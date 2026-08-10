@@ -103,6 +103,7 @@ def test_create_task_appears_on_board(client):
     assert task["status"] == "ready"  # no parents -> immediately ready
     assert task["priority"] == 3
     assert task["tenant"] == "acme"
+    assert task["session_id"] is None
     task_id = task["id"]
 
     # Board now lists it under 'ready'.
@@ -114,6 +115,27 @@ def test_create_task_appears_on_board(client):
     assert ready["tasks"][0]["id"] == task_id
     assert "acme" in data["tenants"]
     assert "researcher" in data["assignees"]
+
+
+def test_create_task_persists_session_id(client):
+    session_id = "opaque/session:id?=42"
+
+    response = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "Continue existing session", "session_id": session_id},
+    )
+
+    assert response.status_code == 200, response.text
+    task = response.json()["task"]
+    assert task["session_id"] == session_id
+
+    conn = kb.connect()
+    try:
+        persisted = kb.get_task(conn, task["id"])
+    finally:
+        conn.close()
+    assert persisted is not None
+    assert persisted.session_id == session_id
 
 
 def test_patch_board_sets_project_directory(client, tmp_path):
