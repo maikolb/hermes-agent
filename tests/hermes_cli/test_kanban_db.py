@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import types
 import unittest.mock
@@ -164,6 +165,72 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
     assert "idx_tasks_tenant" in indexes
     assert "idx_tasks_idempotency" in indexes
     assert "idx_events_run" in indexes
+
+
+def test_concurrent_idempotent_creates_return_one_active_winner(tmp_path):
+    db_path = tmp_path / "concurrent-kanban.db"
+    kb.init_db(db_path)
+    barrier = threading.Barrier(2)
+
+    def create() -> str:
+        conn = kb.connect(db_path)
+        try:
+            barrier.wait(timeout=2)
+            return kb.create_task(
+                conn,
+                title="one logical topic",
+                idempotency_key="project-ops:concurrent-1",
+            )
+        finally:
+            conn.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        task_ids = list(pool.map(lambda _index: create(), range(2)))
+
+    assert task_ids[0] == task_ids[1]
+    conn = kb.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived'",
+            ("project-ops:concurrent-1",),
+        ).fetchall()
+        assert [row["id"] for row in rows] == [task_ids[0]]
+
+        kb.archive_task(conn, task_ids[0])
+        replacement = kb.create_task(
+            conn,
+            title="replacement after archive",
+            idempotency_key="project-ops:concurrent-1",
+        )
+        assert replacement != task_ids[0]
+    finally:
+        conn.close()
+
+
+def test_active_idempotency_index_survives_reopen(tmp_path):
+    db_path = tmp_path / "migrated-kanban.db"
+
+    kb.init_db(db_path)
+
+    reopened = sqlite3.connect(db_path)
+    try:
+        schema = reopened.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("idx_tasks_active_idempotency",),
+        ).fetchone()
+        index_row = next(
+            row
+            for row in reopened.execute("PRAGMA index_list(tasks)").fetchall()
+            if row[1] == "idx_tasks_active_idempotency"
+        )
+    finally:
+        reopened.close()
+
+    assert schema is not None
+    assert "UNIQUE INDEX" in schema[0].upper()
+    assert "STATUS != 'ARCHIVED'" in schema[0].upper()
+    assert index_row[2] == 1  # unique
+    assert index_row[4] == 1  # partial
 
 
 # ---------------------------------------------------------------------------

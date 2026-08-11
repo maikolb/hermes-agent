@@ -113,6 +113,34 @@ def _(rid, params: dict) -> dict:
         return err
     if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
         return _err(rid, 4090, limit_message)
+    request_transport = current_transport()
+    if _session_source(session) == "project_ops":
+        # Project Ops attribution is an authentication boundary: the browser
+        # sends only the user's raw text and the verified WS-ticket identity
+        # on its transport supplies the durable author prefix.  Wrapping the
+        # complete raw text also prevents a forged client prefix from becoming
+        # authoritative when the transcript is rendered by another member.
+        user_id = str(getattr(request_transport, "user_id", "") or "").strip()
+        provider = str(getattr(request_transport, "provider", "") or "").strip()
+        display_name = str(
+            getattr(request_transport, "display_name", "") or ""
+        ).strip()
+        if not user_id or not provider or not display_name:
+            return _err(
+                rid,
+                4031,
+                "authenticated identity required for Project Ops prompt submission",
+            )
+        if not isinstance(text, str):
+            return _err(rid, 4004, "text must be a string")
+
+        from urllib.parse import quote
+
+        encode_safe = "-_.!~*'()"
+        text = (
+            f"[{quote(display_name, safe=encode_safe)}|"
+            f"{quote(user_id, safe=encode_safe)}] {text}"
+        )
     # Which desktop window this message was typed into. Rewritten on every
     # submit, because one session can be driven from the app window and the HUD
     # in turn: a stale "hud" would tell the model the user is still floating
@@ -131,7 +159,8 @@ def _(rid, params: dict) -> dict:
     # Re-bind to the current client transport for this request. This keeps
     # streaming events on the active websocket even if an earlier disconnect
     # or fallback moved the session transport to stdio.
-    if (t := current_transport()) is not None:
+    t = request_transport
+    if t is not None:
         session["transport"] = t
     while True:
         busy_transport = None

@@ -2251,6 +2251,13 @@ def connect(
                     # stale PRAGMA snapshots during gateway startup.
                     conn.executescript(SCHEMA_SQL)
                     _migrate_add_optional_columns(conn)
+                    # Some legacy migrations include DML before installing
+                    # indexes. Persist the complete schema/migration unit before
+                    # advertising this path as initialized or returning the
+                    # connection; otherwise a later close can roll back the
+                    # dedupe + partial UNIQUE invariant while the process cache
+                    # incorrectly skips migration on every subsequent connect.
+                    conn.commit()
                     _INITIALIZED_PATHS.add(resolved)
         except Exception:
             conn.close()
@@ -2485,6 +2492,44 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_idempotency ON tasks(idempotency_key)"
     )
+    # Active idempotency is a database invariant, not a check-then-insert
+    # convention. Older boards may already contain duplicates from the former
+    # TOCTOU path; keep the earliest (created_at, id) winner active and archive
+    # only later active duplicates before installing the partial UNIQUE INDEX.
+    # Existing archived rows remain archived and do not participate. The
+    # migration helper is also used by small compatibility/test schemas that
+    # intentionally omit base task columns, so only install this relational
+    # invariant when its complete base shape exists.
+    if {"id", "status", "created_at", "idempotency_key"}.issubset(cols):
+        conn.execute(
+            "UPDATE tasks SET idempotency_key = NULL WHERE idempotency_key = ''"
+        )
+        conn.execute(
+            """
+            UPDATE tasks AS duplicate
+               SET status = 'archived'
+             WHERE duplicate.status != 'archived'
+               AND duplicate.idempotency_key IS NOT NULL
+               AND EXISTS (
+                   SELECT 1
+                     FROM tasks AS winner
+                    WHERE winner.status != 'archived'
+                      AND winner.idempotency_key = duplicate.idempotency_key
+                      AND (
+                          winner.created_at < duplicate.created_at
+                          OR (
+                              winner.created_at = duplicate.created_at
+                              AND winner.id < duplicate.id
+                          )
+                      )
+               )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_idempotency "
+            "ON tasks(idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL AND status != 'archived'"
+        )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
     )
@@ -2912,6 +2957,19 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _active_task_for_idempotency_key(
+    conn: sqlite3.Connection, idempotency_key: str
+) -> Optional[str]:
+    """Return the deterministic active winner for one idempotency key."""
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE idempotency_key = ? "
+        "AND status != 'archived' "
+        "ORDER BY created_at ASC, id ASC LIMIT 1",
+        (idempotency_key,),
+    ).fetchone()
+    return str(row["id"]) if row else None
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -2982,6 +3040,7 @@ def create_task(
     """
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
+    idempotency_key = (idempotency_key or "").strip() or None
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     if provider_override and not model_override:
         raise ValueError("provider_override requires a model_override")
@@ -3150,20 +3209,12 @@ def create_task(
             )
         skills_list = cleaned
 
-    # Idempotency check — return the existing task instead of creating a
-    # duplicate. Done BEFORE entering write_txn to keep the fast path fast
-    # and to avoid holding a write lock during the lookup. Race is
-    # acceptable: two concurrent creators with the same key might both
-    # insert, at which point both rows exist but the next lookup stabilises.
+    # Idempotency fast path. The same lookup runs again after BEGIN IMMEDIATE,
+    # and the partial unique index remains the final cross-process guarantee.
     if idempotency_key:
-        row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? "
-            "AND status != 'archived' "
-            "ORDER BY created_at DESC LIMIT 1",
-            (idempotency_key,),
-        ).fetchone()
-        if row:
-            return row["id"]
+        winner = _active_task_for_idempotency_key(conn, idempotency_key)
+        if winner:
+            return winner
 
     now = int(time.time())
 
@@ -3195,6 +3246,12 @@ def create_task(
             # compose create_task calls under one outer commit so the
             # dispatcher can never observe a partially constructed graph.
             with write_txn(conn, allow_nested=True):
+                if idempotency_key:
+                    winner = _active_task_for_idempotency_key(
+                        conn, idempotency_key
+                    )
+                    if winner:
+                        return winner
                 # Determine task status from parent status, unless the caller
                 # parks it directly in blocked for human-ops review or in
                 # triage for a specifier.
@@ -3307,9 +3364,26 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                if session_id:
+                    # Part of the same task insert transaction: a successful
+                    # idempotent retry returns the existing task and cannot add
+                    # a second link event, while a failed insert exposes neither
+                    # the task nor a misleading session link.
+                    _append_event(
+                        conn,
+                        task_id,
+                        "task_session_linked",
+                        {"session_id": session_id},
+                    )
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
         except sqlite3.IntegrityError:
+            if idempotency_key:
+                winner = _active_task_for_idempotency_key(
+                    conn, idempotency_key
+                )
+                if winner:
+                    return winner
             if attempt == 1:
                 raise
             # Retry with a fresh id.

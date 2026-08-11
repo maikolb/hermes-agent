@@ -141,6 +141,10 @@ except Exception:
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
+# Opt-in observers for shared live sessions.  Keyed by the ephemeral runtime
+# session id; each inner mapping uses object identity so an unhashable transport
+# is still supported and a primary+observer transport can be deduplicated.
+_session_observers: dict[str, dict[int, Transport]] = {}
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
@@ -155,6 +159,7 @@ _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
 _session_resume_lock = threading.Lock()
+_ANY_PROFILE_HOME = object()
 try:
     _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
 except (ValueError, TypeError):
@@ -893,6 +898,7 @@ def _pop_session_by_id(sid: str) -> dict | None:
     """
     with _sessions_lock:
         session = _sessions.pop(sid, None)
+        _session_observers.pop(sid, None)
     if session is None:
         return None
     # The session is already out of _sessions here, so downstream teardown
@@ -1054,13 +1060,15 @@ def _schedule_ws_orphan_reap(sid: str) -> None:
         reschedule = False
         session = None
         with _session_resume_lock:
-            current = _sessions.get(sid)
-            if not _ws_session_is_orphaned(current):
-                return
-            if _session_has_active_delegations(sid, current):
-                reschedule = True
-            else:
-                session = _pop_session_by_id(sid)
+            with _sessions_lock:
+                current = _sessions.get(sid)
+                observers = _session_observers.get(sid)
+                if not _ws_session_is_orphaned(current) or observers:
+                    return
+                if _session_has_active_delegations(sid, current):
+                    reschedule = True
+                else:
+                    session = _pop_session_by_id(sid)
         if reschedule:
             _schedule_ws_orphan_reap(sid)
             return
@@ -1076,8 +1084,9 @@ def _close_sessions_for_transport(
 ) -> tuple[int, int]:
     """On transport disconnect, reap the sessions that opted into
     close_on_disconnect (sidecar/dashboard) immediately via the unified
-    ``_close_session_by_id`` path, and re-point the rest back to stdio so later
-    emits don't hit a dead socket.
+    ``_close_session_by_id`` path. For the rest, promote a surviving observer
+    when available; otherwise detach to the drop sink so later emits do not hit
+    a dead socket.
 
     Non-flagged detached sessions are handed to the grace-windowed WS-orphan
     reaper (``_schedule_ws_orphan_reap``): a quick reconnect / session.resume
@@ -1087,25 +1096,118 @@ def _close_sessions_for_transport(
     independent reap loop in ``handle_ws``.
 
     Returns ``(reaped, detached)`` counts for disconnect-path observability."""
-    with _sessions_lock:
-        owned = [(sid, s) for sid, s in _sessions.items() if s.get("transport") is transport]
     reaped = 0
     detached = 0
-    for sid, session in owned:
-        if session.get("close_on_disconnect"):
-            _close_session_by_id(sid, end_reason=end_reason)
-            reaped += 1
-        else:
+    close_ids: list[str] = []
+    reap_ids: list[str] = []
+    identity = id(transport)
+    with _sessions_lock:
+        # Observer cleanup, primary detach, and observer promotion are one
+        # state transition. A concurrent subscribe therefore sees either the
+        # old primary or the detached sentinel and can promote itself before a
+        # queued reaper is allowed to claim teardown.
+        for observer_sid, observers in list(_session_observers.items()):
+            observers.pop(identity, None)
+            if not observers:
+                _session_observers.pop(observer_sid, None)
+
+        owned = [
+            (sid, session)
+            for sid, session in _sessions.items()
+            if session.get("transport") is transport
+        ]
+        for sid, session in owned:
+            if session.get("close_on_disconnect"):
+                close_ids.append(sid)
+                continue
+            surviving_observers = list(
+                (_session_observers.get(sid) or {}).values()
+            )
+            if surviving_observers:
+                # A shared runtime is still observed. Promote one healthy peer
+                # to primary ownership instead of marking the session orphaned
+                # and scheduling a reap behind its back.
+                session["transport"] = surviving_observers[0]
+                continue
             # Point detached sessions at the drop sentinel (NOT real stdio) so
             # _ws_session_is_orphaned recognizes them and the grace-reap can
             # actually fire; a standalone `hermes --tui` keeps real _stdio.
             session["transport"] = _detached_ws_transport
             detached += 1
-            try:
-                _schedule_ws_orphan_reap(sid)
-            except Exception:
-                pass
+            reap_ids.append(sid)
+
+    for sid in close_ids:
+        if _close_session_by_id(sid, end_reason=end_reason):
+            reaped += 1
+    for sid in reap_ids:
+        try:
+            _schedule_ws_orphan_reap(sid)
+        except Exception:
+            pass
     return reaped, detached
+
+
+def _subscribe_session_transport(
+    sid: str, transport: Transport | None
+) -> tuple[bool, int] | None:
+    """Attach *transport* as an observer of live runtime *sid*.
+
+    Returns ``(added, observer_count)`` or ``None`` when the runtime is not
+    live.  The mutation and liveness check share ``_sessions_lock`` so an
+    unknown/tearing-down session can never leave orphan registry state.
+    """
+    if transport is None:
+        return None
+    with _sessions_lock:
+        session = _sessions.get(sid)
+        if session is None or session.get("_finalized"):
+            return None
+        observers = _session_observers.setdefault(sid, {})
+        identity = id(transport)
+        added = identity not in observers
+        observers[identity] = transport
+        if session.get("transport") is _detached_ws_transport:
+            session["transport"] = transport
+        return added, len(observers)
+
+
+def _unsubscribe_session_transport(
+    sid: str, transport: Transport | None
+) -> tuple[bool, int] | None:
+    """Detach one transport from a live runtime observer set."""
+    if transport is None:
+        return None
+    with _sessions_lock:
+        if sid not in _sessions:
+            return None
+        observers = _session_observers.get(sid)
+        if not observers:
+            return False, 0
+        removed = observers.pop(id(transport), None) is not None
+        count = len(observers)
+        if not observers:
+            _session_observers.pop(sid, None)
+        return removed, count
+
+
+def unregister_session_observer_transport(transport: Transport | None) -> int:
+    """Remove *transport* from every live-session observer set.
+
+    Called from the WebSocket disconnect funnel before primary-session
+    teardown.  Returns the number of memberships removed for diagnostics and
+    deterministic tests.
+    """
+    if transport is None:
+        return 0
+    identity = id(transport)
+    removed = 0
+    with _sessions_lock:
+        for sid, observers in list(_session_observers.items()):
+            if observers.pop(identity, None) is not None:
+                removed += 1
+            if not observers:
+                _session_observers.pop(sid, None)
+    return removed
 
 
 def _shutdown_sessions() -> None:
@@ -1143,6 +1245,13 @@ def _transport_is_dead(transport) -> bool:
 def _session_is_evictable(sid: str, session: dict, now: float) -> bool:
     if session.get("running") or _session_pending_kind(sid):
         return False
+    # Observer membership is live ownership even during the narrow disconnect
+    # window where the old primary transport is already closed but promotion has
+    # not run yet. Re-read under the registry lock on both the scan and predicate
+    # paths so TTL cannot claim a shared runtime behind an attached client.
+    with _sessions_lock:
+        if _session_observers.get(sid):
+            return False
     if _session_has_active_delegations(sid, session):
         return False
     ready = session.get("agent_ready")
@@ -1236,6 +1345,9 @@ def _session_is_lru_evictable(sid: str, session: dict) -> bool:
     # moment it loses its client.
     if session.get("running") or _session_pending_kind(sid):
         return False
+    with _sessions_lock:
+        if _session_observers.get(sid):
+            return False
     if _session_has_active_delegations(sid, session):
         return False
     ready = session.get("agent_ready")
@@ -1437,6 +1549,51 @@ def _profile_home(profile: str | None) -> Path | None:
     return home if (home / "state.db").exists() or home.exists() else None
 
 
+def _validated_session_profile(
+    params: dict | None,
+) -> tuple[str | None, Path | None, tuple[int, str] | None]:
+    """Resolve an explicitly requested session profile without fallback.
+
+    ``_profile_home`` intentionally returns ``None`` for both the launch
+    profile and an invalid name because many legacy consumers treat ``None``
+    as "use the process home". Session create/resume are state-creating
+    boundaries, so they need the stronger three-way result here: omitted,
+    launch/current, or an existing named profile. An explicitly blank/invalid
+    profile never falls through to the launch ``state.db``.
+    """
+    if not isinstance(params, dict) or "profile" not in params:
+        return None, None, None
+    name = str(params.get("profile") or "").strip()
+    if not name:
+        return None, None, (4006, "profile required when explicitly provided")
+    if name.lower() == "current":
+        return _current_profile_name(), None, None
+    try:
+        from hermes_cli import profiles as profiles_mod
+
+        canonical = profiles_mod.normalize_profile_name(name)
+        profiles_mod.validate_profile_name(canonical)
+        home = Path(profiles_mod.get_profile_dir(canonical))
+    except (TypeError, ValueError) as exc:
+        return None, None, (4006, f"invalid profile: {exc}")
+    except Exception:
+        return None, None, (4007, f"profile not found: {name}")
+
+    try:
+        is_launch = home.resolve() == Path(_hermes_home).resolve()
+    except OSError:
+        is_launch = False
+    if is_launch:
+        return canonical, None, None
+    try:
+        exists = profiles_mod.profile_exists(canonical)
+    except Exception:
+        exists = False
+    if not exists:
+        return None, None, (4007, f"profile not found: {canonical}")
+    return canonical, home, None
+
+
 def _profile_scoped(handler):
     """Bind ``params['profile']``'s HERMES_HOME around a pet RPC handler.
 
@@ -1557,8 +1714,37 @@ def write_json(obj: dict) -> bool:
     """
     if obj.get("method") == "event":
         sid = ((obj.get("params") or {}).get("session_id")) or ""
-        if sid and (t := (_sessions.get(sid) or {}).get("transport")) is not None:
-            return t.write(obj)
+        if sid:
+            with _sessions_lock:
+                session = _sessions.get(sid) or {}
+                primary = session.get("transport")
+                observers = list((_session_observers.get(sid) or {}).values())
+
+            targets: list[Transport] = []
+            seen: set[int] = set()
+            for candidate in ([primary] if primary is not None else []) + observers:
+                identity = id(candidate)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                targets.append(candidate)
+
+            if targets:
+                delivered = False
+                for transport in targets:
+                    try:
+                        delivered = bool(transport.write(obj)) or delivered
+                    except Exception:
+                        # A broken observer must never prevent healthy peers from
+                        # receiving the same session frame. Disconnect cleanup
+                        # removes the stale membership deterministically.
+                        logger.debug(
+                            "session-event write failed type=%s session_id=%s",
+                            (obj.get("params") or {}).get("type"),
+                            sid,
+                            exc_info=True,
+                        )
+                return delivered
 
     return (current_transport() or _stdio_transport).write(obj)
 
@@ -7943,13 +8129,18 @@ def _deferred_session_record(
 
 
 def _claim_or_reuse_live(
-    sid: str, session_key: str, record: dict, lease
+    sid: str,
+    session_key: str,
+    record: dict,
+    lease,
+    *,
+    profile_home: Path | str | None | object = _ANY_PROFILE_HOME,
 ) -> tuple[str, dict] | None:
     """Register ``record`` as the live session for ``session_key`` under the
     resume lock, or — if a concurrent resume already won — release ``lease`` and
     return the winner for the caller to reuse."""
     with _session_resume_lock:
-        live = _find_live_session_by_key(session_key)
+        live = _find_live_session_by_key(session_key, profile_home)
         if live is not None:
             if lease is not None:
                 lease.release()
@@ -8054,12 +8245,40 @@ def _session_lookup_key(session: dict, *, fallback: str = "") -> str:
     )
 
 
-def _find_live_session_by_key(session_key: str) -> tuple[str, dict] | None:
-    for sid, session in list(_sessions.items()):
-        if session.get("_finalized"):
-            continue
-        if _session_lookup_key(session, fallback=sid) == session_key:
-            return sid, session
+def _canonical_live_profile_home(profile_home: Path | str | None) -> str:
+    """Canonical comparison key; ``None`` is the launch profile home."""
+    raw = _hermes_home if profile_home is None else profile_home
+    try:
+        return os.path.normcase(str(Path(raw).resolve()))
+    except (OSError, ValueError, TypeError):
+        return os.path.normcase(os.path.abspath(str(raw)))
+
+
+def _find_live_session_by_key(
+    session_key: str,
+    profile_home: Path | str | None | object = _ANY_PROFILE_HOME,
+) -> tuple[str, dict] | None:
+    """Find a live durable key, optionally scoped to one canonical profile.
+
+    Omitting ``profile_home`` preserves the historical any-profile lookup for
+    non-profile-aware internal callers. Session create/resume pass it
+    explicitly so identical durable keys in isolated profiles cannot collide.
+    """
+    scoped_home = (
+        None
+        if profile_home is _ANY_PROFILE_HOME
+        else _canonical_live_profile_home(profile_home)
+    )
+    with _sessions_lock:
+        for sid, session in list(_sessions.items()):
+            if session.get("_finalized"):
+                continue
+            if scoped_home is not None and _canonical_live_profile_home(
+                session.get("profile_home")
+            ) != scoped_home:
+                continue
+            if _session_lookup_key(session, fallback=sid) == session_key:
+                return sid, session
     return None
 
 
@@ -9738,7 +9957,12 @@ def _run_prompt_submit(
                 agent.clear_interrupt()
             except Exception:
                 pass
-    _emit("message.start", sid)
+    start_payload = (
+        {"user": text}
+        if _session_source(session) == "project_ops" and isinstance(text, str)
+        else None
+    )
+    _emit("message.start", sid, start_payload)
 
     def run():
         # The conversation runs on a fresh thread, so ContextVars from the RPC

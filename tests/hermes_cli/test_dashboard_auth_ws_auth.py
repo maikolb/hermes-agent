@@ -190,6 +190,7 @@ def _fake_ws(*, query: dict, client_host: str = "127.0.0.1", path: str = "/api/p
         query_params=_QP(query),
         client=SimpleNamespace(host=client_host),
         url=SimpleNamespace(path=path),
+        state=SimpleNamespace(),
     )
 
 
@@ -199,6 +200,21 @@ class TestWsAuthOkLoopback:
     def test_correct_token_accepted(self, loopback_app):
         ws = _fake_ws(query={"token": web_server._SESSION_TOKEN})
         assert web_server._ws_auth_ok(ws) is True
+        assert ws.state.hermes_ws_identity == {
+            "user_id": "local-owner",
+            "provider": "local",
+            "display_name": "Owner",
+        }
+
+
+class TestWsAuthOkInsecurePublic:
+    def test_token_has_no_synthetic_owner_identity(self, insecure_public_app):
+        ws = _fake_ws(
+            query={"token": web_server._SESSION_TOKEN},
+            client_host="192.168.0.55",
+        )
+        assert web_server._ws_auth_ok(ws) is True
+        assert ws.state.hermes_ws_identity is None
 
 
 class TestWsAuthOkGated:
@@ -206,10 +222,17 @@ class TestWsAuthOkGated:
 
 
     def test_consumed_ticket_rejected(self, gated_app):
-        ticket = mint_ticket(user_id="u1", provider="stub")
+        ticket = mint_ticket(
+            user_id="u1", provider="stub", display_name="Authenticated User"
+        )
         ws_one = _fake_ws(query={"ticket": ticket})
         ws_two = _fake_ws(query={"ticket": ticket})
         assert web_server._ws_auth_ok(ws_one) is True
+        assert ws_one.state.hermes_ws_identity == {
+            "user_id": "u1",
+            "provider": "stub",
+            "display_name": "Authenticated User",
+        }
         # Single-use — second consumption fails.
         assert web_server._ws_auth_ok(ws_two) is False
 

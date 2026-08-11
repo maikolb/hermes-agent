@@ -14897,6 +14897,10 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
     Audit-logs the rejection so operators can debug "WS keeps closing"
     issues from the log.
     """
+    # Authentication is also the identity-binding point for JSON-RPC WS
+    # clients. Always initialize the state so accepted non-authoritative
+    # credentials cannot inherit or synthesize an Owner identity.
+    ws.state.hermes_ws_identity = None
     auth_required = bool(getattr(app.state, "auth_required", False))
     if auth_required:
         # Lazy import — keeps this function importable in test harnesses
@@ -14930,7 +14934,12 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
             return "no_credential", "none"
 
         try:
-            consume_ticket(ticket)
+            info = consume_ticket(ticket)
+            ws.state.hermes_ws_identity = {
+                "user_id": info.get("user_id"),
+                "provider": info.get("provider"),
+                "display_name": info.get("display_name"),
+            }
             return None, "ticket"
         except TicketInvalid as exc:
             audit_log(
@@ -14945,6 +14954,12 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
     if not token:
         return "no_credential", "none"
     if hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+        if _ws_auth_mode() == "loopback":
+            ws.state.hermes_ws_identity = {
+                "user_id": "local-owner",
+                "provider": "local",
+                "display_name": "Owner",
+            }
         return None, "token"
     return "token_mismatch", "token"
 

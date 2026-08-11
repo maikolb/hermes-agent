@@ -35,10 +35,13 @@ def _reset():
 
 class TestMintAndConsume:
     def test_round_trip(self):
-        ticket = mint_ticket(user_id="u1", provider="nous")
+        ticket = mint_ticket(
+            user_id="u1", provider="nous", display_name="Verified Member"
+        )
         info = consume_ticket(ticket)
         assert info["user_id"] == "u1"
         assert info["provider"] == "nous"
+        assert info["display_name"] == "Verified Member"
         assert "minted_at" in info
 
     def test_ticket_has_minimum_length(self):

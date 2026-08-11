@@ -36,6 +36,7 @@ the port.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import json
 import logging
 import sqlite3
@@ -622,34 +623,39 @@ class CreateTaskBody(BaseModel):
 
 
 @router.post("/tasks")
-def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
+def create_task(
+    payload: CreateTaskBody,
+    board: Optional[str] = Query(None),
+    profile: Optional[str] = Query(None),
+):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        task_id = kanban_db.create_task(
-            conn,
-            title=payload.title,
-            body=payload.body,
-            assignee=payload.assignee,
-            created_by="dashboard",
-            workspace_kind=payload.workspace_kind,
-            workspace_path=payload.workspace_path,
-            tenant=payload.tenant,
-            priority=payload.priority,
-            parents=payload.parents,
-            triage=payload.triage,
-            idempotency_key=payload.idempotency_key,
-            max_runtime_seconds=payload.max_runtime_seconds,
-            skills=payload.skills,
-            goal_mode=payload.goal_mode,
-            goal_max_turns=payload.goal_max_turns,
-            model_override=payload.model_override,
-            provider_override=payload.provider_override,
-            reasoning_effort=payload.reasoning_effort,
-            project_id=payload.project_id,
-            session_id=payload.session_id,
-            board=board,
-        )
+        with _project_profile_scope(profile):
+            task_id = kanban_db.create_task(
+                conn,
+                title=payload.title,
+                body=payload.body,
+                assignee=payload.assignee,
+                created_by="dashboard",
+                workspace_kind=payload.workspace_kind,
+                workspace_path=payload.workspace_path,
+                tenant=payload.tenant,
+                priority=payload.priority,
+                parents=payload.parents,
+                triage=payload.triage,
+                idempotency_key=payload.idempotency_key,
+                max_runtime_seconds=payload.max_runtime_seconds,
+                skills=payload.skills,
+                goal_mode=payload.goal_mode,
+                goal_max_turns=payload.goal_max_turns,
+                model_override=payload.model_override,
+                provider_override=payload.provider_override,
+                reasoning_effort=payload.reasoning_effort,
+                project_id=payload.project_id,
+                session_id=payload.session_id,
+                board=board,
+            )
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
         # Surface a dispatcher-presence warning so the UI can show a
@@ -2356,7 +2362,41 @@ class RenameBoardBody(BaseModel):
     project_id: Optional[str] = None
 
 
-def _resolve_project(ref: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+@contextmanager
+def _project_profile_scope(profile: Optional[str]):
+    """Apply the dashboard's context-local HERMES_HOME profile mechanism."""
+    requested = (profile or "").strip()
+    if not requested or requested.lower() == "current":
+        yield
+        return
+
+    from hermes_cli import profiles as profiles_mod
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    try:
+        canonical = profiles_mod.normalize_profile_name(requested)
+        profiles_mod.validate_profile_name(canonical)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not profiles_mod.profile_exists(canonical):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Profile '{canonical}' does not exist.",
+        )
+
+    token = set_hermes_home_override(str(profiles_mod.get_profile_dir(canonical)))
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _resolve_project(
+    ref: Optional[str], profile: Optional[str] = None
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Resolve a project id/slug to ``(id, name, primary_path)``.
 
     Returns ``(None, None, None)`` for a falsy ref. Raises 400 when a
@@ -2366,8 +2406,9 @@ def _resolve_project(ref: Optional[str]) -> tuple[Optional[str], Optional[str], 
         return None, None, None
     try:
         from hermes_cli import projects_db as pdb
-        with pdb.connect_closing() as pconn:
-            proj = pdb.get_project(pconn, ref.strip())
+        with _project_profile_scope(profile):
+            with pdb.connect_closing() as pconn:
+                proj = pdb.get_project(pconn, ref.strip())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"projects unavailable: {exc}")
     if proj is None:
@@ -2375,12 +2416,16 @@ def _resolve_project(ref: Optional[str]) -> tuple[Optional[str], Optional[str], 
     return proj.id, proj.name, (proj.primary_path or None)
 
 
-def _projects_by_id() -> dict[str, Any]:
+def _projects_by_id(profile: Optional[str] = None) -> dict[str, Any]:
     """Map every project id -> Project (archived included) for annotation."""
     try:
         from hermes_cli import projects_db as pdb
-        with pdb.connect_closing() as pconn:
-            return {p.id: p for p in pdb.list_projects(pconn, include_archived=True)}
+        with _project_profile_scope(profile):
+            with pdb.connect_closing() as pconn:
+                return {
+                    p.id: p
+                    for p in pdb.list_projects(pconn, include_archived=True)
+                }
     except Exception:
         return {}
 
@@ -2415,7 +2460,7 @@ def _default_workspace_kind(board: dict[str, Any]) -> str:
 
 
 @router.get("/projects")
-def list_kanban_projects():
+def list_kanban_projects(profile: Optional[str] = Query(None)):
     """List first-class Hermes projects for board scoping.
 
     Returns ``{projects: [{id, slug, name, primary_path, icon, color}]}``.
@@ -2423,8 +2468,9 @@ def list_kanban_projects():
     """
     try:
         from hermes_cli import projects_db as pdb
-        with pdb.connect_closing() as pconn:
-            projects = pdb.list_projects(pconn, include_archived=False)
+        with _project_profile_scope(profile):
+            with pdb.connect_closing() as pconn:
+                projects = pdb.list_projects(pconn, include_archived=False)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"failed to list projects: {exc}")
     return {
@@ -2443,11 +2489,14 @@ def list_kanban_projects():
 
 
 @router.get("/boards")
-def list_boards(include_archived: bool = Query(False)):
+def list_boards(
+    include_archived: bool = Query(False),
+    profile: Optional[str] = Query(None),
+):
     """Return every board on disk with task counts and the active slug."""
     boards = kanban_db.list_boards(include_archived=include_archived)
     current = kanban_db.get_current_board()
-    proj_map = _projects_by_id()
+    proj_map = _projects_by_id(profile)
     for b in boards:
         b["is_current"] = (b["slug"] == current)
         b["counts"] = _board_counts(b["slug"])
@@ -2486,14 +2535,19 @@ def _validate_workdir(raw: str) -> str:
 
 
 @router.post("/boards")
-def create_board_endpoint(payload: CreateBoardBody):
+def create_board_endpoint(
+    payload: CreateBoardBody,
+    profile: Optional[str] = Query(None),
+):
     """Create a new board. Idempotent — ``slug`` collision returns existing."""
     default_workdir = None
     if payload.default_workdir:
         default_workdir = _validate_workdir(payload.default_workdir)
     # A chosen project scopes the board: its primary repo becomes the default
     # workdir (unless one was passed explicitly) and the link is stored.
-    project_id, _pname, primary_path = _resolve_project(payload.project_id)
+    project_id, _pname, primary_path = _resolve_project(
+        payload.project_id, profile
+    )
     if primary_path and not default_workdir:
         default_workdir = primary_path
     try:
@@ -2514,12 +2568,18 @@ def create_board_endpoint(payload: CreateBoardBody):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
     meta["default_workspace_kind"] = _default_workspace_kind(meta)
-    _, meta["project_name"], _ = _resolve_project(meta.get("project_id"))
+    _, meta["project_name"], _ = _resolve_project(
+        meta.get("project_id"), profile
+    )
     return {"board": meta, "current": kanban_db.get_current_board()}
 
 
 @router.patch("/boards/{slug}")
-def rename_board(slug: str, payload: RenameBoardBody):
+def rename_board(
+    slug: str,
+    payload: RenameBoardBody,
+    profile: Optional[str] = Query(None),
+):
     """Update a board's display metadata + default project directory (slug is immutable — create a new one to rename the directory)."""
     try:
         normed = kanban_db._normalize_board_slug(slug)
@@ -2539,7 +2599,9 @@ def rename_board(slug: str, payload: RenameBoardBody):
     project_name: Optional[str] = None
     if payload.project_id is not None:
         if payload.project_id.strip():
-            project_id, project_name, primary_path = _resolve_project(payload.project_id)
+            project_id, project_name, primary_path = _resolve_project(
+                payload.project_id, profile
+            )
             if primary_path and default_workdir is None:
                 default_workdir = primary_path
         else:
@@ -2554,7 +2616,9 @@ def rename_board(slug: str, payload: RenameBoardBody):
         project_id=project_id,
     )
     meta["default_workspace_kind"] = _default_workspace_kind(meta)
-    _, meta["project_name"], _ = _resolve_project(meta.get("project_id"))
+    _, meta["project_name"], _ = _resolve_project(
+        meta.get("project_id"), profile
+    )
     return {"board": meta}
 
 

@@ -14,7 +14,22 @@ _profile_scoped = _registry.profile_scoped
 @method("session.create")
 def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
-    key = _new_session_key()
+    source = _resolve_session_source(str(params.get("source") or "").strip() or None)
+    profile, profile_home, profile_error = _validated_session_profile(params)
+    if profile_error is not None:
+        code, message = profile_error
+        return _err(rid, code, message)
+    persist = is_truthy_value(params.get("persist", False))
+    creation_key = str(params.get("creation_key") or "").strip()
+    if source == "project_ops" and persist:
+        if not creation_key:
+            return _err(rid, 4006, "creation_key required for persistent Project Ops session")
+        # The operation key is durable client recovery state. Derive the stored
+        # session id from it so an ambiguous response or process restart resolves
+        # the same state.db row without introducing a parallel idempotency store.
+        key = f"project_ops_{hashlib.sha256(creation_key.encode('utf-8')).hexdigest()[:32]}"
+    else:
+        key = _new_session_key()
     cols = int(params.get("cols", 80))
     history = _coerce_seed_history(params.get("messages"))
     title = str(params.get("title") or "").strip()
@@ -32,16 +47,12 @@ def _(rid, params: dict) -> dict:
     except Exception:
         explicit_cwd = False
     resolved_cwd = _completion_cwd(params)
-    source = _resolve_session_source(str(params.get("source") or "").strip() or None)
     _enable_gateway_prompts()
 
     # ``profile`` (app-global remote mode): a new chat started under a non-launch
     # profile must build its agent + persist against THAT profile's home/state.db,
     # not the dashboard's launch profile. Stored on the session so _start_agent_build
     # and each turn re-bind HERMES_HOME. None/own profile → launch (unchanged).
-    profile = (params.get("profile") or "").strip() or None
-    profile_home = _profile_home(profile)
-
     # The desktop composer owns its model/effort/fast as plain UI state and ships
     # it on every session.create. Honor each as a PER-SESSION override (built into
     # the agent below) — never a global config write, so picking a model/effort
@@ -74,48 +85,97 @@ def _(rid, params: dict) -> dict:
     now = time.time()
     lease = None  # claimed lazily on the first turn (_ensure_active_session_slot)
 
-    with _sessions_lock:
-        _sessions[sid] = {
-            "agent": None,
-            "agent_error": None,
-            "agent_ready": ready,
-            "attached_images": [],
-            "close_on_disconnect": is_truthy_value(params.get("close_on_disconnect", False)),
-            "active_session_lease": lease,
-            "cols": cols,
-            "created_at": now,
-            "edit_snapshots": {},
-            "explicit_cwd": explicit_cwd,
-            "history": history,
-            "history_lock": threading.Lock(),
-            "history_version": 0,
-            "image_counter": 0,
-            "cwd": resolved_cwd,
-            "inflight_turn": None,
-            "last_active": now,
-            "model_override": session_model_override,
-            "create_reasoning_override": create_reasoning_override,
-            "create_service_tier_override": create_service_tier_override,
-            "parent_session_id": parent_session_id,
-            "pending_title": title or None,
-            "profile_home": str(profile_home) if profile_home is not None else None,
-            "running": False,
-            "session_key": key,
-            "show_reasoning": _load_show_reasoning(),
-            "source": source,
-            "slash_worker": None,
-            "tool_progress_mode": _load_tool_progress_mode(),
-            "tool_started_at": {},
-            "transport": current_transport() or _stdio_transport,
-        }
-        _register_session_cwd(_sessions[sid])
+    record = {
+        "agent": None,
+        "agent_error": None,
+        "agent_ready": ready,
+        "attached_images": [],
+        "close_on_disconnect": is_truthy_value(params.get("close_on_disconnect", False)),
+        "active_session_lease": lease,
+        "cols": cols,
+        "created_at": now,
+        "edit_snapshots": {},
+        "explicit_cwd": explicit_cwd,
+        "history": history,
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "image_counter": 0,
+        "cwd": resolved_cwd,
+        "inflight_turn": None,
+        "last_active": now,
+        "model_override": session_model_override,
+        "create_reasoning_override": create_reasoning_override,
+        "create_service_tier_override": create_service_tier_override,
+        "parent_session_id": parent_session_id,
+        "pending_title": title or None,
+        "profile_home": str(profile_home) if profile_home is not None else None,
+        "running": False,
+        "session_key": key,
+        "show_reasoning": _load_show_reasoning(),
+        "source": source,
+        "slash_worker": None,
+        "tool_progress_mode": _load_tool_progress_mode(),
+        "tool_started_at": {},
+        "transport": current_transport() or _stdio_transport,
+    }
 
-    # NOTE: we intentionally do NOT persist a DB row here. Every TUI/desktop
+    # The durable Project Ops key is also the live-runtime idempotency key.
+    # Claim it under the same lifecycle lock used by resume before registering,
+    # persisting, or scheduling a build. This makes retries/concurrent callers
+    # observe one fully persisted winner rather than two runtimes that merely
+    # point at the same state.db row.
+    persist_error = None
+    with _session_resume_lock:
+        live = _find_live_session_by_key(key, profile_home)
+        if live is not None:
+            live_sid, live_session = live
+            if source == "project_ops":
+                live_session["source"] = source
+                live_agent = live_session.get("agent")
+                if live_agent is not None:
+                    with contextlib.suppress(Exception):
+                        live_agent.platform = source
+            payload = _live_session_payload(
+                live_sid,
+                live_session,
+                cols=cols,
+                touch=True,
+                transport=current_transport() or _stdio_transport,
+                omit_messages=False,
+            )
+            payload["stored_session_id"] = key
+            return _ok(rid, payload)
+        with _sessions_lock:
+            _sessions[sid] = record
+            _register_session_cwd(record)
+
+        # Project/task topics must be resumable by another authenticated client
+        # before anybody sends the first prompt. Keep this inside the claim so a
+        # concurrent retry cannot return a half-persisted live record.
+        if persist:
+            try:
+                _ensure_session_db_row(record)
+                with _session_db(record) as db:
+                    existing = db.get_session(key) if db is not None else None
+                    if db is None or existing is None:
+                        raise RuntimeError("session storage unavailable")
+                    if source == "project_ops":
+                        db.reopen_session(key)
+                    if title:
+                        db.set_session_title(key, title)
+            except Exception as exc:
+                persist_error = exc
+                failed_session = _pop_session_by_id(sid)
+
+    if persist_error is not None:
+        _teardown_popped_session(failed_session, end_reason="create_persist_failed")
+        return _err(rid, 5000, f"session persistence failed: {persist_error}")
+
+    # By default we intentionally do NOT persist a DB row here. Every TUI/desktop
     # launch (and every "New agent" / draft) opens a session here just to paint
     # the composer, so eagerly creating a row left an "Untitled" empty session
-    # behind for every launch the user never typed into. The row is now created
-    # lazily on the first prompt (see _ensure_session_db_row + prompt.submit),
-    # and the AIAgent's own INSERT-OR-IGNORE persists it on the first turn too.
+    # behind for every launch the user never typed into. Unless ``persist`` was
+    # explicitly requested above, the row is created lazily on the first prompt.
 
     # Return the lightweight session immediately so Ink can paint the composer
     # + skeleton panel, then build the real AIAgent just after this response is
@@ -155,6 +215,52 @@ def _(rid, params: dict) -> dict:
                 "desktop_contract": DESKTOP_BACKEND_CONTRACT,
                 "profile_name": _response_profile_name(profile),
             },
+        },
+    )
+
+
+@method("session.subscribe")
+def _(rid, params: dict) -> dict:
+    sid = str(params.get("session_id") or "").strip()
+    if not sid:
+        return _err(rid, 4006, "session_id required")
+    transport = current_transport()
+    if transport is None or transport is _stdio_transport:
+        return _err(rid, 4008, "live client transport required")
+    subscription = _subscribe_session_transport(sid, transport)
+    if subscription is None:
+        return _err(rid, 4007, "live session not found")
+    added, observer_count = subscription
+    return _ok(
+        rid,
+        {
+            "session_id": sid,
+            "subscribed": True,
+            "already_subscribed": not added,
+            "observer_count": observer_count,
+        },
+    )
+
+
+@method("session.unsubscribe")
+def _(rid, params: dict) -> dict:
+    sid = str(params.get("session_id") or "").strip()
+    if not sid:
+        return _err(rid, 4006, "session_id required")
+    transport = current_transport()
+    if transport is None or transport is _stdio_transport:
+        return _err(rid, 4008, "live client transport required")
+    subscription = _unsubscribe_session_transport(sid, transport)
+    if subscription is None:
+        return _err(rid, 4007, "live session not found")
+    removed, observer_count = subscription
+    return _ok(
+        rid,
+        {
+            "session_id": sid,
+            "subscribed": False,
+            "was_subscribed": removed,
+            "observer_count": observer_count,
         },
     )
 
@@ -314,8 +420,10 @@ def _(rid, params: dict) -> dict:
         cols = 80
     # ``profile`` (app-global remote mode): resume a session that lives in another
     # local profile's state.db. None/own profile → the launch profile (unchanged).
-    profile = (params.get("profile") or "").strip() or None
-    profile_home = _profile_home(profile)
+    profile, profile_home, profile_error = _validated_session_profile(params)
+    if profile_error is not None:
+        code, message = profile_error
+        return _err(rid, code, message)
     # Desktop hydrates persisted transcripts through the authenticated REST
     # route in parallel. Suppress the duplicate WebSocket transcript only when
     # the caller explicitly requests it; other clients keep upstream behavior.
@@ -378,6 +486,13 @@ def _(rid, params: dict) -> dict:
                 target = tip
                 found = db.get_session(target) or found
 
+        # Durable identity is authoritative whenever the row has a source.
+        # A client may request a legacy surface for compatibility, but it may
+        # not downgrade a Project Ops session and bypass backend attribution.
+        requested_source = str(params.get("source") or "").strip() or None
+        persisted_source = str((found or {}).get("source") or "").strip() or None
+        source = _resolve_session_source(persisted_source or requested_source)
+
         # Every interactive resume path materializes the model history, even when
         # omit_messages suppresses the response copy. Count the complete lineage
         # before any reopen/history read so a runaway transcript cannot exhaust
@@ -433,8 +548,14 @@ def _(rid, params: dict) -> dict:
 
         # Fast path: if the session is already live, reuse it under the lock.
         with _session_resume_lock:
-            live = _find_live_session_by_key(target)
+            live = _find_live_session_by_key(target, profile_home)
             if live is not None:
+                if persisted_source:
+                    live[1]["source"] = source
+                    live_agent = live[1].get("agent")
+                    if live_agent is not None:
+                        with contextlib.suppress(Exception):
+                            live_agent.platform = source
                 return _ok(rid, _reuse_live_payload(*live))
 
         # Lazy/watch resume: register the live session WITHOUT building an agent.
@@ -446,7 +567,6 @@ def _(rid, params: dict) -> dict:
         # (resume_session_id keeps the upgrade on the stored conversation).
         if is_truthy_value(params.get("lazy", False)):
             sid = uuid.uuid4().hex[:8]
-            source = _resolve_session_source(str(params.get("source") or "").strip() or None)
             lease = None  # claimed lazily on the first turn (_ensure_active_session_slot)
             try:
                 db.reopen_session(target)
@@ -473,7 +593,11 @@ def _(rid, params: dict) -> dict:
                 profile_home=profile_home,
                 lazy=True,
             )
-            if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
+            if (
+                live := _claim_or_reuse_live(
+                    sid, target, record, lease, profile_home=profile_home
+                )
+            ) is not None:
                 return _ok(rid, _reuse_live_payload(*live))
             # A delegated child mid-run emits no session events of its own — report
             # its liveness from the relay registry so the window shows a busy turn.
@@ -524,7 +648,6 @@ def _(rid, params: dict) -> dict:
         # session's persisted runtime identity, and is a real (upgradable) session.
         if not is_truthy_value(params.get("eager_build", False)):
             sid = uuid.uuid4().hex[:8]
-            source = _resolve_session_source(str(params.get("source") or "").strip() or None)
             lease = None  # claimed lazily on the first turn (_ensure_active_session_slot)
             # Interactive resume routes approvals/clarify through gateway prompts;
             # the deferred build wires the remaining per-session callbacks.
@@ -571,7 +694,11 @@ def _(rid, params: dict) -> dict:
                 model_override=overrides.get("model_override"),
                 resume_runtime_overrides=overrides or None,
             )
-            if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
+            if (
+                live := _claim_or_reuse_live(
+                    sid, target, record, lease, profile_home=profile_home
+                )
+            ) is not None:
                 return _ok(rid, _reuse_live_payload(*live))
 
             _schedule_agent_build(sid)
@@ -606,7 +733,6 @@ def _(rid, params: dict) -> dict:
         # _session_resume_lock across it would stall session.close on the main
         # dispatch thread (it's not a _LONG_HANDLER), blocking fast-path RPCs.
         sid = uuid.uuid4().hex[:8]
-        source = _resolve_session_source(str(params.get("source") or "").strip() or None)
         lease = None  # claimed lazily on the first turn (_ensure_active_session_slot)
         _enable_gateway_prompts()
         home_token = (
@@ -673,8 +799,14 @@ def _(rid, params: dict) -> dict:
         # live session while we were building. Re-check under the lock; if it won,
         # discard our just-built agent and reuse theirs (no worker/poller wired yet).
         with _session_resume_lock:
-            live = _find_live_session_by_key(target)
+            live = _find_live_session_by_key(target, profile_home)
             if live is not None:
+                if persisted_source:
+                    live[1]["source"] = source
+                    live_agent = live[1].get("agent")
+                    if live_agent is not None:
+                        with contextlib.suppress(Exception):
+                            live_agent.platform = source
                 try:
                     if hasattr(agent, "close"):
                         agent.close()
@@ -2753,7 +2885,15 @@ def _(rid, params: dict) -> dict:
     # keep every unrelated session.resume waiting behind it.
     with _session_resume_lock:
         session = _pop_session_by_id(sid)
-    closed = _teardown_popped_session(session, end_reason="tui_close")
+    requested_reason = str(params.get("reason") or "").strip()
+    end_reason = (
+        "orphaned_create"
+        if requested_reason == "orphaned_create"
+        and session is not None
+        and _session_source(session) == "project_ops"
+        else "tui_close"
+    )
+    closed = _teardown_popped_session(session, end_reason=end_reason)
     return _ok(rid, {"closed": closed})
 
 

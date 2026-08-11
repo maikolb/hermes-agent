@@ -117,3 +117,62 @@ def test_task_on_scoped_board_inherits_project(client, project):
         assert kb.get_task(conn, task_id).project_id == project["id"]
     finally:
         conn.close()
+
+
+def test_project_ops_profile_scopes_projects_and_validation(
+    client, kanban_home, tmp_path
+):
+    profile_home = tmp_path / ".hermes" / "profiles" / "coder"
+    profile_home.mkdir(parents=True)
+    repo = tmp_path / "coder-repo"
+    repo.mkdir()
+    with pdb.connect_closing(profile_home / "projects.db") as conn:
+        profile_project_id = pdb.create_project(
+            conn, name="Coder Project", primary_path=str(repo)
+        )
+
+    projects = client.get(
+        "/api/plugins/kanban/projects?profile=coder"
+    ).json()["projects"]
+    assert [item["id"] for item in projects] == [profile_project_id]
+
+    response = client.post(
+        "/api/plugins/kanban/tasks?profile=coder",
+        json={
+            "title": "profile-scoped topic",
+            "project_id": profile_project_id,
+            "workspace_kind": "dir",
+            "workspace_path": str(repo),
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["task"]["project_id"] == profile_project_id
+
+    # Kanban remains root-shared: only project validation is profile-scoped.
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, response.json()["task"]["id"])
+        assert task.project_id == profile_project_id
+
+
+def test_session_link_event_is_atomic_and_idempotent(client):
+    payload = {
+        "title": "shared topic",
+        "session_id": "stored-project-ops-1",
+        "idempotency_key": "project-ops:linked-once",
+    }
+
+    first = client.post("/api/plugins/kanban/tasks", json=payload)
+    second = client.post("/api/plugins/kanban/tasks", json=payload)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    task_id = first.json()["task"]["id"]
+    assert second.json()["task"]["id"] == task_id
+    with kb.connect_closing() as conn:
+        linked = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "task_session_linked"
+        ]
+    assert len(linked) == 1
+    assert linked[0].payload["session_id"] == "stored-project-ops-1"

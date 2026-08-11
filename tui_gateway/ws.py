@@ -89,11 +89,16 @@ class WSTransport:
         loop: asyncio.AbstractEventLoop,
         *,
         peer: str = "unknown",
+        identity: dict[str, Any] | None = None,
     ) -> None:
         self._ws = ws
         self._loop = loop
         self._peer = peer
         self._closed = False
+        identity = identity or {}
+        self.user_id = identity.get("user_id")
+        self.provider = identity.get("provider")
+        self.display_name = identity.get("display_name")
         # Token-coalescing buffer (CF-2). Streamed token frames land here and a
         # short timer flushes the batch. The lock guards the buffer + the
         # "armed" flag against the worker threads that call write(); the timer
@@ -301,7 +306,15 @@ async def handle_ws(ws: Any) -> None:
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
 
-        transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer)
+        identity = getattr(
+            getattr(ws, "state", None), "hermes_ws_identity", None
+        )
+        transport = WSTransport(
+            ws,
+            asyncio.get_running_loop(),
+            peer=peer,
+            identity=identity,
+        )
 
         # resolve_skin() reads config + initializes the skin engine —
         # synchronous I/O + CPU work that should not block the event loop
@@ -431,6 +444,7 @@ async def handle_ws(ws: Any) -> None:
         detached_sessions = 0
         if transport is not None:
             server.unregister_live_transport(transport)
+            server.unregister_session_observer_transport(transport)
             transport.close()
 
             try:
