@@ -1734,7 +1734,10 @@ private fun HermesWorkspace(
                     taskId = route.taskId,
                     pane = route.pane,
                     expanded = expanded,
-                    onBack = { navigator.back(backendId, profileId) },
+                    onBack = {
+                        pendingProjectOpsChat = null
+                        navigator.back(backendId, profileId)
+                    },
                     onOpenChat = openProjectOpsChat,
                 )
                 is HermesDestinationRoute.Artifacts -> when {
