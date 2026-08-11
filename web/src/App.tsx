@@ -31,6 +31,7 @@ import {
   Download,
   Eye,
   FolderOpen,
+  FolderKanban,
   FileText,
   Globe,
   Heart,
@@ -95,6 +96,7 @@ const ChannelsPage = lazy(() => import("@/pages/ChannelsPage"));
 const WebhooksPage = lazy(() => import("@/pages/WebhooksPage"));
 const SystemPage = lazy(() => import("@/pages/SystemPage"));
 const ChatPage = lazy(() => import("@/pages/ChatPage"));
+const ProjectOpsPage = lazy(() => import("@/pages/ProjectOpsPage"));
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -126,6 +128,34 @@ function RootRedirect() {
   return <Navigate to="/sessions" replace />;
 }
 
+export function getRouteHostClassNames(pathname: string) {
+  const normalizedPath = pathname.replace(/\/$/, "") || "/";
+  const isChatRoute = normalizedPath === "/chat";
+  const isFullHeightRoute =
+    normalizedPath === "/docs" ||
+    isChatRoute ||
+    normalizedPath === "/project-ops";
+
+  return {
+    normalizedPath,
+    isChatRoute,
+    outer: cn(
+      "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",
+      "px-3 sm:px-6",
+      isChatRoute
+        ? "pb-0 pt-1 sm:pt-2 lg:pt-4"
+        : "pt-2 sm:pt-4 lg:pt-6",
+      isFullHeightRoute && "min-h-0 flex-1",
+    ),
+    inner: cn(
+      "w-full min-w-0",
+      !isChatRoute &&
+        "pb-[calc(2rem+env(safe-area-inset-bottom,0px))] lg:pb-8",
+      isFullHeightRoute && "min-h-0 flex flex-1 flex-col",
+    ),
+  };
+}
+
 function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
   if (pluginsLoading) {
     // Render nothing during the plugin-load window — a spinner here would just flash.
@@ -155,6 +185,7 @@ const CHAT_NAV_ITEM: NavItem = {
 const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
   "/sessions": SessionsPage,
+  "/project-ops": ProjectOpsPage,
   "/files": FilesPage,
   "/analytics": AnalyticsPage,
   "/models": ModelsPage,
@@ -183,6 +214,11 @@ function ChatRouteSink() {
 }
 
 const BUILTIN_NAV_REST: NavItem[] = [
+  {
+    path: "/project-ops",
+    label: "Project Ops",
+    icon: FolderKanban,
+  },
   {
     path: "/sessions",
     labelKey: "sessions",
@@ -396,9 +432,8 @@ export default function App() {
   const isDesktopCollapsed = collapsed && !isMobile;
   const tooltipWarmRef = useRef(0);
   const sidebarStatus = useSidebarStatus();
-  const isDocsRoute = pathname === "/docs" || pathname === "/docs/";
-  const normalizedPath = pathname.replace(/\/$/, "") || "/";
-  const isChatRoute = normalizedPath === "/chat";
+  const routeHost = getRouteHostClassNames(pathname);
+  const { isChatRoute } = routeHost;
   const embeddedChat = isDashboardEmbeddedChatEnabled();
   // Defer mounting the persistent chat host (and its xterm chunk) until the
   // user has actually opened /chat at least once. Sticky after that so the
@@ -745,26 +780,9 @@ export default function App() {
           </aside>
 
           <PageHeaderProvider pluginTabs={pluginTabMeta}>
-            <div
-              className={cn(
-                "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",
-                "px-3 sm:px-6",
-                isChatRoute
-                  ? "pb-0 pt-1 sm:pt-2 lg:pt-4"
-                  : "pt-2 sm:pt-4 lg:pt-6",
-                isDocsRoute && "min-h-0 flex-1",
-              )}
-            >
+            <div className={routeHost.outer}>
               <PluginSlot name="pre-main" />
-              <div
-                className={cn(
-                  "w-full min-w-0",
-                  !isChatRoute &&
-                    "pb-[calc(2rem+env(safe-area-inset-bottom,0px))] lg:pb-8",
-                  (isDocsRoute || isChatRoute) &&
-                    "min-h-0 flex flex-1 flex-col",
-                )}
-              >
+              <div className={routeHost.inner}>
                 <ProfileKeyedRoutes>
                   <Suspense fallback={<RouteFallback />}>
                     <Routes>
