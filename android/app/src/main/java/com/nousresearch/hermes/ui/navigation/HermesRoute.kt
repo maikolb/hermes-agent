@@ -102,6 +102,23 @@ sealed interface HermesDestinationRoute : HermesRoute {
     }
 
     @Serializable
+    data class ProjectOps(
+        val backendId: String,
+        val profileId: String,
+        val projectId: String? = null,
+        val boardSlug: String? = null,
+        val taskId: String? = null,
+        val pane: ProjectOpsPane? = null,
+    ) : HermesDestinationRoute {
+        init {
+            requireRemoteIdentity(backendId, profileId)
+            requireOptionalStableId(projectId)
+            requireOptionalStableId(boardSlug)
+            requireOptionalStableId(taskId)
+        }
+    }
+
+    @Serializable
     data class Artifacts(
         val backendId: String,
         val profileId: String,
@@ -193,6 +210,14 @@ enum class AppSettingsSection {
     PRIVACY_AND_SECURITY,
     NOTIFICATIONS,
     ACCESSIBILITY,
+}
+
+@Serializable
+@Keep
+enum class ProjectOpsPane {
+    TOPICS,
+    CHAT,
+    BOARD,
 }
 
 private fun requireRemoteIdentity(backendId: String, profileId: String) {
@@ -296,6 +321,16 @@ fun resolveEntryDestination(
         )
     }
     return when (route) {
+        is HermesDestinationRoute.ProjectOps -> if (
+            route.projectId != null || route.boardSlug != null || route.taskId != null
+        ) {
+            RouteResolution(
+                route = HermesDestinationRoute.ProjectOps(route.backendId, route.profileId, pane = route.pane),
+                explanation = "Project Ops route selections require server reconciliation. Opened the authenticated Project Ops home.",
+            )
+        } else {
+            restored
+        }
         is HermesDestinationRoute.Artifacts -> if (route.artifactId != null || route.filePath != null) {
             RouteResolution(
                 route = HermesDestinationRoute.Artifacts(route.backendId, route.profileId),
@@ -348,6 +383,7 @@ fun HermesRoute.backendIdOrNull(): String? = when (this) {
     is HermesRoute.Files -> backendId
     is HermesRoute.Management -> backendId
     is HermesDestinationRoute.Chats -> backendId
+    is HermesDestinationRoute.ProjectOps -> backendId
     is HermesDestinationRoute.Artifacts -> backendId
     is HermesDestinationRoute.Automations -> backendId
     is HermesDestinationRoute.Manage -> backendId
@@ -362,6 +398,7 @@ private fun HermesRoute.profileIdOrNull(): String? = when (this) {
     is HermesRoute.Files -> profileId
     is HermesRoute.Management -> profileId
     is HermesDestinationRoute.Chats -> profileId
+    is HermesDestinationRoute.ProjectOps -> profileId
     is HermesDestinationRoute.Artifacts -> profileId
     is HermesDestinationRoute.Automations -> profileId
     is HermesDestinationRoute.Manage -> profileId

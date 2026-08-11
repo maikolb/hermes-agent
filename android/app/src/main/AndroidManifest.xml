@@ -61,11 +61,12 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="hermes" android:host="chats" />
-                <data android:scheme="hermes" android:host="artifacts" />
-                <data android:scheme="hermes" android:host="automations" />
-                <data android:scheme="hermes" android:host="manage" />
-                <data android:scheme="hermes" android:host="app-settings" />
+                <data android:scheme="hermes-project-ops" android:host="chats" />
+                <data android:scheme="hermes-project-ops" android:host="project-ops" />
+                <data android:scheme="hermes-project-ops" android:host="artifacts" />
+                <data android:scheme="hermes-project-ops" android:host="automations" />
+                <data android:scheme="hermes-project-ops" android:host="manage" />
+                <data android:scheme="hermes-project-ops" android:host="app-settings" />
             </intent-filter>
         </activity>
     </application>

@@ -1,5 +1,13 @@
 # Hermes for Android
 
+> **Derivative:** this workspace builds **Hermes Project Ops** with application
+> ID `com.maikolb.hermesprojectops`, custom scheme `hermes-project-ops`, and
+> version `0.1.0` (code `1`). The Kotlin namespace intentionally remains
+> `com.nousresearch.hermes` so the exact imported source stays auditable. The
+> original MIT license, upstream authorship, and upstream documentation below
+> are preserved; see [UPSTREAM.md](UPSTREAM.md) for the pinned source archive
+> and backend authority.
+
 <p align="center">
   <img src="docs/assets/readme/hermes-android-banner.png" alt="Hermes Agent for Android" width="100%">
 </p>

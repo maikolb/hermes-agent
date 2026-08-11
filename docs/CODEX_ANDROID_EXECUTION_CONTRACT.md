@@ -3,7 +3,7 @@
 ## Contract Metadata
 
 - Contract Version: 1
-- Contract Revision: 3
+- Contract Revision: 7
 - Mode: BUILD
 - Risk: HIGH
 - Workspace: `C:/Users/maiko/Projetos/Hermes Agent Project Ops`
@@ -20,6 +20,7 @@ Produce a derivative-owned native Kotlin/Jetpack Compose Android client that exp
 ## In Scope
 
 - Entire imported `android/` source only as required by the modular derivation.
+- Root `.gitignore` only to unignore the vendored Android Kotlin `data` source/test packages that were accidentally omitted from the import commit.
 - `android/UPSTREAM.md`, inherited MIT `LICENSE`, derivative README/provenance.
 - Derivative package/application/deep-link identity.
 - A `projectops` model/repository/viewmodel/UI seam using the inherited REST and Gateway clients.
@@ -160,5 +161,12 @@ All calls use inherited authenticated Dashboard cookies/session handling and cur
 - Contract preflight: validated by the workspace AOF validator.
 - Upstream import: implemented from exact audited archive; not yet committed.
 - Upstream baseline: `assembleDebug` PASS. Unit suite ran 370 tests: 363 passed and 7 upstream Windows failures reproduced before derivative edits (four AndroidX DataStore temp-file rename failures and three Robolectric FileProvider cache/root failures). Treat this exact set as baseline noise; no new failure is allowed.
-- Android Project Ops implementation: not started.
-- APK/install/device smoke: not started.
+- Android Project Ops implementation: implemented locally with derivative identity, inherited `HermesRestClient` authentication, literal rev.3 API wrappers, generation/cancellation stale-response protection, typed fail-closed routing, explicit shell destination, adaptive Topics/Chat/Board UI, hydrated task detail, and server-owned existing-session handoff. No commit or push was performed.
+- Focused validation: 43 tests passed with zero failures/errors/skips; `:app:compileDebugAndroidTestKotlin`, `lintDebug`, `detekt`, and `assembleDebug` passed. The project-level `detekt` task reported `NO-SOURCE` under the inherited root-only configuration.
+- Full unit validation: 383 tests ran; 376 passed and exactly the same 7 baseline Windows failures remained. No new failure remained after the derivative provenance expectations were aligned.
+- APK validation: the pre-review debug APK is stale after the query/profile fixes and is not an install candidate. A clean post-commit rebuild and fresh package/signature/hash inspection are required before ADB installation.
+- External checker: `PROJECT_OPS_ANDROID_GREEN_PASS` after focused tests, full baseline-aware unit suite, lint, detekt and assemble on the final source state.
+- Snapshot publication repair: completed and published in isolated commit `5f90caaebaadf626e65e8a9b12b280442d84b992`; 329/329 upstream files are visible to Git and the 43 `data/` files were staged semantically identical to the audited archive after Git EOL normalization.
+- Query-encoding review fix: implemented. Board query values now use the inherited query-parameter encoder rather than the path-segment encoder; regression coverage includes `+`, `&`, `/`, and spaces while task IDs remain encoded as path segments.
+- Profile-isolation review fix: implemented. The route-selected nonblank `profileId` is now propagated through ViewModel → ProjectOpsDataSource → HermesRestClient on all four plugin calls and encoded as the `profile` query parameter. Tests cover reserved characters and prove the same selected profile reaches project, board and task reconciliation.
+- Install/device smoke/product acceptance: not run or claimed, per the delegated no-install/no-mutable-ADB boundary. Direct visual-semantic approval remains blocked pending permitted target rendering and human/device evidence.

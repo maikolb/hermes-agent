@@ -46,7 +46,7 @@ class HermesEntryRequestLifecycleTest {
         clearStore()
         val malicious = Intent(
             Intent.ACTION_VIEW,
-            Uri.parse("hermes://chats?backend=personal&profile=default"),
+            Uri.parse("hermes-project-ops://chats?backend=personal&profile=default"),
             context,
             MainActivity::class.java,
         ).putExtra("approval_token", "must-not-survive")

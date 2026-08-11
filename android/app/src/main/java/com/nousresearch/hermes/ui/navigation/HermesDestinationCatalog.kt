@@ -5,7 +5,7 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
-enum class ProductHome { CHATS, ARTIFACTS, AUTOMATIONS, MANAGE, APP_SETTINGS }
+enum class ProductHome { CHATS, PROJECT_OPS, ARTIFACTS, AUTOMATIONS, MANAGE, APP_SETTINGS }
 
 enum class HostCapability {
     TERMINAL_BACKEND,
@@ -51,6 +51,7 @@ object HermesDestinationCatalog {
         is HermesRoute.Management -> durableDestinations.getValue(route.destination).productHome
         HermesRoute.Onboarding, is HermesRoute.BackendPicker -> null
         is HermesDestinationRoute.Chats -> ProductHome.CHATS
+        is HermesDestinationRoute.ProjectOps -> ProductHome.PROJECT_OPS
         is HermesDestinationRoute.Artifacts -> ProductHome.ARTIFACTS
         is HermesDestinationRoute.Automations -> ProductHome.AUTOMATIONS
         is HermesDestinationRoute.Manage -> ProductHome.MANAGE
@@ -149,7 +150,7 @@ private fun ManagementDestination.manageDestination(): ManageDestination? = when
 }
 
 object HermesDestinationUri {
-    private const val SCHEME = "hermes"
+    private const val SCHEME = "hermes-project-ops"
     private const val MAX_URI_LENGTH = 8_192
     private val charset = StandardCharsets.UTF_8
 
@@ -160,6 +161,14 @@ object HermesDestinationUri {
                 "profile" to route.profileId,
                 "session" to route.sessionId,
                 "message" to route.messageId,
+            )
+            is HermesDestinationRoute.ProjectOps -> "project-ops" to listOf(
+                "backend" to route.backendId,
+                "profile" to route.profileId,
+                "project" to route.projectId,
+                "board" to route.boardSlug,
+                "task" to route.taskId,
+                "pane" to route.pane?.name,
             )
             is HermesDestinationRoute.Artifacts -> "artifacts" to listOf(
                 "backend" to route.backendId,
@@ -210,6 +219,17 @@ object HermesDestinationUri {
                         query.required("profile"),
                         query["session"],
                         query["message"],
+                    )
+                }
+                "project-ops" -> {
+                    if (!query.hasOnly("backend", "profile", "project", "board", "task", "pane")) return null
+                    HermesDestinationRoute.ProjectOps(
+                        query.required("backend"),
+                        query.required("profile"),
+                        query["project"],
+                        query["board"],
+                        query["task"],
+                        query["pane"]?.let(ProjectOpsPane::valueOf),
                     )
                 }
                 "artifacts" -> {

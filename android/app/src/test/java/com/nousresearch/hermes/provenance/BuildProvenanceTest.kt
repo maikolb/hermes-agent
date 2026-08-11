@@ -13,12 +13,12 @@ class BuildProvenanceTest {
         val provenance = BuildProvenanceSource.current
 
         assertEquals(BuildConfig.VERSION_NAME, provenance.androidVersion)
-        assertEquals(4, provenance.versionCode)
+        assertEquals(1, provenance.versionCode)
         assertEquals(BuildConfig.HERMES_BUILD_CHANNEL, provenance.channel)
-        assertEquals("b9aa9289a8083f2e9d248ad6837b2938f5ee92d7", provenance.auditedHermesCommit)
+        assertEquals("4fc64b8d356a19ae28cefaab3f57ae9cf83c9523", provenance.auditedHermesCommit)
         assertEquals("0.20.0", provenance.hermesAgentVersion)
         assertEquals("0.17.0", provenance.hermesDesktopVersion)
-        assertEquals("luinbytes", provenance.author)
+        assertEquals("maikolb (derivative); luinbytes (upstream)", provenance.author)
     }
 
     @Test

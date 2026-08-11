@@ -41,6 +41,10 @@ class HermesNavigator(private val controller: NavHostController) {
                 launchSingleTop = true
                 if (clearHistory) popUpTo(controller.graph.id) { inclusive = true }
             }
+            is HermesDestinationRoute.ProjectOps -> controller.navigate(route) {
+                launchSingleTop = true
+                if (clearHistory) popUpTo(controller.graph.id) { inclusive = true }
+            }
             is HermesDestinationRoute.Artifacts -> controller.navigate(route) {
                 launchSingleTop = true
                 if (clearHistory) popUpTo(controller.graph.id) { inclusive = true }
@@ -71,6 +75,17 @@ class HermesNavigator(private val controller: NavHostController) {
         messageId: String? = null,
     ) {
         navigate(HermesDestinationRoute.Chats(backendId, profileId, sessionId, messageId))
+    }
+
+    fun openProjectOps(
+        backendId: String,
+        profileId: String,
+        projectId: String? = null,
+        boardSlug: String? = null,
+        taskId: String? = null,
+        pane: ProjectOpsPane? = null,
+    ) {
+        navigate(HermesDestinationRoute.ProjectOps(backendId, profileId, projectId, boardSlug, taskId, pane))
     }
 
     fun openArtifacts(

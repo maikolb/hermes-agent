@@ -143,4 +143,34 @@ class HermesNavigationTest {
 
         composeRule.onNodeWithText("backend-intended/research/stored-session").assertIsDisplayed()
     }
+
+    @Test
+    fun navigatorOpensTypedProjectOpsDestination() {
+        composeRule.setContent {
+            val controller = rememberNavController()
+            val navigator = remember(controller) { HermesNavigator(controller) }
+            NavHost(controller, startDestination = HermesDestinationRoute.Chats("backend", "default")) {
+                composable<HermesDestinationRoute.Chats> {
+                    Button(onClick = {
+                        navigator.openProjectOps(
+                            "backend",
+                            "default",
+                            "project-1",
+                            "board-1",
+                            "task-1",
+                            ProjectOpsPane.BOARD,
+                        )
+                    }) { Text("Open Project Ops") }
+                }
+                composable<HermesDestinationRoute.ProjectOps> { entry ->
+                    val route = entry.toRoute<HermesDestinationRoute.ProjectOps>()
+                    Text("${route.projectId}/${route.boardSlug}/${route.taskId}/${route.pane}")
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("Open Project Ops").performClick()
+
+        composeRule.onNodeWithText("project-1/board-1/task-1/BOARD").assertIsDisplayed()
+    }
 }

@@ -33,7 +33,7 @@ class MainActivityIntentTest {
         val request = parseHermesEntryRequest(
             Intent(
                 Intent.ACTION_VIEW,
-                Uri.parse("hermes://chats?backend=personal&profile=default&session=session-1"),
+                Uri.parse("hermes-project-ops://chats?backend=personal&profile=default&session=session-1"),
                 context,
                 MainActivity::class.java,
             ),
@@ -59,7 +59,7 @@ class MainActivityIntentTest {
             parseHermesEntryRequest(
                 Intent(
                     Intent.ACTION_VIEW,
-                    Uri.parse("hermes://chats?backend=personal&profile=default"),
+                    Uri.parse("hermes-project-ops://chats?backend=personal&profile=default"),
                     context,
                     MainActivity::class.java,
                 ).putExtra("approval_token", "must-not-authorize"),

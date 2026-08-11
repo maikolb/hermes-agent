@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Hermes</string>
+    <string name="app_name">Hermes Project Ops</string>
     <string name="widget_new_chat_label">New chat</string>
     <string name="widget_new_chat_description">Open a new Hermes chat</string>
     <string name="widget_new_chat_content_description">Open a new Hermes chat</string>

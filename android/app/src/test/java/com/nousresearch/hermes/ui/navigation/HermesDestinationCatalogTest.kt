@@ -58,6 +58,7 @@ class HermesDestinationCatalogTest {
     fun `new remote routes retain only stable scope and detail identity`() {
         val routes = listOf<HermesDestinationRoute>(
             HermesDestinationRoute.Chats("backend", "profile", "session"),
+            HermesDestinationRoute.ProjectOps("backend", "profile", "project", "board", "task", ProjectOpsPane.BOARD),
             HermesDestinationRoute.Artifacts("backend", "profile", artifactId = "artifact"),
             HermesDestinationRoute.Automations(
                 "backend",
@@ -102,6 +103,7 @@ class HermesDestinationCatalogTest {
                 "session/1",
                 messageId = "message/1",
             ),
+            HermesDestinationRoute.ProjectOps("backend one", "research", "project/1", "board one", "task/1", ProjectOpsPane.TOPICS),
             HermesDestinationRoute.Artifacts("backend one", "research", filePath = "/workspace/report one.md"),
             HermesDestinationRoute.Automations(
                 "backend one",
@@ -138,11 +140,11 @@ class HermesDestinationCatalogTest {
         assertEquals(route, HermesDestinationUri.parse(encoded))
         assertEquals(
             route,
-            HermesDestinationUri.parse("hermes://chats?backend=backend&profile=profile&session=session&message=message-42"),
+            HermesDestinationUri.parse("hermes-project-ops://chats?backend=backend&profile=profile&session=session&message=message-42"),
         )
         assertNull(
             HermesDestinationUri.parse(
-                "hermes://chats?backend=backend&profile=profile&session=session&messageId=message-42",
+                "hermes-project-ops://chats?backend=backend&profile=profile&session=session&messageId=message-42",
             ),
         )
     }
@@ -180,10 +182,10 @@ class HermesDestinationCatalogTest {
 
     @Test
     fun `deep link parser rejects secret fields duplicates and paths outside artifacts`() {
-        assertNull(HermesDestinationUri.parse("hermes://chats?backend=b&profile=p&token=secret"))
-        assertNull(HermesDestinationUri.parse("hermes://chats?backend=b&backend=other&profile=p"))
-        assertNull(HermesDestinationUri.parse("hermes://chats?backend=b&profile=p&path=%2Fserver"))
-        assertNull(HermesDestinationUri.parse("hermes://chats/unexpected?backend=b&profile=p"))
+        assertNull(HermesDestinationUri.parse("hermes-project-ops://chats?backend=b&profile=p&token=secret"))
+        assertNull(HermesDestinationUri.parse("hermes-project-ops://chats?backend=b&backend=other&profile=p"))
+        assertNull(HermesDestinationUri.parse("hermes-project-ops://chats?backend=b&profile=p&path=%2Fserver"))
+        assertNull(HermesDestinationUri.parse("hermes-project-ops://chats/unexpected?backend=b&profile=p"))
         assertNull(HermesDestinationUri.parse("https://chats?backend=b&profile=p"))
         assertNull(HermesDestinationUri.parse("x".repeat(8_193)))
     }

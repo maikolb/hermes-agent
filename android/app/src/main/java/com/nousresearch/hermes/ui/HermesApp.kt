@@ -223,6 +223,9 @@ import com.nousresearch.hermes.ui.navigation.AutomationResourceIdentity
 import com.nousresearch.hermes.ui.navigation.conversationMutationsEnabled
 import com.nousresearch.hermes.ui.navigation.resolveEntryDestination
 import com.nousresearch.hermes.ui.navigation.resolveRestoredRoute
+import com.nousresearch.hermes.projectops.ProjectOpsRoute
+import com.nousresearch.hermes.projectops.ProjectOpsTask
+import com.nousresearch.hermes.projectops.projectOpsStoredSession
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.compose.elements.highlightedCodeBlock
 import com.mikepenz.markdown.compose.elements.highlightedCodeFence
@@ -757,6 +760,7 @@ fun HermesApp(
                     composable<HermesRoute.Files> { WorkspaceRoute(it.toRoute<HermesRoute.Files>()) }
                     composable<HermesRoute.Management> { WorkspaceRoute(it.toRoute<HermesRoute.Management>()) }
                     composable<HermesDestinationRoute.Chats> { WorkspaceRoute(it.toRoute<HermesDestinationRoute.Chats>()) }
+                    composable<HermesDestinationRoute.ProjectOps> { WorkspaceRoute(it.toRoute<HermesDestinationRoute.ProjectOps>()) }
                     composable<HermesDestinationRoute.Artifacts> { WorkspaceRoute(it.toRoute<HermesDestinationRoute.Artifacts>()) }
                     composable<HermesDestinationRoute.Automations> { WorkspaceRoute(it.toRoute<HermesDestinationRoute.Automations>()) }
                     composable<HermesDestinationRoute.Manage> { WorkspaceRoute(it.toRoute<HermesDestinationRoute.Manage>()) }
@@ -1136,6 +1140,7 @@ private fun HermesWorkspace(
             if (supportingToolId != null && supportingToolId !in availableToolIds) supportingToolId = null
         }
         var pendingNewConversationFromId by remember { mutableStateOf<String?>(null) }
+        var pendingProjectOpsSessionId by remember { mutableStateOf<String?>(null) }
         val openStoredSession: (StoredSession) -> Unit = { session ->
             pendingNewConversationFromId = null
             onRecovery(null)
@@ -1161,6 +1166,26 @@ private fun HermesWorkspace(
                     profileId = session.profile?.takeIf(String::isNotBlank) ?: state.currentProfile,
                     sessionId = session.durableId,
                 )
+            }
+        }
+        LaunchedEffect(pendingProjectOpsSessionId, state.activeStoredSession?.durableId) {
+            val pendingSessionId = pendingProjectOpsSessionId ?: return@LaunchedEffect
+            val active = state.activeStoredSession ?: return@LaunchedEffect
+            if (active.durableId == pendingSessionId) {
+                pendingProjectOpsSessionId = null
+                navigator.openConversation(
+                    backendId = backendId,
+                    profileId = active.profile?.takeIf(String::isNotBlank) ?: profileId,
+                    sessionId = pendingSessionId,
+                )
+            }
+        }
+        val openProjectOpsChat: (ProjectOpsTask) -> Unit = { task ->
+            val storedSession = projectOpsStoredSession(task, state.sessions, profileId)
+            if (storedSession != null) {
+                pendingProjectOpsSessionId = storedSession.durableId
+                onRecovery(null)
+                onSession(storedSession)
             }
         }
         fun navigate(destination: WorkspaceContent) {
@@ -1517,6 +1542,7 @@ private fun HermesWorkspace(
                             onSession = openStoredSession,
                             onDeleteSession = onDeleteSession,
                             onNewSession = { createConversation(null) },
+                            onProjectOps = { navigator.openProjectOps(backendId, profileId) },
                             onArtifacts = { navigator.openArtifacts(backendId, profileId) },
                             onAutomations = { navigator.openAutomations(backendId, profileId) },
                             onManage = { navigator.openManage(backendId, profileId) },
@@ -1557,6 +1583,7 @@ private fun HermesWorkspace(
                         onSession = openStoredSession,
                         onDeleteSession = onDeleteSession,
                         onNewSession = { createConversation(null) },
+                        onProjectOps = { navigator.openProjectOps(backendId, profileId) },
                         onArtifacts = { navigator.openArtifacts(backendId, profileId) },
                         onAutomations = { navigator.openAutomations(backendId, profileId) },
                         onManage = { navigator.openManage(backendId, profileId) },
@@ -1677,6 +1704,17 @@ private fun HermesWorkspace(
                         WorkspaceRouteContent(WorkspaceContent.CHAT, conversationReady = conversationReady)
                     }
                 }
+                is HermesDestinationRoute.ProjectOps -> ProjectOpsRoute(
+                    backend = requireNotNull(state.backend),
+                    profileId = route.profileId,
+                    projectId = route.projectId,
+                    boardSlug = route.boardSlug,
+                    taskId = route.taskId,
+                    pane = route.pane,
+                    expanded = expanded,
+                    onBack = { navigator.back(backendId, profileId) },
+                    onOpenChat = openProjectOpsChat,
+                )
                 is HermesDestinationRoute.Artifacts -> when {
                     route.filePath != null -> WorkspaceRouteContent(WorkspaceContent.FILES, filesPath = route.filePath)
                     else -> WorkspaceRouteContent(WorkspaceContent.ARTIFACTS)
@@ -1804,6 +1842,7 @@ private fun HermesRoute.profileIdOr(fallback: String): String = when (this) {
     is HermesRoute.Files -> profileId
     is HermesRoute.Management -> profileId
     is HermesDestinationRoute.Chats -> profileId
+    is HermesDestinationRoute.ProjectOps -> profileId
     is HermesDestinationRoute.Artifacts -> profileId
     is HermesDestinationRoute.Automations -> profileId
     is HermesDestinationRoute.Manage -> profileId
@@ -1829,6 +1868,7 @@ private fun SessionRail(
     onSession: (StoredSession) -> Unit,
     onDeleteSession: (StoredSession) -> Unit,
     onNewSession: () -> Unit,
+    onProjectOps: () -> Unit,
     onArtifacts: () -> Unit,
     onAutomations: () -> Unit,
     onManage: () -> Unit,
@@ -1881,6 +1921,14 @@ private fun SessionRail(
         }
         ConnectionLine(connection)
         if (!compact) {
+        OutlinedButton(
+            onClick = onProjectOps,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        ) {
+            Icon(Icons.Outlined.Forum, null)
+            Spacer(Modifier.width(6.dp))
+            Text("Project Ops")
+        }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1989,6 +2037,12 @@ private fun SessionRail(
                         label = { Text("Chats") },
                         selected = true,
                         onClick = { drawerScope.launch { drawerState.close() } },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                    NavigationDrawerItem(
+                        label = { Text("Project Ops") },
+                        selected = false,
+                        onClick = onProjectOps,
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                     NavigationDrawerItem(

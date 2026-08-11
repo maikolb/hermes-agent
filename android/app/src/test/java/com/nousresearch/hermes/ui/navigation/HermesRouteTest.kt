@@ -397,6 +397,7 @@ private fun HermesDestinationRoute.resourceIdForTest(): String? = when (this) {
     is HermesDestinationRoute.Artifacts -> artifactId ?: filePath
     is HermesDestinationRoute.Automations -> resourceId
     is HermesDestinationRoute.Manage -> resourceId
+    is HermesDestinationRoute.ProjectOps -> taskId ?: boardSlug ?: projectId
     is HermesDestinationRoute.Chats,
     is HermesDestinationRoute.AppSettings,
     -> null

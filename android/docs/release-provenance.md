@@ -1,6 +1,6 @@
 # Android build provenance
 
-Every Hermes Android variant gets its build identity from the Gradle metadata
+Every Hermes Project Ops Android variant gets its build identity from the Gradle metadata
 defined in [`app/build.gradle.kts`](../app/build.gradle.kts). The generated
 `BuildConfig` fields are exposed through
 [`BuildProvenanceSource`](../app/src/main/java/com/nousresearch/hermes/provenance/BuildProvenance.kt),
@@ -19,7 +19,12 @@ The metadata includes:
   version ranges;
 - the SHA-256 toolchain/dependency-input digest, CI/build identity, and signing
   certificate fingerprint when a configured keystore is available; and
-- the generated author `luinbytes`.
+- the derivative owner `maikolb` and upstream Android author `luinbytes`.
+
+The installed identity is `com.maikolb.hermesprojectops` for release and
+`com.maikolb.hermesprojectops.debug` for debug. The Kotlin namespace remains
+the imported `com.nousresearch.hermes`; namespace continuity does not grant the
+derivative the upstream package ID or `hermes://` URI scheme.
 
 All app configurations use Gradle dependency locking. Resolve intentional
 dependency updates with `./gradlew :app:dependencies --write-locks`, review and

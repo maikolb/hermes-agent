@@ -8,6 +8,8 @@ import com.nousresearch.hermes.data.SessionCredentialStore
 import com.nousresearch.hermes.security.SecureTokenStore
 import com.nousresearch.hermes.protocol.HermesGatewayClient
 import com.nousresearch.hermes.protocol.OkHttpHermesGatewayClient
+import com.nousresearch.hermes.projectops.ProjectOpsDataSource
+import com.nousresearch.hermes.projectops.ProjectOpsRepository
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -32,6 +34,10 @@ abstract class AppBindings {
     @Binds
     @Singleton
     abstract fun bindSessionCredentialStore(implementation: SecureTokenStore): SessionCredentialStore
+
+    @Binds
+    @Singleton
+    abstract fun bindProjectOpsDataSource(implementation: ProjectOpsRepository): ProjectOpsDataSource
 }
 
 @Module

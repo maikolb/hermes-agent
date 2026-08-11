@@ -60,6 +60,10 @@ import com.nousresearch.hermes.protocol.ToolsetInfo
 import com.nousresearch.hermes.protocol.ToolsetToggleResult
 import com.nousresearch.hermes.protocol.ServerConfigMutationResponse
 import com.nousresearch.hermes.protocol.ServerConfigSchemaResponse
+import com.nousresearch.hermes.projectops.ProjectOpsBoardResponse
+import com.nousresearch.hermes.projectops.ProjectOpsBoardsResponse
+import com.nousresearch.hermes.projectops.ProjectOpsProjectsResponse
+import com.nousresearch.hermes.projectops.ProjectOpsTaskDetailResponse
 import java.io.IOException
 import java.io.OutputStream
 import java.io.ByteArrayOutputStream
@@ -90,6 +94,68 @@ class HermesRestClient(
     private val json: Json,
     private val credentials: SessionCredentialStore? = null,
 ) {
+    suspend fun projectOpsProjects(
+        config: BackendConfig,
+        token: String,
+        profileId: String,
+    ): ProjectOpsProjectsResponse {
+        require(profileId.isNotBlank()) { "Project Ops profile is required" }
+        return get(
+            config,
+            token,
+            "/api/plugins/kanban/projects?${encodeQueryParameter("profile", profileId)}",
+            ProjectOpsProjectsResponse.serializer(),
+        )
+    }
+
+    suspend fun projectOpsBoards(
+        config: BackendConfig,
+        token: String,
+        profileId: String,
+    ): ProjectOpsBoardsResponse {
+        require(profileId.isNotBlank()) { "Project Ops profile is required" }
+        return get(
+            config,
+            token,
+            "/api/plugins/kanban/boards?${encodeQueryParameter("profile", profileId)}",
+            ProjectOpsBoardsResponse.serializer(),
+        )
+    }
+
+    suspend fun projectOpsBoard(
+        config: BackendConfig,
+        token: String,
+        profileId: String,
+        boardSlug: String,
+    ): ProjectOpsBoardResponse {
+        require(profileId.isNotBlank()) { "Project Ops profile is required" }
+        require(boardSlug.isNotBlank()) { "Project Ops board slug is required" }
+        return get(
+            config,
+            token,
+            "/api/plugins/kanban/board?${encodeQueryParameter("board", boardSlug)}&${encodeQueryParameter("profile", profileId)}",
+            ProjectOpsBoardResponse.serializer(),
+        )
+    }
+
+    suspend fun projectOpsTask(
+        config: BackendConfig,
+        token: String,
+        profileId: String,
+        boardSlug: String,
+        taskId: String,
+    ): ProjectOpsTaskDetailResponse {
+        require(profileId.isNotBlank()) { "Project Ops profile is required" }
+        require(boardSlug.isNotBlank()) { "Project Ops board slug is required" }
+        require(taskId.isNotBlank()) { "Project Ops task id is required" }
+        return get(
+            config,
+            token,
+            "/api/plugins/kanban/tasks/${encodePathSegment(taskId)}?${encodeQueryParameter("board", boardSlug)}&${encodeQueryParameter("profile", profileId)}",
+            ProjectOpsTaskDetailResponse.serializer(),
+        )
+    }
+
     suspend fun status(config: BackendConfig, token: String?): StatusResponse =
         get(config, token, "/api/status", StatusResponse.serializer())
 

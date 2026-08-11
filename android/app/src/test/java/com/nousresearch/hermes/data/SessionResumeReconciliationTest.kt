@@ -45,4 +45,13 @@ class SessionResumeReconciliationTest {
         assertEquals("Long chat", active.title)
         assertEquals("work", active.profile)
     }
+
+    @Test
+    fun `Project Ops source is preserved and blank or unknown source falls back safely`() {
+        assertEquals("project_ops", sessionResumeSource("project_ops"))
+        assertEquals("project_ops", sessionResumeSource(" project_ops "))
+        assertEquals("android", sessionResumeSource(null))
+        assertEquals("android", sessionResumeSource(""))
+        assertEquals("android", sessionResumeSource("caller-controlled"))
+    }
 }

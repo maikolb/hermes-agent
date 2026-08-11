@@ -654,7 +654,7 @@ class HermesRepository @Inject constructor(
                 buildJsonObject {
                     put("session_id", session.durableId)
                     put("cols", 96)
-                    put("source", "android")
+                    put("source", sessionResumeSource(session.source))
                     session.profile?.let { put("profile", it) }
                 },
             )
@@ -4876,6 +4876,14 @@ internal fun resumedStoredSession(
         ?: requested.durableId
     return requested.copy(sessionId = durableId)
 }
+
+/**
+ * Only the persisted Project Ops source changes backend attribution. Unknown,
+ * blank, or caller-constructed values retain the ordinary Android surface.
+ * The backend still resolves its persisted session source ahead of this hint.
+ */
+internal fun sessionResumeSource(serverSource: String?): String =
+    if (serverSource?.trim() == "project_ops") "project_ops" else "android"
 
 private fun sessionTarget(backendId: String, session: StoredSession): SessionTarget =
     SessionTarget(

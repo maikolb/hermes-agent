@@ -9,3 +9,14 @@
 - Import method: exact GitHub archive extracted under this directory; no nested Git repository or worktree.
 
 Project Ops changes must remain modular and must not weaken the inherited authentication, Keystore, transport, profile, or session-authority contracts.
+
+## Derivative identity
+
+- Product: Hermes Project Ops.
+- Application ID: `com.maikolb.hermesprojectops` (`.debug` for debug builds).
+- Custom URI scheme: `hermes-project-ops`.
+- Initial derivative version: `0.1.0` / code `1`.
+- Kotlin namespace remains `com.nousresearch.hermes` to keep the imported code auditable and avoid an unsafe mass rename.
+- Backend contract authority: `4fc64b8d356a19ae28cefaab3f57ae9cf83c9523`.
+
+The derivative preserves the imported MIT license and credits `luinbytes` as the upstream Android author. Project Ops-specific ownership and build metadata are additive and do not replace the upstream provenance above.

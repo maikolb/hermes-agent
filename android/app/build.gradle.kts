@@ -69,18 +69,18 @@ fun signingFingerprint(path: String?, password: String?, alias: String?): String
     }.getOrDefault("unavailable")
 }
 
-val appVersionCode = 4
-val appVersionName = "1.0.1"
+val appVersionCode = 1
+val appVersionName = "0.1.0"
 require(Regex("\\d+\\.\\d+\\.\\d+").matches(appVersionName)) {
     "Hermes versionName must be semantic major.minor.patch."
 }
 tasks.cyclonedxDirectBom {
     includeConfigs = listOf("releaseRuntimeClasspath")
     projectType.set(org.cyclonedx.model.Component.Type.APPLICATION)
-    componentName.set("hermes-android")
+    componentName.set("hermes-project-ops")
     componentVersion.set(appVersionName)
 }
-val auditedHermesCommit = "b9aa9289a8083f2e9d248ad6837b2938f5ee92d7"
+val auditedHermesCommit = "4fc64b8d356a19ae28cefaab3f57ae9cf83c9523"
 val hermesAgentVersion = "0.20.0"
 val hermesDesktopVersion = "0.17.0"
 val androidCommit = environmentOrFallback(
@@ -123,11 +123,11 @@ require(provenanceChannel == "debug" || provenanceChannel == "release") {
 require(provenanceChannel != "release" || rootProject.file(dependencyLockPath).isFile) {
     "Release provenance requires the committed app/gradle.lockfile."
 }
-val provenanceOutput = layout.buildDirectory.file("generated/provenance/hermes-android-$provenanceChannel.properties")
+val provenanceOutput = layout.buildDirectory.file("generated/provenance/hermes-project-ops-$provenanceChannel.properties")
 val provenancePackageName = if (provenanceChannel == "release") {
-    "com.nousresearch.hermes"
+    "com.maikolb.hermesprojectops"
 } else {
-    "com.nousresearch.hermes.debug"
+    "com.maikolb.hermesprojectops.debug"
 }
 val provenanceVersionName = if (provenanceChannel == "release") appVersionName else "$appVersionName-debug"
 val provenanceSigningFingerprint = if (provenanceChannel == "release") {
@@ -149,7 +149,7 @@ val provenanceContent = listOf(
     "build.identity=$buildIdentity",
     "build.package=$provenancePackageName",
     "build.signing_fingerprint=$provenanceSigningFingerprint",
-    "build.author=luinbytes",
+    "build.author=maikolb (derivative); luinbytes (upstream)",
 ).joinToString("\n", postfix = "\n")
 
 tasks.register("writeBuildProvenance") {
@@ -185,7 +185,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.nousresearch.hermes"
+        applicationId = "com.maikolb.hermesprojectops"
         minSdk = 28
         targetSdk = 36
         versionCode = appVersionCode
@@ -200,7 +200,11 @@ android {
         buildConfigField("String", "HERMES_DESKTOP_VERSION_RANGE", buildConfigString("=$hermesDesktopVersion"))
         buildConfigField("String", "HERMES_TOOLCHAIN_DIGEST", buildConfigString(toolchainDigest))
         buildConfigField("String", "HERMES_BUILD_IDENTITY", buildConfigString(buildIdentity))
-        buildConfigField("String", "HERMES_BUILD_AUTHOR", buildConfigString("luinbytes"))
+        buildConfigField(
+            "String",
+            "HERMES_BUILD_AUTHOR",
+            buildConfigString("maikolb (derivative); luinbytes (upstream)"),
+        )
     }
 
     buildFeatures {

@@ -18,7 +18,7 @@ class AppSettingsDeepLinkTest {
     @Test
     fun appSettingsDeepLinkDoesNotRequireAnAuthenticatedBackend() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("hermes://app-settings"), context, MainActivity::class.java)
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("hermes-project-ops://app-settings"), context, MainActivity::class.java)
 
         ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use {
             it.onActivity { activity -> activity.startActivity(intent) }
