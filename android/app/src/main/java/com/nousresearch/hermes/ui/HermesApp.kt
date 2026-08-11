@@ -240,6 +240,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 private const val MAX_VISIBLE_COMPOSER_HISTORY = 20
 private const val MAX_PENDING_ATTACHMENTS = 5
@@ -258,6 +259,11 @@ private data class ModelActions(
     val reasoning: (String) -> Unit,
     val fast: (Boolean) -> Unit,
     val yolo: (Boolean) -> Unit,
+)
+
+private data class PendingProjectOpsChat(
+    val sessionId: String,
+    val requestToken: String,
 )
 
 private data class SessionActionCallbacks(
@@ -687,6 +693,7 @@ fun HermesApp(
             onRefresh = viewModel::refresh,
             onSearchSessions = viewModel::searchSessions,
             onSession = viewModel::openSession,
+            onProjectOpsSession = viewModel::openProjectOpsSession,
             onDeleteSession = viewModel::deleteSession,
             onNewSession = viewModel::newSession,
             onSend = viewModel::send,
@@ -1073,6 +1080,7 @@ private fun HermesWorkspace(
     onRefresh: () -> Unit,
     onSearchSessions: (String) -> Unit,
     onSession: (StoredSession) -> Unit,
+    onProjectOpsSession: (StoredSession, String) -> Unit,
     onDeleteSession: (StoredSession) -> Unit,
     onNewSession: (String?) -> Unit,
     onSend: (String) -> Unit,
@@ -1142,10 +1150,10 @@ private fun HermesWorkspace(
             if (supportingToolId != null && supportingToolId !in availableToolIds) supportingToolId = null
         }
         var pendingNewConversationFromId by remember { mutableStateOf<String?>(null) }
-        var pendingProjectOpsSessionId by remember { mutableStateOf<String?>(null) }
+        var pendingProjectOpsChat by remember { mutableStateOf<PendingProjectOpsChat?>(null) }
         val openStoredSession: (StoredSession) -> Unit = { session ->
             pendingNewConversationFromId = null
-            pendingProjectOpsSessionId = null
+            pendingProjectOpsChat = null
             onRecovery(null)
             navigator.openConversation(
                 backendId = backendId,
@@ -1154,7 +1162,7 @@ private fun HermesWorkspace(
             )
         }
         val createConversation: (String?) -> Unit = { profile ->
-            pendingProjectOpsSessionId = null
+            pendingProjectOpsChat = null
             pendingNewConversationFromId = state.activeStoredSession?.durableId.orEmpty()
             onNewSession(profile)
         }
@@ -1172,12 +1180,17 @@ private fun HermesWorkspace(
                 )
             }
         }
-        LaunchedEffect(pendingProjectOpsSessionId, state.restoration) {
-            when (val navigation = projectOpsChatNavigation(pendingProjectOpsSessionId, state.restoration)) {
+        LaunchedEffect(pendingProjectOpsChat, state.restoration) {
+            val pending = pendingProjectOpsChat ?: return@LaunchedEffect
+            when (val navigation = projectOpsChatNavigation(
+                pending.sessionId,
+                pending.requestToken,
+                state.restoration,
+            )) {
                 ProjectOpsChatNavigation.Waiting -> Unit
-                ProjectOpsChatNavigation.Cancelled -> pendingProjectOpsSessionId = null
+                ProjectOpsChatNavigation.Cancelled -> pendingProjectOpsChat = null
                 is ProjectOpsChatNavigation.Open -> {
-                    pendingProjectOpsSessionId = null
+                    pendingProjectOpsChat = null
                     navigator.openConversation(
                         backendId = backendId,
                         profileId = navigation.session.profile?.takeIf(String::isNotBlank) ?: profileId,
@@ -1189,13 +1202,14 @@ private fun HermesWorkspace(
         val openProjectOpsChat: (ProjectOpsTask) -> Unit = { task ->
             val storedSession = projectOpsStoredSession(task, state.sessions, profileId)
             if (storedSession != null) {
-                pendingProjectOpsSessionId = storedSession.durableId
+                val requestToken = UUID.randomUUID().toString()
+                pendingProjectOpsChat = PendingProjectOpsChat(storedSession.durableId, requestToken)
                 onRecovery(null)
-                onSession(storedSession)
+                onProjectOpsSession(storedSession, requestToken)
             }
         }
         fun navigate(destination: WorkspaceContent) {
-            pendingProjectOpsSessionId = null
+            pendingProjectOpsChat = null
             onRecovery(null)
             when (destination) {
                 WorkspaceContent.SESSIONS -> navigator.openAtlas(backendId, profileId)
@@ -1211,7 +1225,7 @@ private fun HermesWorkspace(
         }
 
         fun openNativeEntry(entry: NativeDestinationEntry) {
-            pendingProjectOpsSessionId = null
+            pendingProjectOpsChat = null
             onRecovery(null)
             when (entry.action) {
                 NativeDestinationAction.REMOTE_FILES -> navigator.openFiles(

@@ -81,38 +81,42 @@ class ProjectOpsSessionTest {
             status = SessionRestorationStatus.READY,
             session = StoredSession(sessionId = "unrelated"),
         )
-        assertTrue(projectOpsChatNavigation("parent-session", oldReady) is ProjectOpsChatNavigation.Waiting)
+        assertTrue(projectOpsChatNavigation("parent-session", "request-2", oldReady) is ProjectOpsChatNavigation.Waiting)
 
         val rehydrating = SessionRestorationState(
             status = SessionRestorationStatus.REHYDRATING,
             requestedSessionId = "parent-session",
+            requestToken = "request-2",
         )
-        assertTrue(projectOpsChatNavigation("parent-session", rehydrating) is ProjectOpsChatNavigation.Waiting)
+        assertTrue(projectOpsChatNavigation("parent-session", "request-2", rehydrating) is ProjectOpsChatNavigation.Waiting)
 
         val child = StoredSession(sessionId = "child-session", profile = "work", source = "project_ops")
         val ready = SessionRestorationState(
             status = SessionRestorationStatus.READY,
             requestedSessionId = "parent-session",
+            requestToken = "request-2",
             session = child,
         )
-        val decision = projectOpsChatNavigation("parent-session", ready)
+        val decision = projectOpsChatNavigation("parent-session", "request-2", ready)
 
         assertEquals(child, (decision as ProjectOpsChatNavigation.Open).session)
 
         val stalePreviousResume = SessionRestorationState(
             status = SessionRestorationStatus.READY,
-            requestedSessionId = "previous-session",
+            requestedSessionId = "parent-session",
+            requestToken = "request-1",
             session = StoredSession(sessionId = "previous-child"),
         )
         assertTrue(
-            projectOpsChatNavigation("next-parent", stalePreviousResume) is ProjectOpsChatNavigation.Waiting,
+            projectOpsChatNavigation("parent-session", "request-2", stalePreviousResume) is ProjectOpsChatNavigation.Waiting,
         )
 
         val failed = SessionRestorationState(
             status = SessionRestorationStatus.AUTHENTICATION_REQUIRED,
             requestedSessionId = "parent-session",
+            requestToken = "request-2",
         )
-        assertTrue(projectOpsChatNavigation("parent-session", failed) is ProjectOpsChatNavigation.Cancelled)
+        assertTrue(projectOpsChatNavigation("parent-session", "request-2", failed) is ProjectOpsChatNavigation.Cancelled)
     }
 
     private fun task(sessionId: String?) = ProjectOpsTask(

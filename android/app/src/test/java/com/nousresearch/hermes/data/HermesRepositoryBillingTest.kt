@@ -632,11 +632,13 @@ class HermesRepositoryBillingTest {
                     profile = "work",
                     source = "project_ops",
                 ),
+                requestToken = "project-ops-request-2",
             )
 
             val state = repository.state.value
             assertEquals(SessionRestorationStatus.READY, state.restoration.status)
             assertEquals("parent-session", state.restoration.requestedSessionId)
+            assertEquals("project-ops-request-2", state.restoration.requestToken)
             assertEquals("child-session", state.restoration.session?.durableId)
             assertEquals("child-session", state.activeStoredSession?.durableId)
             assertEquals("child-session", registry.sessionTarget(backend.id)?.sessionId)

@@ -37,13 +37,18 @@ internal fun projectOpsStoredSession(
 
 internal fun projectOpsChatNavigation(
     pendingSessionId: String?,
+    pendingRequestToken: String?,
     restoration: SessionRestorationState,
 ): ProjectOpsChatNavigation {
     val pending = pendingSessionId?.takeIf(String::isNotBlank)
         ?: return ProjectOpsChatNavigation.Cancelled
+    val pendingToken = pendingRequestToken?.takeIf(String::isNotBlank)
+        ?: return ProjectOpsChatNavigation.Cancelled
     val requested = restoration.requestedSessionId?.takeIf(String::isNotBlank)
         ?: return ProjectOpsChatNavigation.Waiting
-    if (requested != pending) return ProjectOpsChatNavigation.Waiting
+    val requestToken = restoration.requestToken?.takeIf(String::isNotBlank)
+        ?: return ProjectOpsChatNavigation.Waiting
+    if (requested != pending || requestToken != pendingToken) return ProjectOpsChatNavigation.Waiting
     return when (restoration.status) {
         SessionRestorationStatus.AUTHENTICATING,
         SessionRestorationStatus.REHYDRATING,

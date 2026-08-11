@@ -321,6 +321,9 @@ class HermesViewModel @Inject constructor(
     fun refresh() = viewModelScope.launch { repository.refreshSessions() }
     fun searchSessions(query: String) = repository.searchSessions(query)
     fun openSession(session: StoredSession) = viewModelScope.launch { repository.openSession(session) }
+    fun openProjectOpsSession(session: StoredSession, requestToken: String) = viewModelScope.launch {
+        repository.openSession(session, requestToken)
+    }
     fun newSession(profile: String? = null) = viewModelScope.launch { repository.newSession(profile) }
     suspend fun newSessionFromEntry(profile: String? = null): Boolean = repository.newSession(profile)
     fun send(text: String) = viewModelScope.launch { repository.send(text) }

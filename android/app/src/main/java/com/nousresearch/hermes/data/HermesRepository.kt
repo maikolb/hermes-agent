@@ -599,7 +599,7 @@ class HermesRepository @Inject constructor(
         }
     }
 
-    suspend fun openSession(session: StoredSession) {
+    suspend fun openSession(session: StoredSession, requestToken: String? = null) {
         invalidatePendingAttachments()
         val requestGeneration = openSessionGeneration.incrementAndGet()
         val credentials = runCatching {
@@ -631,6 +631,7 @@ class HermesRepository @Inject constructor(
                         status = SessionRestorationStatus.REHYDRATING,
                         target = sessionTarget(backend.id, session),
                         requestedSessionId = session.durableId,
+                        requestToken = requestToken,
                     ),
                     timeline = previousTimeline,
                     pendingAttachments = emptyList(),
@@ -695,6 +696,7 @@ class HermesRepository @Inject constructor(
                             status = SessionRestorationStatus.READY,
                             target = sessionTarget(backend.id, activeSession),
                             requestedSessionId = session.durableId,
+                            requestToken = requestToken,
                             session = activeSession,
                         ),
                         loading = false,
@@ -728,6 +730,7 @@ class HermesRepository @Inject constructor(
                                 status = SessionRestorationStatus.SESSION_UNAVAILABLE,
                                 target = sessionTarget(backend.id, session),
                                 requestedSessionId = session.durableId,
+                                requestToken = requestToken,
                                 explanation = "That Hermes session could not be found. Choose another session to continue.",
                             ),
                             loading = false,
@@ -4664,6 +4667,7 @@ class HermesRepository @Inject constructor(
                     status = SessionRestorationStatus.AUTHENTICATION_REQUIRED,
                     target = mutableState.value.restoration.target,
                     requestedSessionId = mutableState.value.restoration.requestedSessionId,
+                    requestToken = mutableState.value.restoration.requestToken,
                     explanation = "Reconnect to this Hermes backend before continuing.",
                 ),
                 error = "Dashboard session expired or was rejected. Reconnect with your username and password.",

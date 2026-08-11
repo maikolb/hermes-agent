@@ -37,6 +37,7 @@ data class SessionRestorationState(
     val status: SessionRestorationStatus = SessionRestorationStatus.IDLE,
     val target: SessionTarget? = null,
     val requestedSessionId: String? = null,
+    val requestToken: String? = null,
     val session: StoredSession? = null,
     val explanation: String? = null,
 ) {
