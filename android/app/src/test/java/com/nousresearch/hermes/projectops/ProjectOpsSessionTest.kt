@@ -1,9 +1,12 @@
 package com.nousresearch.hermes.projectops
 
+import com.nousresearch.hermes.data.SessionRestorationState
+import com.nousresearch.hermes.data.SessionRestorationStatus
 import com.nousresearch.hermes.protocol.StoredSession
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProjectOpsSessionTest {
@@ -70,6 +73,46 @@ class ProjectOpsSessionTest {
         assertEquals("server-owned-id", selected?.durableId)
         assertEquals("project_ops", selected?.source)
         assertEquals("work", selected?.profile)
+    }
+
+    @Test
+    fun `Project Ops navigation waits for its resume and opens returned durable child`() {
+        val oldReady = SessionRestorationState(
+            status = SessionRestorationStatus.READY,
+            session = StoredSession(sessionId = "unrelated"),
+        )
+        assertTrue(projectOpsChatNavigation("parent-session", oldReady) is ProjectOpsChatNavigation.Waiting)
+
+        val rehydrating = SessionRestorationState(
+            status = SessionRestorationStatus.REHYDRATING,
+            requestedSessionId = "parent-session",
+        )
+        assertTrue(projectOpsChatNavigation("parent-session", rehydrating) is ProjectOpsChatNavigation.Waiting)
+
+        val child = StoredSession(sessionId = "child-session", profile = "work", source = "project_ops")
+        val ready = SessionRestorationState(
+            status = SessionRestorationStatus.READY,
+            requestedSessionId = "parent-session",
+            session = child,
+        )
+        val decision = projectOpsChatNavigation("parent-session", ready)
+
+        assertEquals(child, (decision as ProjectOpsChatNavigation.Open).session)
+
+        val stalePreviousResume = SessionRestorationState(
+            status = SessionRestorationStatus.READY,
+            requestedSessionId = "previous-session",
+            session = StoredSession(sessionId = "previous-child"),
+        )
+        assertTrue(
+            projectOpsChatNavigation("next-parent", stalePreviousResume) is ProjectOpsChatNavigation.Waiting,
+        )
+
+        val failed = SessionRestorationState(
+            status = SessionRestorationStatus.AUTHENTICATION_REQUIRED,
+            requestedSessionId = "parent-session",
+        )
+        assertTrue(projectOpsChatNavigation("parent-session", failed) is ProjectOpsChatNavigation.Cancelled)
     }
 
     private fun task(sessionId: String?) = ProjectOpsTask(

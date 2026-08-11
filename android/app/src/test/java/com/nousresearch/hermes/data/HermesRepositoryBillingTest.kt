@@ -597,6 +597,55 @@ class HermesRepositoryBillingTest {
     }
 
     @Test
+    fun `Project Ops rotated resume preserves requested parent and promotes durable child`() = runBlocking {
+        MockWebServer().use { server ->
+            val ready = readyDashboardDispatcher()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/sessions/child-session/messages" -> MockResponse().setBody(
+                        """{"session_id":"child-session","messages":[]}""",
+                    )
+                    else -> ready.dispatch(request)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement(
+                    """{"session_id":"live-child","session_key":"child-session","messages":[]}""",
+                ),
+            )
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+
+            repository.openSession(
+                StoredSession(
+                    sessionId = "parent-session",
+                    profile = "work",
+                    source = "project_ops",
+                ),
+            )
+
+            val state = repository.state.value
+            assertEquals(SessionRestorationStatus.READY, state.restoration.status)
+            assertEquals("parent-session", state.restoration.requestedSessionId)
+            assertEquals("child-session", state.restoration.session?.durableId)
+            assertEquals("child-session", state.activeStoredSession?.durableId)
+            assertEquals("child-session", registry.sessionTarget(backend.id)?.sessionId)
+            val resume = gateway.requests.single { it.method == "session.resume" }
+            assertTrue(resume.params.toString().contains("\"source\":\"project_ops\""))
+        }
+    }
+
+    @Test
     fun `session preflight failure leaves restoration in explicit authentication recovery`() = runBlocking {
         MockWebServer().use { server ->
             server.dispatcher = readyDashboardDispatcher()

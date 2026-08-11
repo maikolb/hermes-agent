@@ -630,6 +630,7 @@ class HermesRepository @Inject constructor(
                     restoration = SessionRestorationState(
                         status = SessionRestorationStatus.REHYDRATING,
                         target = sessionTarget(backend.id, session),
+                        requestedSessionId = session.durableId,
                     ),
                     timeline = previousTimeline,
                     pendingAttachments = emptyList(),
@@ -693,6 +694,7 @@ class HermesRepository @Inject constructor(
                         restoration = SessionRestorationState(
                             status = SessionRestorationStatus.READY,
                             target = sessionTarget(backend.id, activeSession),
+                            requestedSessionId = session.durableId,
                             session = activeSession,
                         ),
                         loading = false,
@@ -725,6 +727,7 @@ class HermesRepository @Inject constructor(
                             restoration = SessionRestorationState(
                                 status = SessionRestorationStatus.SESSION_UNAVAILABLE,
                                 target = sessionTarget(backend.id, session),
+                                requestedSessionId = session.durableId,
                                 explanation = "That Hermes session could not be found. Choose another session to continue.",
                             ),
                             loading = false,
@@ -4660,6 +4663,7 @@ class HermesRepository @Inject constructor(
                 restoration = SessionRestorationState(
                     status = SessionRestorationStatus.AUTHENTICATION_REQUIRED,
                     target = mutableState.value.restoration.target,
+                    requestedSessionId = mutableState.value.restoration.requestedSessionId,
                     explanation = "Reconnect to this Hermes backend before continuing.",
                 ),
                 error = "Dashboard session expired or was rejected. Reconnect with your username and password.",

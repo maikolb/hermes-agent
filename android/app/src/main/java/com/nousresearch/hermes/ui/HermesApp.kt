@@ -223,8 +223,10 @@ import com.nousresearch.hermes.ui.navigation.AutomationResourceIdentity
 import com.nousresearch.hermes.ui.navigation.conversationMutationsEnabled
 import com.nousresearch.hermes.ui.navigation.resolveEntryDestination
 import com.nousresearch.hermes.ui.navigation.resolveRestoredRoute
+import com.nousresearch.hermes.projectops.ProjectOpsChatNavigation
 import com.nousresearch.hermes.projectops.ProjectOpsRoute
 import com.nousresearch.hermes.projectops.ProjectOpsTask
+import com.nousresearch.hermes.projectops.projectOpsChatNavigation
 import com.nousresearch.hermes.projectops.projectOpsStoredSession
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.compose.elements.highlightedCodeBlock
@@ -1143,6 +1145,7 @@ private fun HermesWorkspace(
         var pendingProjectOpsSessionId by remember { mutableStateOf<String?>(null) }
         val openStoredSession: (StoredSession) -> Unit = { session ->
             pendingNewConversationFromId = null
+            pendingProjectOpsSessionId = null
             onRecovery(null)
             navigator.openConversation(
                 backendId = backendId,
@@ -1151,6 +1154,7 @@ private fun HermesWorkspace(
             )
         }
         val createConversation: (String?) -> Unit = { profile ->
+            pendingProjectOpsSessionId = null
             pendingNewConversationFromId = state.activeStoredSession?.durableId.orEmpty()
             onNewSession(profile)
         }
@@ -1168,16 +1172,18 @@ private fun HermesWorkspace(
                 )
             }
         }
-        LaunchedEffect(pendingProjectOpsSessionId, state.activeStoredSession?.durableId) {
-            val pendingSessionId = pendingProjectOpsSessionId ?: return@LaunchedEffect
-            val active = state.activeStoredSession ?: return@LaunchedEffect
-            if (active.durableId == pendingSessionId) {
-                pendingProjectOpsSessionId = null
-                navigator.openConversation(
-                    backendId = backendId,
-                    profileId = active.profile?.takeIf(String::isNotBlank) ?: profileId,
-                    sessionId = pendingSessionId,
-                )
+        LaunchedEffect(pendingProjectOpsSessionId, state.restoration) {
+            when (val navigation = projectOpsChatNavigation(pendingProjectOpsSessionId, state.restoration)) {
+                ProjectOpsChatNavigation.Waiting -> Unit
+                ProjectOpsChatNavigation.Cancelled -> pendingProjectOpsSessionId = null
+                is ProjectOpsChatNavigation.Open -> {
+                    pendingProjectOpsSessionId = null
+                    navigator.openConversation(
+                        backendId = backendId,
+                        profileId = navigation.session.profile?.takeIf(String::isNotBlank) ?: profileId,
+                        sessionId = navigation.session.durableId,
+                    )
+                }
             }
         }
         val openProjectOpsChat: (ProjectOpsTask) -> Unit = { task ->
@@ -1189,6 +1195,7 @@ private fun HermesWorkspace(
             }
         }
         fun navigate(destination: WorkspaceContent) {
+            pendingProjectOpsSessionId = null
             onRecovery(null)
             when (destination) {
                 WorkspaceContent.SESSIONS -> navigator.openAtlas(backendId, profileId)
@@ -1204,6 +1211,7 @@ private fun HermesWorkspace(
         }
 
         fun openNativeEntry(entry: NativeDestinationEntry) {
+            pendingProjectOpsSessionId = null
             onRecovery(null)
             when (entry.action) {
                 NativeDestinationAction.REMOTE_FILES -> navigator.openFiles(
