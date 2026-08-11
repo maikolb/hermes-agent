@@ -3,7 +3,7 @@
 ## Contract Metadata
 
 - Contract Version: 1
-- Contract Revision: 7
+- Contract Revision: 8
 - Mode: BUILD
 - Risk: HIGH
 - Workspace: `C:/Users/maiko/Projetos/Hermes Agent Project Ops`
@@ -159,14 +159,17 @@ All calls use inherited authenticated Dashboard cookies/session handling and cur
 ## Status
 
 - Contract preflight: validated by the workspace AOF validator.
-- Upstream import: implemented from exact audited archive; not yet committed.
+- Upstream import: exact audited archive imported in `385fb9c2bbe5356246e4f686fca1eac172ed78f8`; root-ignore repair completed in `5f90caaebaadf626e65e8a9b12b280442d84b992`.
 - Upstream baseline: `assembleDebug` PASS. Unit suite ran 370 tests: 363 passed and 7 upstream Windows failures reproduced before derivative edits (four AndroidX DataStore temp-file rename failures and three Robolectric FileProvider cache/root failures). Treat this exact set as baseline noise; no new failure is allowed.
-- Android Project Ops implementation: implemented locally with derivative identity, inherited `HermesRestClient` authentication, literal rev.3 API wrappers, generation/cancellation stale-response protection, typed fail-closed routing, explicit shell destination, adaptive Topics/Chat/Board UI, hydrated task detail, and server-owned existing-session handoff. No commit or push was performed.
+- Android Project Ops implementation: implemented and published in commit `c0563df9176a6f32f7ebbd3f7f23f024a3f44d92` with derivative identity, inherited `HermesRestClient` authentication, literal API wrappers, generation/cancellation stale-response protection, typed fail-closed routing, explicit shell destination, adaptive Topics/Chat/Board UI, hydrated task detail, and server-owned existing-session handoff.
 - Focused validation: 43 tests passed with zero failures/errors/skips; `:app:compileDebugAndroidTestKotlin`, `lintDebug`, `detekt`, and `assembleDebug` passed. The project-level `detekt` task reported `NO-SOURCE` under the inherited root-only configuration.
 - Full unit validation: 383 tests ran; 376 passed and exactly the same 7 baseline Windows failures remained. No new failure remained after the derivative provenance expectations were aligned.
-- APK validation: the pre-review debug APK is stale after the query/profile fixes and is not an install candidate. A clean post-commit rebuild and fresh package/signature/hash inspection are required before ADB installation.
+- APK validation: final post-commit debug APK package `com.maikolb.hermesprojectops.debug`, label `Hermes Project Ops`, version `0.1.0-debug` / code `1`, min/target SDK 28/36, arm64 included, APK Signature Scheme v2 verified, SHA-256 `b7d1b2197f0008f55798306b2b46a28f15544ae33f473768b21fa555d499b2f0`. Generated provenance names Android commit `c0563df9176a6f32f7ebbd3f7f23f024a3f44d92`, and its signing fingerprint exactly matches the APK signer certificate.
 - External checker: `PROJECT_OPS_ANDROID_GREEN_PASS` after focused tests, full baseline-aware unit suite, lint, detekt and assemble on the final source state.
 - Snapshot publication repair: completed and published in isolated commit `5f90caaebaadf626e65e8a9b12b280442d84b992`; 329/329 upstream files are visible to Git and the 43 `data/` files were staged semantically identical to the audited archive after Git EOL normalization.
 - Query-encoding review fix: implemented. Board query values now use the inherited query-parameter encoder rather than the path-segment encoder; regression coverage includes `+`, `&`, `/`, and spaces while task IDs remain encoded as path segments.
 - Profile-isolation review fix: implemented. The route-selected nonblank `profileId` is now propagated through ViewModel → ProjectOpsDataSource → HermesRestClient on all four plugin calls and encoded as the `profile` query parameter. Tests cover reserved characters and prove the same selected profile reaches project, board and task reconciliation.
-- Install/device smoke/product acceptance: not run or claimed, per the delegated no-install/no-mutable-ADB boundary. Direct visual-semantic approval remains blocked pending permitted target rendering and human/device evidence.
+- Clean-clone reproducibility: a fresh local clone at exact commit `c0563df9176a6f32f7ebbd3f7f23f024a3f44d92` passed focused Project Ops tests plus `assembleDebug`, proving the published tree no longer depends on ignored Android `data/` source files.
+- Install/device state: `adb install -r -t` succeeded on Samsung `SM-S918B`, Android 16 / API 36; Package Manager read-back confirmed package path, launchable `MainActivity`, version `0.1.0-debug` / code `1`, min/target SDK 28/36, and install time `2026-08-11 06:13:09`.
+- Target visual/instrumentation acceptance: BLOCKED by the device's secure pattern Keyguard. Launch intent was delivered, but captures show SystemUI lock/pattern screens. Three Project Ops Compose tests were attempted on-device; logs prove each test `ComponentActivity` reached `RESUMED` then was immediately `PAUSED`/`STOPPED` by Keyguard, leaving no Compose hierarchy. Re-run after manual unlock; do not classify these three as product regressions or as passes.
+- Independent review: exact-commit reviewer completed with no blocking or material findings in the requested scope. The compact live transcript omitted its requested literal final verdict line, so formal `approve` retrieval remains pending the delegation delivery and Phase 2 is not promoted on that basis alone.
