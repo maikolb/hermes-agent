@@ -27,6 +27,28 @@ class ProjectOpsSessionTest {
     }
 
     @Test
+    fun `blank catalog source receives Project Ops fallback without losing server metadata`() {
+        val serverSession = StoredSession(
+            sessionId = "server-session",
+            profile = "work",
+            source = null,
+            title = "Server title",
+            messageCount = 12,
+        )
+
+        val selected = projectOpsStoredSession(
+            task = task(sessionId = "server-session"),
+            sessions = listOf(serverSession),
+            profileId = "work",
+        )
+
+        assertEquals("server-session", selected?.durableId)
+        assertEquals("project_ops", selected?.source)
+        assertEquals("Server title", selected?.title)
+        assertEquals(12, selected?.messageCount)
+    }
+
+    @Test
     fun `blank task session id cannot create a chat identity`() {
         assertNull(
             projectOpsStoredSession(

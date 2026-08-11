@@ -8,10 +8,18 @@ internal fun projectOpsStoredSession(
     profileId: String,
 ): StoredSession? {
     val sessionId = task.sessionId?.takeIf(String::isNotBlank) ?: return null
-    return sessions.firstOrNull { session ->
+    val serverSession = sessions.firstOrNull { session ->
         session.durableId == sessionId &&
             (session.profile?.takeIf(String::isNotBlank) ?: profileId) == profileId
-    } ?: StoredSession(
+    }
+    if (serverSession != null) {
+        return if (serverSession.source.isNullOrBlank()) {
+            serverSession.copy(source = "project_ops")
+        } else {
+            serverSession
+        }
+    }
+    return StoredSession(
         sessionId = sessionId,
         profile = profileId,
         source = "project_ops",
