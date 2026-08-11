@@ -1,0 +1,142 @@
+{
+  "schemaVersion": "2.0",
+  "contractRef": {
+    "path": "docs/CODEX_EXECUTION_CONTRACT.md",
+    "sha256": "985f52bc0df8e0dcdc184132a55fb1a1b0078f92f56d7b05d74d24376000bd1b"
+  },
+  "identity": {
+    "loopId": "project-ops-phase2-shared-portal",
+    "runId": "f796e8a8-80f9-447a-93a1-08f6f341e14f",
+    "attemptId": "3e872480-a819-4c25-9724-d6a395a8ed0e",
+    "traceId": "trace-project-ops-phase2-shared-portal"
+  },
+  "qualification": {
+    "reasons": ["high-risk"]
+  },
+  "trigger": {
+    "type": "manual",
+    "provenance": "user-request:build-project-ops-before-phone-install",
+    "deduplicationKey": "project-ops-phase2:2026-08-10",
+    "deduplicationWindowSeconds": 0,
+    "overlapPolicy": "reject"
+  },
+  "authorities": {
+    "stateSourceIds": ["git-worktree", "execution-contract", "repository-tests"],
+    "gateRefs": ["gate:project-ops-phase2-green", "gate:aof-contract"],
+    "approvalAuthorityRefs": ["authority:user-maikol"]
+  },
+  "budgets": {
+    "maxIterations": 4,
+    "maxWallClockSeconds": 7200,
+    "maxToolCalls": 160,
+    "maxRetries": 4,
+    "maxStagnantIterations": 2,
+    "maxOutputBytes": 2097152,
+    "maxConcurrency": 1,
+    "sideEffectCeiling": {
+      "enabled": true,
+      "maxConsequentialActions": 1
+    }
+  },
+  "checkpoint": {
+    "stateSchemaRef": "C:/Users/maiko/Projetos/AgentOperatingFramework/framework/runtime/schemas/agent-loop-run.schema.json",
+    "stateSchemaVersion": "2.0",
+    "expectedStateVersion": 0,
+    "iteration": 0,
+    "atomicWritePolicy": "atomic-replace",
+    "lastEventSequence": 0,
+    "lastKnownGoodRef": "git:4ff76d7eb67bdcda866fc858f1579342a442669c",
+    "priorCheckpointRef": "none:first-run",
+    "resumePolicy": "reconcile-then-resume",
+    "replayPolicy": "no-side-effect-replay",
+    "digest": "2ba7da5e0c5c91ee0c8a3ee96be4ded77cf90ff7257aa597c71fe9f6adaa8387"
+  },
+  "concurrency": {
+    "mode": "single-writer",
+    "casEnabled": false,
+    "partitions": []
+  },
+  "failurePolicies": [
+    {"class":"transient","retryable":true,"limit":3,"backoff":{"type":"exponential","baseSeconds":1,"maxSeconds":30},"requireReobservation":true,"safetyMechanism":"idempotency-key","escalationRef":"contract:Loop Control"},
+    {"class":"invalid-input","retryable":false,"limit":0,"backoff":{"type":"none","baseSeconds":0,"maxSeconds":0},"requireReobservation":false,"safetyMechanism":"no-retry","escalationRef":"contract:Loop Control"},
+    {"class":"precondition-failed","retryable":true,"limit":1,"backoff":{"type":"fixed","baseSeconds":1,"maxSeconds":1},"requireReobservation":true,"safetyMechanism":"reconciliation","escalationRef":"contract:Loop Control"},
+    {"class":"validation-failed","retryable":true,"limit":4,"backoff":{"type":"fixed","baseSeconds":1,"maxSeconds":1},"requireReobservation":true,"safetyMechanism":"reconciliation","escalationRef":"contract:Loop Control"},
+    {"class":"policy-blocked","retryable":false,"limit":0,"backoff":{"type":"none","baseSeconds":0,"maxSeconds":0},"requireReobservation":false,"safetyMechanism":"no-retry","escalationRef":"contract:Loop Control"},
+    {"class":"ambiguous-side-effect","retryable":false,"limit":0,"backoff":{"type":"none","baseSeconds":0,"maxSeconds":0},"requireReobservation":true,"safetyMechanism":"reconciliation","escalationRef":"contract:Loop Control"},
+    {"class":"unsafe-to-retry","retryable":false,"limit":0,"backoff":{"type":"none","baseSeconds":0,"maxSeconds":0},"requireReobservation":false,"safetyMechanism":"no-retry","escalationRef":"contract:Loop Control"},
+    {"class":"environment-unavailable","retryable":true,"limit":3,"backoff":{"type":"exponential","baseSeconds":2,"maxSeconds":60},"requireReobservation":true,"safetyMechanism":"idempotency-key","escalationRef":"contract:Loop Control"},
+    {"class":"stagnated","retryable":false,"limit":0,"backoff":{"type":"none","baseSeconds":0,"maxSeconds":0},"requireReobservation":false,"safetyMechanism":"no-retry","escalationRef":"contract:Loop Control"}
+  ],
+  "verificationPolicy": {
+    "oracleRef": "C:/Users/maiko/AppData/Local/hermes/tmp/project-ops-phase2-green.py",
+    "executorIdentity": "agent:codex-gpt-5.6-sol-high",
+    "checkerRef": "C:/Users/maiko/AppData/Local/hermes/tmp/project-ops-phase2-green.py",
+    "checkerIdentity": "process:hermes-green-guard",
+    "checkerIndependent": true,
+    "checkerDigest": "534fd99f3331461cd114558f350093f1685acf0d07e6fb49ded87bab232f1803",
+    "immutableFixtureRefs": ["tests/test_tui_gateway_ws.py"],
+    "immutableFixtureDigests": ["e1fce9e6f601df4bd9e93ddf63c063d18988048429a65a7e0b26066233bf6520"],
+    "feedbackRef": "C:/Users/maiko/AppData/Local/hermes/evidence/project-ops-phase2-aof-events.jsonl",
+    "requiredAttemptDelta": "changed allowed source or test artifact plus re-observation",
+    "highRisk": true
+  },
+  "approvalPolicy": {
+    "requiredForConsequentialActions": true,
+    "authorityRefs": ["authority:user-maikol"],
+    "bindingFields": ["actionDigest", "argumentDigest", "preconditions", "stateVersion"],
+    "maxAgeSeconds": 900,
+    "reapprovalOnStateChange": true
+  },
+  "tracePolicy": {
+    "allowedEventFields": ["sequence","timestamp","eventType","traceId","loopId","runId","attemptId","iteration","stateVersion","observationSequence","intentSequence","observationRef","observationDigest","decisionRef","decisionDigest","actionFingerprint","actionDigest","argumentDigest","preconditionDigest","idempotencyKeyDigest","approval","resultRef","resultDigest","checkerDigest","verificationPassed","postconditionsPassed","failureClass","transition","checkpointDigest","retryAfterSeconds","reconciled","childrenPending","redactedFields"],
+    "redactedFields": ["arguments", "toolPayload", "credentials"],
+    "prohibitedContent": ["raw-chain-of-thought", "secrets", "credentials", "unrestricted-payloads"],
+    "retentionDays": 30,
+    "accessPolicyRef": "policy:hermes-local-evidence"
+  },
+  "eventsRef": {
+    "path": "C:/Users/maiko/AppData/Local/hermes/evidence/project-ops-phase2-aof-events.jsonl",
+    "schemaRef": ".aof/runtime/schemas/agent-loop-event.schema.json"
+  },
+  "current": {
+    "status": "success",
+    "iteration": 4,
+    "stagnantIterations": 0,
+    "retryCount": 4,
+    "toolCallCount": 0,
+    "outputBytes": 0,
+    "startedAt": "2026-08-11T00:11:55Z",
+    "observation": {
+      "ref": "git:4ff76d7eb67bdcda866fc858f1579342a442669c+green:PROJECT_OPS_PHASE2_GREEN_PASS+python:99+web:20+cdp:desktop-mobile-pass",
+      "digest": "8bc33561c2e9f8ce14474b93d519e4222e5943604a84972a50d8959f4236f8ee",
+      "observedAt": "2026-08-11T03:02:24-03:00",
+      "freshnessCeilingSeconds": 900,
+      "stateVersion": 0
+    },
+    "decision": {
+      "ref": "decision:run-codex-single-writer-under-validated-contract",
+      "digest": "6364d8ebaa94da48511e4338d28ee8a929c14c77b108c6f35a7831f50825cbf6"
+    },
+    "action": {
+      "id": "implement-project-ops-phase2",
+      "capabilityClass": "workspace-write",
+      "consequential": false,
+      "fingerprint": "fb968d29b236f3e4a87748fbdf43b74226cb8af4e25517ca20bf8f6726c6027d",
+      "actionDigest": "799723cab94aea7a490d2dc1cfdcf86009c86f9d4a45e2094e5a6421e30e06d3",
+      "argumentDigest": "88fbf627b952784a158401afb290398bd3e2f9f3dfd73513cf296d7676395ca8",
+      "preconditions": ["user requested build before install", "single writer", "contract preflight", "green guard expected red"],
+      "postconditions": ["external green guard passes", "diff remains allowlisted", "no phone modification"],
+      "noRetry": false
+    },
+    "verification": {
+      "evidenceRef": "green:PROJECT_OPS_PHASE2_GREEN_PASS+tests:python-99-web-20+evidence:project-ops-final-api-ws.json+project-ops-final-browser.json",
+      "passed": true,
+      "postconditionsPassed": true,
+      "checkerDigest": "534fd99f3331461cd114558f350093f1685acf0d07e6fb49ded87bab232f1803"
+    },
+    "transition": {"from": "running", "to": "success"},
+    "cancellation": {"requested": false, "propagateToChildren": true, "childrenPending": 0},
+    "ambiguityResolved": true,
+    "budgetExhausted": false
+  }
+}
