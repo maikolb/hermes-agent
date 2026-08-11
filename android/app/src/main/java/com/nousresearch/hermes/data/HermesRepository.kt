@@ -602,6 +602,19 @@ class HermesRepository @Inject constructor(
     suspend fun openSession(session: StoredSession, requestToken: String? = null) {
         invalidatePendingAttachments()
         val requestGeneration = openSessionGeneration.incrementAndGet()
+        mutableState.update { live ->
+            if (openSessionGeneration.get() != requestGeneration) {
+                live
+            } else {
+                live.copy(
+                    restoration = live.restoration.copy(
+                        requestedSessionId = session.durableId,
+                        requestToken = requestToken,
+                    ),
+                    error = null,
+                )
+            }
+        }
         val credentials = runCatching {
             activeCredentials(allowRecovery = true, allowRehydrating = true)
         }.getOrElse { error ->

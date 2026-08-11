@@ -663,9 +663,14 @@ class HermesRepositoryBillingTest {
             awaitReady(repository, backend.id)
             credentials.remove(backend.id)
 
-            repository.openSession(StoredSession(sessionId = "stored-session"))
+            repository.openSession(
+                StoredSession(sessionId = "stored-session"),
+                requestToken = "preflight-request-2",
+            )
 
             assertEquals(SessionRestorationStatus.AUTHENTICATION_REQUIRED, repository.state.value.restoration.status)
+            assertEquals("stored-session", repository.state.value.restoration.requestedSessionId)
+            assertEquals("preflight-request-2", repository.state.value.restoration.requestToken)
             assertTrue(repository.state.value.error.orEmpty().contains("Reconnect", ignoreCase = true))
         }
     }
