@@ -226,12 +226,25 @@ def activate_durable_lazy_target() -> None:
         pass
 
 
+def activate_windows_process_broker() -> bool:
+    """Install the process-wide zero-UI subprocess boundary on Windows."""
+    if not _IS_WINDOWS:
+        return False
+    from hermes_cli.windows_process_broker import install_windows_process_broker
+
+    return install_windows_process_broker()
+
+
 # Apply on import — entry points just need ``import hermes_bootstrap``
 # (or ``from hermes_bootstrap import apply_windows_utf8_bootstrap``) at
 # the very top of their module, before importing anything else.  The
 # import side effect does the right thing.
 apply_windows_utf8_bootstrap()
 suppress_platform_ver_console()
+
+# Enforce invisible, contained subprocess creation before any later bootstrap
+# step can import a package manager, validator, or capability probe.
+activate_windows_process_broker()
 
 # Activate the durable lazy-install target (immutable Docker images) so
 # packages installed into the data volume on a previous run are importable
