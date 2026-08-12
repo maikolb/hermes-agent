@@ -286,14 +286,28 @@ def test_elevated_gateway_command_uses_hidden_console_python(monkeypatch):
     assert cwd
 
 
-def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_path):
-    """Install must delete+create so stale minute-repeat task settings are not preserved."""
+def test_install_scheduled_task_recreates_with_native_pythonw_entrypoint(monkeypatch, tmp_path):
+    """Install must delete+create and persist base-pythonw -> generated pyw."""
     calls = []
-    script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    project = tmp_path / "project"
+    venv = project / "venv"
+    scripts = venv / "Scripts"
+    base = tmp_path / "base-python"
+    scripts.mkdir(parents=True)
+    base.mkdir()
+    venv_python = scripts / "python.exe"
+    venv_python.write_text("", encoding="utf-8")
+    base_pythonw = base / "pythonw.exe"
+    base_pythonw.write_text("", encoding="utf-8")
+    (venv / "pyvenv.cfg").write_text(f"home = {base}\n", encoding="utf-8")
+    script_path = tmp_path / "gateway-service" / "Hermes_Gateway_alice.cmd"
+    script_path.parent.mkdir()
+    script_path.with_suffix(".pyw").write_text("# generated", encoding="utf-8")
     xml_seen = {}
 
     monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
     monkeypatch.setattr(gateway_windows, "_resolve_task_user", lambda: r"DOMAIN\\alice")
+    monkeypatch.setattr(gateway, "get_python_path", lambda: str(venv_python))
 
     def fake_schtasks(args):
         calls.append(tuple(args))
@@ -322,11 +336,11 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
     assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml_seen["text"]
     assert "<RestartOnFailure>" in xml_seen["text"]
     assert "<Count>999</Count>" in xml_seen["text"]
-    # Scheduled Task launches the console-less .vbs via wscript.exe, never cmd.exe
-    # (issue #45599 fix A: no console -> no logon CTRL_CLOSE_EVENT / 0xC000013A).
-    assert "<Command>wscript.exe</Command>" in xml_seen["text"]
-    assert "//B //Nologo" in xml_seen["text"]
-    assert "Hermes_Gateway_alice.vbs" in xml_seen["text"]
+    assert f"<Command>{base_pythonw}</Command>" in xml_seen["text"]
+    assert "Hermes_Gateway_alice.pyw" in xml_seen["text"]
+    assert f"<WorkingDirectory>{tmp_path}</WorkingDirectory>" in xml_seen["text"]
+    assert "wscript.exe" not in xml_seen["text"]
+    assert ".vbs" not in xml_seen["text"]
     assert "cmd.exe" not in xml_seen["text"]
 
 
