@@ -36,6 +36,12 @@ from gateway.config import PlatformConfig
 
 
 def _ensure_telegram_mock():
+    try:
+        import telegram as installed_telegram
+    except ImportError:
+        installed_telegram = None
+    if installed_telegram is not None and getattr(installed_telegram, "__file__", None):
+        return
     if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
         return
     telegram_mod = MagicMock()
@@ -74,7 +80,7 @@ def _make_adapter() -> TelegramAdapter:
     return TelegramAdapter(PlatformConfig(enabled=True, token="test-token"))
 
 
-def _drive_connect(monkeypatch, *, proxy_url, fallback_ips=None):
+def _drive_connect(monkeypatch, *, proxy_url, direct=False):
     """Run connect() far enough to build the HTTPXRequests, then abort.
 
     Returns the list of recorded _RecordingHTTPXRequest instances.
@@ -85,7 +91,21 @@ def _drive_connect(monkeypatch, *, proxy_url, fallback_ips=None):
     async def _no_fallback():
         return list(fallback_ips or [])
 
-    monkeypatch.setattr(tg_adapter, "discover_fallback_ips", _no_fallback)
+    if direct:
+        async def _unexpected_discovery():
+            raise AssertionError("direct mode must not discover fallback IPs")
+
+        monkeypatch.setattr(tg_adapter, "discover_fallback_ips", _unexpected_discovery)
+        monkeypatch.setenv("HERMES_TELEGRAM_DISABLE_FALLBACK_IPS", "1")
+        import types
+
+        monkeypatch.setitem(
+            sys.modules,
+            "plugins.platforms.telegram.telegram_sync_request",
+            types.SimpleNamespace(ThreadedUrllibRequest=_RecordingHTTPXRequest),
+        )
+    else:
+        monkeypatch.setattr(tg_adapter, "discover_fallback_ips", _no_fallback)
     monkeypatch.setattr(
         tg_adapter, "resolve_proxy_url", lambda *a, **k: proxy_url
     )
@@ -183,5 +203,26 @@ def test_fallback_branch_forwards_tuned_limits_to_inner_transports(monkeypatch):
         assert limits.keepalive_expiry < 5.0
         assert limits.max_connections == 512
 
-    for instance in instances:
-        asyncio.run(instance.kwargs["httpx_kwargs"]["transport"].aclose())
+
+def test_direct_branch_ignores_environment_proxy_and_skips_fallback_discovery(monkeypatch):
+    """Direct mode must match a clean ``httpx.Client(trust_env=False)`` path."""
+    instances = _drive_connect(
+        monkeypatch,
+        proxy_url="http://127.0.0.1:9/",
+        direct=True,
+    )
+    assert len(instances) >= 2
+    for inst in instances:
+        assert inst.kwargs.get("proxy") is None
+        assert "httpx_kwargs" not in inst.kwargs
+        assert inst.kwargs.get("connection_pool_size")
+
+
+def test_limits_keepalive_below_ptb_default_is_the_contract():
+    """Document the invariant independent of adapter wiring: the shared
+    helper itself must tighten keepalive below httpx's 5.0 default."""
+    from gateway.platforms._http_client_limits import platform_httpx_limits
+
+    limits = platform_httpx_limits()
+    assert isinstance(limits, httpx.Limits)
+    assert limits.keepalive_expiry is not None and limits.keepalive_expiry < 5.0

@@ -404,6 +404,75 @@ def test_managed_named_topic_auto_registers_then_enforces_acl(monkeypatch, tmp_p
     assert denied_text == "You do not have access to the project bound to this Telegram topic."
 
 
+def test_legacy_unnamed_topic_binds_from_authorized_bot_mention(tmp_path):
+    config = ProjectRouterConfig(
+        enabled=True,
+        managed_chat_ids=["-1001"],
+        auto_register_topics=True,
+        management_topic_names=["Gestão", "🧭 Gestão"],
+    )
+    runner = _runner(config)
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+    db_path = tmp_path / "project_router.db"
+    with ProjectRouter(db_path, "default") as router:
+        router.upsert_project("dovcrm", "dovcrm", "dovcrm", tmp_path / "dovcrm")
+        router.upsert_project(
+            "default-management", "default-management", "default-management", None
+        )
+        router.set_acl("-1001", "9", "allow")
+
+    project, denial = runner._resolve_project_context_for_message(
+        SimpleNamespace(
+            text="@hermes_voltiva_bot DOVCRM", internal=False, metadata={}
+        ),
+        _source(thread_id="77", chat_topic=None),
+    )
+    management, management_denial = runner._resolve_project_context_for_message(
+        SimpleNamespace(
+            text="@hermes_voltiva_bot Gestão", internal=False, metadata={}
+        ),
+        _source(thread_id="78", chat_topic=None),
+    )
+
+    assert denial is None
+    assert project.project_id == "dovcrm"
+    assert project.thread_id == "77"
+    assert management_denial is None
+    assert management.project_id == "default-management"
+    assert management.is_management is True
+
+
+def test_legacy_unnamed_topic_mention_fails_closed_for_unknown_project_or_user(tmp_path):
+    runner = _runner(ProjectRouterConfig(
+        enabled=True,
+        managed_chat_ids=["-1001"],
+        auto_register_topics=True,
+    ))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+    with ProjectRouter(tmp_path / "project_router.db", "default") as router:
+        router.upsert_project("dovcrm", "dovcrm", "dovcrm", tmp_path / "dovcrm")
+        router.set_acl("-1001", "9", "allow")
+
+    unknown_project, project_denial = runner._resolve_project_context_for_message(
+        SimpleNamespace(text="@hermes_voltiva_bot nonexistent", internal=False, metadata={}),
+        _source(thread_id="79", chat_topic=None),
+    )
+    unknown_user, user_denial = runner._resolve_project_context_for_message(
+        SimpleNamespace(text="@hermes_voltiva_bot DOVCRM", internal=False, metadata={}),
+        _source(thread_id="80", user_id="10", chat_topic=None),
+    )
+
+    assert unknown_project is None
+    assert "not bound" in project_denial
+    assert unknown_user is None
+    assert "access" in user_denial
+    with ProjectRouter(tmp_path / "project_router.db", "default") as router:
+        with pytest.raises(UnknownBindingError):
+            router.resolve("telegram", "-1001", "79", "9")
+        with pytest.raises(UnknownBindingError):
+            router.resolve("telegram", "-1001", "80", "9")
+
+
 def test_management_topic_persists_identity_without_ensuring_board(monkeypatch, tmp_path):
     monkeypatch.setattr("hermes_cli.kanban_db.create_board", lambda slug, **kwargs: {})
     ensure_calls = []
