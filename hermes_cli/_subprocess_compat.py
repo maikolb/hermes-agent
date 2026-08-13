@@ -41,6 +41,7 @@ __all__ = [
     "windows_detach_flags",
     "windows_detach_flags_without_breakaway",
     "windows_hide_flags",
+    "windows_hidden_popen_kwargs",
     "windows_detach_popen_kwargs",
     "bounded_git_probe",
     "noninteractive_git_env",
@@ -229,41 +230,23 @@ def windows_hide_flags() -> int:
     return _CREATE_NO_WINDOW
 
 
-def suppress_platform_ver_console() -> None:
-    """Stub out ``platform._syscmd_ver`` on Windows so it can never flash a
-    console window.  No-op on non-Windows.
+def windows_hidden_popen_kwargs() -> dict:
+    """Return canonical no-visible-window kwargs for a child process.
 
-    CPython's ``platform.win32_ver()`` — reached by ``platform.uname()``,
-    ``platform.version()``, and ``platform.platform()`` — unconditionally
-    shells out ``cmd /c ver`` via ``subprocess.check_output(..., shell=True)``
-    with no ``CREATE_NO_WINDOW``.  From a windowless parent (the pythonw
-    gateway and every kanban worker it spawns) that allocates a fresh
-    *visible* console: one flashing ``cmd`` window per process, triggered by
-    any dependency that merely touches ``platform.uname()`` at import time.
-
-    With ``_syscmd_ver`` stubbed to return its inputs, ``win32_ver()`` hits
-    the documented ``ValueError`` fallback and reads the version from
-    ``sys.getwindowsversion().platform_version`` — same information, queried
-    in-process, no subprocess, no window.  Verified equivalent on
-    CPython 3.11 (``platform()`` → ``Windows-10-10.0.xxxxx-SP0`` either way).
-
-    Call early, before heavyweight imports — the flash typically happens
-    during a dependency's import, not from Hermes' own code.
+    CREATE_NO_WINDOW gives console descendants a hidden console to inherit.
+    STARTF_USESHOWWINDOW with SW_HIDE independently requests hidden startup
+    state for launchers that honor it. Centralizing both keeps terminal and
+    execute_code on the same Windows contract.
     """
     if not IS_WINDOWS:
-        return
-    try:
-        import platform
-
-        if hasattr(platform, "_syscmd_ver"):
-            def _quiet_syscmd_ver(system="", release="", version="",
-                                  supported_platforms=("win32", "win16", "dos")):
-                return system, release, version
-
-            platform._syscmd_ver = _quiet_syscmd_ver
-    except Exception:
-        # Purely cosmetic hardening — never let it break startup.
-        pass
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": windows_hide_flags(),
+        "startupinfo": startupinfo,
+    }
 
 
 def windows_detach_popen_kwargs() -> dict:

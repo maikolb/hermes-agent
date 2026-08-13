@@ -36,9 +36,8 @@ needs to replace the import + call site:
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
 """
 
-from contextlib import contextmanager
-from contextvars import ContextVar
-from typing import Any, Iterator
+from contextvars import ContextVar, Token
+from typing import Any, Awaitable, Callable
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
 # When a contextvar holds _UNSET, we fall back to os.environ (CLI/cron compat).
@@ -95,11 +94,41 @@ _SESSION_MESSAGE_ID: ContextVar = ContextVar("HERMES_SESSION_MESSAGE_ID", defaul
 
 _SESSION_PROFILE: ContextVar = ContextVar("HERMES_SESSION_PROFILE", default=_UNSET)
 
-# Per-session cron marker. Unlike the process-global legacy env var, this is
-# scoped to one cron job / inbound session. _UNSET preserves the legacy env
-# fallback for CLI/tests; "1" marks cron; "" explicitly marks non-cron and
-# masks any leaked process env value.
-_CRON_SESSION: ContextVar = ContextVar("HERMES_CRON_SESSION", default=_UNSET)
+# Project routing context. These values follow the same task-local/fallback
+# semantics as the HERMES_SESSION_* variables so concurrent project requests
+# cannot overwrite one another through process-global environment state.
+_PROJECT_ID: ContextVar = ContextVar("HERMES_PROJECT_ID", default=_UNSET)
+_PROJECT_BOARD: ContextVar = ContextVar("HERMES_PROJECT_BOARD", default=_UNSET)
+_PROJECT_WORKDIR: ContextVar = ContextVar("HERMES_PROJECT_WORKDIR", default=_UNSET)
+_PROJECT_ACCESS: ContextVar = ContextVar("HERMES_PROJECT_ACCESS", default=_UNSET)
+
+# Management-topic capability for the current gateway turn.  This deliberately
+# lives outside the string environment map: it is an in-process callable, not
+# serializable session state, and ContextVar keeps concurrent turns isolated.
+ProjectTopicCreator = Callable[..., Awaitable[dict[str, Any]]]
+_PROJECT_TOPIC_CREATOR: ContextVar[ProjectTopicCreator | None] = ContextVar(
+    "HERMES_PROJECT_TOPIC_CREATOR", default=None
+)
+
+
+def set_project_topic_creator(callback: ProjectTopicCreator) -> Token:
+    """Bind a management-topic creator to the current task and return its token."""
+    if not callable(callback):
+        raise TypeError("project topic creator must be callable")
+    return _PROJECT_TOPIC_CREATOR.set(callback)
+
+
+def get_project_topic_creator() -> ProjectTopicCreator | None:
+    """Return the creator bound to this task, if management access installed one."""
+    return _PROJECT_TOPIC_CREATOR.get()
+
+
+def clear_project_topic_creator(token: Token | None = None) -> None:
+    """Clear or token-reset the creator bound to the current task."""
+    if token is None:
+        _PROJECT_TOPIC_CREATOR.set(None)
+    else:
+        _PROJECT_TOPIC_CREATOR.reset(token)
 
 # Whether the current session's delivery channel can route an ASYNC completion
 # back to the agent AFTER the current turn ends (i.e. wake a fresh turn).
@@ -141,7 +170,10 @@ _VAR_MAP = {
     "HERMES_UI_SESSION_ID": _SESSION_UI_SESSION_ID,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
     "HERMES_SESSION_PROFILE": _SESSION_PROFILE,
-    "HERMES_CRON_SESSION": _CRON_SESSION,
+    "HERMES_PROJECT_ID": _PROJECT_ID,
+    "HERMES_PROJECT_BOARD": _PROJECT_BOARD,
+    "HERMES_PROJECT_WORKDIR": _PROJECT_WORKDIR,
+    "HERMES_PROJECT_ACCESS": _PROJECT_ACCESS,
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
@@ -219,7 +251,10 @@ def set_session_vars(
     cwd: str = "",
     async_delivery: bool = True,
     ui_session_id: str = "",
-    cron_session: Any = _UNSET,
+    project_id: str = "",
+    project_board: str = "",
+    project_workdir: str = "",
+    project_access: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
 
@@ -259,7 +294,10 @@ def set_session_vars(
         _SESSION_UI_SESSION_ID.set(ui_session_id),
         _SESSION_MESSAGE_ID.set(message_id),
         _SESSION_PROFILE.set(profile),
-        _CRON_SESSION.set(cron_session),
+        _PROJECT_ID.set(project_id),
+        _PROJECT_BOARD.set(project_board),
+        _PROJECT_WORKDIR.set(project_workdir),
+        _PROJECT_ACCESS.set(project_access),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
     ]
     try:
@@ -296,7 +334,10 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_UI_SESSION_ID,
         _SESSION_MESSAGE_ID,
         _SESSION_PROFILE,
-        _CRON_SESSION,
+        _PROJECT_ID,
+        _PROJECT_BOARD,
+        _PROJECT_WORKDIR,
+        _PROJECT_ACCESS,
     ):
         var.set("")
     # Reset async-delivery capability to the "never set" sentinel rather than a
@@ -304,6 +345,7 @@ def clear_session_vars(tokens: list) -> None:
     # behavior (CLI / unaware paths), not be mistaken for an opted-out
     # stateless adapter.
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _PROJECT_TOPIC_CREATOR.set(None)
     try:
         from agent.runtime_cwd import clear_session_cwd
 
@@ -352,6 +394,7 @@ def reset_session_vars() -> None:
     # same inheritance-leak reason as the mapped vars above — see clear_session_vars,
     # which resets this var on the handler-exit path for the symmetric concern.
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _PROJECT_TOPIC_CREATOR.set(None)
     try:
         from agent.runtime_cwd import clear_session_cwd
 
@@ -386,56 +429,15 @@ def get_session_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
-# Surfaces that are not a human chat channel. The gateway binds a platform
-# value (``telegram``) to HERMES_SESSION_PLATFORM, while the CLI, TUI, and
-# desktop bind HERMES_SESSION_SOURCE (``cli``, ``tui``, ``desktop``) and leave
-# the platform empty — so both have to be consulted. ``local``, ``api_server``,
-# ``webhook``, and ``msgraph_webhook`` are real Platform values that reach
-# HERMES_SESSION_PLATFORM but have no attachment channel behind them.
-# Default-deny: an unrecognized identity counts as messaging so a newly added
-# chat platform is never treated as a private surface before this set is
-# updated. Mirrors LOCAL_SESSION_SOURCE_IDS in
-# apps/desktop/src/lib/session-source.ts; keep roughly in sync when adding a
-# local or programmatic surface.
-NON_MESSAGING_SESSION_SURFACES = frozenset(
-    {
-        "",
-        "api_server",
-        "cli",
-        "codex",
-        "desktop",
-        "gateway",
-        "kanban",
-        "local",
-        "msgraph_webhook",
-        "tool",
-        "tui",
-        "webhook",
+def get_project_context() -> dict[str, str] | None:
+    """Return the current task's project routing context, if one is bound."""
+    values = {
+        "project_id": get_session_env("HERMES_PROJECT_ID", ""),
+        "board": get_session_env("HERMES_PROJECT_BOARD", ""),
+        "workdir": get_session_env("HERMES_PROJECT_WORKDIR", ""),
+        "access": get_session_env("HERMES_PROJECT_ACCESS", ""),
     }
-)
-
-
-def session_is_messaging_surface() -> bool:
-    """Whether this turn is delivered over a human messaging channel.
-
-    Callers use this to decide anything that differs between "the user is
-    reading a chat message" and "the user is at a machine they own": whether
-    to emit a delivery tag, whether a file has to land somewhere the gateway
-    is allowed to send from, whether narration would read as chat noise.
-
-    Resolves ``HERMES_PLATFORM``, then the session platform, then the session
-    source, and reports messaging when any of them names a surface outside
-    :data:`NON_MESSAGING_SESSION_SURFACES`.
-    """
-    import os
-
-    platform = os.getenv("HERMES_PLATFORM") or get_session_env("HERMES_SESSION_PLATFORM", "")
-    source = get_session_env("HERMES_SESSION_SOURCE", "")
-    for identity in (platform, source):
-        identity = str(identity or "").strip().lower()
-        if identity and identity not in NON_MESSAGING_SESSION_SURFACES:
-            return True
-    return False
+    return values if any(values.values()) else None
 
 
 def declare_stateless_channel() -> None:
