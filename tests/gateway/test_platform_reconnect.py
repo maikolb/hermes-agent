@@ -215,6 +215,21 @@ class TestPlatformReconnectWatcher:
         )
 
     @pytest.mark.asyncio
+    async def test_recovery_launcher_preserves_pending_updates(self, monkeypatch):
+        """A persistent launcher recovering a prior gateway process must preserve
+        messages Telegram queued while that process was offline."""
+        runner = _make_runner()
+        adapter = StubAdapter(succeed=True)
+        monkeypatch.setenv("HERMES_GATEWAY_RECOVERY", "1")
+
+        success = await runner._connect_initial_adapter_with_timeout(
+            adapter, Platform.TELEGRAM
+        )
+
+        assert success is True
+        assert adapter.connect_calls == [True]
+
+    @pytest.mark.asyncio
     async def test_reconnect_retries_resume_pending_for_platform(self):
         """A successful reconnect retries the startup auto-resume scoped to
         that platform.

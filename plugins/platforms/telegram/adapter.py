@@ -3836,19 +3836,41 @@ class TelegramAdapter(BasePlatformAdapter):
                 return kwargs
 
             disable_fallback = (os.getenv("HERMES_TELEGRAM_DISABLE_FALLBACK_IPS", "").strip().lower() in {"1", "true", "yes", "on"})
-            fallback_ips = self._fallback_ips()
-            if not fallback_ips:
-                logger.warning("[%s] Discovering Telegram API fallback IPs via DNS-over-HTTPS…", self.name)
-                fallback_ips = await discover_fallback_ips()
+            fallback_ips: list[str] = []
+            proxy_url = None
+            if not disable_fallback:
+                fallback_ips = self._fallback_ips()
+                if not fallback_ips:
+                    logger.warning("[%s] Discovering Telegram API fallback IPs via DNS-over-HTTPS…", self.name)
+                    fallback_ips = await discover_fallback_ips()
+                    logger.info(
+                        "[%s] Auto-discovered Telegram fallback IPs: %s",
+                        self.name,
+                        ", ".join(fallback_ips),
+                    )
+
+                proxy_targets = ["api.telegram.org", *fallback_ips]
+                proxy_url = resolve_proxy_url("TELEGRAM_PROXY", target_hosts=proxy_targets)
+
+            if disable_fallback:
                 logger.info(
-                    "[%s] Auto-discovered Telegram fallback IPs: %s",
+                    "[%s] Telegram threaded direct transport active (stdlib urllib, fallback IPs and environment proxies disabled)",
                     self.name,
-                    ", ".join(fallback_ips),
+                )
+                from plugins.platforms.telegram.telegram_sync_request import (
+                    ThreadedUrllibRequest,
                 )
 
-            proxy_targets = ["api.telegram.org", *fallback_ips]
-            proxy_url = resolve_proxy_url("TELEGRAM_PROXY", target_hosts=proxy_targets)
-            if fallback_ips and not proxy_url and not disable_fallback:
+                direct_request_kwargs = {
+                    "connection_pool_size": request_kwargs["connection_pool_size"],
+                    "read_timeout": request_kwargs["read_timeout"],
+                    "write_timeout": request_kwargs["write_timeout"],
+                    "connect_timeout": request_kwargs["connect_timeout"],
+                    "pool_timeout": request_kwargs["pool_timeout"],
+                }
+                request = ThreadedUrllibRequest(**direct_request_kwargs)
+                get_updates_request = ThreadedUrllibRequest(**direct_request_kwargs)
+            elif fallback_ips and not proxy_url:
                 logger.info(
                     "[%s] Telegram fallback IPs active: %s",
                     self.name,

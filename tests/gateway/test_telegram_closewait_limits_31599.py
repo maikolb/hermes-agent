@@ -36,6 +36,12 @@ from gateway.config import PlatformConfig
 
 
 def _ensure_telegram_mock():
+    try:
+        import telegram as installed_telegram
+    except ImportError:
+        installed_telegram = None
+    if installed_telegram is not None and getattr(installed_telegram, "__file__", None):
+        return
     if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
         return
     telegram_mod = MagicMock()
@@ -85,7 +91,21 @@ def _drive_connect(monkeypatch, *, proxy_url, fallback_ips=None):
     async def _no_fallback():
         return list(fallback_ips or [])
 
-    monkeypatch.setattr(tg_adapter, "discover_fallback_ips", _no_fallback)
+    if direct:
+        async def _unexpected_discovery():
+            raise AssertionError("direct mode must not discover fallback IPs")
+
+        monkeypatch.setattr(tg_adapter, "discover_fallback_ips", _unexpected_discovery)
+        monkeypatch.setenv("HERMES_TELEGRAM_DISABLE_FALLBACK_IPS", "1")
+        import types
+
+        monkeypatch.setitem(
+            sys.modules,
+            "plugins.platforms.telegram.telegram_sync_request",
+            types.SimpleNamespace(ThreadedUrllibRequest=_RecordingHTTPXRequest),
+        )
+    else:
+        monkeypatch.setattr(tg_adapter, "discover_fallback_ips", _no_fallback)
     monkeypatch.setattr(
         tg_adapter, "resolve_proxy_url", lambda *a, **k: proxy_url
     )
