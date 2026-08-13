@@ -304,6 +304,7 @@ def clear_session_vars(tokens: list) -> None:
     # behavior (CLI / unaware paths), not be mistaken for an opted-out
     # stateless adapter.
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _PROJECT_TOPIC_CREATOR.set(None)
     try:
         from agent.runtime_cwd import clear_session_cwd
 
@@ -352,6 +353,7 @@ def reset_session_vars() -> None:
     # same inheritance-leak reason as the mapped vars above — see clear_session_vars,
     # which resets this var on the handler-exit path for the symmetric concern.
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _PROJECT_TOPIC_CREATOR.set(None)
     try:
         from agent.runtime_cwd import clear_session_cwd
 

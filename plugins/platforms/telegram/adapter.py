@@ -3332,6 +3332,18 @@ class TelegramAdapter(BasePlatformAdapter):
         thread_id = await self._create_dm_topic(chat_id_int, name=name)
         return str(thread_id) if thread_id else None
 
+    async def ensure_forum_topic(self, chat_id: str, topic_name: str) -> Optional[str]:
+        """Create a forum topic in a DM or supergroup and return its thread id."""
+        name = str(topic_name or "").strip()
+        if not name:
+            return None
+        try:
+            chat_id_int = int(chat_id)
+        except (TypeError, ValueError):
+            return None
+        thread_id = await self._create_dm_topic(chat_id_int, name=name)
+        return str(thread_id) if thread_id is not None else None
+
     async def ensure_dm_topic(self, chat_id: str, topic_name: str, force_create: bool = False) -> Optional[str]:
         """Return a private DM topic thread id, creating and persisting it if needed."""
         name = str(topic_name or "").strip()
@@ -3908,6 +3920,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL | filters.Sticker.ALL,
                 self._handle_media_message
             ))
+            forum_topic_created_filter = getattr(
+                getattr(filters, "StatusUpdate", None),
+                "FORUM_TOPIC_CREATED",
+                None,
+            )
+            if forum_topic_created_filter is not None:
+                self._app.add_handler(TelegramMessageHandler(
+                    forum_topic_created_filter,
+                    self._handle_forum_topic_created,
+                ))
             # Handle inline keyboard button callbacks (update prompts)
             self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
             
@@ -8970,6 +8992,22 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         await self.handle_message(event)
 
+    async def _handle_forum_topic_created(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Forward topic creation as infrastructure metadata, never agent text."""
+        msg = self._effective_update_message(update)
+        if not msg or not getattr(msg, "forum_topic_created", None):
+            return
+        event = self._build_message_event(
+            msg,
+            MessageType.TEXT,
+            update_id=update.update_id,
+        )
+        await self.handle_message(event)
+
     async def _handle_location_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming location/venue pin messages."""
         msg = self._effective_update_message(update)
@@ -9789,6 +9827,8 @@ class TelegramAdapter(BasePlatformAdapter):
         thread_id_str = self._effective_message_thread_id(message)
         chat_topic = None
         topic_skill = None
+        topic_created = getattr(message, "forum_topic_created", None)
+        created_name = str(getattr(topic_created, "name", "") or "").strip()
 
         if chat_type == "dm" and thread_id_str:
             topic_info = self._get_dm_topic_info(str(chat.id), thread_id_str)
@@ -9797,14 +9837,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 topic_skill = topic_info.get("skill")
 
             # Also check forum_topic_created service message for topic discovery
-            if hasattr(message, "forum_topic_created") and message.forum_topic_created:
-                created_name = message.forum_topic_created.name
-                if created_name:
-                    self._cache_dm_topic_from_message(str(chat.id), thread_id_str, created_name)
-                    if not chat_topic:
-                        chat_topic = created_name
+            if created_name:
+                self._cache_dm_topic_from_message(str(chat.id), thread_id_str, created_name)
+                chat_topic = created_name
 
         elif chat_type == "group" and thread_id_str:
+            if created_name:
+                chat_topic = created_name
             # Group/supergroup forum topic skill binding via config.extra['group_topics'].
             # Accept both supported shapes:
             #   [{"chat_id": "-100...", "topics": [...]}]
@@ -9832,7 +9871,8 @@ class TelegramAdapter(BasePlatformAdapter):
                             continue
                         tid = topic.get("thread_id")
                         if tid is not None and str(tid) == thread_id_str:
-                            chat_topic = topic.get("name")
+                            if not chat_topic:
+                                chat_topic = topic.get("name")
                             topic_skill = topic.get("skill")
                             break
                     break
@@ -9918,6 +9958,7 @@ class TelegramAdapter(BasePlatformAdapter):
             reply_to_text=reply_to_text,
             auto_skill=topic_skill,
             channel_prompt=_channel_prompt,
+            metadata={"telegram_forum_topic_created": True} if created_name else {},
             timestamp=message.date,
         )
 

@@ -9805,7 +9805,12 @@ def _module_hermes_argv() -> list[str]:
     # ``hermes_cli.main`` is the console-script target declared in
     # pyproject.toml, NOT a top-level ``hermes`` package — there is no
     # ``hermes`` package to import.
-    return [sys.executable, "-m", "hermes_cli.main"]
+    # On Windows, venv ``python.exe`` and ``hermes.exe`` are console shims
+    # which can re-exec the base interpreter through a visible console tree.
+    # Bind workers directly to the real base interpreter; ``spawn_worker``
+    # supplies source + venv site-packages through PYTHONPATH below.
+    interpreter = sys._base_executable if _IS_WINDOWS else sys.executable
+    return [interpreter, "-m", "hermes_cli.main"]
 
 
 def _absolute_hermes_path(path: str) -> str:
@@ -9900,6 +9905,12 @@ def _resolve_hermes_argv() -> list[str]:
     ``gateway`` in the dependency order.
     """
     import shutil
+
+    # Fail closed on the canonical hidden Windows path. Do not resolve a
+    # console-script executable or batch shim: either can materialize a
+    # console before the real Python process starts.
+    if _IS_WINDOWS:
+        return _module_hermes_argv()
 
     env_bin = os.environ.get("HERMES_BIN", "").strip()
     if env_bin:
@@ -10137,6 +10148,17 @@ def _default_spawn(
     # highest-precedence interface override; dropping the env var covers
     # older hermes builds on PATH that predate the flag's precedence.
     env.pop("HERMES_TUI", None)
+
+    if _IS_WINDOWS:
+        source_root = Path(__file__).resolve().parents[1]
+        venv_site = source_root / "venv" / "Lib" / "site-packages"
+        pythonpath_parts = [str(source_root)]
+        if venv_site.is_dir():
+            pythonpath_parts.append(str(venv_site))
+        inherited_pythonpath = env.get("PYTHONPATH", "").strip()
+        if inherited_pythonpath:
+            pythonpath_parts.append(inherited_pythonpath)
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
 
     cmd = [
         *_resolve_hermes_argv(),

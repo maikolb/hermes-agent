@@ -41,6 +41,7 @@ __all__ = [
     "windows_detach_flags",
     "windows_detach_flags_without_breakaway",
     "windows_hide_flags",
+    "windows_hidden_popen_kwargs",
     "windows_detach_popen_kwargs",
     "bounded_git_probe",
     "noninteractive_git_env",
