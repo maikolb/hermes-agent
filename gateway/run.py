@@ -4018,7 +4018,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._platform_lock_takeover_on_start
         )
         try:
-            return await self._connect_adapter_with_timeout(adapter, platform)
+            recovery_boot = os.getenv("HERMES_GATEWAY_RECOVERY", "").strip().lower()
+            return await self._connect_adapter_with_timeout(
+                adapter,
+                platform,
+                is_reconnect=recovery_boot in {"1", "true", "yes", "on"},
+            )
         finally:
             adapter._platform_lock_takeover_allowed = False
 
@@ -17128,10 +17133,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 except UnknownBindingError:
                     topic_name = str(getattr(source, "chat_topic", None) or "").strip()
+                    marker_match = re.fullmatch(
+                        r"\s*@[A-Za-z0-9_]{2,32}bot\s+(.+?)\s*",
+                        str(getattr(event, "text", None) or ""),
+                        flags=re.IGNORECASE,
+                    )
                     if (
                         chat_id not in managed_chat_ids
                         or getattr(router_config, "auto_register_topics", False) is not True
-                        or not topic_name
                     ):
                         raise
                     raw_management_names = getattr(
@@ -17142,6 +17151,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     management_slugs = {
                         normalize_project_slug(name) for name in raw_management_names
                     }
+                    if not topic_name:
+                        if marker_match is None:
+                            raise
+                        marker_slug = normalize_project_slug(marker_match.group(1))
+                        is_management = marker_slug in management_slugs
+                        project_slug = (
+                            f"{normalize_project_slug(profile)[:53].rstrip('-')}-management"
+                            if is_management
+                            else marker_slug
+                        )
+                        project_context = router.bind_existing_topic(
+                            Platform.TELEGRAM.value,
+                            chat_id,
+                            thread_id,
+                            project_slug,
+                            str(getattr(source, "user_id", None) or ""),
+                            is_management=is_management,
+                        )
+                        if not project_context.is_management:
+                            router.ensure_bound_board(project_context)
+                        return project_context, None
                     topic_slug = normalize_project_slug(topic_name)
                     is_management = topic_slug in management_slugs
                     project_slug = (

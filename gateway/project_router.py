@@ -456,6 +456,65 @@ class ProjectRouter:
 
         self._transaction(operation)
 
+    def bind_existing_topic(
+        self,
+        platform: object,
+        chat_id: object,
+        thread_id: object,
+        project_slug: object,
+        sender_user_id: object,
+        *,
+        is_management: bool = False,
+    ) -> ProjectContext:
+        """Bind an unbound topic to an existing active project after ACL validation."""
+        platform_s = _id(platform, "platform")
+        chat_s = _id(chat_id, "chat_id")
+        thread_s = _id(thread_id, "thread_id")
+        user_s = _id(sender_user_id, "sender_user_id")
+        slug_s = _slug(project_slug, "project_slug")
+
+        def operation(connection: sqlite3.Connection) -> None:
+            acl = connection.execute(
+                """SELECT effect FROM acl_entries
+                   WHERE profile=? AND chat_id=? AND user_id=?""",
+                (self.profile, chat_s, user_s),
+            ).fetchone()
+            if acl is None:
+                raise UnknownUserError("sender has no ACL entry")
+            if acl["effect"] == "deny":
+                raise AccessDeniedError("sender is denied by ACL")
+
+            project = connection.execute(
+                """SELECT project_id FROM projects
+                   WHERE profile=? AND slug=? AND status='active'""",
+                (self.profile, slug_s),
+            ).fetchone()
+            if project is None:
+                raise UnknownBindingError("no active existing project matches the topic marker")
+
+            key = (self.profile, platform_s, chat_s, thread_s)
+            existing = connection.execute(
+                """SELECT project_id FROM topic_bindings
+                   WHERE profile=? AND platform=? AND chat_id=? AND thread_id=?""",
+                key,
+            ).fetchone()
+            if existing is not None and existing["project_id"] != project["project_id"]:
+                raise BindingConflictError("topic is already bound to another project")
+            connection.execute(
+                """
+                INSERT INTO topic_bindings(
+                    profile, platform, chat_id, thread_id, project_id, is_management
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(profile, platform, chat_id, thread_id) DO UPDATE SET
+                    project_id=excluded.project_id,
+                    is_management=excluded.is_management
+                """,
+                (*key, project["project_id"], int(is_management)),
+            )
+
+        self._transaction(operation)
+        return self.resolve(platform_s, chat_s, thread_s, user_s)
+
     def set_acl(self, chat_id: object, user_id: object, effect: str) -> None:
         normalized_effect = _required(effect, "effect").lower()
         if normalized_effect not in {"allow", "deny"}:
