@@ -39,6 +39,7 @@ __all__ = [
     "windows_detach_flags",
     "windows_detach_flags_without_breakaway",
     "windows_hide_flags",
+    "windows_hidden_popen_kwargs",
     "windows_detach_popen_kwargs",
     "bounded_git_probe",
 ]
@@ -224,6 +225,25 @@ def windows_hide_flags() -> int:
     if not IS_WINDOWS:
         return 0
     return _CREATE_NO_WINDOW
+
+
+def windows_hidden_popen_kwargs() -> dict:
+    """Return canonical no-visible-window kwargs for a child process.
+
+    CREATE_NO_WINDOW gives console descendants a hidden console to inherit.
+    STARTF_USESHOWWINDOW with SW_HIDE independently requests hidden startup
+    state for launchers that honor it. Centralizing both keeps terminal and
+    execute_code on the same Windows contract.
+    """
+    if not IS_WINDOWS:
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": windows_hide_flags(),
+        "startupinfo": startupinfo,
+    }
 
 
 def windows_detach_popen_kwargs() -> dict:

@@ -840,6 +840,74 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
 
 
 @dataclass
+class ProjectRouterConfig:
+    """Opt-in Telegram Topic routing backed by a profile-scoped database."""
+
+    enabled: bool = False
+    db_path: Optional[Path] = None
+    managed_chat_ids: List[str] = field(default_factory=list)
+    auto_register_topics: bool = False
+    management_topic_names: List[str] = field(default_factory=lambda: ["🧭 Gestão"])
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "db_path": str(self.db_path) if self.db_path is not None else None,
+            "managed_chat_ids": list(self.managed_chat_ids),
+            "auto_register_topics": self.auto_register_topics,
+            "management_topic_names": list(self.management_topic_names),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ProjectRouterConfig":
+        if not isinstance(data, dict):
+            return cls()
+
+        raw_db_path = data.get("db_path")
+        if raw_db_path is None:
+            db_path = None
+        elif isinstance(raw_db_path, (str, os.PathLike)):
+            try:
+                db_path = Path(raw_db_path)
+            except (TypeError, ValueError, OSError):
+                return cls()
+        else:
+            return cls()
+
+        raw_chat_ids = data.get("managed_chat_ids", [])
+        if not isinstance(raw_chat_ids, list):
+            return cls()
+        managed_chat_ids: List[str] = []
+        for chat_id in raw_chat_ids:
+            if not isinstance(chat_id, (str, int)) or isinstance(chat_id, bool):
+                return cls()
+            normalized = str(chat_id).strip()
+            if not normalized:
+                return cls()
+            managed_chat_ids.append(normalized)
+
+        raw_management_names = data.get("management_topic_names", ["🧭 Gestão"])
+        if not isinstance(raw_management_names, list):
+            return cls()
+        management_topic_names: List[str] = []
+        for name in raw_management_names:
+            if not isinstance(name, str):
+                return cls()
+            normalized = name.strip()
+            if not normalized:
+                return cls()
+            management_topic_names.append(normalized)
+
+        return cls(
+            enabled=_coerce_bool(data.get("enabled"), False),
+            db_path=db_path,
+            managed_chat_ids=managed_chat_ids,
+            auto_register_topics=_coerce_bool(data.get("auto_register_topics"), False),
+            management_topic_names=management_topic_names,
+        )
+
+
+@dataclass
 class GatewayConfig:
     """
     Main gateway configuration.
@@ -917,6 +985,10 @@ class GatewayConfig:
     # different profiles. See gateway/profile_routing.py. Each entry is a
     # dict with: name, platform, profile, and optional guild_id/chat_id/thread_id.
     profile_routes: list = field(default_factory=list)
+
+    # Opt-in Telegram Topic -> project/board routing. Default disabled keeps
+    # every existing gateway profile on the ordinary session path.
+    project_router: ProjectRouterConfig = field(default_factory=ProjectRouterConfig)
 
     def __post_init__(self) -> None:
         self.systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
@@ -1041,6 +1113,7 @@ class GatewayConfig:
                 asdict(r) if is_dataclass(r) and not isinstance(r, type) else r
                 for r in self.profile_routes
             ],
+            "project_router": self.project_router.to_dict(),
         }
     
     @classmethod
@@ -1096,6 +1169,12 @@ class GatewayConfig:
         thread_sessions_per_user = data.get("thread_sessions_per_user")
         multiplex_profiles = data.get("multiplex_profiles")
         nested_gateway = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
+        raw_project_router = (
+            data.get("project_router")
+            if "project_router" in data
+            else nested_gateway.get("project_router")
+        )
+        project_router = ProjectRouterConfig.from_dict(raw_project_router)
         if "systemd_watchdog_seconds" in data:
             systemd_watchdog_raw = data.get("systemd_watchdog_seconds")
             systemd_watchdog_key = "systemd_watchdog_seconds"
@@ -1170,6 +1249,7 @@ class GatewayConfig:
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
             profile_routes=profile_routes,
+            project_router=project_router,
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -1252,6 +1332,11 @@ def load_gateway_config() -> GatewayConfig:
             # already established for gateway.multiplex_profiles/streaming/
             # write_sessions_json: top-level wins, nested gateway.* falls back.
             gateway_section = yaml_cfg.get("gateway")
+
+            if "project_router" in yaml_cfg:
+                gw_data["project_router"] = yaml_cfg["project_router"]
+            elif isinstance(gateway_section, dict) and "project_router" in gateway_section:
+                gw_data["project_router"] = gateway_section["project_router"]
 
             # Map config.yaml keys → GatewayConfig.from_dict() schema.
             # Each key overwrites whatever gateway.json may have set.

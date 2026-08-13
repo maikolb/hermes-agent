@@ -36,8 +36,8 @@ needs to replace the import + call site:
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
 """
 
-from contextvars import ContextVar
-from typing import Any
+from contextvars import ContextVar, Token
+from typing import Any, Awaitable, Callable
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
 # When a contextvar holds _UNSET, we fall back to os.environ (CLI/cron compat).
@@ -93,6 +93,42 @@ _SESSION_MESSAGE_ID: ContextVar = ContextVar("HERMES_SESSION_MESSAGE_ID", defaul
 
 _SESSION_PROFILE: ContextVar = ContextVar("HERMES_SESSION_PROFILE", default=_UNSET)
 
+# Project routing context. These values follow the same task-local/fallback
+# semantics as the HERMES_SESSION_* variables so concurrent project requests
+# cannot overwrite one another through process-global environment state.
+_PROJECT_ID: ContextVar = ContextVar("HERMES_PROJECT_ID", default=_UNSET)
+_PROJECT_BOARD: ContextVar = ContextVar("HERMES_PROJECT_BOARD", default=_UNSET)
+_PROJECT_WORKDIR: ContextVar = ContextVar("HERMES_PROJECT_WORKDIR", default=_UNSET)
+_PROJECT_ACCESS: ContextVar = ContextVar("HERMES_PROJECT_ACCESS", default=_UNSET)
+
+# Management-topic capability for the current gateway turn.  This deliberately
+# lives outside the string environment map: it is an in-process callable, not
+# serializable session state, and ContextVar keeps concurrent turns isolated.
+ProjectTopicCreator = Callable[..., Awaitable[dict[str, Any]]]
+_PROJECT_TOPIC_CREATOR: ContextVar[ProjectTopicCreator | None] = ContextVar(
+    "HERMES_PROJECT_TOPIC_CREATOR", default=None
+)
+
+
+def set_project_topic_creator(callback: ProjectTopicCreator) -> Token:
+    """Bind a management-topic creator to the current task and return its token."""
+    if not callable(callback):
+        raise TypeError("project topic creator must be callable")
+    return _PROJECT_TOPIC_CREATOR.set(callback)
+
+
+def get_project_topic_creator() -> ProjectTopicCreator | None:
+    """Return the creator bound to this task, if management access installed one."""
+    return _PROJECT_TOPIC_CREATOR.get()
+
+
+def clear_project_topic_creator(token: Token | None = None) -> None:
+    """Clear or token-reset the creator bound to the current task."""
+    if token is None:
+        _PROJECT_TOPIC_CREATOR.set(None)
+    else:
+        _PROJECT_TOPIC_CREATOR.reset(token)
+
 # Whether the current session's delivery channel can route an ASYNC completion
 # back to the agent AFTER the current turn ends (i.e. wake a fresh turn).
 #
@@ -132,6 +168,10 @@ _VAR_MAP = {
     "HERMES_UI_SESSION_ID": _SESSION_UI_SESSION_ID,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
     "HERMES_SESSION_PROFILE": _SESSION_PROFILE,
+    "HERMES_PROJECT_ID": _PROJECT_ID,
+    "HERMES_PROJECT_BOARD": _PROJECT_BOARD,
+    "HERMES_PROJECT_WORKDIR": _PROJECT_WORKDIR,
+    "HERMES_PROJECT_ACCESS": _PROJECT_ACCESS,
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
@@ -168,6 +208,10 @@ def set_session_vars(
     cwd: str = "",
     async_delivery: bool = True,
     ui_session_id: str = "",
+    project_id: str = "",
+    project_board: str = "",
+    project_workdir: str = "",
+    project_access: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
 
@@ -202,6 +246,10 @@ def set_session_vars(
         _SESSION_UI_SESSION_ID.set(ui_session_id),
         _SESSION_MESSAGE_ID.set(message_id),
         _SESSION_PROFILE.set(profile),
+        _PROJECT_ID.set(project_id),
+        _PROJECT_BOARD.set(project_board),
+        _PROJECT_WORKDIR.set(project_workdir),
+        _PROJECT_ACCESS.set(project_access),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
     ]
     try:
@@ -237,6 +285,10 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_UI_SESSION_ID,
         _SESSION_MESSAGE_ID,
         _SESSION_PROFILE,
+        _PROJECT_ID,
+        _PROJECT_BOARD,
+        _PROJECT_WORKDIR,
+        _PROJECT_ACCESS,
     ):
         var.set("")
     # Reset async-delivery capability to the "never set" sentinel rather than a
@@ -244,6 +296,7 @@ def clear_session_vars(tokens: list) -> None:
     # behavior (CLI / unaware paths), not be mistaken for an opted-out
     # stateless adapter.
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _PROJECT_TOPIC_CREATOR.set(None)
     try:
         from agent.runtime_cwd import clear_session_cwd
 
@@ -292,6 +345,7 @@ def reset_session_vars() -> None:
     # same inheritance-leak reason as the mapped vars above — see clear_session_vars,
     # which resets this var on the handler-exit path for the symmetric concern.
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _PROJECT_TOPIC_CREATOR.set(None)
     try:
         from agent.runtime_cwd import clear_session_cwd
 
@@ -324,6 +378,17 @@ def get_session_env(name: str, default: str = "") -> str:
             return value
     # Fall back to os.environ for CLI, cron, and test compatibility
     return os.getenv(name, default)
+
+
+def get_project_context() -> dict[str, str] | None:
+    """Return the current task's project routing context, if one is bound."""
+    values = {
+        "project_id": get_session_env("HERMES_PROJECT_ID", ""),
+        "board": get_session_env("HERMES_PROJECT_BOARD", ""),
+        "workdir": get_session_env("HERMES_PROJECT_WORKDIR", ""),
+        "access": get_session_env("HERMES_PROJECT_ACCESS", ""),
+    }
+    return values if any(values.values()) else None
 
 
 def declare_stateless_channel() -> None:

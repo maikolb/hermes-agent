@@ -208,6 +208,18 @@ def _connect(board: Optional[str] = None):
     → ``default``). Per-tool ``board`` lets a Telegram-side agent override
     the env-pinned active board without restarting Hermes.
     """
+    from gateway.session_context import get_session_env
+
+    bound_board = get_session_env("HERMES_PROJECT_BOARD", "")
+    if bound_board:
+        if board is None:
+            board = bound_board
+        elif str(board).strip().lower() != str(bound_board).strip().lower():
+            raise ValueError(
+                f"project context is bound to board {bound_board!r}; "
+                f"refusing explicit board {board!r}"
+            )
+
     from hermes_cli import kanban_db as kb
     return kb, kb.connect(board=board)
 
@@ -1170,6 +1182,60 @@ def _handle_create(args: dict, **kw) -> str:
     if bool_error:
         return tool_error(bool_error)
     idempotency_key = args.get("idempotency_key")
+    if idempotency_key is None or not str(idempotency_key).strip():
+        from gateway.session_context import get_session_env
+
+        message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "").strip()
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip()
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+        if message_id and platform and chat_id:
+            import hashlib
+            import re
+            import unicodedata
+
+            def _component(
+                value: object,
+                *,
+                fallback: str = "",
+                preserve_leading_hyphen: bool = False,
+            ) -> str:
+                raw = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
+                ascii_value = "".join(
+                    char
+                    for char in unicodedata.normalize("NFKD", raw)
+                    if not unicodedata.combining(char) and ord(char) < 128
+                )
+                normalized = re.sub(r"[^a-z0-9._-]+", "-", ascii_value)
+                normalized = (
+                    normalized.rstrip("-")
+                    if preserve_leading_hyphen
+                    else normalized.strip("-")
+                )
+                normalized = normalized or (
+                    f"u-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:12]}"
+                    if raw
+                    else fallback
+                )
+                if len(normalized) <= 48:
+                    return normalized
+                digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+                return f"{normalized[:35].rstrip('-')}-{digest}"
+
+            profile = _component(
+                get_session_env("HERMES_SESSION_PROFILE", ""), fallback="default"
+            )
+            thread = _component(
+                get_session_env("HERMES_SESSION_THREAD_ID", ""), fallback="root"
+            )
+            title_key = _component(title)
+            idempotency_key = (
+                f"project-os:{profile}:{_component(platform)}:"
+                f"{_component(chat_id, preserve_leading_hyphen=True)}:"
+                f"{thread}:{_component(message_id)}:kanban-create:{title_key}"
+            )
+            if len(idempotency_key) > 255:
+                digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:16]
+                idempotency_key = f"{idempotency_key[:238].rstrip('-:')}-{digest}"
     max_runtime_seconds = args.get("max_runtime_seconds")
     initial_status = args.get("initial_status") or "running"
     skills = args.get("skills")
