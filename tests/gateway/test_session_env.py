@@ -76,6 +76,44 @@ def test_set_session_env_sets_contextvars(monkeypatch):
     runner._clear_session_env(tokens)
 
 
+def test_set_session_env_stamps_active_profile_when_source_is_unrouted(monkeypatch):
+    """Detached notifications must return through the receiving profile's bot."""
+    runner = object.__new__(GatewayRunner)
+    monkeypatch.setattr(
+        runner, "_active_profile_name", lambda: "hermes-project-factory"
+    )
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="-1004309874643",
+        chat_type="group",
+        thread_id="41",
+    )
+    context = SessionContext(
+        source=source, connected_platforms=[], home_channels={}
+    )
+
+    tokens = runner._set_session_env(context)
+    try:
+        assert (
+            get_session_env("HERMES_SESSION_PROFILE")
+            == "hermes-project-factory"
+        )
+    finally:
+        runner._clear_session_env(tokens)
+
+
+def test_session_source_uses_contextvars(monkeypatch):
+    monkeypatch.delenv("HERMES_SESSION_SOURCE", raising=False)
+
+    tokens = set_session_vars(source="tool")
+
+    assert get_session_env("HERMES_SESSION_SOURCE") == "tool"
+
+    clear_session_vars(tokens)
+
+    assert get_session_env("HERMES_SESSION_SOURCE") == ""
+
+
 def test_clear_session_env_restores_previous_state(monkeypatch):
     """_clear_session_env should restore contextvars to their pre-handler values."""
     runner = object.__new__(GatewayRunner)

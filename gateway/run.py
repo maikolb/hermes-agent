@@ -22234,7 +22234,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
             message_id=str(context.source.message_id) if context.source.message_id else "",
-            profile=getattr(context.source, "profile", "") or "",
+            # A single-profile gateway receives ordinary platform events with
+            # source.profile unset.  Persist the gateway's active profile as
+            # the delivery owner so detached work (Kanban notifications,
+            # background completions) is sent by the same profile/bot that
+            # accepted the request.  Multiplexed/routed sources keep their
+            # explicit profile stamp.
+            profile=(
+                getattr(context.source, "profile", "")
+                or self._active_profile_name()
+            ),
             async_delivery=_async_delivery,
             project_id=project_context.project_id if project_context else "",
             project_board=(
