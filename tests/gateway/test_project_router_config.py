@@ -15,6 +15,7 @@ def test_project_router_defaults_disabled_and_empty():
     assert config.project_router.managed_chat_ids == []
     assert config.project_router.auto_register_topics is False
     assert config.project_router.management_topic_names == ["🧭 Gestão"]
+    assert config.project_router.workspace_root is None
 
 
 def test_project_router_valid_parse_and_roundtrip():
@@ -26,6 +27,7 @@ def test_project_router_valid_parse_and_roundtrip():
                 "managed_chat_ids": [-1001, "-1002"],
                 "auto_register_topics": True,
                 "management_topic_names": ["🧭 Gestão", "Management"],
+                "workspace_root": "C:/Projects",
             }
         }
     )
@@ -36,6 +38,7 @@ def test_project_router_valid_parse_and_roundtrip():
         managed_chat_ids=["-1001", "-1002"],
         auto_register_topics=True,
         management_topic_names=["🧭 Gestão", "Management"],
+        workspace_root=Path("C:/Projects"),
     )
     assert GatewayConfig.from_dict(config.to_dict()).project_router == config.project_router
 

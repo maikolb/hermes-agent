@@ -7,7 +7,9 @@ import pytest
 
 from gateway.project_router import (
     AccessDeniedError,
+    BindingConflictError,
     ProjectRouter,
+    UnknownUserError,
     normalize_project_slug,
 )
 
@@ -146,6 +148,103 @@ def test_provisioning_is_idempotent_seeds_acl_and_preserves_conflicting_binding(
     assert current_board == "keep-me"
 
 
+def test_dynamic_provisioning_checks_acl_before_any_state_or_board(tmp_path: Path):
+    board_calls = []
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        router.set_acl("chat", "denied", "deny")
+        with pytest.raises(UnknownUserError):
+            router.provision_topic_project(
+                "Unknown", "Unknown", "telegram", "chat", "thread-unknown",
+                sender_user_id="missing",
+                board_creator=lambda *args, **kwargs: board_calls.append(args),
+            )
+        with pytest.raises(AccessDeniedError):
+            router.provision_topic_project(
+                "Denied", "Denied", "telegram", "chat", "thread-denied",
+                sender_user_id="denied",
+                board_creator=lambda *args, **kwargs: board_calls.append(args),
+            )
+        assert router._connection.execute(
+            "SELECT COUNT(*) FROM projects WHERE profile=?", ("default",)
+        ).fetchone()[0] == 0
+        assert router._connection.execute(
+            "SELECT COUNT(*) FROM topic_bindings WHERE profile=?", ("default",)
+        ).fetchone()[0] == 0
+    assert board_calls == []
+
+
+def test_dynamic_provisioning_is_atomic_and_same_name_topics_get_stable_slugs(tmp_path: Path):
+    boards = set()
+
+    def create_board(slug, **kwargs):
+        boards.add(slug)
+        return {"slug": slug, **kwargs}
+
+    db_path = tmp_path / "router.db"
+    with ProjectRouter(db_path, "default") as router:
+        router.set_acl("chat", "alice", "allow")
+        first = router.provision_topic_project(
+            "Atlas", "Atlas", "telegram", "chat", "81",
+            sender_user_id="alice", board_creator=create_board,
+        )
+        retried = router.provision_topic_project(
+            "Atlas renamed", "Atlas renamed", "telegram", "chat", "81",
+            sender_user_id="alice", board_creator=create_board,
+        )
+        second = router.provision_topic_project(
+            "Atlas", "Atlas", "telegram", "chat", "82",
+            sender_user_id="alice", board_creator=create_board,
+        )
+        second_retry = router.provision_topic_project(
+            "Atlas", "Atlas", "telegram", "chat", "82",
+            sender_user_id="alice", board_creator=create_board,
+        )
+        rows = router._connection.execute(
+            "SELECT project_id, slug FROM projects WHERE profile=? ORDER BY slug",
+            ("default",),
+        ).fetchall()
+        bindings = router._connection.execute(
+            "SELECT thread_id, project_id FROM topic_bindings WHERE profile=? ORDER BY thread_id",
+            ("default",),
+        ).fetchall()
+
+    assert first == retried
+    assert first.slug == "atlas"
+    assert second == second_retry
+    assert second.slug.startswith("atlas-") and second.slug != "atlas"
+    assert len(second.slug) <= 64
+    assert [(row["thread_id"], row["project_id"]) for row in bindings] == [
+        ("81", first.project_id), ("82", second.project_id)
+    ]
+    assert {row["slug"] for row in rows} == {first.slug, second.slug}
+    assert boards == {first.board_slug, second.board_slug}
+
+
+def test_dynamic_project_rolls_back_when_binding_insert_fails(tmp_path: Path):
+    db_path = tmp_path / "router.db"
+    with ProjectRouter(db_path, "default") as router:
+        router.set_acl("chat", "alice", "allow")
+        router._connection.execute(
+            """CREATE TRIGGER reject_topic_binding
+               BEFORE INSERT ON topic_bindings
+               BEGIN SELECT RAISE(ABORT, 'binding rejected'); END"""
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="binding rejected"):
+            router.provision_topic_project(
+                "Atomic", "Atomic", "telegram", "chat", "91",
+                sender_user_id="alice",
+                board_creator=lambda *args, **kwargs: pytest.fail(
+                    "board must not be created after transaction rollback"
+                ),
+            )
+        assert router._connection.execute(
+            "SELECT COUNT(*) FROM projects WHERE profile=?", ("default",)
+        ).fetchone()[0] == 0
+        assert router._connection.execute(
+            "SELECT COUNT(*) FROM topic_bindings WHERE profile=?", ("default",)
+        ).fetchone()[0] == 0
+
+
 def test_management_provisioning_persists_control_plane_without_creating_board(
     tmp_path: Path,
 ):
@@ -208,6 +307,111 @@ def test_retry_after_project_only_partial_state_creates_missing_board(tmp_path: 
         )
 
     assert calls == ["alpha"]
+
+
+def test_workspace_root_reuses_unique_normalized_folder_and_creates_missing_one(
+    tmp_path: Path,
+):
+    workspace_root = tmp_path / "projects"
+    existing = workspace_root / "Concursa_ai"
+    existing.mkdir(parents=True)
+    board_calls = []
+
+    def create_board(slug, **kwargs):
+        board_calls.append((slug, kwargs))
+        return {"slug": slug, **kwargs}
+
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        router.set_acl("chat", "alice", "allow")
+        concursa = router.provision_topic_project(
+            "Concursa AI", "Concursa AI", "telegram", "chat", "41",
+            sender_user_id="alice",
+            workspace_root=workspace_root,
+            board_creator=create_board,
+        )
+        created = router.provision_topic_project(
+            "Novo Projeto", "Novo Projeto", "telegram", "chat", "42",
+            sender_user_id="alice",
+            workspace_root=workspace_root,
+            board_creator=create_board,
+        )
+
+    assert concursa.workdir == existing.resolve()
+    assert created.workdir == (workspace_root / created.slug).resolve()
+    assert created.workdir.is_dir()
+    assert board_calls == [
+        (
+            "concursa-ai",
+            {"name": "Concursa AI", "default_workdir": str(existing.resolve())},
+        ),
+        (
+            "novo-projeto",
+            {
+                "name": "Novo Projeto",
+                "default_workdir": str((workspace_root / "novo-projeto").resolve()),
+            },
+        ),
+    ]
+
+
+def test_workspace_root_ambiguity_fails_closed_before_project_persistence(tmp_path: Path):
+    workspace_root = tmp_path / "projects"
+    (workspace_root / "Concursa_ai").mkdir(parents=True)
+    (workspace_root / "Concursa AI").mkdir()
+
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        router.set_acl("chat", "alice", "allow")
+        with pytest.raises(BindingConflictError, match="multiple workspace directories"):
+            router.provision_topic_project(
+                "Concursa AI", "Concursa AI", "telegram", "chat", "41",
+                sender_user_id="alice",
+                workspace_root=workspace_root,
+                board_creator=lambda *args, **kwargs: pytest.fail(
+                    "ambiguous workspace must not create a board"
+                ),
+            )
+        assert router._connection.execute(
+            "SELECT COUNT(*) FROM projects WHERE profile=?", ("default",)
+        ).fetchone()[0] == 0
+        assert router._connection.execute(
+            "SELECT COUNT(*) FROM topic_bindings WHERE profile=?", ("default",)
+        ).fetchone()[0] == 0
+
+
+def test_existing_null_workdir_is_repaired_idempotently(tmp_path: Path):
+    workspace_root = tmp_path / "projects"
+    existing = workspace_root / "Concursa_ai"
+    existing.mkdir(parents=True)
+    calls = []
+
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        router.upsert_project("concursa-ai", "concursa-ai", "concursa-ai", None)
+        router.bind_topic("telegram", "chat", "41", "concursa-ai")
+        router.set_acl("chat", "alice", "allow")
+        context = router.resolve("telegram", "chat", "41", "alice")
+        repaired = router.ensure_bound_workspace(
+            context,
+            workspace_root,
+            display_name="Concursa AI",
+            board_creator=lambda slug, **kwargs: calls.append((slug, kwargs)),
+        )
+        retried = router.ensure_bound_workspace(
+            repaired,
+            workspace_root,
+            display_name="Concursa AI",
+            board_creator=lambda *args, **kwargs: pytest.fail(
+                "a repaired workspace must be an idempotent no-op"
+            ),
+        )
+
+    assert repaired == retried
+    assert repaired.workdir == existing.resolve()
+    assert calls == [
+        (
+            "concursa-ai",
+            {"name": "Concursa AI", "default_workdir": str(existing.resolve())},
+        )
+    ]
 
 
 def test_find_telegram_binding_is_profile_and_chat_scoped(tmp_path: Path):

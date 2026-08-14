@@ -22020,6 +22020,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             candidate = profile_home / candidate
         return candidate.expanduser().resolve(strict=False)
 
+    def _project_router_workspace_root(self, source: SessionSource) -> Optional[Path]:
+        """Resolve the configured project workspace root for the effective profile."""
+        router_config = getattr(getattr(self, "config", None), "project_router", None)
+        configured = getattr(router_config, "workspace_root", None)
+        if configured is None or not str(configured).strip():
+            return None
+        candidate = Path(configured)
+        if not candidate.is_absolute():
+            candidate = Path(self._resolve_profile_home_for_source(source)) / candidate
+        return candidate.expanduser().resolve(strict=False)
+
     def _resolve_project_context_for_message(
         self,
         event: Any,
@@ -22041,6 +22052,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         chat_id = str(getattr(source, "chat_id", None) or "").strip()
         raw_managed = getattr(router_config, "managed_chat_ids", [])
         try:
+            event_metadata = getattr(event, "metadata", None) or {}
+            metadata_sender_user_id = (
+                event_metadata.get("telegram_sender_user_id")
+                if isinstance(event_metadata, dict)
+                else None
+            )
+            if not isinstance(metadata_sender_user_id, (str, int)) or isinstance(
+                metadata_sender_user_id, bool
+            ):
+                metadata_sender_user_id = None
+            sender_user_id = str(
+                getattr(source, "user_id", None) or metadata_sender_user_id or ""
+            ).strip()
             if not isinstance(raw_managed, list):
                 raise TypeError("managed_chat_ids must be a list")
             managed_chat_ids = set()
@@ -22053,13 +22077,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 managed_chat_ids.add(normalized)
             profile = self._effective_project_router_profile(source)
             db_path = self._project_router_db_path(source)
+            workspace_root = self._project_router_workspace_root(source)
             with ProjectRouter(db_path, profile) as router:
+                board_prepared = False
                 try:
                     project_context = router.resolve(
                         Platform.TELEGRAM.value,
                         chat_id,
                         thread_id,
-                        str(getattr(source, "user_id", None) or ""),
+                        sender_user_id,
                     )
                 except UnknownBindingError:
                     topic_name = str(getattr(source, "chat_topic", None) or "").strip()
@@ -22096,7 +22122,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             chat_id,
                             thread_id,
                             project_slug,
-                            str(getattr(source, "user_id", None) or ""),
+                            sender_user_id,
                             is_management=is_management,
                         )
                         if not project_context.is_management:
@@ -22109,7 +22135,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if is_management
                         else topic_slug
                     )
-                    router.provision_topic_project(
+                    provisioned = router.provision_topic_project(
                         topic_name,
                         topic_name,
                         Platform.TELEGRAM.value,
@@ -22117,15 +22143,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         thread_id,
                         slug=project_slug,
                         board_slug=project_slug,
+                        workspace_root=workspace_root,
                         is_management=is_management,
+                        sender_user_id=sender_user_id,
                     )
+                    board_prepared = not provisioned.is_management
                     project_context = router.resolve(
                         Platform.TELEGRAM.value,
                         chat_id,
                         thread_id,
-                        str(getattr(source, "user_id", None) or ""),
+                        sender_user_id,
                     )
-                if not project_context.is_management:
+                if (
+                    not project_context.is_management
+                    and project_context.workdir is None
+                    and workspace_root is not None
+                ):
+                    project_context = router.ensure_bound_workspace(
+                        project_context,
+                        workspace_root,
+                        display_name=(
+                            str(getattr(source, "chat_topic", None) or "").strip()
+                            or project_context.slug
+                        ),
+                    )
+                    board_prepared = True
+                if not project_context.is_management and not board_prepared:
                     router.ensure_bound_board(project_context)
             return project_context, None
         except UnknownBindingError:
