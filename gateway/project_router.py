@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -119,6 +120,40 @@ def _slug(value: object, name: str) -> str:
 def _workdir(value: Path | str) -> str:
     raw = _required(value, "workdir")
     return str(Path(raw).expanduser().resolve(strict=False))
+
+
+def _resolve_or_create_workspace(root: Path | str, slug: str) -> tuple[Path, bool]:
+    """Resolve one direct normalized child or create ``root/slug`` deterministically."""
+    workspace_root = Path(_workdir(root))
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    if not workspace_root.is_dir():
+        raise BindingConflictError("workspace_root is not a directory")
+
+    matches: list[Path] = []
+    for child in workspace_root.iterdir():
+        try:
+            same_slug = normalize_project_slug(child.name) == slug
+        except ValueError:
+            same_slug = False
+        if not same_slug:
+            continue
+        if child.is_symlink() or not child.is_dir():
+            raise BindingConflictError("workspace candidate is not a safe directory")
+        matches.append(child.resolve())
+
+    if len(matches) > 1:
+        raise BindingConflictError("multiple workspace directories match the project slug")
+    if matches:
+        return matches[0], False
+
+    target = workspace_root / slug
+    try:
+        target.mkdir()
+        return target.resolve(), True
+    except FileExistsError:
+        if target.is_symlink() or not target.is_dir():
+            raise BindingConflictError("canonical workspace path is not a safe directory")
+        return target.resolve(), False
 
 
 class ProjectRouter:
@@ -311,93 +346,303 @@ class ProjectRouter:
         slug: object | None = None,
         board_slug: object | None = None,
         workdir: Path | str | None = None,
+        workspace_root: Path | str | None = None,
         status: object = "active",
         is_management: bool = False,
+        sender_user_id: object | None = None,
         allowed_users: Mapping[object, object] | None = None,
         board_creator: Callable[..., object] | None = None,
     ) -> ProvisionedProject:
-        """Idempotently provision project identity, binding, ACL, and ordinary board."""
+        """Atomically provision a dynamic Topic project after fail-closed ACL validation.
+
+        ``sender_user_id`` is required for runtime-created projects. Bootstrap callers may
+        omit it while atomically seeding ``allowed_users``. Project identity and Topic
+        binding commit together; board creation is idempotent and happens after that
+        authoritative transaction so a later request can repair a missing board.
+        """
         display_name = _required(project_name, "project_name")
         _required(topic_name, "topic_name")
-        resolved_slug = _slug(
+        base_slug = _slug(
             slug if slug is not None else normalize_project_slug(display_name),
             "slug",
         )
-        resolved_board = _slug(board_slug if board_slug is not None else resolved_slug, "board_slug")
+        requested_board = _slug(
+            board_slug if board_slug is not None else base_slug,
+            "board_slug",
+        )
         platform_s = _id(platform, "platform")
         chat_s = _id(chat_id, "chat_id")
         thread_s = _id(thread_id, "thread_id")
-        canonical_workdir = (
-            Path(_workdir(workdir)) if workdir is not None and str(workdir).strip() else None
+        sender_s = (
+            _id(sender_user_id, "sender_user_id")
+            if sender_user_id is not None
+            else None
         )
+        canonical_workdir = (
+            Path(_workdir(workdir))
+            if workdir is not None and str(workdir).strip()
+            else None
+        )
+        canonical_workspace_root = (
+            Path(_workdir(workspace_root))
+            if workspace_root is not None and str(workspace_root).strip()
+            else None
+        )
+        status_s = _required(status, "status")
+        key = (self.profile, platform_s, chat_s, thread_s)
+        created_workspace: Path | None = None
 
-        with self._lock:
-            existing_binding = self._connection.execute(
+        creator = board_creator
+        if creator is None and not is_management:
+            from hermes_cli.kanban_db import create_board
+
+            creator = create_board
+
+        def as_result(row: sqlite3.Row) -> ProvisionedProject:
+            return ProvisionedProject(
+                project_id=row["project_id"],
+                slug=row["slug"],
+                board_slug=row["board_slug"],
+                workdir=Path(row["workdir"]) if row["workdir"] else None,
+                platform=platform_s,
+                chat_id=chat_s,
+                thread_id=thread_s,
+                is_management=bool(row["is_management"]),
+            )
+
+        def operation(connection: sqlite3.Connection) -> ProvisionedProject:
+            nonlocal created_workspace
+            for user_id, effect in (allowed_users or {}).items():
+                normalized_effect = _required(effect, "effect").lower()
+                if normalized_effect not in {"allow", "deny"}:
+                    raise ValueError("effect must be 'allow' or 'deny'")
+                connection.execute(
+                    """INSERT INTO acl_entries(profile, chat_id, user_id, effect)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(profile, chat_id, user_id)
+                       DO UPDATE SET effect=excluded.effect""",
+                    (self.profile, chat_s, _id(user_id, "user_id"), normalized_effect),
+                )
+
+            if sender_s is not None:
+                acl = connection.execute(
+                    """SELECT effect FROM acl_entries
+                       WHERE profile=? AND chat_id=? AND user_id=?""",
+                    (self.profile, chat_s, sender_s),
+                ).fetchone()
+                if acl is None:
+                    raise UnknownUserError("sender has no ACL entry")
+                if acl["effect"] == "deny":
+                    raise AccessDeniedError("sender is denied by ACL")
+
+            existing = connection.execute(
                 """SELECT p.project_id, p.slug, p.board_slug, p.workdir,
                           b.is_management
                    FROM topic_bindings AS b
                    JOIN projects AS p
                      ON p.profile=b.profile AND p.project_id=b.project_id
                    WHERE b.profile=? AND b.platform=? AND b.chat_id=? AND b.thread_id=?""",
-                (self.profile, platform_s, chat_s, thread_s),
+                key,
             ).fetchone()
-        if existing_binding is not None and existing_binding["project_id"] != resolved_slug:
-            for user_id, effect in (allowed_users or {}).items():
-                self.set_acl(chat_s, user_id, str(effect))
-            return ProvisionedProject(
-                project_id=existing_binding["project_id"],
-                slug=existing_binding["slug"],
-                board_slug=existing_binding["board_slug"],
-                workdir=(
-                    Path(existing_binding["workdir"])
-                    if existing_binding["workdir"]
-                    else None
+            if existing is not None:
+                result = as_result(existing)
+                if (
+                    result.workdir is None
+                    and not result.is_management
+                    and canonical_workspace_root is not None
+                ):
+                    resolved_workdir, was_created = _resolve_or_create_workspace(
+                        canonical_workspace_root, result.slug
+                    )
+                    if was_created:
+                        created_workspace = resolved_workdir
+                    connection.execute(
+                        """UPDATE projects SET workdir=?
+                           WHERE profile=? AND project_id=? AND workdir IS NULL""",
+                        (str(resolved_workdir), self.profile, result.project_id),
+                    )
+                    result = replace(result, workdir=resolved_workdir)
+                    assert creator is not None
+                    creator(
+                        result.board_slug,
+                        name=display_name,
+                        default_workdir=str(resolved_workdir),
+                    )
+                return result
+
+            resolved_slug = base_slug
+            resolved_board = requested_board
+            resolved_project_id = resolved_slug
+            project = connection.execute(
+                """SELECT project_id, slug, board_slug, workdir, status
+                   FROM projects WHERE profile=? AND slug=?""",
+                (self.profile, resolved_slug),
+            ).fetchone()
+            if project is not None:
+                bound_elsewhere = connection.execute(
+                    """SELECT 1 FROM topic_bindings
+                       WHERE profile=? AND project_id=? LIMIT 1""",
+                    (self.profile, project["project_id"]),
+                ).fetchone()
+                if bound_elsewhere is None:
+                    resolved_project_id = project["project_id"]
+                    resolved_slug = project["slug"]
+                    resolved_board = project["board_slug"]
+                    canonical_project_workdir = (
+                        Path(project["workdir"]) if project["workdir"] else None
+                    )
+                else:
+                    suffix = hashlib.sha256(
+                        f"{platform_s}:{chat_s}:{thread_s}".encode("utf-8")
+                    ).hexdigest()[:10]
+                    resolved_slug = _slug(
+                        f"{base_slug[:53].rstrip('-')}-{suffix}", "slug"
+                    )
+                    resolved_board = resolved_slug
+                    resolved_project_id = resolved_slug
+                    collision = connection.execute(
+                        """SELECT project_id FROM projects
+                           WHERE profile=? AND slug=?""",
+                        (self.profile, resolved_slug),
+                    ).fetchone()
+                    if collision is not None:
+                        raise BindingConflictError(
+                            "stable Topic slug is already owned by another project"
+                        )
+                    canonical_project_workdir = canonical_workdir
+            else:
+                canonical_project_workdir = canonical_workdir
+
+            if (
+                canonical_project_workdir is None
+                and not is_management
+                and canonical_workspace_root is not None
+            ):
+                canonical_project_workdir, was_created = _resolve_or_create_workspace(
+                    canonical_workspace_root, resolved_slug
+                )
+                if was_created:
+                    created_workspace = canonical_project_workdir
+
+            connection.execute(
+                """INSERT INTO projects(
+                       profile, project_id, slug, board_slug, workdir, status
+                   ) VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(profile, project_id) DO NOTHING""",
+                (
+                    self.profile,
+                    resolved_project_id,
+                    resolved_slug,
+                    resolved_board,
+                    str(canonical_project_workdir)
+                    if canonical_project_workdir is not None
+                    else None,
+                    status_s,
                 ),
-                platform=platform_s,
-                chat_id=chat_s,
-                thread_id=thread_s,
-                is_management=bool(existing_binding["is_management"]),
             )
+            connection.execute(
+                """INSERT INTO topic_bindings(
+                       profile, platform, chat_id, thread_id, project_id, is_management
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (*key, resolved_project_id, int(is_management)),
+            )
+            created = connection.execute(
+                """SELECT p.project_id, p.slug, p.board_slug, p.workdir,
+                          b.is_management
+                   FROM topic_bindings AS b
+                   JOIN projects AS p
+                     ON p.profile=b.profile AND p.project_id=b.project_id
+                   WHERE b.profile=? AND b.platform=? AND b.chat_id=? AND b.thread_id=?""",
+                key,
+            ).fetchone()
+            provisioned = as_result(created)
+            if not provisioned.is_management:
+                assert creator is not None
+                creator(
+                    provisioned.board_slug,
+                    name=display_name,
+                    default_workdir=(
+                        str(provisioned.workdir) if provisioned.workdir else None
+                    ),
+                )
+            return provisioned
 
-        if existing_binding is None and not is_management:
-            creator = board_creator
-            if creator is None:
-                from hermes_cli.kanban_db import create_board
+        try:
+            return self._transaction(operation)
+        except BaseException:
+            if created_workspace is not None:
+                try:
+                    created_workspace.rmdir()
+                except OSError:
+                    pass
+            raise
 
-                creator = create_board
+    def ensure_bound_workspace(
+        self,
+        project_context: ProjectContext,
+        workspace_root: Path | str,
+        *,
+        display_name: str | None = None,
+        board_creator: Callable[..., object] | None = None,
+    ) -> ProjectContext:
+        """Repair a bound project's missing workdir without user intervention."""
+        if project_context.is_management or project_context.workdir is not None:
+            return project_context
+
+        creator = board_creator
+        if creator is None:
+            from hermes_cli.kanban_db import create_board
+
+            creator = create_board
+        created_workspace: Path | None = None
+
+        def operation(connection: sqlite3.Connection) -> ProjectContext:
+            nonlocal created_workspace
+            row = connection.execute(
+                """SELECT p.workdir FROM topic_bindings AS b
+                   JOIN projects AS p
+                     ON p.profile=b.profile AND p.project_id=b.project_id
+                   WHERE b.profile=? AND b.platform=? AND b.chat_id=?
+                     AND b.thread_id=? AND b.project_id=?""",
+                (
+                    self.profile,
+                    project_context.platform,
+                    project_context.chat_id,
+                    project_context.thread_id,
+                    project_context.project_id,
+                ),
+            ).fetchone()
+            if row is None:
+                raise UnknownBindingError("project binding no longer exists")
+            if row["workdir"]:
+                return replace(project_context, workdir=Path(row["workdir"]))
+
+            resolved_workdir, was_created = _resolve_or_create_workspace(
+                workspace_root, project_context.slug
+            )
+            if was_created:
+                created_workspace = resolved_workdir
+            connection.execute(
+                """UPDATE projects SET workdir=?
+                   WHERE profile=? AND project_id=? AND workdir IS NULL""",
+                (str(resolved_workdir), self.profile, project_context.project_id),
+            )
             creator(
-                resolved_board,
-                name=display_name,
-                default_workdir=str(canonical_workdir) if canonical_workdir else None,
+                project_context.board_slug,
+                name=display_name or project_context.slug,
+                default_workdir=str(resolved_workdir),
             )
+            return replace(project_context, workdir=resolved_workdir)
 
-        self.upsert_project(
-            resolved_slug,
-            resolved_slug,
-            resolved_board,
-            canonical_workdir,
-            status,
-        )
-        self.bind_topic(
-            platform_s,
-            chat_s,
-            thread_s,
-            resolved_slug,
-            is_management=is_management,
-        )
-        for user_id, effect in (allowed_users or {}).items():
-            self.set_acl(chat_s, user_id, str(effect))
-        return ProvisionedProject(
-            project_id=resolved_slug,
-            slug=resolved_slug,
-            board_slug=resolved_board,
-            workdir=canonical_workdir,
-            platform=platform_s,
-            chat_id=chat_s,
-            thread_id=thread_s,
-            is_management=bool(is_management),
-        )
-
+        try:
+            return self._transaction(operation)
+        except BaseException:
+            if created_workspace is not None:
+                try:
+                    created_workspace.rmdir()
+                except OSError:
+                    pass
+            raise
     def ensure_bound_board(
         self,
         project_context: ProjectContext,
