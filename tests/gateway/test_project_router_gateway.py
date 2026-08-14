@@ -127,6 +127,43 @@ def test_bound_allowed_topic_resolves_and_closes_router(monkeypatch, tmp_path):
     ]
 
 
+def test_shared_group_source_uses_verified_telegram_sender_for_project_acl(
+    monkeypatch, tmp_path
+):
+    expected = _project()
+    calls = []
+
+    class FakeRouter:
+        def __init__(self, db_path, profile):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def resolve(self, platform, chat_id, thread_id, sender_user_id):
+            calls.append(sender_user_id)
+            return expected
+
+        def ensure_bound_board(self, context):
+            pass
+
+    runner = _runner(ProjectRouterConfig(enabled=True))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+    monkeypatch.setattr(gateway_run, "ProjectRouter", FakeRouter)
+
+    context, denial = runner._resolve_project_context_for_message(
+        _event(metadata={"telegram_sender_user_id": "9"}),
+        _source(user_id=None),
+    )
+
+    assert denial is None
+    assert context == expected
+    assert calls == ["9"]
+
+
 @pytest.mark.parametrize("error", [UnknownUserError("unknown"), AccessDeniedError("denied")])
 def test_bound_unknown_or_denied_user_returns_short_denial(monkeypatch, error):
     class FakeRouter:
@@ -217,6 +254,11 @@ def test_effective_profile_and_db_paths_are_profile_scoped(tmp_path):
     runner.config.project_router.db_path = Path("state/router.db")
     assert runner._project_router_db_path(explicit) == (
         tmp_path / "explicit" / "state/router.db"
+    ).resolve()
+
+    runner.config.project_router.workspace_root = Path("projects")
+    assert runner._project_router_workspace_root(explicit) == (
+        tmp_path / "explicit" / "projects"
     ).resolve()
 
     absolute = (tmp_path / "absolute.db").resolve()
@@ -407,6 +449,75 @@ def test_managed_named_topic_auto_registers_then_enforces_acl(monkeypatch, tmp_p
     assert created_boards == {"mulher-segura"}
     assert denied is None
     assert denied_text == "You do not have access to the project bound to this Telegram topic."
+    with ProjectRouter(db_path, "default") as router:
+        assert router._connection.execute(
+            "SELECT COUNT(*) FROM projects WHERE profile=?", ("default",)
+        ).fetchone()[0] == 1
+        assert router._connection.execute(
+            "SELECT COUNT(*) FROM topic_bindings WHERE profile=?", ("default",)
+        ).fetchone()[0] == 1
+
+
+def test_managed_named_topic_auto_registers_from_shared_group_source(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "hermes_cli.kanban_db.create_board",
+        lambda slug, **kwargs: {"slug": slug, **kwargs},
+    )
+    runner = _runner(ProjectRouterConfig(
+        enabled=True,
+        managed_chat_ids=["-1001"],
+        auto_register_topics=True,
+    ))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+    with ProjectRouter(tmp_path / "project_router.db", "default") as router:
+        router.set_acl("-1001", "9", "allow")
+
+    context, denial = runner._resolve_project_context_for_message(
+        _event(metadata={"telegram_sender_user_id": "9"}),
+        _source(user_id=None, chat_topic="Shared Topic"),
+    )
+
+    assert denial is None
+    assert context.slug == "shared-topic"
+    assert context.sender_user_id == "9"
+
+
+def test_existing_bound_topic_repairs_null_workspace_before_context_return(
+    monkeypatch, tmp_path,
+):
+    workspace_root = tmp_path / "projects"
+    existing = workspace_root / "Concursa_ai"
+    existing.mkdir(parents=True)
+    board_calls = []
+    monkeypatch.setattr(
+        "hermes_cli.kanban_db.create_board",
+        lambda slug, **kwargs: board_calls.append((slug, kwargs)),
+    )
+    runner = _runner(ProjectRouterConfig(
+        enabled=True,
+        managed_chat_ids=["-1001"],
+        auto_register_topics=True,
+        workspace_root=workspace_root,
+    ))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+    db_path = tmp_path / "project_router.db"
+    with ProjectRouter(db_path, "default") as router:
+        router.upsert_project("concursa-ai", "concursa-ai", "concursa-ai", None)
+        router.bind_topic("telegram", "-1001", "41", "concursa-ai")
+        router.set_acl("-1001", "9", "allow")
+
+    context, denial = runner._resolve_project_context_for_message(
+        _event(), _source(thread_id="41", chat_topic="Concursa AI")
+    )
+
+    assert denial is None
+    assert context.workdir == existing.resolve()
+    assert board_calls == [
+        (
+            "concursa-ai",
+            {"name": "Concursa AI", "default_workdir": str(existing.resolve())},
+        )
+    ]
 
 
 def test_legacy_unnamed_topic_binds_from_authorized_bot_mention(tmp_path):

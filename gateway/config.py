@@ -848,6 +848,7 @@ class ProjectRouterConfig:
     managed_chat_ids: List[str] = field(default_factory=list)
     auto_register_topics: bool = False
     management_topic_names: List[str] = field(default_factory=lambda: ["🧭 Gestão"])
+    workspace_root: Optional[Path] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -856,6 +857,9 @@ class ProjectRouterConfig:
             "managed_chat_ids": list(self.managed_chat_ids),
             "auto_register_topics": self.auto_register_topics,
             "management_topic_names": list(self.management_topic_names),
+            "workspace_root": (
+                str(self.workspace_root) if self.workspace_root is not None else None
+            ),
         }
 
     @classmethod
@@ -869,6 +873,17 @@ class ProjectRouterConfig:
         elif isinstance(raw_db_path, (str, os.PathLike)):
             try:
                 db_path = Path(raw_db_path)
+            except (TypeError, ValueError, OSError):
+                return cls()
+        else:
+            return cls()
+
+        raw_workspace_root = data.get("workspace_root")
+        if raw_workspace_root is None:
+            workspace_root = None
+        elif isinstance(raw_workspace_root, (str, os.PathLike)):
+            try:
+                workspace_root = Path(raw_workspace_root)
             except (TypeError, ValueError, OSError):
                 return cls()
         else:
@@ -904,6 +919,7 @@ class ProjectRouterConfig:
             managed_chat_ids=managed_chat_ids,
             auto_register_topics=_coerce_bool(data.get("auto_register_topics"), False),
             management_topic_names=management_topic_names,
+            workspace_root=workspace_root,
         )
 
 
