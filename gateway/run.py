@@ -1283,10 +1283,17 @@ def _project_context_prompt_block(project_context: Any) -> str:
     routing_instruction = (
         "This is the team control plane; it has no authoritative project board or canonical workdir.\n"
         "Do not route ordinary Kanban operations to a management board.\n"
+        "For catalog or count questions, use only projects registered in this profile and managed team.\n"
+        "Do not enumerate, confirm, search for, or comment on other teams, profiles, or their projects "
+        "unless the current user message explicitly requests that cross-team information.\n"
         if is_management
         else (
             "Use the existing Kanban tools naturally. When a board is omitted, "
             "it resolves to authoritative_board. Do not switch to or target another board.\n"
+            "This Topic is scoped only to the bound project above. Do not enumerate, confirm, search for, "
+            "or comment on other projects, teams, or profiles unless the current user message explicitly "
+            "requests that cross-project information. Do not use global project directories, broad filesystem "
+            "discovery, or cross-topic session history to expand the answer beyond this bound project.\n"
         )
     )
     return (
