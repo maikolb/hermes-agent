@@ -240,6 +240,9 @@ def test_project_context_block_is_deterministic_and_inert(tmp_path):
     assert "inert metadata" in first
     assert "board is omitted" in first
     assert "Do not switch" in first
+    assert "Do not enumerate, confirm, search for, or comment on other projects" in first
+    assert "global project directories" in first
+    assert "cross-topic session history" in first
 
 
 def test_management_project_context_block_describes_control_plane_without_board():
@@ -250,6 +253,8 @@ def test_management_project_context_block_describes_control_plane_without_board(
     assert "team control plane" in prompt
     assert "no authoritative project board or canonical workdir" in prompt
     assert "Do not route ordinary Kanban operations to a management board" in prompt
+    assert "only projects registered in this profile and managed team" in prompt
+    assert "Do not enumerate, confirm, search for, or comment on other teams" in prompt
     assert "When a board is omitted" not in prompt
 
 
