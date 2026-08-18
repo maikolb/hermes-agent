@@ -805,6 +805,27 @@ def create_board(
     return meta
 
 
+def set_board_archived(slug: str, archived: bool) -> dict:
+    """Hide or reactivate an existing board without moving any board data.
+
+    This is the reversible lifecycle primitive for project-bound boards.
+    Unlike :func:`remove_board`, it keeps the directory, database, logs,
+    attachments, and workspaces at their canonical paths. Active board
+    discovery excludes metadata-archived boards.
+    """
+    _assert_not_delegated_child_mutation()
+    normed = _normalize_board_slug(slug)
+    if not normed:
+        raise ValueError("board slug is required")
+    if normed == DEFAULT_BOARD:
+        raise ValueError("the 'default' board cannot be archived")
+    if not board_exists(normed):
+        raise ValueError(f"board {normed!r} does not exist")
+    if bool(archived) and get_current_board() == normed:
+        clear_current_board()
+    return write_board_metadata(normed, archived=bool(archived))
+
+
 def list_boards(*, include_archived: bool = True) -> list[dict]:
     """Enumerate all boards that exist on disk.
 
