@@ -207,6 +207,7 @@ class ProjectRouter:
             thread_id TEXT NOT NULL,
             project_id TEXT NOT NULL,
             is_management INTEGER NOT NULL DEFAULT 0 CHECK (is_management IN (0, 1)),
+            is_closed INTEGER NOT NULL DEFAULT 0 CHECK (is_closed IN (0, 1)),
             PRIMARY KEY (profile, platform, chat_id, thread_id),
             FOREIGN KEY (profile, project_id)
                 REFERENCES projects(profile, project_id) ON DELETE CASCADE
@@ -252,6 +253,18 @@ class ProjectRouter:
                 )
                 if workdir_column is not None and bool(workdir_column["notnull"]):
                     self._rebuild_projects_for_nullable_workdir()
+                binding_columns = {
+                    row["name"]
+                    for row in self._connection.execute(
+                        "PRAGMA table_info(topic_bindings)"
+                    )
+                }
+                if "is_closed" not in binding_columns:
+                    self._connection.execute(
+                        """ALTER TABLE topic_bindings
+                           ADD COLUMN is_closed INTEGER NOT NULL DEFAULT 0
+                           CHECK (is_closed IN (0, 1))"""
+                    )
             except BaseException:
                 if self._connection.in_transaction:
                     self._connection.execute("ROLLBACK")
@@ -690,11 +703,13 @@ class ProjectRouter:
             connection.execute(
                 """
                 INSERT INTO topic_bindings(
-                    profile, platform, chat_id, thread_id, project_id, is_management
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    profile, platform, chat_id, thread_id, project_id,
+                    is_management, is_closed
+                ) VALUES (?, ?, ?, ?, ?, ?, 0)
                 ON CONFLICT(profile, platform, chat_id, thread_id) DO UPDATE SET
                     project_id=excluded.project_id,
-                    is_management=excluded.is_management
+                    is_management=excluded.is_management,
+                    is_closed=0
                 """,
                 (*key, target, int(is_management)),
             )
@@ -748,17 +763,136 @@ class ProjectRouter:
             connection.execute(
                 """
                 INSERT INTO topic_bindings(
-                    profile, platform, chat_id, thread_id, project_id, is_management
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    profile, platform, chat_id, thread_id, project_id,
+                    is_management, is_closed
+                ) VALUES (?, ?, ?, ?, ?, ?, 0)
                 ON CONFLICT(profile, platform, chat_id, thread_id) DO UPDATE SET
                     project_id=excluded.project_id,
-                    is_management=excluded.is_management
+                    is_management=excluded.is_management,
+                    is_closed=0
                 """,
                 (*key, project["project_id"], int(is_management)),
             )
 
         self._transaction(operation)
         return self.resolve(platform_s, chat_s, thread_s, user_s)
+
+    def transition_topic_project(
+        self,
+        platform: object,
+        chat_id: object,
+        thread_id: object,
+        sender_user_id: object,
+        *,
+        closed: bool,
+        allow_implicit_member: bool = False,
+        verified_sender_user_id: object | None = None,
+        board_state_writer: Callable[..., object] | None = None,
+    ) -> ProjectContext:
+        """Close or reopen one bound Topic and reconcile its project board.
+
+        A board is archived only after every binding for its project is closed
+        and no other active project in this profile still references it.
+        Repeating either transition is safe: the binding, project status, and
+        board metadata converge on the same state without creating a new board.
+        """
+        platform_s = _id(platform, "platform")
+        chat_s = _id(chat_id, "chat_id")
+        thread_s = _id(thread_id, "thread_id")
+        user_s = _id(sender_user_id, "sender_user_id")
+        writer = board_state_writer
+        if writer is None:
+            from hermes_cli.kanban_db import set_board_archived
+
+            writer = set_board_archived
+
+        def operation(connection: sqlite3.Connection) -> ProjectContext:
+            row = connection.execute(
+                """
+                SELECT p.project_id, p.slug, p.board_slug, p.workdir, p.status,
+                       b.is_management, b.is_closed
+                FROM topic_bindings AS b
+                JOIN projects AS p
+                  ON p.profile=b.profile AND p.project_id=b.project_id
+                WHERE b.profile=? AND b.platform=? AND b.chat_id=? AND b.thread_id=?
+                """,
+                (self.profile, platform_s, chat_s, thread_s),
+            ).fetchone()
+            if row is None:
+                raise UnknownBindingError("no project binding exists for this topic")
+            acl = connection.execute(
+                """SELECT effect FROM acl_entries
+                   WHERE profile=? AND chat_id=? AND user_id=?""",
+                (self.profile, chat_s, user_s),
+            ).fetchone()
+            if acl is not None and acl["effect"] == "deny":
+                raise AccessDeniedError("sender is denied by ACL")
+            if acl is not None and acl["effect"] == "allow":
+                access = "allow"
+            else:
+                verified_s = (
+                    _id(verified_sender_user_id, "verified_sender_user_id")
+                    if verified_sender_user_id is not None
+                    else None
+                )
+                if not allow_implicit_member or verified_s != user_s:
+                    raise UnknownUserError("sender has no ACL entry")
+                access = "member"
+
+            connection.execute(
+                """UPDATE topic_bindings SET is_closed=?
+                   WHERE profile=? AND platform=? AND chat_id=? AND thread_id=?""",
+                (int(bool(closed)), self.profile, platform_s, chat_s, thread_s),
+            )
+            status = row["status"]
+            if not bool(row["is_management"]):
+                if closed:
+                    open_binding = connection.execute(
+                        """SELECT 1 FROM topic_bindings
+                           WHERE profile=? AND project_id=? AND is_closed=0
+                           LIMIT 1""",
+                        (self.profile, row["project_id"]),
+                    ).fetchone()
+                    if open_binding is None:
+                        other_active_project = connection.execute(
+                            """SELECT 1 FROM projects
+                               WHERE profile=? AND board_slug=? AND project_id<>?
+                                 AND status='active'
+                               LIMIT 1""",
+                            (self.profile, row["board_slug"], row["project_id"]),
+                        ).fetchone()
+                        if other_active_project is None:
+                            writer(row["board_slug"], archived=True)
+                        connection.execute(
+                            """UPDATE projects SET status='archived'
+                               WHERE profile=? AND project_id=?""",
+                            (self.profile, row["project_id"]),
+                        )
+                        status = "archived"
+                else:
+                    writer(row["board_slug"], archived=False)
+                    connection.execute(
+                        """UPDATE projects SET status='active'
+                           WHERE profile=? AND project_id=?""",
+                        (self.profile, row["project_id"]),
+                    )
+                    status = "active"
+
+            return ProjectContext(
+                project_id=row["project_id"],
+                slug=row["slug"],
+                board_slug=row["board_slug"],
+                workdir=Path(row["workdir"]) if row["workdir"] else None,
+                status=status,
+                platform=platform_s,
+                chat_id=chat_s,
+                thread_id=thread_s,
+                sender_user_id=user_s,
+                is_management=bool(row["is_management"]),
+                access=access,
+            )
+
+        return self._transaction(operation)
 
     def set_acl(self, chat_id: object, user_id: object, effect: str) -> None:
         normalized_effect = _required(effect, "effect").lower()

@@ -225,6 +225,44 @@ class TestBoardCRUD:
         slugs = [b["slug"] for b in kb.list_boards()]
         assert slugs == ["default", "bar"]
 
+    def test_archive_flag_hides_and_reopens_same_board_without_touching_data(
+        self, fresh_home
+    ):
+        kb.create_board("lifecycle")
+        kb.set_current_board("lifecycle")
+        with kb.connect(board="lifecycle") as conn:
+            task = kb.create_task(conn, title="preserve me", assignee="worker")
+        db_path = kb.kanban_db_path("lifecycle")
+        before = db_path.read_bytes()
+
+        archived = kb.set_board_archived("lifecycle", True)
+
+        assert archived["archived"] is True
+        assert kb.get_current_board() == "default"
+        assert "lifecycle" not in {
+            board["slug"] for board in kb.list_boards(include_archived=False)
+        }
+        assert kb.read_board_metadata("lifecycle")["archived"] is True
+        assert db_path.read_bytes() == before
+        with kb.connect(board="lifecycle") as conn:
+            assert kb.get_task(conn, task).title == "preserve me"
+
+        reopened = kb.set_board_archived("lifecycle", False)
+
+        assert reopened["archived"] is False
+        assert "lifecycle" in {
+            board["slug"] for board in kb.list_boards(include_archived=False)
+        }
+        assert db_path.read_bytes() == before
+        with kb.connect(board="lifecycle") as conn:
+            assert kb.get_task(conn, task).title == "preserve me"
+
+    def test_archive_flag_rejects_default_or_missing_board(self, fresh_home):
+        with pytest.raises(ValueError, match="default"):
+            kb.set_board_archived("default", True)
+        with pytest.raises(ValueError, match="does not exist"):
+            kb.set_board_archived("missing", True)
+
     def test_create_writes_metadata(self, fresh_home):
         meta = kb.create_board(
             "baz",

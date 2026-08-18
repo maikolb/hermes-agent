@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import sqlite3
 from threading import Barrier
 
 import pytest
@@ -195,3 +196,205 @@ def test_profiles_are_isolated_in_one_database(tmp_path: Path) -> None:
         ).access == "allow"
         with pytest.raises(AccessDeniedError):
             second.resolve("telegram", "same-chat", "same-thread", "same-user")
+
+
+def test_topic_binding_migration_adds_closed_state_to_existing_database(tmp_path: Path):
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE projects (
+                profile TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                board_slug TEXT NOT NULL,
+                workdir TEXT,
+                status TEXT NOT NULL,
+                PRIMARY KEY (profile, project_id),
+                UNIQUE (profile, slug)
+            );
+            CREATE TABLE topic_bindings (
+                profile TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                is_management INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (profile, platform, chat_id, thread_id)
+            );
+            """
+        )
+
+    with ProjectRouter(db_path, "default") as router:
+        columns = {
+            row["name"]: row for row in router._connection.execute(
+                "PRAGMA table_info(topic_bindings)"
+            )
+        }
+
+    assert "is_closed" in columns
+    assert columns["is_closed"]["notnull"] == 1
+    assert str(columns["is_closed"]["dflt_value"]) == "0"
+
+
+def test_last_open_topic_archives_project_and_duplicate_close_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    board_states = []
+    writer = lambda slug, *, archived: board_states.append((slug, archived))
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        router.upsert_project("project-1", "alpha", "alpha-board", tmp_path / "alpha")
+        router.bind_topic("telegram", "chat", "thread", "project-1")
+        router.set_acl("chat", "user", "allow")
+
+        first = router.transition_topic_project(
+            "telegram", "chat", "thread", "user",
+            closed=True,
+            board_state_writer=writer,
+        )
+        duplicate = router.transition_topic_project(
+            "telegram", "chat", "thread", "user",
+            closed=True,
+            board_state_writer=writer,
+        )
+        binding = router._connection.execute(
+            "SELECT is_closed FROM topic_bindings WHERE profile='default'"
+        ).fetchone()
+
+    assert first.status == duplicate.status == "archived"
+    assert binding["is_closed"] == 1
+    assert board_states == [("alpha-board", True), ("alpha-board", True)]
+
+
+def test_reopening_topic_reactivates_same_project_and_board(tmp_path: Path) -> None:
+    board_states = []
+    writer = lambda slug, *, archived: board_states.append((slug, archived))
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        router.upsert_project("project-1", "alpha", "alpha-board", tmp_path / "alpha")
+        router.bind_topic("telegram", "chat", "thread", "project-1")
+        router.set_acl("chat", "user", "allow")
+        router.transition_topic_project(
+            "telegram", "chat", "thread", "user",
+            closed=True,
+            board_state_writer=writer,
+        )
+
+        reopened = router.transition_topic_project(
+            "telegram", "chat", "thread", "user",
+            closed=False,
+            board_state_writer=writer,
+        )
+        binding = router._connection.execute(
+            "SELECT is_closed FROM topic_bindings WHERE profile='default'"
+        ).fetchone()
+
+    assert reopened.status == "active"
+    assert reopened.project_id == "project-1"
+    assert reopened.board_slug == "alpha-board"
+    assert binding["is_closed"] == 0
+    assert board_states == [("alpha-board", True), ("alpha-board", False)]
+
+
+def test_board_archives_only_after_all_project_topics_are_closed(tmp_path: Path) -> None:
+    board_states = []
+    writer = lambda slug, *, archived: board_states.append((slug, archived))
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        router.upsert_project("project-1", "alpha", "alpha-board", tmp_path / "alpha")
+        router.bind_topic("telegram", "chat", "thread-1", "project-1")
+        router.bind_topic("telegram", "chat", "thread-2", "project-1")
+        router.set_acl("chat", "user", "allow")
+
+        first = router.transition_topic_project(
+            "telegram", "chat", "thread-1", "user",
+            closed=True,
+            board_state_writer=writer,
+        )
+        second = router.transition_topic_project(
+            "telegram", "chat", "thread-2", "user",
+            closed=True,
+            board_state_writer=writer,
+        )
+
+    assert first.status == "active"
+    assert second.status == "archived"
+    assert board_states == [("alpha-board", True)]
+
+
+def test_shared_board_stays_active_until_last_project_is_archived(tmp_path: Path) -> None:
+    board_states = []
+    writer = lambda slug, *, archived: board_states.append((slug, archived))
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        for project_id, thread_id in (("project-1", "thread-1"), ("project-2", "thread-2")):
+            router.upsert_project(
+                project_id, project_id, "shared-board", tmp_path / project_id
+            )
+            router.bind_topic("telegram", "chat", thread_id, project_id)
+        router.set_acl("chat", "user", "allow")
+
+        first = router.transition_topic_project(
+            "telegram", "chat", "thread-1", "user",
+            closed=True,
+            board_state_writer=writer,
+        )
+        second = router.transition_topic_project(
+            "telegram", "chat", "thread-2", "user",
+            closed=True,
+            board_state_writer=writer,
+        )
+
+    assert first.status == second.status == "archived"
+    assert board_states == [("shared-board", True)]
+
+
+def test_management_topic_never_archives_a_board(tmp_path: Path) -> None:
+    board_states = []
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        router.upsert_project(
+            "management", "management", "management", None, status="active"
+        )
+        router.bind_topic(
+            "telegram", "chat", "management-thread", "management",
+            is_management=True,
+        )
+        router.set_acl("chat", "admin", "allow")
+
+        result = router.transition_topic_project(
+            "telegram", "chat", "management-thread", "admin",
+            closed=True,
+            board_state_writer=lambda slug, *, archived: board_states.append(
+                (slug, archived)
+            ),
+        )
+        binding = router._connection.execute(
+            "SELECT is_closed FROM topic_bindings WHERE profile='default'"
+        ).fetchone()
+
+    assert result.status == "active"
+    assert binding["is_closed"] == 1
+    assert board_states == []
+
+
+def test_board_state_failure_rolls_back_topic_and_project_status(tmp_path: Path) -> None:
+    def fail_board_state(slug, *, archived):
+        raise OSError("board metadata unavailable")
+
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        router.upsert_project("project-1", "alpha", "alpha-board", tmp_path / "alpha")
+        router.bind_topic("telegram", "chat", "thread", "project-1")
+        router.set_acl("chat", "user", "allow")
+
+        with pytest.raises(OSError, match="metadata unavailable"):
+            router.transition_topic_project(
+                "telegram", "chat", "thread", "user",
+                closed=True,
+                board_state_writer=fail_board_state,
+            )
+        binding = router._connection.execute(
+            "SELECT is_closed FROM topic_bindings WHERE profile='default'"
+        ).fetchone()
+        project = router._connection.execute(
+            "SELECT status FROM projects WHERE profile='default'"
+        ).fetchone()
+
+    assert binding["is_closed"] == 0
+    assert project["status"] == "active"
