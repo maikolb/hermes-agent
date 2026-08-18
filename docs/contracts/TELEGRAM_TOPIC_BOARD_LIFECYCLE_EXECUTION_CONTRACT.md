@@ -52,4 +52,4 @@
 - Contract preflight: validated-local
 - Implementation: implemented
 - Validation: validated-local — 17/17 regressões novas; 134 testes afetados; 1 teste Vigília; `py_compile`; `git diff --check`; SQLite/router integrity `ok`; mesmo SHA-256 do board antes/depois.
-- Target readiness: validated-target — Hermes PF PID 29860 via Scheduled Task, Telegram `connected`, `is_closed` migrated, SQLite `ok` with 0 FK errors; Vigília PID 5356, `/api/kanban/boards` HTTP 200, both process trees with zero visible windows.
+- Target readiness: validated-target — Hermes PF PID 29860 via Scheduled Task, Telegram `connected`, `is_closed` migrated, SQLite `ok` with 0 FK errors; Vigília PID 33096 via native WMI→`pythonw`, `/api/kanban/boards` HTTP 200, both process trees with zero visible windows.
