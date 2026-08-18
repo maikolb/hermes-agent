@@ -16848,7 +16848,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         if project_route_denial is not None:
             return project_route_denial
-        if bool((getattr(event, "metadata", None) or {}).get("telegram_forum_topic_created")):
+        lifecycle_metadata = getattr(event, "metadata", None) or {}
+        if isinstance(lifecycle_metadata, dict) and any(
+            bool(lifecycle_metadata.get(key))
+            for key in (
+                "telegram_forum_topic_created",
+                "telegram_forum_topic_closed",
+                "telegram_forum_topic_reopened",
+            )
+        ):
             return None
 
         session_entry = await self.async_session_store.get_or_create_session(source)
@@ -22078,7 +22086,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             profile = self._effective_project_router_profile(source)
             db_path = self._project_router_db_path(source)
             workspace_root = self._project_router_workspace_root(source)
+            allow_implicit_member = bool(
+                getattr(router_config, "implicit_managed_chat_members", False)
+            ) and chat_id in managed_chat_ids
+            topic_closed = bool(
+                isinstance(event_metadata, dict)
+                and event_metadata.get("telegram_forum_topic_closed")
+            )
+            topic_reopened = bool(
+                isinstance(event_metadata, dict)
+                and event_metadata.get("telegram_forum_topic_reopened")
+            )
+            if topic_closed and topic_reopened:
+                raise ValueError("Telegram topic lifecycle event is ambiguous")
             with ProjectRouter(db_path, profile) as router:
+                if topic_closed or topic_reopened:
+                    project_context = router.transition_topic_project(
+                        Platform.TELEGRAM.value,
+                        chat_id,
+                        thread_id,
+                        sender_user_id,
+                        closed=topic_closed,
+                        allow_implicit_member=allow_implicit_member,
+                        verified_sender_user_id=sender_user_id or None,
+                    )
+                    logger.info(
+                        "Telegram project topic lifecycle: chat=%s thread=%s "
+                        "project=%s status=%s",
+                        chat_id,
+                        thread_id,
+                        project_context.project_id,
+                        project_context.status,
+                    )
+                    return project_context, None
                 board_prepared = False
                 try:
                     project_context = router.resolve(
@@ -22153,6 +22193,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         chat_id,
                         thread_id,
                         sender_user_id,
+                    )
+                if project_context.status == "archived":
+                    return (
+                        None,
+                        "This project is archived. Reopen its Telegram topic to reactivate "
+                        "the same project board.",
                     )
                 if (
                     not project_context.is_management

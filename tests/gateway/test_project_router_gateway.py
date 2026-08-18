@@ -396,7 +396,18 @@ async def test_denial_returns_before_session_creation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_topic_created_service_event_stops_before_session_creation(monkeypatch):
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"telegram_forum_topic_created": True},
+        {"telegram_forum_topic_closed": True},
+        {"telegram_forum_topic_reopened": True},
+    ],
+)
+async def test_topic_lifecycle_service_event_stops_before_session_creation(
+    monkeypatch,
+    metadata,
+):
     runner = _runner(ProjectRouterConfig(enabled=True))
     runner._recover_telegram_topic_thread_id = lambda source: None
     runner._resolve_project_context_for_message = lambda event, source: (_project(), None)
@@ -408,13 +419,117 @@ async def test_topic_created_service_event_stops_before_session_creation(monkeyp
     monkeypatch.setattr(GatewayRunner, "async_session_store", property(lambda self: Store()))
 
     result = await runner._handle_message_with_agent(
-        _event(metadata={"telegram_forum_topic_created": True}),
+        _event(metadata=metadata),
         _source(chat_topic="Alpha"),
         "key",
         1,
     )
 
     assert result is None
+
+
+def test_topic_close_and_reopen_transition_before_board_ensure(monkeypatch, tmp_path):
+    calls = []
+    expected = _project()
+
+    class FakeRouter:
+        def __init__(self, db_path, profile):
+            calls.append(("open", Path(db_path), profile))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            calls.append(("close",))
+
+        def transition_topic_project(
+            self,
+            platform,
+            chat_id,
+            thread_id,
+            sender_user_id,
+            *,
+            closed,
+            **kwargs,
+        ):
+            calls.append((
+                "transition",
+                platform,
+                chat_id,
+                thread_id,
+                sender_user_id,
+                closed,
+                kwargs,
+            ))
+            return expected
+
+        def resolve(self, *args, **kwargs):
+            raise AssertionError("lifecycle service events must not use ordinary resolution")
+
+        def ensure_bound_board(self, context):
+            raise AssertionError("lifecycle service events must not ensure/create a board")
+
+    runner = _runner(ProjectRouterConfig(enabled=True))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+    monkeypatch.setattr(gateway_run, "ProjectRouter", FakeRouter)
+
+    closed = runner._resolve_project_context_for_message(
+        _event(metadata={"telegram_forum_topic_closed": True}),
+        _source(),
+    )
+    reopened = runner._resolve_project_context_for_message(
+        _event(metadata={"telegram_forum_topic_reopened": True}),
+        _source(),
+    )
+
+    assert closed == (expected, None)
+    assert reopened == (expected, None)
+    transitions = [call for call in calls if call[0] == "transition"]
+    assert [(call[5], call[6]) for call in transitions] == [
+        (
+            True,
+            {
+                "allow_implicit_member": False,
+                "verified_sender_user_id": "9",
+            },
+        ),
+        (
+            False,
+            {
+                "allow_implicit_member": False,
+                "verified_sender_user_id": "9",
+            },
+        ),
+    ]
+
+
+def test_archived_project_message_does_not_recreate_board(monkeypatch, tmp_path):
+    archived = ProjectContext(**{**_project().__dict__, "status": "archived"})
+
+    class FakeRouter:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def resolve(self, *args, **kwargs):
+            return archived
+
+        def ensure_bound_board(self, context):
+            raise AssertionError("archived projects must not recreate boards")
+
+    runner = _runner(ProjectRouterConfig(enabled=True))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+    monkeypatch.setattr(gateway_run, "ProjectRouter", FakeRouter)
+
+    context, denial = runner._resolve_project_context_for_message(_event(), _source())
+
+    assert context is None
+    assert "archived" in denial.lower()
 
 
 def test_managed_named_topic_auto_registers_then_enforces_acl(monkeypatch, tmp_path):

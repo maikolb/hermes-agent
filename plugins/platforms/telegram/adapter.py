@@ -3952,6 +3952,20 @@ class TelegramAdapter(BasePlatformAdapter):
                     forum_topic_created_filter,
                     self._handle_forum_topic_created,
                 ))
+            for lifecycle_filter_name in (
+                "FORUM_TOPIC_CLOSED",
+                "FORUM_TOPIC_REOPENED",
+            ):
+                lifecycle_filter = getattr(
+                    getattr(filters, "StatusUpdate", None),
+                    lifecycle_filter_name,
+                    None,
+                )
+                if lifecycle_filter is not None:
+                    self._app.add_handler(TelegramMessageHandler(
+                        lifecycle_filter,
+                        self._handle_forum_topic_lifecycle,
+                    ))
             # Handle inline keyboard button callbacks (update prompts)
             self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
             
@@ -9030,6 +9044,25 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         await self.handle_message(event)
 
+    async def _handle_forum_topic_lifecycle(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Forward close/reopen service updates to project lifecycle routing."""
+        msg = self._effective_update_message(update)
+        if not msg or not any(
+            getattr(msg, attr, None)
+            for attr in ("forum_topic_closed", "forum_topic_reopened")
+        ):
+            return
+        event = self._build_message_event(
+            msg,
+            MessageType.TEXT,
+            update_id=update.update_id,
+        )
+        await self.handle_message(event)
+
     async def _handle_location_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming location/venue pin messages."""
         msg = self._effective_update_message(update)
@@ -9851,6 +9884,8 @@ class TelegramAdapter(BasePlatformAdapter):
         topic_skill = None
         topic_created = getattr(message, "forum_topic_created", None)
         created_name = str(getattr(topic_created, "name", "") or "").strip()
+        topic_closed = getattr(message, "forum_topic_closed", None) is not None
+        topic_reopened = getattr(message, "forum_topic_reopened", None) is not None
 
         if chat_type == "dm" and thread_id_str:
             topic_info = self._get_dm_topic_info(str(chat.id), thread_id_str)
@@ -9968,6 +10003,13 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id_str or _chat_id_str,
             _chat_id_str if thread_id_str else None,
         )
+        service_metadata = {}
+        if created_name:
+            service_metadata["telegram_forum_topic_created"] = True
+        if topic_closed:
+            service_metadata["telegram_forum_topic_closed"] = True
+        if topic_reopened:
+            service_metadata["telegram_forum_topic_reopened"] = True
 
         return MessageEvent(
             text=message.text or "",
@@ -9980,7 +10022,7 @@ class TelegramAdapter(BasePlatformAdapter):
             reply_to_text=reply_to_text,
             auto_skill=topic_skill,
             channel_prompt=_channel_prompt,
-            metadata={"telegram_forum_topic_created": True} if created_name else {},
+            metadata=service_metadata,
             timestamp=message.date,
         )
 
