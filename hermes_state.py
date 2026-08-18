@@ -15,6 +15,7 @@ Key design decisions:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -60,6 +61,11 @@ def workspace_key(row: Dict[str, Any]) -> Optional[str]:
 
     cwd = (row.get("cwd") or "").strip()
     return cwd or None
+
+
+def _system_prompt_hash(system_prompt: str) -> str:
+    """Return the content address used by shared system-prompt snapshots."""
+    return hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
 
 
 def _delegate_from_json(col: str = "model_config") -> str:
@@ -153,7 +159,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 25
 
 # FTS storage-layout version, tracked INDEPENDENTLY of SCHEMA_VERSION in the
 # state_meta key ``fts_storage_version``. The main schema version advances
@@ -996,6 +1002,11 @@ CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS system_prompts (
+    hash TEXT PRIMARY KEY,
+    prompt TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
@@ -1010,6 +1021,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     model TEXT,
     model_config TEXT,
     system_prompt TEXT,
+    system_prompt_hash TEXT,
     parent_session_id TEXT,
     started_at REAL NOT NULL,
     ended_at REAL,
@@ -1044,7 +1056,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     profile_name TEXT,
     rewind_count INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+    FOREIGN KEY (parent_session_id) REFERENCES sessions(id),
+    FOREIGN KEY (system_prompt_hash) REFERENCES system_prompts(hash)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -1163,6 +1176,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_gateway_peer
     ON sessions(source, user_id, chat_id, chat_type, thread_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
     ON sessions(handoff_state, started_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_system_prompt_hash
+    ON sessions(system_prompt_hash);
 """
 
 # ── Deferred FTS rebuild bookkeeping (schema v23) ──
@@ -1550,6 +1565,39 @@ class SessionDB:
     _IMPORT_MAX_SESSION_BYTES = 5 * 1024 * 1024
     _IMPORT_MAX_TOTAL_BYTES = 25 * 1024 * 1024
 
+    @staticmethod
+    def _store_system_prompt(conn, system_prompt: Optional[str]) -> Optional[str]:
+        """Store one prompt once and return its stable content hash."""
+        if system_prompt is None:
+            return None
+        prompt_hash = _system_prompt_hash(system_prompt)
+        conn.execute(
+            "INSERT OR IGNORE INTO system_prompts (hash, prompt) VALUES (?, ?)",
+            (prompt_hash, system_prompt),
+        )
+        return prompt_hash
+
+    @staticmethod
+    def _delete_unreferenced_system_prompts(conn) -> None:
+        """Collect shared prompt rows after references are replaced or deleted."""
+        conn.execute(
+            "DELETE FROM system_prompts "
+            "WHERE NOT EXISTS ("
+            "SELECT 1 FROM sessions "
+            "WHERE sessions.system_prompt_hash = system_prompts.hash"
+            ")"
+        )
+
+    @staticmethod
+    def _session_row_dict(row: sqlite3.Row) -> Dict[str, Any]:
+        """Hydrate hashed prompts while preserving inline legacy fallback."""
+        data = dict(row)
+        if "_system_prompt_resolved" in data:
+            resolved = data.pop("_system_prompt_resolved")
+            if "system_prompt" in data:
+                data["system_prompt"] = resolved
+        return data
+
     def __init__(self, db_path: Path = None, read_only: bool = False):
         self.db_path = db_path or DEFAULT_DB_PATH
         self.read_only = read_only
@@ -1747,6 +1795,50 @@ class SessionDB:
             self.db_path,
             exc,
         )
+
+    def _dedupe_legacy_system_prompts(self, cursor: sqlite3.Cursor) -> None:
+        """Reconcile inline prompt snapshots into content-addressed storage.
+
+        A v23 writer can leave new inline rows in a database whose version was
+        already advanced to v25 by a newer process. Run this repair
+        idempotently on every writable open rather than trusting only the
+        version marker. When both representations exist and the hash resolves,
+        preserve the hashed value (the read contract's authority) and only
+        clear the stale inline copy. If the hash is absent or broken, promote
+        the inline value so a partial migration remains recoverable.
+        """
+        try:
+            rows = cursor.execute(
+                "SELECT id, system_prompt, system_prompt_hash FROM sessions "
+                "WHERE system_prompt IS NOT NULL"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+
+        for row in rows:
+            session_id = row["id"] if isinstance(row, sqlite3.Row) else row[0]
+            prompt = row["system_prompt"] if isinstance(row, sqlite3.Row) else row[1]
+            existing_hash = (
+                row["system_prompt_hash"]
+                if isinstance(row, sqlite3.Row)
+                else row[2]
+            )
+            if existing_hash is not None and cursor.execute(
+                "SELECT 1 FROM system_prompts WHERE hash = ? LIMIT 1",
+                (existing_hash,),
+            ).fetchone() is not None:
+                cursor.execute(
+                    "UPDATE sessions SET system_prompt = NULL WHERE id = ?",
+                    (session_id,),
+                )
+                continue
+            prompt_hash = self._store_system_prompt(cursor, prompt)
+            cursor.execute(
+                "UPDATE sessions "
+                "SET system_prompt_hash = ?, system_prompt = NULL "
+                "WHERE id = ?",
+                (prompt_hash, session_id),
+            )
 
     def _sqlite_supports_fts5(self, cursor: sqlite3.Cursor) -> bool:
         try:
@@ -3197,6 +3289,12 @@ class SessionDB:
                     (SCHEMA_VERSION,),
                 )
 
+        # v25: de-duplicate per-session system prompt snapshots into shared
+        # content-addressed storage. This intentionally runs even when the
+        # version already says 25: an older concurrent/deferred gateway may
+        # have written new inline-only rows after the original migration.
+        self._dedupe_legacy_system_prompts(cursor)
+
         # Unique title index — always ensure it exists. Older databases may
         # contain duplicate aliases from before the constraint was enforced;
         # preserve every session while letting the newest one retain the alias.
@@ -3344,17 +3442,27 @@ class SessionDB:
         without a recoverable routing mapping (#59527).
         """
         def _do(conn):
+            system_prompt_hash = self._store_system_prompt(conn, system_prompt)
             conn.execute(
                 """INSERT INTO sessions (
                    id, source, user_id, session_key, chat_id, chat_type, thread_id,
-                   model, model_config, system_prompt, parent_session_id, cwd,
-                   profile_name, git_repo_root, started_at
+                   model, model_config, system_prompt, system_prompt_hash,
+                   parent_session_id, cwd, profile_name, git_repo_root, started_at
                 )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        model = COALESCE(sessions.model, excluded.model),
                        model_config = COALESCE(sessions.model_config, excluded.model_config),
-                       system_prompt = COALESCE(sessions.system_prompt, excluded.system_prompt),
+                       system_prompt_hash = COALESCE(
+                           sessions.system_prompt_hash,
+                           excluded.system_prompt_hash
+                       ),
+                       system_prompt = CASE
+                           WHEN sessions.system_prompt_hash IS NULL
+                                AND excluded.system_prompt_hash IS NOT NULL
+                           THEN NULL
+                           ELSE sessions.system_prompt
+                       END,
                        session_key = COALESCE(sessions.session_key, excluded.session_key),
                        chat_id = COALESCE(sessions.chat_id, excluded.chat_id),
                        chat_type = COALESCE(sessions.chat_type, excluded.chat_type),
@@ -3373,7 +3481,7 @@ class SessionDB:
                     thread_id,
                     model,
                     json.dumps(model_config) if model_config else None,
-                    system_prompt,
+                    system_prompt_hash,
                     parent_session_id,
                     cwd,
                     profile_name,
@@ -3381,6 +3489,11 @@ class SessionDB:
                     time.time(),
                 ),
             )
+            if system_prompt_hash is not None:
+                # An existing row may already reference a different prompt;
+                # collect the unused candidate inserted above without touching
+                # prompts still shared by any session.
+                self._delete_unreferenced_system_prompts(conn)
             if parent_session_id:
                 conn.execute(
                     """UPDATE sessions
@@ -3601,12 +3714,16 @@ class SessionDB:
         """
         query = """
             SELECT sessions.*,
+                   COALESCE(sp.prompt, sessions.system_prompt)
+                       AS _system_prompt_resolved,
                    COALESCE(
                        (SELECT MAX(m.timestamp) FROM messages m
                         WHERE m.session_id = sessions.id),
                        sessions.started_at
                    ) AS last_active
             FROM sessions
+            LEFT JOIN system_prompts sp
+              ON sp.hash = sessions.system_prompt_hash
             WHERE session_key IS NOT NULL
               AND started_at = (
                   SELECT MAX(s2.started_at) FROM sessions s2
@@ -3622,7 +3739,7 @@ class SessionDB:
         query += " ORDER BY last_active DESC"
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+        return [self._session_row_dict(r) for r in rows]
 
     def find_session_by_origin(
         self,
@@ -3749,20 +3866,24 @@ class SessionDB:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT * FROM sessions
-                WHERE session_key = ?
-                  AND source = ?
-                  AND (ended_at IS NULL OR end_reason IN ('agent_close', 'ws_orphan_reap'))
-                  AND (COALESCE(message_count, 0) > 0 OR EXISTS (
-                      SELECT 1 FROM messages WHERE messages.session_id = sessions.id LIMIT 1
+                SELECT s.*,
+                       COALESCE(sp.prompt, s.system_prompt)
+                           AS _system_prompt_resolved
+                FROM sessions s
+                LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash
+                WHERE s.session_key = ?
+                  AND s.source = ?
+                  AND (s.ended_at IS NULL OR s.end_reason IN ('agent_close', 'ws_orphan_reap'))
+                  AND (COALESCE(s.message_count, 0) > 0 OR EXISTS (
+                      SELECT 1 FROM messages WHERE messages.session_id = s.id LIMIT 1
                   ))
-                ORDER BY started_at DESC
+                ORDER BY s.started_at DESC
                 LIMIT 1
                 """,
                 (session_key, source),
             ).fetchone()
             if row is not None:
-                return dict(row)
+                return self._session_row_dict(row)
 
             # Conservative fallback for rows created by current code but with a
             # temporarily-missing exact key: still require the complete peer
@@ -3771,22 +3892,26 @@ class SessionDB:
                 return None
             row = self._conn.execute(
                 """
-                SELECT * FROM sessions
-                WHERE source = ?
-                  AND COALESCE(user_id, '') = COALESCE(?, '')
-                  AND COALESCE(chat_id, '') = COALESCE(?, '')
-                  AND COALESCE(chat_type, '') = COALESCE(?, '')
-                  AND COALESCE(thread_id, '') = COALESCE(?, '')
-                  AND (ended_at IS NULL OR end_reason IN ('agent_close', 'ws_orphan_reap'))
-                  AND (COALESCE(message_count, 0) > 0 OR EXISTS (
-                      SELECT 1 FROM messages WHERE messages.session_id = sessions.id LIMIT 1
+                SELECT s.*,
+                       COALESCE(sp.prompt, s.system_prompt)
+                           AS _system_prompt_resolved
+                FROM sessions s
+                LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash
+                WHERE s.source = ?
+                  AND COALESCE(s.user_id, '') = COALESCE(?, '')
+                  AND COALESCE(s.chat_id, '') = COALESCE(?, '')
+                  AND COALESCE(s.chat_type, '') = COALESCE(?, '')
+                  AND COALESCE(s.thread_id, '') = COALESCE(?, '')
+                  AND (s.ended_at IS NULL OR s.end_reason IN ('agent_close', 'ws_orphan_reap'))
+                  AND (COALESCE(s.message_count, 0) > 0 OR EXISTS (
+                      SELECT 1 FROM messages WHERE messages.session_id = s.id LIMIT 1
                   ))
-                ORDER BY started_at DESC
+                ORDER BY s.started_at DESC
                 LIMIT 1
                 """,
                 (source, user_id, chat_id, chat_type, thread_id),
             ).fetchone()
-        return dict(row) if row else None
+        return self._session_row_dict(row) if row else None
 
     def end_session(self, session_id: str, end_reason: str) -> None:
         """Mark a session as ended.
@@ -4262,13 +4387,18 @@ class SessionDB:
             )
         self._execute_write(_do)
 
-    def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
+    def update_system_prompt(
+        self, session_id: str, system_prompt: Optional[str]
+    ) -> None:
         """Store the full assembled system prompt snapshot."""
         def _do(conn):
+            system_prompt_hash = self._store_system_prompt(conn, system_prompt)
             conn.execute(
-                "UPDATE sessions SET system_prompt = ? WHERE id = ?",
-                (system_prompt, session_id),
+                "UPDATE sessions "
+                "SET system_prompt_hash = ?, system_prompt = NULL WHERE id = ?",
+                (system_prompt_hash, session_id),
             )
+            self._delete_unreferenced_system_prompts(conn)
         self._execute_write(_do)
 
     def update_session_model(self, session_id: str, model: str) -> None:
@@ -4276,13 +4406,17 @@ class SessionDB:
 
         Unlike ``update_token_counts`` which uses ``COALESCE(model, ?)``
         (only filling in NULL), this unconditionally sets the model column
-        so that the dashboard reflects the user's latest /model choice.
+        so that the dashboard reflects the user's latest /model choice. Also
+        clears the cached prompt snapshot so model/provider footer metadata is
+        rebuilt on the next turn.
         """
         def _do(conn):
             conn.execute(
-                "UPDATE sessions SET model = ? WHERE id = ?",
+                "UPDATE sessions SET model = ?, system_prompt = NULL, "
+                "system_prompt_hash = NULL WHERE id = ?",
                 (model, session_id),
             )
+            self._delete_unreferenced_system_prompts(conn)
         self._execute_write(_do)
 
     def update_session_billing_route(
@@ -4309,10 +4443,12 @@ class SessionDB:
                    billing_provider = ?,
                    billing_base_url = ?,
                    billing_mode = COALESCE(?, billing_mode),
-                   system_prompt = NULL
+                   system_prompt = NULL,
+                   system_prompt_hash = NULL
                    WHERE id = ?""",
                 (provider, base_url, billing_mode, session_id),
             )
+            self._delete_unreferenced_system_prompts(conn)
         self._execute_write(_do)
 
     def update_token_counts(
@@ -4677,6 +4813,7 @@ class SessionDB:
                 conn.execute(
                     f"DELETE FROM sessions WHERE id IN ({placeholders})", ids
                 )
+                self._delete_unreferenced_system_prompts(conn)
             return ids
 
         removed_ids = self._execute_write(_do) or []
@@ -4729,10 +4866,15 @@ class SessionDB:
         """Get a session by ID."""
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT * FROM sessions WHERE id = ?", (session_id,)
+                "SELECT s.*, "
+                "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
+                "FROM sessions s "
+                "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
+                "WHERE s.id = ?",
+                (session_id,),
             )
             row = cursor.fetchone()
-        return dict(row) if row else None
+        return self._session_row_dict(row) if row else None
 
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Resolve an exact or uniquely prefixed session ID to the full ID.
@@ -4990,10 +5132,15 @@ class SessionDB:
         """Look up a session by exact title. Returns session dict or None."""
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT * FROM sessions WHERE title = ?", (title,)
+                "SELECT s.*, "
+                "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
+                "FROM sessions s "
+                "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
+                "WHERE s.title = ?",
+                (title,),
             )
             row = cursor.fetchone()
-        return dict(row) if row else None
+        return self._session_row_dict(row) if row else None
 
     def resolve_session_by_title(self, title: str) -> Optional[str]:
         """Resolve a title to a session ID, preferring the latest in a lineage.
@@ -5128,7 +5275,9 @@ class SessionDB:
     # the projection is derived from SCHEMA_SQL so columns added later via
     # declarative reconciliation are included automatically instead of
     # silently dropping out of list rows.
-    _SESSION_COMPACT_EXCLUDED = frozenset({"system_prompt"})
+    _SESSION_COMPACT_EXCLUDED = frozenset(
+        {"system_prompt", "system_prompt_hash"}
+    )
     _session_compact_cols_sql: Optional[str] = None
 
     @classmethod
@@ -5267,6 +5416,14 @@ class SessionDB:
             where_clauses.append("s.archived = 0")
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        prompt_select = (
+            "" if compact_rows
+            else ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved"
+        )
+        prompt_join = (
+            "" if compact_rows
+            else "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash"
+        )
 
         # Optional session-id filter, pushed into SQL so callers (Desktop
         # session-id search) don't have to fetch every row and filter in
@@ -5366,7 +5523,7 @@ class SessionDB:
                     FROM chain
                     GROUP BY root_id
                 )
-                SELECT {_sel},
+                SELECT {_sel}{prompt_select},
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                          FROM messages m
@@ -5380,6 +5537,7 @@ class SessionDB:
                     ) AS last_active,
                     COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
                 FROM sessions s
+                {prompt_join}
                 LEFT JOIN chain_max cm ON cm.root_id = s.id
                 {outer_where}
                 ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
@@ -5391,7 +5549,7 @@ class SessionDB:
         else:
             _sel = self._compact_session_cols() if compact_rows else "s.*"
             query = f"""
-                SELECT {_sel},
+                SELECT {_sel}{prompt_select},
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                          FROM messages m
@@ -5404,6 +5562,7 @@ class SessionDB:
                         s.started_at
                     ) AS last_active
                 FROM sessions s
+                {prompt_join}
                 {where_sql}
                 ORDER BY s.started_at DESC
                 LIMIT ? OFFSET ?
@@ -5414,7 +5573,7 @@ class SessionDB:
             rows = cursor.fetchall()
         sessions = []
         for row in rows:
-            s = dict(row)
+            s = self._session_row_dict(row)
             # Build the preview from the raw substring
             raw = s.pop("_preview_raw", "").strip()
             if raw:
@@ -5496,6 +5655,7 @@ class SessionDB:
 
         query = """
             SELECT s.*,
+                COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved,
                 COALESCE(
                     (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                      FROM messages m
@@ -5508,6 +5668,7 @@ class SessionDB:
                     s.started_at
                 ) AS last_active
             FROM sessions s
+            LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash
             WHERE s.source = 'cron' AND s.id >= ? AND s.id < ?
             ORDER BY s.started_at DESC, s.id DESC
             LIMIT ? OFFSET ?
@@ -5518,7 +5679,7 @@ class SessionDB:
 
         runs: List[Dict[str, Any]] = []
         for row in rows:
-            s = dict(row)
+            s = self._session_row_dict(row)
             raw = s.pop("_preview_raw", "").strip()
             if raw:
                 text = raw[:60]
@@ -5537,8 +5698,16 @@ class SessionDB:
         ``list_sessions_rich`` for details).
         """
         _sel = self._compact_session_cols() if compact_rows else "s.*"
+        prompt_select = (
+            "" if compact_rows
+            else ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved"
+        )
+        prompt_join = (
+            "" if compact_rows
+            else "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash"
+        )
         query = f"""
-            SELECT {_sel},
+            SELECT {_sel}{prompt_select},
                 COALESCE(
                     (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                      FROM messages m
@@ -5551,6 +5720,7 @@ class SessionDB:
                     s.started_at
                 ) AS last_active
             FROM sessions s
+            {prompt_join}
             WHERE s.id = ?
         """
         with self._lock:
@@ -5558,7 +5728,7 @@ class SessionDB:
             row = cursor.fetchone()
         if not row:
             return None
-        s = dict(row)
+        s = self._session_row_dict(row)
         raw = s.pop("_preview_raw", "").strip()
         if raw:
             text = raw[:60]
@@ -7856,8 +8026,11 @@ class SessionDB:
         ordered by most-recently-used first.
         """
         select_with_last_active = (
-            "SELECT s.*, COALESCE(m.last_active, s.started_at) AS last_active "
+            "SELECT s.*, "
+            "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved, "
+            "COALESCE(m.last_active, s.started_at) AS last_active "
             "FROM sessions s "
+            "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
             "LEFT JOIN ("
             "SELECT session_id, MAX(timestamp) AS last_active "
             "FROM messages GROUP BY session_id"
@@ -7877,7 +8050,7 @@ class SessionDB:
                     "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
                     (limit, offset),
                 )
-            return [dict(row) for row in cursor.fetchall()]
+            return [self._session_row_dict(row) for row in cursor.fetchall()]
 
     # =========================================================================
     # Utility
@@ -8332,10 +8505,14 @@ class SessionDB:
                 if started_at is None:
                     started_at = time.time()
                 archived = 1 if raw.get("archived") else 0
+                system_prompt_hash = self._store_system_prompt(
+                    conn, raw.get("system_prompt")
+                )
 
                 conn.execute(
                     """INSERT INTO sessions (
                            id, source, user_id, model, model_config, system_prompt,
+                           system_prompt_hash,
                            parent_session_id, started_at, ended_at, end_reason,
                            message_count, tool_call_count, input_tokens, output_tokens,
                            cache_read_tokens, cache_write_tokens, reasoning_tokens,
@@ -8346,7 +8523,7 @@ class SessionDB:
                        )
                        VALUES (
                            :id, :source, :user_id, :model, :model_config,
-                           :system_prompt, NULL, :started_at, :ended_at,
+                           NULL, :system_prompt_hash, NULL, :started_at, :ended_at,
                            :end_reason, 0, 0, :input_tokens, :output_tokens,
                            :cache_read_tokens, :cache_write_tokens,
                            :reasoning_tokens, :cwd, :git_branch, :git_repo_root,
@@ -8361,7 +8538,7 @@ class SessionDB:
                         "user_id": raw.get("user_id"),
                         "model": raw.get("model"),
                         "model_config": raw.get("model_config"),
-                        "system_prompt": raw.get("system_prompt"),
+                        "system_prompt_hash": system_prompt_hash,
                         "started_at": started_at,
                         "ended_at": self._float_or_none(raw.get("ended_at")),
                         "end_reason": raw.get("end_reason"),
@@ -8544,6 +8721,7 @@ class SessionDB:
             )
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            self._delete_unreferenced_system_prompts(conn)
             return True
 
         deleted = self._execute_write(_do)
@@ -8588,6 +8766,8 @@ class SessionDB:
                 """,
                 (session_id,),
             )
+            if cursor.rowcount > 0:
+                self._delete_unreferenced_system_prompts(conn)
             return cursor.rowcount > 0
 
         deleted = self._execute_write(_do)
@@ -8668,6 +8848,7 @@ class SessionDB:
                 f"DELETE FROM sessions WHERE id IN ({existing_placeholders})",
                 existing,
             )
+            self._delete_unreferenced_system_prompts(conn)
             removed_ids.extend(existing)
             return len(existing)
 
@@ -8763,6 +8944,7 @@ class SessionDB:
                 )
                 conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
                 removed_ids.append(sid)
+            self._delete_unreferenced_system_prompts(conn)
             return len(session_ids)
 
         count = self._execute_write(_do)
@@ -9009,6 +9191,7 @@ class SessionDB:
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
                 conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
                 removed_ids.append(sid)
+            self._delete_unreferenced_system_prompts(conn)
             return len(session_ids)
 
         count = self._execute_write(_do)
@@ -9503,6 +9686,8 @@ class SessionDB:
                 rows = self._conn.execute(
                     """
                     SELECT s.*,
+                        COALESCE(sp.prompt, s.system_prompt)
+                            AS _system_prompt_resolved,
                         COALESCE(
                             (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                              FROM messages m
@@ -9515,6 +9700,8 @@ class SessionDB:
                             s.started_at
                         ) AS last_active
                     FROM sessions s
+                    LEFT JOIN system_prompts sp
+                      ON sp.hash = s.system_prompt_hash
                     WHERE s.source = 'telegram'
                       AND s.user_id = ?
                       AND NOT EXISTS (
@@ -9532,6 +9719,8 @@ class SessionDB:
                 rows = self._conn.execute(
                     """
                     SELECT s.*,
+                        COALESCE(sp.prompt, s.system_prompt)
+                            AS _system_prompt_resolved,
                         COALESCE(
                             (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                              FROM messages m
@@ -9544,6 +9733,8 @@ class SessionDB:
                             s.started_at
                         ) AS last_active
                     FROM sessions s
+                    LEFT JOIN system_prompts sp
+                      ON sp.hash = s.system_prompt_hash
                     WHERE s.source = 'telegram'
                       AND s.user_id = ?
                     ORDER BY last_active DESC, s.started_at DESC
@@ -9554,7 +9745,7 @@ class SessionDB:
 
         sessions: List[Dict[str, Any]] = []
         for row in rows:
-            session = dict(row)
+            session = self._session_row_dict(row)
             raw = str(session.pop("_preview_raw", "") or "").strip()
             session["preview"] = raw[:60] + ("..." if len(raw) > 60 else "") if raw else ""
             sessions.append(session)
@@ -9822,11 +10013,14 @@ class SessionDB:
         """
         try:
             cur = self._conn.execute(
-                "SELECT * FROM sessions "
+                "SELECT s.*, "
+                "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
+                "FROM sessions s "
+                "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
                 "WHERE handoff_state = 'pending' "
                 "ORDER BY started_at ASC"
             )
-            return [dict(r) for r in cur.fetchall()]
+            return [self._session_row_dict(r) for r in cur.fetchall()]
         except Exception:
             return []
 

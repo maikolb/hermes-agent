@@ -6950,7 +6950,8 @@ def test_refresh_compression_lock_requires_holder_and_preserves_reclaimability(d
 
 class TestCompactRows:
     """list_sessions_rich and _get_session_rich_row with compact_rows=True
-    must omit system_prompt but return all other metadata fields."""
+    must omit system_prompt payload/reference fields but return all other
+    metadata fields."""
 
     def _create(self, db, sid, *, system_prompt="big blob " * 500):
         db.create_session(session_id=sid, source="cli", model="m")
@@ -6962,6 +6963,7 @@ class TestCompactRows:
         rows = db.list_sessions_rich(compact_rows=True)
         assert len(rows) == 1
         assert "system_prompt" not in rows[0]
+        assert "system_prompt_hash" not in rows[0]
 
     def test_full_rows_include_system_prompt(self, db):
         self._create(db, "s1", system_prompt="keep me")
@@ -6984,12 +6986,14 @@ class TestCompactRows:
         rows = db.list_sessions_rich(compact_rows=True, order_by_last_active=True)
         assert len(rows) == 2
         assert all("system_prompt" not in r for r in rows)
+        assert all("system_prompt_hash" not in r for r in rows)
 
     def test_get_session_rich_row_compact_omits_system_prompt(self, db):
         self._create(db, "s1", system_prompt="should be gone")
         row = db._get_session_rich_row("s1", compact_rows=True)
         assert row is not None
         assert "system_prompt" not in row
+        assert "system_prompt_hash" not in row
         assert row["id"] == "s1"
 
     def test_get_session_rich_row_full_includes_system_prompt(self, db):
@@ -7013,12 +7017,13 @@ class TestCompactRows:
             row[1] for row in db._conn.execute("PRAGMA table_info(sessions)")
         }
         row = db.list_sessions_rich(compact_rows=True)[0]
-        # Hardcode the one sanctioned exclusion: if the excluded set ever
+        # Hardcode the sanctioned exclusions: if the excluded set ever
         # widens (or the projection silently drops a column), this fails and
         # forces a conscious review of what list consumers lose.
-        missing = live_cols - set(row) - {"system_prompt"}
+        missing = live_cols - set(row) - {"system_prompt", "system_prompt_hash"}
         assert not missing, f"compact projection lost schema columns: {missing}"
         assert "system_prompt" not in row
+        assert "system_prompt_hash" not in row
 
     def test_compact_rows_tip_projection_omits_system_prompt(self, db):
         """Compression-tip projection must not reintroduce the blob: the
@@ -7234,4 +7239,3 @@ class TestDisplayMetadataPersistence:
         switched = [m for m in reloaded if m.get("display_kind") == "model_switch"]
         assert len(switched) == 1
         assert switched[0]["display_metadata"] == meta
-

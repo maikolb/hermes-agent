@@ -44,6 +44,8 @@ import threading
 import time
 import uuid
 
+from hermes_cli._subprocess_compat import windows_hidden_popen_kwargs
+
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1422,8 +1424,8 @@ def execute_code(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+            start_new_session=not _IS_WINDOWS,
+            **windows_hidden_popen_kwargs(),
         )
 
         # --- Poll loop: watch for exit, timeout, and interrupt ---
@@ -1763,9 +1765,9 @@ def _is_usable_python(python_path: str) -> bool:
              "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"],
             timeout=5,
             capture_output=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
             stdin=subprocess.DEVNULL,
             env=delegated_child_subprocess_env(),
+            **windows_hidden_popen_kwargs(),
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):

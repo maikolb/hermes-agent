@@ -847,6 +847,8 @@ class ProjectRouterConfig:
     db_path: Optional[Path] = None
     managed_chat_ids: List[str] = field(default_factory=list)
     auto_register_topics: bool = False
+    implicit_managed_chat_members: bool = False
+    namespace_team_resources: bool = False
     management_topic_names: List[str] = field(default_factory=lambda: ["🧭 Gestão"])
     workspace_root: Optional[Path] = None
 
@@ -856,6 +858,8 @@ class ProjectRouterConfig:
             "db_path": str(self.db_path) if self.db_path is not None else None,
             "managed_chat_ids": list(self.managed_chat_ids),
             "auto_register_topics": self.auto_register_topics,
+            "implicit_managed_chat_members": self.implicit_managed_chat_members,
+            "namespace_team_resources": self.namespace_team_resources,
             "management_topic_names": list(self.management_topic_names),
             "workspace_root": (
                 str(self.workspace_root) if self.workspace_root is not None else None
@@ -913,11 +917,28 @@ class ProjectRouterConfig:
                 return cls()
             management_topic_names.append(normalized)
 
+        enabled = _coerce_bool(data.get("enabled"), False)
+        auto_register_topics = _coerce_bool(data.get("auto_register_topics"), False)
+        implicit_managed_chat_members = _coerce_bool(
+            data.get("implicit_managed_chat_members"), False
+        )
+        namespace_team_resources = _coerce_bool(
+            data.get("namespace_team_resources"), False
+        )
+        if enabled and auto_register_topics and workspace_root is None:
+            logger.warning(
+                "project_router auto_register_topics is enabled without workspace_root; "
+                "new Telegram Topics can be bound and receive boards, but workspace "
+                "provisioning will remain disabled"
+            )
+
         return cls(
-            enabled=_coerce_bool(data.get("enabled"), False),
+            enabled=enabled,
             db_path=db_path,
             managed_chat_ids=managed_chat_ids,
-            auto_register_topics=_coerce_bool(data.get("auto_register_topics"), False),
+            auto_register_topics=auto_register_topics,
+            implicit_managed_chat_members=implicit_managed_chat_members,
+            namespace_team_resources=namespace_team_resources,
             management_topic_names=management_topic_names,
             workspace_root=workspace_root,
         )
@@ -1191,6 +1212,41 @@ class GatewayConfig:
             else nested_gateway.get("project_router")
         )
         project_router = ProjectRouterConfig.from_dict(raw_project_router)
+        # A managed Telegram team is already an explicit chat-scope authority.
+        # When implicit membership is opted in, reuse that same scope for the
+        # adapter/authz group gate in memory so operators cannot accidentally
+        # configure a routable team that the Telegram ingress drops first.
+        # This does not authorize arbitrary chats or users: project routing
+        # still requires an exact managed chat and a verified sender, and an
+        # explicit router deny continues to win.
+        if (
+            project_router.enabled
+            and project_router.implicit_managed_chat_members
+            and project_router.managed_chat_ids
+        ):
+            telegram_config = platforms.get(Platform.TELEGRAM)
+            if telegram_config is not None:
+                raw_group_allowed = telegram_config.extra.get("group_allowed_chats")
+                if isinstance(raw_group_allowed, (list, tuple, set)):
+                    existing_group_allowed = [
+                        str(value).strip()
+                        for value in raw_group_allowed
+                        if str(value).strip()
+                    ]
+                elif isinstance(raw_group_allowed, str):
+                    existing_group_allowed = [
+                        value.strip()
+                        for value in raw_group_allowed.split(",")
+                        if value.strip()
+                    ]
+                else:
+                    existing_group_allowed = []
+                telegram_config.extra = dict(telegram_config.extra)
+                telegram_config.extra["group_allowed_chats"] = list(
+                    dict.fromkeys(
+                        [*existing_group_allowed, *project_router.managed_chat_ids]
+                    )
+                )
         if "systemd_watchdog_seconds" in data:
             systemd_watchdog_raw = data.get("systemd_watchdog_seconds")
             systemd_watchdog_key = "systemd_watchdog_seconds"

@@ -925,6 +925,8 @@ def _build_replay_entry(
 _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER = "observed Telegram group context"
 _OBSERVED_GROUP_CONTEXT_HEADER = "[Observed Telegram group context - context only, not requests]"
 _CURRENT_ADDRESSED_MESSAGE_HEADER = "[Current addressed message - answer only this unless it explicitly asks you to use the observed context]"
+_TELEGRAM_OBSERVED_CONTEXT_MAX_MESSAGES = 80
+_TELEGRAM_OBSERVED_CONTEXT_MAX_CHARS = 32_000
 
 
 def _project_context_prompt_block(project_context: Any) -> str:
@@ -955,6 +957,20 @@ def _project_context_prompt_block(project_context: Any) -> str:
         else (
             "Use the existing Kanban tools naturally. When a board is omitted, "
             "it resolves to authoritative_board. Do not switch to or target another board.\n"
+            "When creating a task that needs source control, call kanban_create with "
+            "requires_repo=true; Hermes will create/register the local repo if absent and "
+            "dispatch the task in an isolated worktree. Leave it false for research, writing, "
+            "operations, or other work that does not need a repository. Never create a remote "
+            "repository unless the user explicitly authorizes its host, owner, and visibility.\n"
+            "When the user asks for Kanban or board status, call kanban_list before answering; "
+            "never answer from chat memory or stale summaries. Present the result using a valid GFM pipe "
+            "table (header row, delimiter row, and data rows) so Telegram Rich Messages renders the same "
+            "bordered header-and-cells appearance as other rich tables. Choose column names and content "
+            "dynamically from the useful fields actually returned by the board; do not force a fixed Kanban "
+            "schema. Keep the visual compact and mobile-readable, normally using three to five columns and "
+            "concise cells. Do not wrap the table in a code fence and do not replace it with prose or a bullet "
+            "list. Use only tool-returned data. If tasks is empty, still render a valid table with one explicit "
+            "empty-state row. Do not invent owners, blockers, progress, deadlines, or next steps.\n"
             "This Topic is scoped only to the bound project above. Do not enumerate, confirm, search for, "
             "or comment on other projects, teams, or profiles unless the current user message explicitly "
             "requests that cross-project information. Do not use global project directories, broad filesystem "
@@ -1105,6 +1121,11 @@ def _build_gateway_agent_history(
             content = _render_msg_ts(content, msg.get("timestamp"), tz=_msg_tz)
         if separate_observed_context and msg.get("observed") and role == "user" and content:
             observed_group_context.append(str(content).strip())
+            if len(observed_group_context) > _TELEGRAM_OBSERVED_CONTEXT_MAX_MESSAGES:
+                del observed_group_context[
+                    : len(observed_group_context)
+                    - _TELEGRAM_OBSERVED_CONTEXT_MAX_MESSAGES
+                ]
             continue
 
         # Rich agent messages (tool_calls, tool results) must be passed through
@@ -1158,7 +1179,27 @@ def _build_gateway_agent_history(
         agent_history, now=time.time()
     )
 
-    observed_context = "\n".join(observed_group_context).strip() or None
+    # Prefer the newest observed discussion and keep the API-only context
+    # bounded. A Telegram Topic can live indefinitely; replaying every passive
+    # message would eventually crowd out the addressed request and the
+    # project's actual working context.
+    bounded_observed_reversed: List[str] = []
+    remaining_chars = _TELEGRAM_OBSERVED_CONTEXT_MAX_CHARS
+    for observed_message in reversed(observed_group_context):
+        separator_cost = 1 if bounded_observed_reversed else 0
+        available = remaining_chars - separator_cost
+        if available <= 0:
+            break
+        chunk = observed_message[:available]
+        if not chunk:
+            continue
+        bounded_observed_reversed.append(chunk)
+        remaining_chars -= len(chunk) + separator_cost
+        if len(chunk) < len(observed_message):
+            break
+    observed_context = (
+        "\n".join(reversed(bounded_observed_reversed)).strip() or None
+    )
     return agent_history, observed_context
 
 
@@ -2079,6 +2120,7 @@ from gateway.project_router import (
     ProjectRouter,
     UnknownBindingError,
     UnknownUserError,
+    build_team_resource_namespace,
     normalize_project_slug,
 )
 from gateway.delivery import DeliveryRouter, looks_like_telegram_private_chat_id
@@ -4452,13 +4494,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return model, runtime_kwargs
 
-    def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
+    def _resolve_turn_agent_config(
+        self,
+        user_message: str,
+        model: str,
+        runtime_kwargs: dict,
+        *,
+        user_config: Optional[dict] = None,
+        source: Optional[SessionSource] = None,
+        session_key: Optional[str] = None,
+        reasoning_config: Optional[dict] = None,
+        routing_context: Optional[dict] = None,
+    ) -> dict:
         """Build the effective model/runtime config for a single turn.
 
-        Always uses the session's primary model/provider.  If `/fast` is
-        enabled and the model supports Priority Processing / Anthropic fast
-        mode, attach `request_overrides` so the API call is marked
-        accordingly.
+        Smart routing is opt-in and stays within the resolved provider family
+        (GPT-5.6 or Claude). Explicit channel, ``/model``, and
+        ``/reasoning`` choices win. The returned decision is prompt-free and
+        safe to log as operational telemetry.
         """
         from hermes_cli.models import resolve_fast_mode_overrides
 
@@ -4473,19 +4526,122 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "credential_pool": runtime_kwargs.get("credential_pool"),
             "max_tokens": runtime_kwargs.get("max_tokens"),
         }
-        route = {
-            "model": model,
-            "runtime": runtime,
-            "signature": (
-                model,
-                runtime["provider"],
-                runtime["requested_provider"],
-                runtime["base_url"],
-                runtime["api_mode"],
-                runtime["command"],
-                tuple(runtime["args"]),
-            ),
-        }
+        resolved_session_key = session_key
+        if not resolved_session_key and source is not None:
+            try:
+                resolved_session_key = self._session_key_for_source(source)
+            except Exception:
+                resolved_session_key = None
+        explicit_model_override = bool(
+            resolved_session_key
+            and (getattr(self, "_session_model_overrides", {}) or {}).get(resolved_session_key)
+        )
+        explicit_reasoning_override = bool(
+            resolved_session_key
+            and (getattr(self, "_session_reasoning_overrides", {}) or {}).get(resolved_session_key)
+        )
+        cfg = user_config if isinstance(user_config, dict) else {}
+        if source is not None and getattr(self, "config", None):
+            try:
+                channel = _get_channel_override(
+                    self.config,
+                    source.platform,
+                    str(source.chat_id or ""),
+                    thread_id=(str(source.thread_id) if source.thread_id else None),
+                    parent_id=(str(source.parent_chat_id) if source.parent_chat_id else None),
+                )
+                explicit_model_override = explicit_model_override or bool(
+                    channel and (channel.model or channel.provider)
+                )
+            except Exception:
+                logger.debug("Smart route channel-override check failed", exc_info=True)
+
+        routing_cfg = cfg.get("smart_model_routing") or {}
+        smart_context = dict(routing_context) if isinstance(routing_context, dict) else {}
+        smart_context["platform"] = (
+            source.platform.value
+            if source is not None and getattr(source, "platform", None)
+            else ""
+        )
+        now = time.monotonic()
+        try:
+            ttl = max(60.0, min(14_400.0, float(routing_cfg.get("continuation_ttl_seconds", 1800))))
+        except (TypeError, ValueError):
+            ttl = 1800.0
+        state_lock = getattr(self, "_agent_cache_lock", None)
+        state = getattr(self, "_session_smart_route_decisions", None)
+        if not isinstance(state, dict):
+            state = {}
+            self._session_smart_route_decisions = state
+        if resolved_session_key and smart_context.get("has_history"):
+            def _read_previous_decision():
+                entry = state.get(resolved_session_key)
+                if not entry or now - entry[0] > ttl:
+                    state.pop(resolved_session_key, None)
+                    return None
+                return dict(entry[1])
+            if state_lock is not None:
+                with state_lock:
+                    previous_decision = _read_previous_decision()
+            else:
+                previous_decision = _read_previous_decision()
+            if previous_decision:
+                smart_context["previous_auto_decision"] = previous_decision
+
+        try:
+            from agent.smart_model_routing import resolve_turn_route
+            route = resolve_turn_route(
+                user_message,
+                routing_cfg,
+                {"model": model, "runtime": runtime},
+                reasoning_config=reasoning_config,
+                explicit_model_override=explicit_model_override,
+                explicit_reasoning_override=explicit_reasoning_override,
+                context=smart_context,
+            )
+        except Exception:
+            logger.warning("Smart model routing failed; preserving primary route", exc_info=True)
+            route = {
+                "model": model,
+                "cache_model": model,
+                "runtime": runtime,
+                "reasoning_config": reasoning_config,
+                "decision": {
+                    "tier": "baseline",
+                    "model": model,
+                    "reasoning_effort": "",
+                    "score": -1,
+                    "risk": "unknown",
+                    "action": "fallback",
+                    "reasons": ["router_error_primary_preserved"],
+                    "source": "fail_safe",
+                },
+            }
+        decision = route.get("decision") or {}
+        if (
+            resolved_session_key
+            and decision.get("source") in {"auto", "auto_continuation"}
+        ):
+            def _write_decision():
+                state[resolved_session_key] = (now, dict(decision))
+                if len(state) > 1024:
+                    oldest = min(state, key=lambda key: state[key][0])
+                    state.pop(oldest, None)
+            if state_lock is not None:
+                with state_lock:
+                    _write_decision()
+            else:
+                _write_decision()
+        logger.info(
+            "Smart model route: tier=%s model=%s effort=%s score=%s risk=%s source=%s reasons=%s",
+            decision.get("tier"),
+            decision.get("model"),
+            decision.get("reasoning_effort"),
+            decision.get("score"),
+            decision.get("risk"),
+            decision.get("source"),
+            ",".join(decision.get("reasons") or ()),
+        )
 
         service_tier = getattr(self, "_service_tier", None)
         if not service_tier:
@@ -14537,6 +14693,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if not canonical_cmd:
             return None
+        project_capability = self._project_router_slash_capability(source)
+        if project_capability == "deny":
+            return "⛔ You are not authorized for this managed team."
+        if project_capability == "allow":
+            return None
+        if project_capability == "member":
+            member_commands = frozenset({"help", "whoami", "status"})
+            if canonical_cmd not in member_commands:
+                return (
+                    f"⛔ /{canonical_cmd} is admin-only here. "
+                    "Team members can use /help, /whoami, and /status. "
+                    "Ask for Kanban work in natural language so Hermes can apply project policy."
+                )
+            # The managed-team router is the authority for these three
+            # non-mutating commands. Do not fall through to the legacy slash
+            # allowlist, which may intentionally contain admins only.
+            return None
         policy = _policy_for_source(self.config, source)
         if not policy.enabled or policy.can_run(source.user_id, canonical_cmd):
             return None
@@ -14561,6 +14734,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "or to set user_allowed_commands."
             )
         return f"⛔ /{canonical_cmd} is admin-only here. {suffix}"
+
+    def _project_router_slash_capability(self, source: SessionSource) -> Optional[str]:
+        """Resolve managed-team slash capability before Topic provisioning."""
+        router_config = getattr(getattr(self, "config", None), "project_router", None)
+        if (
+            router_config is None
+            or getattr(router_config, "enabled", False) is not True
+            or getattr(router_config, "implicit_managed_chat_members", False) is not True
+            or getattr(source, "platform", None) != Platform.TELEGRAM
+            or str(getattr(source, "chat_type", "") or "").lower()
+            not in {"group", "forum", "channel", "supergroup"}
+        ):
+            return None
+
+        raw_managed = getattr(router_config, "managed_chat_ids", [])
+        if not isinstance(raw_managed, list):
+            return "deny"
+        managed = {
+            str(value).strip()
+            for value in raw_managed
+            if isinstance(value, (str, int))
+            and not isinstance(value, bool)
+            and str(value).strip()
+        }
+        chat_id = str(getattr(source, "chat_id", "") or "").strip()
+        sender_user_id = str(getattr(source, "user_id", "") or "").strip()
+        if chat_id not in managed:
+            return None
+        if not sender_user_id:
+            return "deny"
+
+        try:
+            db_path = self._project_router_db_path(source)
+            if not Path(db_path).exists():
+                return "member"
+            profile = self._effective_project_router_profile(source)
+            with ProjectRouter(db_path, profile) as router:
+                return router.authorize_sender(
+                    chat_id,
+                    sender_user_id,
+                    allow_implicit_member=True,
+                    verified_sender_user_id=sender_user_id,
+                )
+        except AccessDeniedError:
+            return "deny"
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.DatabaseError):
+            logger.warning("Managed-team slash authorization failed closed")
+            return "deny"
 
 
 
@@ -15483,7 +15704,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             self._reasoning_config = reasoning_config
             self._service_tier = self._resolve_session_service_tier(source=source)
-            turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+            turn_route = self._resolve_turn_agent_config(
+                prompt,
+                model,
+                runtime_kwargs,
+                user_config=user_config,
+                source=source,
+                reasoning_config=reasoning_config,
+            )
 
             # Enrich the prompt with image descriptions so the background
             # agent can see user-attached images (same as the main flow).
@@ -15512,7 +15740,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     verbose_logging=False,
                     enabled_toolsets=enabled_toolsets,
                     disabled_toolsets=disabled_toolsets,
-                    reasoning_config=reasoning_config,
+                    reasoning_config=turn_route.get("reasoning_config", reasoning_config),
                     service_tier=self._service_tier,
                     request_overrides=turn_route.get("request_overrides"),
                     providers_allowed=pr.get("only"),
@@ -17147,9 +17375,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 metadata_sender_user_id, bool
             ):
                 metadata_sender_user_id = None
+            source_sender_user_id = getattr(source, "user_id", None)
+            if not isinstance(source_sender_user_id, (str, int)) or isinstance(
+                source_sender_user_id, bool
+            ):
+                source_sender_user_id = None
+            if (
+                source_sender_user_id is not None
+                and metadata_sender_user_id is not None
+                and str(source_sender_user_id).strip()
+                != str(metadata_sender_user_id).strip()
+            ):
+                raise AccessDeniedError("Telegram sender attribution is inconsistent")
             sender_user_id = str(
-                getattr(source, "user_id", None) or metadata_sender_user_id or ""
+                source_sender_user_id or metadata_sender_user_id or ""
             ).strip()
+            if not sender_user_id:
+                raise UnknownUserError("Telegram sender identity is unavailable")
             if not isinstance(raw_managed, list):
                 raise TypeError("managed_chat_ids must be a list")
             managed_chat_ids = set()
@@ -17166,6 +17408,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             allow_implicit_member = bool(
                 getattr(router_config, "implicit_managed_chat_members", False)
             ) and chat_id in managed_chat_ids
+            resource_namespace = (
+                build_team_resource_namespace(profile, chat_id)
+                if bool(getattr(router_config, "namespace_team_resources", False))
+                and chat_id in managed_chat_ids
+                else None
+            )
             topic_closed = bool(
                 isinstance(event_metadata, dict)
                 and event_metadata.get("telegram_forum_topic_closed")
@@ -17203,6 +17451,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         chat_id,
                         thread_id,
                         sender_user_id,
+                        allow_implicit_member=allow_implicit_member,
+                        verified_sender_user_id=sender_user_id or None,
                     )
                 except UnknownBindingError:
                     topic_name = str(getattr(source, "chat_topic", None) or "").strip()
@@ -17241,6 +17491,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             project_slug,
                             sender_user_id,
                             is_management=is_management,
+                            allow_implicit_member=allow_implicit_member,
+                            verified_sender_user_id=sender_user_id or None,
                         )
                         if not project_context.is_management:
                             router.ensure_bound_board(project_context)
@@ -17259,10 +17511,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         chat_id,
                         thread_id,
                         slug=project_slug,
-                        board_slug=project_slug,
+                        board_slug=(project_slug if resource_namespace is None else None),
                         workspace_root=workspace_root,
+                        resource_namespace=resource_namespace,
                         is_management=is_management,
                         sender_user_id=sender_user_id,
+                        allow_implicit_member=allow_implicit_member,
+                        verified_sender_user_id=sender_user_id or None,
                     )
                     board_prepared = not provisioned.is_management
                     project_context = router.resolve(
@@ -17270,6 +17525,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         chat_id,
                         thread_id,
                         sender_user_id,
+                        allow_implicit_member=allow_implicit_member,
+                        verified_sender_user_id=sender_user_id or None,
                     )
                 if project_context.status == "archived":
                     return (
@@ -17289,6 +17546,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             str(getattr(source, "chat_topic", None) or "").strip()
                             or project_context.slug
                         ),
+                        resource_namespace=resource_namespace,
                     )
                     board_prepared = True
                 if not project_context.is_management and not board_prepared:
@@ -17392,6 +17650,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if (
             project_context is not None
             and project_context.is_management
+            and project_context.access == "allow"
             and context.source.platform == Platform.TELEGRAM
             and getattr(router_config, "enabled", False) is True
         ):
@@ -17414,6 +17673,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         db_path = self._project_router_db_path(source)
         chat_id = str(getattr(source, "chat_id", None) or "").strip()
         message_id = str(getattr(source, "message_id", None) or "").strip()
+        router_config = getattr(getattr(self, "config", None), "project_router", None)
+        raw_managed = getattr(router_config, "managed_chat_ids", [])
+        managed_chat_ids = {
+            str(value).strip()
+            for value in raw_managed
+            if isinstance(value, (str, int))
+            and not isinstance(value, bool)
+            and str(value).strip()
+        } if isinstance(raw_managed, list) else set()
+        resource_namespace = (
+            build_team_resource_namespace(effective_profile, chat_id)
+            if bool(getattr(router_config, "namespace_team_resources", False))
+            and chat_id in managed_chat_ids
+            else None
+        )
+        workspace_root = self._project_router_workspace_root(source)
 
         def _result(project: Any, *, created: bool) -> dict:
             return {
@@ -17437,6 +17712,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "success": False,
                     "error": "project topic creation requires a Telegram chat and message id",
                 }
+
+            requested_workdir = None
+            if workdir is not None and str(workdir).strip():
+                if workspace_root is None:
+                    return {
+                        "success": False,
+                        "error": (
+                            "custom project workdirs require a configured workspace_root"
+                        ),
+                    }
+                try:
+                    raw_workdir = Path(str(workdir).strip()).expanduser()
+                    if not raw_workdir.is_absolute():
+                        raise ValueError("workdir must be absolute")
+                    canonical_root = Path(workspace_root).resolve(strict=False)
+                    canonical_workdir = raw_workdir.resolve(strict=False)
+                    if (
+                        canonical_workdir != canonical_root
+                        and canonical_root not in canonical_workdir.parents
+                    ):
+                        raise ValueError("workdir escapes workspace_root")
+                    requested_workdir = str(canonical_workdir)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    return {
+                        "success": False,
+                        "error": (
+                            "project workdir must be an absolute safe path inside "
+                            f"workspace_root ({type(exc).__name__})"
+                        ),
+                    }
 
             with ProjectRouter(db_path, effective_profile) as router:
                 existing = router.find_telegram_binding(chat_id, slug)
@@ -17528,8 +17833,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             chat_id,
                             thread_id,
                             slug=slug,
-                            board_slug=slug,
-                            workdir=workdir,
+                            board_slug=(slug if resource_namespace is None else None),
+                            workdir=requested_workdir,
+                            workspace_root=workspace_root,
+                            resource_namespace=resource_namespace,
                             status=status,
                         )
                         break
@@ -21541,13 +21848,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     log_message="interim_assistant_callback scheduling error",
                 )
 
-            turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            turn_route = self._resolve_turn_agent_config(
+                message,
+                model,
+                runtime_kwargs,
+                user_config=user_config,
+                source=source,
+                session_key=session_key,
+                reasoning_config=reasoning_config,
+                routing_context={"has_history": bool(history)},
+            )
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
             # schemas for prompt cache hits.
             _sig = self._agent_config_signature(
-                turn_route["model"],
+                turn_route.get("cache_model", turn_route["model"]),
                 turn_route["runtime"],
                 enabled_toolsets,
                 combined_ephemeral,
@@ -21757,7 +22073,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if agent is None:
                 # Config changed or first message — create fresh agent
                 agent = AIAgent(
-                    model=turn_route["model"],
+                    # Anchor fallback restoration and model-specific init state
+                    # to the user's primary model. The selected GPT-5.6 tier is
+                    # applied below as per-turn state before the API call.
+                    model=turn_route.get("cache_model", turn_route["model"]),
                     **turn_route["runtime"],
                     **_checkpoint_agent_kwargs(user_config),
                     max_iterations=max_iterations,
@@ -21863,7 +22182,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent.notice_callback = _notice_callback_sync
             agent.notice_clear_callback = None
             agent.event_callback = _event_callback_sync
-            agent.reasoning_config = reasoning_config
+            routed_reasoning_config = turn_route.get("reasoning_config", reasoning_config)
+            route_runtime_provider = str(turn_route["runtime"].get("provider") or "").lower()
+            agent_provider = str(getattr(agent, "provider", "") or "").lower()
+            if (
+                not getattr(agent, "_fallback_activated", False)
+                and agent_provider == route_runtime_provider
+            ):
+                # Model and effort are per-request fields. GPT-5.6 shares one
+                # cache signature; Claude uses a model-specific signature so
+                # its context metadata is rebuilt safely on family switches.
+                agent.model = turn_route["model"]
+            elif turn_route["model"] != getattr(agent, "model", None):
+                # A provider fallback owns the cached agent now. Do not pair a
+                # GPT-5.6 model slug/effort with that different backend.
+                routed_reasoning_config = reasoning_config
+                logger.info(
+                    "Smart model route skipped for active fallback provider=%s",
+                    agent_provider or "unknown",
+                )
+            agent.reasoning_config = routed_reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
             # Must-deliver notes for THIS turn ride the current user message

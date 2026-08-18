@@ -555,3 +555,14 @@ export function pollCreationMessageFromPayload(payload) {
   };
   return message;
 }
+
+export function hasCompletedPairingCredentials(creds) {
+  if (!creds || typeof creds !== 'object') return false;
+  if (creds.registered === true) return true;
+  return Boolean(
+    creds.me?.id
+    && creds.account
+    && Array.isArray(creds.signalIdentities)
+    && creds.signalIdentities.length > 0,
+  );
+}

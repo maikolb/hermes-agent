@@ -45,11 +45,94 @@ def test_acl_is_fail_closed_and_deny_replaces_prior_allow(tmp_path: Path) -> Non
             router.resolve("telegram", 100, 200, 7)
 
 
+def test_implicit_member_requires_matching_verified_sender_and_deny_wins(
+    tmp_path: Path,
+) -> None:
+    with configured_router(tmp_path / "router.db", tmp_path / "workspace") as router:
+        with pytest.raises(UnknownUserError):
+            router.resolve("telegram", 100, 200, 8)
+        with pytest.raises(UnknownUserError):
+            router.resolve(
+                "telegram",
+                100,
+                200,
+                8,
+                allow_implicit_member=True,
+                verified_sender_user_id=9,
+            )
+
+        implicit = router.resolve(
+            "telegram",
+            100,
+            200,
+            8,
+            allow_implicit_member=True,
+            verified_sender_user_id=8,
+        )
+        assert implicit.sender_user_id == "8"
+        assert implicit.access == "member"
+
+        router.set_acl(100, 8, "deny")
+        with pytest.raises(AccessDeniedError):
+            router.resolve(
+                "telegram",
+                100,
+                200,
+                8,
+                allow_implicit_member=True,
+                verified_sender_user_id=8,
+            )
+
+
+def test_authorize_sender_exposes_capability_without_topic_binding(tmp_path: Path) -> None:
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        assert router.authorize_sender(
+            "team",
+            "member",
+            allow_implicit_member=True,
+            verified_sender_user_id="member",
+        ) == "member"
+
+        router.set_acl("team", "admin", "allow")
+        assert router.authorize_sender(
+            "team",
+            "admin",
+            allow_implicit_member=True,
+            verified_sender_user_id="admin",
+        ) == "allow"
+
+        router.set_acl("team", "blocked", "deny")
+        with pytest.raises(AccessDeniedError):
+            router.authorize_sender(
+                "team",
+                "blocked",
+                allow_implicit_member=True,
+                verified_sender_user_id="blocked",
+            )
+
+
 def test_unknown_topic_fails_closed(tmp_path: Path) -> None:
     with configured_router(tmp_path / "router.db", tmp_path / "workspace") as router:
         router.set_acl(100, 7, "allow")
         with pytest.raises(UnknownBindingError):
             router.resolve("telegram", 100, 999, 7)
+
+
+def test_bind_existing_topic_propagates_implicit_member_capability(tmp_path: Path) -> None:
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        router.upsert_project("project-1", "alpha", "alpha-board", tmp_path / "alpha")
+        context = router.bind_existing_topic(
+            "telegram",
+            "chat",
+            "thread",
+            "alpha",
+            "member",
+            allow_implicit_member=True,
+            verified_sender_user_id="member",
+        )
+
+    assert context.project_id == "project-1"
+    assert context.access == "member"
 
 
 def test_resolution_values_persist_across_reopen(tmp_path: Path) -> None:

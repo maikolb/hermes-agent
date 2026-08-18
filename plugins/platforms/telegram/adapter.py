@@ -7857,11 +7857,20 @@ class TelegramAdapter(BasePlatformAdapter):
                 event,
                 channel_prompt=channel_prompt,
             )
+        metadata = dict(event.metadata or {})
+        sender_user_id = str(event.source.user_id or "").strip()
+        if sender_user_id:
+            # The shared group source intentionally removes the sender from the
+            # session key, but authorization/routing still needs the verified
+            # Telegram identity carried by the original update. Keep it in
+            # adapter-owned metadata; never recover identity from prompt text.
+            metadata["telegram_sender_user_id"] = sender_user_id
         return dataclasses.replace(
             event,
             text=self._telegram_group_observe_attributed_text(event),
             source=shared_source,
             channel_prompt=channel_prompt,
+            metadata=metadata,
         )
 
     def _media_message_type(self, msg: Message) -> MessageType:

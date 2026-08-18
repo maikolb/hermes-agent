@@ -484,13 +484,14 @@ class TestGatewayRuntimeStatus:
         assert status.get_runtime_status_running_pid(payload) is None
 
     def test_runtime_status_running_pid_uses_record_when_cmdline_unreadable(self, monkeypatch):
-        """Keep the cross-platform fallback for hosts where cmdline is unavailable."""
+        """Keep the strong persisted-identity fallback when cmdline is unavailable."""
         payload = {
             "pid": 132,
             "start_time": 123,
             "gateway_state": "running",
             "kind": "hermes-gateway",
             "argv": ["/opt/hermes/.venv/bin/hermes", "gateway", "run", "--replace"],
+            "hermes_home": "/opt/data",
         }
 
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
@@ -601,10 +602,13 @@ class TestGatewayRuntimeStatus:
             == 139
         )
 
-    def test_runtime_status_running_pid_profile_scope_falls_back_when_cmdline_unreadable(self, monkeypatch):
-        """When the live command line is unreadable (Windows/permission), the
-        profile scope cannot apply — fall back to the persisted record so the
-        cross-platform behavior is preserved."""
+    def test_runtime_status_running_pid_profile_scope_fails_closed_without_recorded_home(self, monkeypatch):
+        """An unreadable command line plus no persisted home is unprovable.
+
+        Older snapshots can still prove the PID birth and gateway-shaped argv,
+        but cannot prove which profile owns that process. Cross-profile health
+        therefore fails closed instead of rendering a false green badge.
+        """
         payload = {
             "pid": 139,
             "gateway_state": "running",
@@ -618,10 +622,10 @@ class TestGatewayRuntimeStatus:
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 1000)
         monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
 
-        assert (
-            status.get_runtime_status_running_pid(payload, expected_home=coder_home)
-            == 139
-        )
+        assert status.get_runtime_status_running_pid(
+            payload,
+            expected_home=coder_home,
+        ) is None
 
     def test_write_runtime_status_records_platform_failure(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

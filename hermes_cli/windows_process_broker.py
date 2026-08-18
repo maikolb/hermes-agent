@@ -3,8 +3,9 @@
 Normal children are delegated to a real base ``pythonw.exe`` runner. The
 runner creates the requested process suspended on a private desktop, assigns
 it to a kill-on-close Job Object, resumes it, and proxies its exit code. The
-single interactive-desktop subprocess capability (cua-driver) uses the same
-no-window + pre-resume Job path directly.
+capability-owned subprocesses that must retain the real child PID/lifecycle
+use the same no-window + pre-resume Job path directly. The interactive CUA
+driver is one such capability; long-lived platform bridges are another.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ _KILL_ON_CLOSE = 0x00002000
 _EXTENDED_LIMIT_INFO = 9
 _DESKTOP_ALL_ACCESS = 0x01FF
 _INTERACTIVE_CHILD_ENV = "HERMES_INTERNAL_INTERACTIVE_DESKTOP_CHILD"
+_DIRECT_HIDDEN_CHILD_ENV = "HERMES_INTERNAL_DIRECT_HIDDEN_CHILD"
 
 _install_lock = threading.Lock()
 _installed = False
@@ -164,6 +166,23 @@ def interactive_desktop_child_env(
     return env
 
 
+def direct_hidden_child_env(
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Request a direct, invisible child whose ``Popen`` owns the real PID.
+
+    The default broker runner is correct for short-lived children whose caller
+    only needs an exit code. Long-lived services such as the WhatsApp bridge
+    additionally depend on ``Popen.pid``, ``poll()``, stdio and tree teardown
+    referring to the actual service process. This internal marker selects the
+    direct hidden-desktop + Job Object path and is removed before the target
+    receives its environment.
+    """
+    env = dict(base_env if base_env is not None else os.environ)
+    env[_DIRECT_HIDDEN_CHILD_ENV] = "1"
+    return env
+
+
 def _base_pythonw() -> str:
     candidate = Path(sys.base_prefix) / "pythonw.exe"
     if not candidate.is_file():
@@ -223,7 +242,7 @@ def _write_payload(payload: dict) -> str:
 
 
 class WindowsHiddenPopen(_original_popen):
-    """Canonical Windows Popen: brokered by default, direct only for cua-driver."""
+    """Canonical Windows Popen with explicit direct lifecycle capabilities."""
 
     def __init__(self, *args, **kwargs):
         bound = _popen_signature.bind(*args, **kwargs)
@@ -235,13 +254,17 @@ class WindowsHiddenPopen(_original_popen):
         target_startup = params.pop("startupinfo", None)
 
         child_env = params.get("env")
-        interactive_child = bool(
+        direct_hidden_child = bool(
             isinstance(child_env, dict)
-            and child_env.get(_INTERACTIVE_CHILD_ENV) == "1"
+            and (
+                child_env.get(_INTERACTIVE_CHILD_ENV) == "1"
+                or child_env.get(_DIRECT_HIDDEN_CHILD_ENV) == "1"
+            )
         )
-        if interactive_child:
+        if direct_hidden_child:
             child_env = dict(child_env)
             child_env.pop(_INTERACTIVE_CHILD_ENV, None)
+            child_env.pop(_DIRECT_HIDDEN_CHILD_ENV, None)
             params["env"] = child_env
             flags, startup = hidden_spawn_policy(target_flags, target_startup, suspend=True)
             self._hermes_job_handle = None
@@ -346,6 +369,15 @@ class WindowsHiddenPopen(_original_popen):
             self._close_job()
 
 
+def _popen_uses_hidden_broker() -> bool:
+    """True for the broker itself or a policy wrapper subclassing it."""
+    candidate = subprocess.Popen
+    try:
+        return isinstance(candidate, type) and issubclass(candidate, WindowsHiddenPopen)
+    except TypeError:
+        return candidate is WindowsHiddenPopen
+
+
 def install_windows_process_broker() -> bool:
     global _installed
     if not IS_WINDOWS:
@@ -353,7 +385,7 @@ def install_windows_process_broker() -> bool:
     with _install_lock:
         activate_hidden_desktop()
         _base_pythonw()
-        if _installed or subprocess.Popen is WindowsHiddenPopen:
+        if _popen_uses_hidden_broker():
             _installed = True
             return False
         subprocess.Popen = WindowsHiddenPopen
@@ -365,5 +397,5 @@ def broker_installed() -> bool:
     return bool(
         IS_WINDOWS
         and hidden_desktop_ready()
-        and subprocess.Popen is WindowsHiddenPopen
+        and _popen_uses_hidden_broker()
     )

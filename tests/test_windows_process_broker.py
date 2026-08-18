@@ -52,10 +52,38 @@ def test_broker_is_installed_by_shared_bootstrap():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific contract")
+def test_install_repairs_stale_installed_flag(monkeypatch):
+    monkeypatch.setattr(subprocess, "Popen", broker._original_popen)
+    monkeypatch.setattr(broker, "_installed", True)
+
+    assert broker.install_windows_process_broker() is True
+    assert broker.broker_installed()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific contract")
+def test_broker_remains_installed_through_policy_wrapper(monkeypatch):
+    class GuardedPopen(broker.WindowsHiddenPopen):
+        pass
+
+    monkeypatch.setattr(subprocess, "Popen", GuardedPopen)
+
+    assert broker.install_windows_process_broker() is False
+    assert subprocess.Popen is GuardedPopen
+    assert broker.broker_installed()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific contract")
 def test_interactive_child_marker_is_capability_scoped():
     env = broker.interactive_desktop_child_env({"KEEP": "yes"})
     assert env["KEEP"] == "yes"
     assert env["HERMES_INTERNAL_INTERACTIVE_DESKTOP_CHILD"] == "1"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific contract")
+def test_direct_hidden_child_marker_is_capability_scoped():
+    env = broker.direct_hidden_child_env({"KEEP": "yes"})
+    assert env["KEEP"] == "yes"
+    assert env["HERMES_INTERNAL_DIRECT_HIDDEN_CHILD"] == "1"
 
 
 def test_posix_branch_is_a_noop(monkeypatch):

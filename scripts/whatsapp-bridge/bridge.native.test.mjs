@@ -18,10 +18,24 @@ import {
   createBoundedMessageStore,
   appendMediaFailureNote,
   extractBridgeEvent,
+  hasCompletedPairingCredentials,
   mediaPayloadForFile,
   pollCreationMessageFromPayload,
   pollUpdateForAggregation,
 } from './bridge_helpers.js';
+
+// -- pairing credential durability --------------------------------------
+{
+  assert.equal(hasCompletedPairingCredentials({ registered: true }), true);
+  assert.equal(hasCompletedPairingCredentials({ registered: false }), false);
+  assert.equal(hasCompletedPairingCredentials({
+    registered: false,
+    me: { id: 'device' },
+    account: { details: 'present' },
+    signalIdentities: [{ identifier: 'present' }],
+  }), true);
+  console.log('  ✓ QR pair-success credentials are recognized as provisional credentials');
+}
 
 // -- quoted outbound text -------------------------------------------------
 {

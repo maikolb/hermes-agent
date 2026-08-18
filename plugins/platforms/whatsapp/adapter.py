@@ -638,6 +638,15 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             bridge_env["HERMES_IMAGE_CACHE_DIR"] = str(_get_img_dir())
             bridge_env["HERMES_AUDIO_CACHE_DIR"] = str(_get_audio_dir())
             bridge_env["HERMES_DOCUMENT_CACHE_DIR"] = str(_get_doc_dir())
+            if _IS_WINDOWS:
+                # The bridge is a long-lived service: its Popen PID, poll(),
+                # stdio and teardown must refer to the real Node process, not
+                # the broker's short-lived pythonw runner. The broker still
+                # starts it suspended on the private desktop, assigns a
+                # kill-on-close Job Object, and keeps all windows invisible.
+                from hermes_cli.windows_process_broker import direct_hidden_child_env
+
+                bridge_env = direct_hidden_child_env(bridge_env)
 
             self._bridge_process = subprocess.Popen(
                 [
