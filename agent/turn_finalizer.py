@@ -495,6 +495,18 @@ def finalize_turn(
         except Exception as exc:
             logger.warning("post_llm_call hook failed: %s", exc)
 
+    # Persist the handoff from agent execution to the gateway delivery ledger.
+    # The gateway will replace ``awaiting_ledger`` with the stable obligation
+    # id/status before attempting provider delivery.
+    if final_response and not interrupted:
+        _checkpoint_store = getattr(agent, "_turn_checkpoint_store", None)
+        if _checkpoint_store is not None and agent.session_id:
+            agent._turn_checkpoint_state = _checkpoint_store.mark_terminal(
+                agent.session_id,
+                final_response=final_response,
+                delivery_status="awaiting_ledger",
+            )
+
     # Extract reasoning from the CURRENT turn only.  Walk backwards
     # but stop at the user message that started this turn — anything
     # earlier is from a prior turn and must not leak into the reasoning

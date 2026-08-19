@@ -2221,6 +2221,11 @@ def format_process_notification(evt: dict) -> "str | None":
     return (
         f"[IMPORTANT: Background process {_sid} {_status} "
         f"(exit code {_exit}{_signal}).\n"
+        "Control note: this is an auxiliary completion for an earlier tool "
+        "call. It does not supersede the latest real user request or any "
+        "pending final deliverable. Reconcile only this process result; do not "
+        "declare that no actions are pending unless the active turn checkpoint "
+        "and delivery obligation are both terminal.\n"
         f"Command: {_cmd}\n"
         f"Output:\n{_out}]"
     )
