@@ -305,7 +305,12 @@ def build_verify_on_stop_nudge(
         f"Verification status: {_status_detail(status)}\n\n"
         f"Changed paths:\n{_format_changed_paths(paths)}\n\n"
         f"{command_instruction} If verification is not possible, explain the "
-        "concrete blocker instead of claiming the work is fully verified."
+        "concrete blocker instead of claiming the work is fully verified. "
+        "After verification, return one self-contained final answer containing "
+        "the full requested deliverable together with the verification evidence. "
+        "Do not replace the deliverable with only a verification or test summary. "
+        "If the evidence changes or invalidates the pending draft, correct it "
+        "before returning the final answer."
         f"{addendum}]"
     )
 
