@@ -1257,6 +1257,141 @@ def _build_replay_entry(
     return entry
 
 
+async def _send_queued_response_durably(
+    adapter: Any,
+    source: Any,
+    content: str,
+    *,
+    session_key: str,
+    session_id: str | None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Deliver the completed primary answer before a queued follow-up.
+
+    This path used to call ``adapter.send`` directly, bypassing both the
+    adapter's retry/reconnect rail and the delivery ledger.  A Telegram timeout
+    could therefore drop the real answer while a queued synthetic completion
+    continued and posted an unrelated short reply.  Persist the obligation
+    first and report success only after the adapter confirms delivery.
+    """
+    from gateway.delivery_ledger import (
+        compute_obligation_id,
+        ledger_enabled,
+        mark_attempting,
+        mark_deferred,
+        mark_delivered,
+        mark_failed,
+        record_obligation,
+        send_was_not_attempted,
+    )
+
+    platform = str(getattr(source.platform, "value", source.platform))
+    obligation_id = compute_obligation_id(
+        session_key,
+        f"queued-primary:{session_id or ''}",
+        content,
+    )
+    ledger_active = ledger_enabled()
+    if ledger_active:
+        try:
+            record_obligation(
+                obligation_id=obligation_id,
+                session_key=session_key,
+                platform=platform,
+                chat_id=source.chat_id,
+                thread_id=getattr(source, "thread_id", None),
+                content=content,
+                session_id=session_id,
+            )
+            mark_attempting(obligation_id)
+        except Exception:
+            logger.error(
+                "Queued primary response was not sent because its delivery "
+                "obligation could not be persisted (session=%s)",
+                session_key or "?",
+                exc_info=True,
+            )
+            return False
+
+    if session_id:
+        try:
+            from agent.turn_checkpoint import update_checkpoint_delivery
+
+            update_checkpoint_delivery(
+                session_id,
+                obligation_id=obligation_id,
+                status="attempting",
+            )
+        except Exception:
+            logger.debug("queued response checkpoint handoff failed", exc_info=True)
+
+    try:
+        retry_send = getattr(adapter, "_send_with_retry", None)
+        if callable(retry_send):
+            result = await retry_send(
+                chat_id=source.chat_id,
+                content=content,
+                reply_to=None,
+                metadata=metadata,
+            )
+        else:
+            result = await adapter.send(
+                source.chat_id,
+                content,
+                metadata=metadata,
+            )
+    except Exception as exc:
+        if ledger_active:
+            try:
+                mark_failed(obligation_id, str(exc))
+            except Exception:
+                logger.debug("queued response ledger failure update failed", exc_info=True)
+        if session_id:
+            try:
+                from agent.turn_checkpoint import update_checkpoint_delivery
+
+                update_checkpoint_delivery(
+                    session_id,
+                    obligation_id=obligation_id,
+                    status="failed",
+                )
+            except Exception:
+                logger.debug("queued response checkpoint failure update failed", exc_info=True)
+        logger.warning("Failed to deliver queued primary response: %s", exc)
+        return False
+
+    delivered = bool(getattr(result, "success", False))
+    if ledger_active:
+        try:
+            if delivered:
+                mark_delivered(obligation_id)
+            elif send_was_not_attempted(result):
+                mark_deferred(
+                    obligation_id,
+                    str(getattr(result, "error", "") or ""),
+                )
+            else:
+                mark_failed(
+                    obligation_id,
+                    str(getattr(result, "error", "") or ""),
+                )
+        except Exception:
+            logger.debug("queued response ledger result update failed", exc_info=True)
+
+    if session_id:
+        try:
+            from agent.turn_checkpoint import update_checkpoint_delivery
+
+            update_checkpoint_delivery(
+                session_id,
+                obligation_id=obligation_id,
+                status="delivered" if delivered else "failed",
+            )
+        except Exception:
+            logger.debug("queued response checkpoint result update failed", exc_info=True)
+    return delivered
+
+
 _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER = "observed Telegram group context"
 _OBSERVED_GROUP_CONTEXT_HEADER = "[Observed Telegram group context - context only, not requests]"
 _CURRENT_ADDRESSED_MESSAGE_HEADER = "[Current addressed message - answer only this unless it explicitly asks you to use the observed context]"
@@ -7979,6 +8114,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             overflow.insert(0, next_queued)
         return pending_event
 
+    def _requeue_event_front(
+        self,
+        session_key: str,
+        event: "MessageEvent",
+        adapter: Any,
+    ) -> None:
+        """Restore a dequeued event without allowing it to overtake an owed reply."""
+        if adapter is None or not hasattr(adapter, "_pending_messages"):
+            queued_events = getattr(self, "_queued_events", None)
+            if queued_events is None:
+                queued_events = {}
+                self._queued_events = queued_events
+            queued_events.setdefault(session_key, []).insert(0, event)
+            return
+
+        pending_slot = adapter._pending_messages
+        displaced = pending_slot.get(session_key)
+        pending_slot[session_key] = event
+        if displaced is not None and displaced is not event:
+            queued_events = getattr(self, "_queued_events", None)
+            if queued_events is None:
+                queued_events = {}
+                self._queued_events = queued_events
+            queued_events.setdefault(session_key, []).insert(0, displaced)
+
     def _queue_depth(self, session_key: str, *, adapter: Any = None) -> int:
         """Total pending /queue items for a session — slot + overflow."""
         _q_state = self._peek_session_state(session_key)
@@ -10694,6 +10854,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
             except Exception:
                 logger.debug("delivery ledger update failed", exc_info=True)
+
+            if row.get("session_id"):
+                try:
+                    from agent.turn_checkpoint import update_checkpoint_delivery
+
+                    update_checkpoint_delivery(
+                        row["session_id"],
+                        obligation_id=row["obligation_id"],
+                        status=(
+                            "delivered"
+                            if result is not None and getattr(result, "success", False)
+                            else "failed"
+                        ),
+                    )
+                except Exception:
+                    logger.debug(
+                        "recovered delivery checkpoint update failed", exc_info=True
+                    )
 
             # The answer reached (or was owed to) this session — don't ALSO
             # re-run the turn via the resume path.
@@ -26964,29 +27142,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             "Queued follow-up for session %s: suppressing intentional silence marker before continuing.",
                             session_key or "?",
                         )
-                    elif first_response:
-                        try:
-                            if _already_streamed:
-                                logger.info(
-                                    "Queued follow-up for session %s: final text delivery confirmed; delivering explicit media before continuing.",
-                                    session_key or "?",
-                                )
-                            else:
-                                logger.info(
-                                    "Queued follow-up for session %s: final stream delivery not confirmed; sending first response before continuing.",
-                                    session_key or "?",
-                                )
-                            await self._deliver_queued_first_response(
-                                first_response,
-                                source=source,
-                                adapter=adapter,
-                                metadata=_status_thread_metadata,
-                                event_message_id=event_message_id,
-                                text_already_delivered=_already_streamed,
-                                deliver_media=not _delivery_result.get("failed"),
+                    elif first_response and not _already_streamed:
+                        logger.info(
+                            "Queued follow-up for session %s: final stream delivery "
+                            "not confirmed; persisting and sending first response "
+                            "before continuing.",
+                            session_key or "?",
+                        )
+                        _primary_delivered = await _send_queued_response_durably(
+                            adapter,
+                            source,
+                            first_response,
+                            session_key=session_key,
+                            session_id=session_id,
+                            metadata=_status_thread_metadata,
+                        )
+                        if not _primary_delivered:
+                            logger.warning(
+                                "Queued follow-up for session %s remains blocked: "
+                                "primary response delivery is unconfirmed.",
+                                session_key or "?",
                             )
-                        except Exception as e:
-                            logger.warning("Failed to send first response before queued message: %s", e)
+                            if pending_event is not None:
+                                self._requeue_event_front(
+                                    session_key, pending_event, adapter
+                                )
+                            elif pending and hasattr(adapter, "queue_message"):
+                                adapter.queue_message(session_key, pending)
+                            return result_holder[0] or {
+                                "final_response": response,
+                                "messages": history,
+                            }
+                    elif first_response:
+                        logger.info(
+                            "Queued follow-up for session %s: skipping resend because final streamed delivery was confirmed.",
+                            session_key or "?",
+                        )
                     # Release deferred bg-review notifications now that the
                     # first response has been delivered.  Pop from the
                     # adapter's callback dict (prevents double-fire in

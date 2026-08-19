@@ -20,6 +20,9 @@ monkeypatch ``run_agent.time.sleep`` locally (see
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
 
@@ -44,3 +47,51 @@ def _fast_retry_backoff(monkeypatch):
         monkeypatch.setattr(_conv_loop, "jittered_backoff", lambda *a, **k: 0.0)
     except ImportError:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _close_session_db_handles(monkeypatch):
+    """Close SessionDB handles before a TemporaryDirectory removes its files.
+
+    POSIX permits unlinking an open SQLite database; Windows correctly rejects
+    it with WinError 32. Tests own these databases, so close matching handles at
+    the directory lifecycle boundary without weakening production locking.
+    """
+    from hermes_state import SessionDB
+
+    original_init = SessionDB.__init__
+    original_cleanup = tempfile.TemporaryDirectory.cleanup
+    created = []
+
+    def tracked_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+
+    def cleanup_with_closed_databases(temp_dir):
+        root = Path(temp_dir.name).resolve(strict=False)
+        for db in reversed(created):
+            db_path = Path(getattr(db, "db_path", "")).resolve(strict=False)
+            try:
+                db_path.relative_to(root)
+            except ValueError:
+                continue
+            try:
+                db.close()
+            except Exception:
+                pass
+        return original_cleanup(temp_dir)
+
+    monkeypatch.setattr(SessionDB, "__init__", tracked_init)
+    monkeypatch.setattr(
+        tempfile.TemporaryDirectory,
+        "cleanup",
+        cleanup_with_closed_databases,
+    )
+    try:
+        yield
+    finally:
+        for db in reversed(created):
+            try:
+                db.close()
+            except Exception:
+                pass

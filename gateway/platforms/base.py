@@ -6450,6 +6450,14 @@ class BasePlatformAdapter(ABC):
                     # Slash-command and ephemeral replies are cheap to
                     # regenerate and are not recorded.
                     _obligation_id = None
+                    try:
+                        from gateway.session_context import get_session_env
+
+                        _checkpoint_session_id = get_session_env(
+                            "HERMES_SESSION_ID", ""
+                        )
+                    except Exception:
+                        _checkpoint_session_id = ""
                     if not is_ephemeral_response and not str(
                         event.text or ""
                     ).lstrip().startswith(("/", self.typed_command_prefix or "!")):
@@ -6478,11 +6486,25 @@ class BasePlatformAdapter(ABC):
                                     chat_id=event.source.chat_id,
                                     thread_id=getattr(event.source, "thread_id", None),
                                     content=text_content,
+                                    session_id=_checkpoint_session_id or None,
                                 )
                                 await asyncio.to_thread(mark_attempting, _obligation_id)
                         except Exception:
                             logger.debug("delivery ledger record failed", exc_info=True)
                             _obligation_id = None
+                    if _checkpoint_session_id:
+                        try:
+                            from agent.turn_checkpoint import update_checkpoint_delivery
+
+                            update_checkpoint_delivery(
+                                _checkpoint_session_id,
+                                obligation_id=_obligation_id or "",
+                                status="attempting" if _obligation_id else "pending",
+                            )
+                        except Exception:
+                            logger.debug(
+                                "turn checkpoint delivery handoff failed", exc_info=True
+                            )
                     result = await delivery_adapter._send_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,
@@ -6535,6 +6557,25 @@ class BasePlatformAdapter(ABC):
                         except Exception:
                             logger.debug(
                                 "delivery ledger update failed", exc_info=True
+                            )
+
+                    if _checkpoint_session_id:
+                        try:
+                            from agent.turn_checkpoint import update_checkpoint_delivery
+
+                            update_checkpoint_delivery(
+                                _checkpoint_session_id,
+                                obligation_id=_obligation_id or "",
+                                status=(
+                                    "delivered"
+                                    if getattr(result, "success", False)
+                                    else "failed"
+                                ),
+                            )
+                        except Exception:
+                            logger.debug(
+                                "turn checkpoint delivery result update failed",
+                                exc_info=True,
                             )
 
                     # Schedule auto-deletion on the adapter that owns the new

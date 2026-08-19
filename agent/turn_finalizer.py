@@ -595,33 +595,17 @@ def finalize_turn(
         except Exception as exc:
             logger.warning("post_llm_call hook failed: %s", exc)
 
-    # Context engine observation hook: notify the active engine that this
-    # turn has finished, with the finalized transcript. Complements the
-    # per-request select_context() hook (selection before the request;
-    # observation after the turn). No-op default, fail-open.
-    try:
-        from agent.conversation_loop import _notify_context_engine_turn_complete
-        # Forward the turn's canonical usage when the host has it. The loop
-        # stashes the most recent API response's usage dict (the same
-        # canonical buckets fed to ``update_from_response``) on the agent as
-        # ``_last_turn_usage``. It is ``None`` on turns that never reached a
-        # provider response (early failure / interrupt), which is exactly the
-        # contract: real usage when available, ``None`` otherwise.
-        _turn_usage = getattr(agent, "_last_turn_usage", None)
-        _notify_context_engine_turn_complete(
-            agent,
-            messages,
-            usage=_turn_usage,
-            logger=logger,
-            turn_id=turn_id,
-            task_id=effective_task_id,
-            api_call_count=api_call_count,
-            interrupted=interrupted,
-            failed=failed,
-            turn_exit_reason=_turn_exit_reason,
-        )
-    except Exception as exc:
-        logger.warning("on_turn_complete notification failed: %s", exc)
+    # Persist the handoff from agent execution to the gateway delivery ledger.
+    # The gateway will replace ``awaiting_ledger`` with the stable obligation
+    # id/status before attempting provider delivery.
+    if final_response and not interrupted:
+        _checkpoint_store = getattr(agent, "_turn_checkpoint_store", None)
+        if _checkpoint_store is not None and agent.session_id:
+            agent._turn_checkpoint_state = _checkpoint_store.mark_terminal(
+                agent.session_id,
+                final_response=final_response,
+                delivery_status="awaiting_ledger",
+            )
 
     # Extract reasoning from the CURRENT turn only.  Walk backwards
     # but stop at the user message that started this turn — anything

@@ -2372,6 +2372,49 @@ def compress_context(
         check_compression_model_feasibility(agent)
         agent._compression_feasibility_checked = True
 
+    # Write-ahead control checkpoint before any summarizer can replace context.
+    # Durable sessions must never cross a compaction boundary on transcript
+    # state alone. Manual/legacy compression entrypoints that did not pass
+    # through turn_context get a bounded synthetic turn identity here.
+    _turn_checkpoint_store = None
+    _checkpoint_db = getattr(agent, "_session_db", None)
+    _checkpoint_db_path = getattr(_checkpoint_db, "db_path", None)
+    if (
+        _checkpoint_db is not None
+        and isinstance(agent.session_id, str)
+        and bool(agent.session_id)
+        and isinstance(_checkpoint_db_path, (str, os.PathLike))
+    ):
+        from agent.turn_checkpoint import checkpoint_store_for_agent
+
+        _turn_checkpoint_store = checkpoint_store_for_agent(agent)
+        if _turn_checkpoint_store is None:
+            raise RuntimeError("durable compaction requires a turn checkpoint store")
+        try:
+            _turn_checkpoint_store.load(agent.session_id)
+        except FileNotFoundError:
+            _last_user_content = ""
+            for _checkpoint_message in reversed(messages):
+                if (
+                    isinstance(_checkpoint_message, dict)
+                    and _checkpoint_message.get("role") == "user"
+                ):
+                    _last_user_content = _checkpoint_message.get("content", "")
+                    break
+            _turn_checkpoint_store.start_turn(
+                agent.session_id,
+                str(getattr(agent, "_current_turn_id", None) or f"manual-compress:{_attempt_id}"),
+                _last_user_content,
+                messages,
+                routing={"platform": str(getattr(agent, "platform", None) or "")},
+            )
+        _turn_checkpoint_store.transition(
+            agent.session_id,
+            phase="compaction_summarizing",
+            next_action="prepare_and_commit_compacted_transcript",
+            changed_paths=sorted(getattr(agent, "_turn_file_mutation_paths", set()) or set()),
+        )
+
     _pre_msg_count = len(messages)
     # In-place compaction (config: compression.in_place, see #38763). When True,
     # this compaction rewrites the message list and refreshes the system prompt
@@ -3341,6 +3384,18 @@ def compress_context(
             new_system_prompt = agent._build_system_prompt(system_message)
             agent._cached_system_prompt = new_system_prompt
 
+        if (
+            agent._session_db
+            and _turn_checkpoint_store is not None
+        ):
+            # Phase 2 of the write-ahead protocol. Both hashes are durable and
+            # read-validated before SessionDB archives/replaces a single row.
+            _turn_checkpoint_store.prepare_compaction(
+                agent.session_id,
+                messages_before_compression,
+                compressed,
+            )
+
         _session_commit_succeeded = False
         split_status = "not_applicable"
         if agent._session_db:
@@ -3371,17 +3426,45 @@ def compress_context(
                     # for search/recovery (Teknium review — keep one durable id
                     # WITHOUT destroying history, unlike a hard replace_messages).
                     # See #38763.
-                    from agent.context_compressor import (
-                        PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY,
-                    )
+                    from agent.turn_checkpoint import CheckpointWriteError
 
-                    agent._session_db.archive_and_compact(
-                        agent.session_id,
-                        compressed,
-                        model_config_patch={
-                            PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None,
-                        },
-                    )
+                    agent._session_db.archive_and_compact(agent.session_id, compressed)
+                    if _turn_checkpoint_store is None:
+                        raise CheckpointWriteError(
+                            "in-place durable compaction committed without checkpoint store"
+                        )
+                    try:
+                        _checkpoint_live_messages = (
+                            agent._session_db.get_messages_as_conversation(agent.session_id)
+                        )
+                        _turn_checkpoint_store.commit_compaction(
+                            agent.session_id, _checkpoint_live_messages
+                        )
+                    except Exception as _checkpoint_commit_error:
+                        # The transcript transaction already committed. Restore
+                        # the original active set as a compensating transaction;
+                        # archived rows remain searchable, and the prepared WAL
+                        # once again matches its before-hash. Never continue on
+                        # a transcript/control-state split brain.
+                        try:
+                            agent._session_db.archive_and_compact(
+                                agent.session_id, messages_before_compression
+                            )
+                            _checkpoint_rollback_live = (
+                                agent._session_db.get_messages_as_conversation(agent.session_id)
+                            )
+                            _turn_checkpoint_store.restore(
+                                agent.session_id, _checkpoint_rollback_live
+                            )
+                        except Exception as _checkpoint_rollback_error:
+                            raise CheckpointWriteError(
+                                "checkpoint commit failed after transcript swap and "
+                                "compensating rollback also failed"
+                            ) from _checkpoint_rollback_error
+                        raise CheckpointWriteError(
+                            "checkpoint commit failed after transcript swap; "
+                            "original transcript restored"
+                        ) from _checkpoint_commit_error
                     split_status = "in_place_committed"
                     # Reset the flush identity set so the next turn's appends are
                     # diffed against the COMPACTED transcript: the compacted dicts
@@ -3543,6 +3626,25 @@ def compress_context(
                     )
                     agent._last_flushed_db_idx = 0
                 else:
+                    # A headless turn can be killed before its finalizer. Persist
+                    # the rotated child's compacted handoff at the boundary so
+                    # the new session is immediately resumable.
+                    agent._session_db.replace_messages(agent.session_id, compressed)
+                    if _turn_checkpoint_store is None or not old_session_id:
+                        from agent.turn_checkpoint import CheckpointWriteError
+
+                        raise CheckpointWriteError(
+                            "rotation committed without a checkpoint lineage"
+                        )
+                    agent._turn_checkpoint_state = (
+                        _turn_checkpoint_store.migrate_session(
+                            old_session_id,
+                            agent.session_id,
+                            agent._session_db.get_messages_as_conversation(
+                                agent.session_id
+                            ),
+                        )
+                    )
                     agent._last_flushed_db_idx = len(compressed)
                     agent._flushed_db_message_session_id = agent.session_id
                     agent._flushed_db_message_ids = {
@@ -3552,40 +3654,39 @@ def compress_context(
                     }
                 _session_commit_succeeded = True
             except Exception as e:
-                if (
-                    not in_place
-                    and locals().get("old_session_id")
-                    and agent.session_id == old_session_id
-                ):
-                    # Atomic publication failed (including lease loss): keep the
-                    # parent live and discard the stale compacted snapshot.
-                    old_session_id = None
-                    messages[:] = copy.deepcopy(messages_before_compression)
-                    compressed = messages
-                    _compression_made_progress = False
-                    # Restore ONLY the prune runway, not the full attempt
-                    # snapshot: _restore_compressor_attempt_state is reserved
-                    # for pre-commit cancels (fence deny / explicit cancel),
-                    # while this branch is post-attempt — the other snapshot
-                    # fields (telemetry, aborted flags) must keep the failed
-                    # attempt's values. The runway is a property of transcript
-                    # state, and the transcript was just rolled back to its
-                    # pre-compression copy, so the runway rolls back with it.
-                    # (compress() zeroed it in-memory on summary success; the
-                    # durable copy was never cleared — that clear only rides
-                    # the atomic archive_and_compact / child-row publication
-                    # that just failed.)
-                    if "_proactive_prune_rearm_tokens" in _compressor_attempt_snapshot:
-                        agent.context_compressor._proactive_prune_rearm_tokens = (
-                            _compressor_attempt_snapshot[
-                                "_proactive_prune_rearm_tokens"
-                            ]
-                        )
-                split_status = (
-                    "aborted"
-                    if locals().get("old_session_id") is None and not in_place
-                    else "failed_not_indexed"
-                )
+                from agent.turn_checkpoint import CheckpointError, CheckpointWriteError
+
+                if isinstance(e, CheckpointError):
+                    if not in_place and locals().get("old_session_id"):
+                        _checkpoint_failed_child = agent.session_id
+                        try:
+                            agent._session_db.end_session(
+                                _checkpoint_failed_child,
+                                "checkpoint_rotation_rollback",
+                            )
+                            agent._session_db.reopen_session(old_session_id)
+                            agent.session_id = old_session_id
+                            agent._session_db_created = True
+                            _turn_checkpoint_store.restore(
+                                old_session_id, messages_before_compression
+                            )
+                        except Exception as _rotation_checkpoint_rollback_error:
+                            logger.critical(
+                                "Checkpoint rotation rollback failed child=%s parent=%s",
+                                _checkpoint_failed_child,
+                                old_session_id,
+                                exc_info=True,
+                            )
+                            raise CheckpointWriteError(
+                                "rotation checkpoint failed and parent rollback failed"
+                            ) from _rotation_checkpoint_rollback_error
+                    logger.error(
+                        "Compaction checkpoint failed closed for session=%s: %s",
+                        agent.session_id or "?",
+                        e,
+                    )
+                    raise
+                split_status = "aborted" if locals().get("old_session_id") is None and not in_place else "failed_not_indexed"
                 # If the rotation rolled back to the parent (orphan-avoidance
                 # above), agent.session_id is the still-indexed parent and
                 # old_session_id was cleared — so this is recovery, not an
@@ -3776,6 +3877,28 @@ def compress_context(
         )
         return compressed, new_system_prompt
     finally:
+        # A summarizer no-op/abort never crossed the transcript boundary. Reset
+        # the captured control phase so a later restart does not resume a
+        # compaction that was already abandoned.
+        try:
+            if _turn_checkpoint_store is not None and agent.session_id:
+                _checkpoint_final_state = _turn_checkpoint_store.load(agent.session_id)
+                if (
+                    _checkpoint_final_state.get("phase") == "compaction_summarizing"
+                    and _checkpoint_final_state.get("compaction", {}).get("state")
+                    == "captured"
+                ):
+                    _turn_checkpoint_store.transition(
+                        agent.session_id,
+                        phase="turn_active",
+                        next_action="continue_current_turn",
+                    )
+        except Exception:
+            logger.error(
+                "Could not finalize compaction checkpoint phase for session=%s",
+                agent.session_id or "?",
+                exc_info=True,
+            )
         # Release the lock on the OLD session_id only AFTER rotation completed
         # and all post-rotation bookkeeping (memory manager, context engine,
         # file dedup) ran. A concurrent path that wakes up the moment we
