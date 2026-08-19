@@ -238,6 +238,7 @@ def test_nudge_preserves_final_delivery_after_verification(tmp_path, monkeypatch
     assert "one self-contained final answer" in nudge
     assert "full requested deliverable" in nudge
     assert "Do not replace the deliverable" in nudge
+    assert "[HERMES_VERIFIED_FINAL_DELIVERY]" in nudge
 
 
 def test_nudge_includes_failed_output_summary(tmp_path, monkeypatch):

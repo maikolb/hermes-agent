@@ -799,6 +799,10 @@ def run_conversation(
     # reused as the final response — not merely because any interim was
     # streamed. (#65919 review: response-loss blocker)
     _pending_verification_response_previewed = False
+    # True only for the built-in verify-on-stop continuation. Unlike the
+    # generic pre_verify/Kanban fallbacks that share the pending response slot,
+    # this path has a deterministic final-delivery reconciliation contract.
+    _verification_delivery_pending = False
     # If pre-API compression fires after MoA advisors have produced guidance,
     # retain that ephemeral output and rebase it onto the compacted transcript
     # on the next loop iteration. This prevents a second advisor fan-out.
@@ -5896,6 +5900,17 @@ def run_conversation(
                     _verify_nudge = None
 
                 if _verify_nudge:
+                    try:
+                        from agent.verification_stop import strip_verification_delivery_marker
+
+                        _clean_candidate, _candidate_marked = (
+                            strip_verification_delivery_marker(final_response)
+                        )
+                    except Exception:
+                        _clean_candidate, _candidate_marked = final_response, False
+                    if _candidate_marked:
+                        final_response = _clean_candidate
+                        final_msg["content"] = _clean_candidate
                     agent._verification_stop_nudges = (
                         getattr(agent, "_verification_stop_nudges", 0) + 1
                     )
@@ -5922,19 +5937,48 @@ def run_conversation(
                     # terminal. Keep a debug breadcrumb in agent.log for tracing.
                     logger.debug("verification stop-loop nudge issued (attempt %d)",
                                  agent._verification_stop_nudges)
-                    # Keep the attempted answer only as an explicit fallback for
-                    # continuation-budget exhaustion.  ``final_response`` itself
-                    # must be cleared so the finalizer can distinguish this gate
-                    # from unrelated error/recovery exits. (#61631)
-                    # Track whether this candidate was already streamed so the
-                    # finalizer can mark the turn previewed only if the
-                    # candidate is actually reused as the final response.
-                    _pending_verification_response = final_response
-                    _pending_verification_response_previewed = (
-                        agent._interim_content_was_streamed(final_response or "")
-                    )
+                    # The first candidate predates the marker contract and is
+                    # always retained. On later verification attempts, replace
+                    # it only with a marked self-contained candidate; a short
+                    # verification narrative cannot become the new fallback.
+                    if not _verification_delivery_pending or _candidate_marked:
+                        _pending_verification_response = final_response
+                        _pending_verification_response_previewed = (
+                            agent._interim_content_was_streamed(final_response or "")
+                        )
+                    _verification_delivery_pending = True
                     final_response = None
                     continue
+
+                if _verification_delivery_pending:
+                    try:
+                        from agent.verification_stop import reconcile_verification_delivery
+
+                        final_response, _delivery_reconcile_mode = (
+                            reconcile_verification_delivery(
+                                _pending_verification_response,
+                                final_response,
+                            )
+                        )
+                    except Exception:
+                        logger.exception("verification final-delivery reconciliation failed")
+                        if _pending_verification_response:
+                            final_response = _pending_verification_response
+                        _delivery_reconcile_mode = "exception-fallback"
+                    final_msg["content"] = final_response
+                    if _delivery_reconcile_mode == "merged-fallback":
+                        logger.warning(
+                            "verification response omitted the final-delivery marker; "
+                            "preserved pending deliverable plus verification outcome"
+                        )
+                    else:
+                        logger.debug(
+                            "verification final-delivery reconciliation: %s",
+                            _delivery_reconcile_mode,
+                        )
+                    _pending_verification_response = None
+                    _pending_verification_response_previewed = False
+                    _verification_delivery_pending = False
 
                 # User verification-loop gate: when the agent edited code this
                 # turn, let a registered `pre_verify` hook (plugin/shell) keep it
