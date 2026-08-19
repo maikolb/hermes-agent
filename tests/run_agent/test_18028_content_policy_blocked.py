@@ -15,6 +15,8 @@ was the problem.
 """
 from __future__ import annotations
 
+from unittest.mock import patch
+
 
 class TestContentPolicyBlockedClassification:
     """Verify classify_api_error returns the right shape so downstream
@@ -41,6 +43,67 @@ class TestContentPolicyBlockedClassification:
         assert result.should_compress is False
         assert result.should_rotate_credential is False
 
+
+
+class TestContentPolicyRecoveryGuidance:
+    """The terminal refusal must give a safe, executable recovery boundary.
+
+    A profile's model cannot apply memory or persona instructions after the
+    provider rejects the request before inference.  The deterministic handler
+    therefore owns the user-facing recovery contract.
+    """
+
+    def test_recovery_hint_distinguishes_provider_hardline_and_bounds_reframe(self):
+        from agent.conversation_loop import _CONTENT_POLICY_RECOVERY_HINT
+
+        hint = _CONTENT_POLICY_RECOVERY_HINT.lower()
+        assert "before hermes could complete" in hint
+        assert "explicitly provided" in hint
+        assert "normal authentication" in hint
+        assert "no bypass" in hint
+        assert "no guessing" in hint
+        assert "no enumeration" in hint
+        assert "no exploitation" in hint
+        assert "no exfiltration" in hint
+        assert "secrets out of logs" in hint
+        assert "minimum read-only" in hint
+        assert "confirm" in hint
+        assert "no fallback is activated automatically" in hint
+
+    def test_no_fallback_surfaces_defensive_boundary_after_one_api_call(self):
+        from tests.run_agent.test_run_agent import agent as agent_fixture
+
+        agent = agent_fixture.__wrapped__()
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.client.chat.completions.create.side_effect = Exception(
+            "This content was flagged for possible cybersecurity risk. "
+            "If this seems wrong, try rephrasing your request. To get "
+            "authorized for security work, join the Trusted Access for "
+            "Cyber program."
+        )
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("validate my authorized asset")
+
+        response = (result.get("final_response") or "").lower()
+        assert result["failed"] is True
+        assert result["completed"] is False
+        assert "content_policy_blocked" in result["error"]
+        assert "provider hardline" in response
+        assert "normal authentication" in response
+        assert "minimum read-only" in response
+        assert "no fallback is activated automatically" in response
+        assert agent.client.chat.completions.create.call_count == 1
 
 
 class TestContentPolicyTriggersClientErrorAbort:
