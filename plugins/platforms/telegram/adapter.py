@@ -816,9 +816,12 @@ class TelegramAdapter(BasePlatformAdapter):
         # "all"       — every message triggers a push notification (legacy
         #               behavior; opt-in via display.platforms.telegram.notifications).
         self._notifications_mode: str = "important"
-        # send_or_update_status() bookkeeping: {(chat_id, status_key) -> bot message_id}
+        # send_or_update_status() bookkeeping:
+        # {(chat_id, thread_id, status_key) -> bot message_id}
         # Tracks status bubbles owned by this adapter so subsequent calls with the
-        # same key edit the same message instead of appending new ones (#30045).
+        # same topic-scoped key edit the same message instead of appending new ones
+        # (#30045).  The thread id is part of the identity because one Telegram
+        # forum group can run several independent project sessions concurrently.
         self._status_message_ids: Dict[tuple, str] = {}
         # Last truncated mid-stream preview delivered per (chat_id, message_id).
         # Once an oversized streaming edit saturates at the 4096 preview cap,
@@ -4422,11 +4425,20 @@ class TelegramAdapter(BasePlatformAdapter):
         Issue #30045: progress/status callbacks (context-pressure, lifecycle,
         compression, etc.) used to append a fresh bubble on every call. With
         this method, the first call sends and the message id is remembered;
-        subsequent calls with the same (chat_id, status_key) edit that same
-        message in place. If the edit fails (message deleted, too old, etc.)
-        we drop the cached id and send fresh.
+        subsequent calls with the same (chat_id, thread_id, status_key) edit that
+        same message in place. If the edit fails (message deleted, too old, etc.)
+        we drop the cached id and send fresh. Topic identity is mandatory here:
+        without it, concurrent projects in one forum group edit and later clean
+        up each other's status bubbles.
         """
-        key = (str(chat_id), str(status_key))
+        thread_id = ""
+        if metadata:
+            for field in ("thread_id", "message_thread_id", "direct_messages_topic_id"):
+                candidate = metadata.get(field)
+                if candidate not in (None, ""):
+                    thread_id = str(candidate)
+                    break
+        key = (str(chat_id), thread_id, str(status_key))
         cached_id = self._status_message_ids.get(key)
         if cached_id is not None:
             result = await self.edit_message(
