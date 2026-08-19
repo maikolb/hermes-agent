@@ -1,14 +1,15 @@
 """Tests for TelegramAdapter.send_or_update_status (issue #30045).
 
 The status-update path must:
-  1. Send a fresh message on the first call for a (chat_id, status_key) pair.
+  1. Send a fresh message on the first call for a (chat_id, thread_id, status_key) tuple.
   2. Edit that same message on subsequent calls with the same key.
   3. Fall back to sending fresh when the cached message edit fails.
-  4. Keep distinct keys independent (no cross-talk).
+  4. Keep distinct keys, chats, and forum topics independent (no cross-talk).
 """
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from types import SimpleNamespace
@@ -85,7 +86,47 @@ async def test_first_call_sends_and_caches_message_id(adapter):
     assert result.message_id == "100"
     adapter.send.assert_awaited_once()
     adapter.edit_message.assert_not_awaited()
-    assert adapter._status_message_ids[("chat-1", "lifecycle")] == "100"
+    assert adapter._status_message_ids[("chat-1", "", "lifecycle")] == "100"
+
+
+@pytest.mark.asyncio
+async def test_second_call_edits_in_place(adapter):
+    """Same (chat, key) on the second call must edit, not send."""
+    adapter.send.return_value = SendResult(success=True, message_id="100")
+    adapter.edit_message.return_value = SendResult(success=True, message_id="100")
+
+    await adapter.send_or_update_status("chat-1", "lifecycle", "step 1")
+    await adapter.send_or_update_status("chat-1", "lifecycle", "step 2")
+
+    adapter.send.assert_awaited_once()
+    adapter.edit_message.assert_awaited_once()
+    # Edit was directed at the cached message id.
+    args, kwargs = adapter.edit_message.call_args
+    assert args[0] == "chat-1"
+    assert args[1] == "100"
+    assert args[2] == "step 2"
+
+
+@pytest.mark.asyncio
+async def test_edit_failure_falls_back_to_fresh_send(adapter):
+    """When edit_message fails the cache is cleared and a new send happens."""
+    adapter.send.side_effect = [
+        SendResult(success=True, message_id="100"),
+        SendResult(success=True, message_id="200"),
+    ]
+    adapter.edit_message.return_value = SendResult(
+        success=False, error="Bad Request: message to edit not found",
+    )
+
+    await adapter.send_or_update_status("chat-1", "lifecycle", "step 1")
+    result = await adapter.send_or_update_status("chat-1", "lifecycle", "step 2")
+
+    assert result.success is True
+    assert result.message_id == "200"
+    assert adapter.send.await_count == 2
+    assert adapter.edit_message.await_count == 1
+    # Cache now points at the fresh message id.
+    assert adapter._status_message_ids[("chat-1", "", "lifecycle")] == "200"
 
 
 @pytest.mark.asyncio
@@ -101,7 +142,80 @@ async def test_distinct_status_keys_do_not_collide(adapter):
 
     assert adapter.send.await_count == 2
     adapter.edit_message.assert_not_awaited()
-    assert adapter._status_message_ids[("chat-1", "lifecycle")] == "100"
-    assert adapter._status_message_ids[("chat-1", "model-switch")] == "200"
+    assert adapter._status_message_ids[("chat-1", "", "lifecycle")] == "100"
+    assert adapter._status_message_ids[("chat-1", "", "model-switch")] == "200"
 
 
+@pytest.mark.asyncio
+async def test_distinct_chat_ids_do_not_collide(adapter):
+    """Same status_key in different chats must not edit each other's messages."""
+    adapter.send.side_effect = [
+        SendResult(success=True, message_id="100"),
+        SendResult(success=True, message_id="200"),
+    ]
+
+    await adapter.send_or_update_status("chat-1", "lifecycle", "first")
+    await adapter.send_or_update_status("chat-2", "lifecycle", "second")
+
+    assert adapter.send.await_count == 2
+    adapter.edit_message.assert_not_awaited()
+    assert adapter._status_message_ids[("chat-1", "", "lifecycle")] == "100"
+    assert adapter._status_message_ids[("chat-2", "", "lifecycle")] == "200"
+
+
+@pytest.mark.asyncio
+async def test_same_status_in_three_forum_topics_does_not_crosstalk(adapter):
+    """Concurrent projects in one forum group must own separate status bubbles."""
+    adapter.send.side_effect = [
+        SendResult(success=True, message_id="topic-4-message"),
+        SendResult(success=True, message_id="topic-6-message"),
+        SendResult(success=True, message_id="topic-41-message"),
+    ]
+
+    await asyncio.gather(
+        adapter.send_or_update_status(
+            "project-group", "context_pressure", "dovcrm", metadata={"thread_id": "4"},
+        ),
+        adapter.send_or_update_status(
+            "project-group", "context_pressure", "recuperacli", metadata={"thread_id": "6"},
+        ),
+        adapter.send_or_update_status(
+            "project-group", "context_pressure", "concursa", metadata={"thread_id": "41"},
+        ),
+    )
+
+    assert adapter.send.await_count == 3
+    adapter.edit_message.assert_not_awaited()
+    assert adapter._status_message_ids == {
+        ("project-group", "4", "context_pressure"): "topic-4-message",
+        ("project-group", "6", "context_pressure"): "topic-6-message",
+        ("project-group", "41", "context_pressure"): "topic-41-message",
+    }
+
+    adapter.send.reset_mock()
+    adapter.edit_message.reset_mock()
+    adapter.edit_message.side_effect = [
+        SendResult(success=True, message_id="topic-4-message"),
+        SendResult(success=True, message_id="topic-6-message"),
+        SendResult(success=True, message_id="topic-41-message"),
+    ]
+
+    await asyncio.gather(
+        adapter.send_or_update_status(
+            "project-group", "context_pressure", "dovcrm-2", metadata={"thread_id": "4"},
+        ),
+        adapter.send_or_update_status(
+            "project-group", "context_pressure", "recuperacli-2", metadata={"thread_id": "6"},
+        ),
+        adapter.send_or_update_status(
+            "project-group", "context_pressure", "concursa-2", metadata={"thread_id": "41"},
+        ),
+    )
+
+    adapter.send.assert_not_awaited()
+    assert adapter.edit_message.await_count == 3
+    assert {call.args[1] for call in adapter.edit_message.await_args_list} == {
+        "topic-4-message",
+        "topic-6-message",
+        "topic-41-message",
+    }
