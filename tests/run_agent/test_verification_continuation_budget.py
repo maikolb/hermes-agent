@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent.verification_stop import VERIFICATION_FINAL_DELIVERY_MARKER
 from run_agent import AIAgent
 
 
@@ -127,7 +128,10 @@ def test_intermediate_ack_uses_summary_instead_of_premature_text(agent, monkeypa
 def test_later_verified_response_supersedes_pending_report(agent, monkeypatch):
     agent.max_iterations = 2
     agent.iteration_budget.max_total = 2
-    answers = iter([_response("premature report"), _response("verified final report")])
+    answers = iter([
+        _response("premature report"),
+        _response(f"{VERIFICATION_FINAL_DELIVERY_MARKER}\nverified final report"),
+    ])
     agent._interruptible_api_call = lambda _kwargs: next(answers)
     agent._handle_max_iterations = MagicMock(return_value="replacement summary")
     monkeypatch.setenv("HERMES_VERIFY_ON_STOP", "1")
@@ -147,14 +151,42 @@ def test_later_verified_response_supersedes_pending_report(agent, monkeypatch):
     agent._handle_max_iterations.assert_not_called()
 
 
+def test_verification_summary_cannot_replace_pending_deliverable(agent, monkeypatch):
+    """Regression: a test summary must never erase the requested report."""
+    agent.max_iterations = 2
+    agent.iteration_budget.max_total = 2
+    answers = iter([
+        _response("complete requested report"),
+        _response("25/25 verification checks passed"),
+    ])
+    agent._interruptible_api_call = lambda _kwargs: next(answers)
+    agent._handle_max_iterations = MagicMock(return_value="replacement summary")
+    monkeypatch.setenv("HERMES_VERIFY_ON_STOP", "1")
+
+    with (
+        patch(
+            "agent.verification_stop.build_verify_on_stop_nudge",
+            side_effect=["verify it", None],
+        ),
+        patch("hermes_cli.plugins.invoke_hook", return_value=[]),
+    ):
+        result = agent.run_conversation("edit changed.py and deliver the report")
+
+    assert result["final_response"].startswith("complete requested report")
+    assert "25/25 verification checks passed" in result["final_response"]
+    assert result["final_response"] != "25/25 verification checks passed"
+    assert result["completed"] is True
+    agent._handle_max_iterations.assert_not_called()
+
+
 def test_multiple_verification_retries_publish_each_candidate_once(agent, monkeypatch):
     """Multiple verification retries should publish each candidate once, in order."""
     agent.max_iterations = 3
     agent.iteration_budget.max_total = 3
     answers = iter([
         _response("candidate one"),
-        _response("candidate two"),
-        _response("candidate three"),
+        _response(f"{VERIFICATION_FINAL_DELIVERY_MARKER}\ncandidate two"),
+        _response(f"{VERIFICATION_FINAL_DELIVERY_MARKER}\ncandidate three"),
     ])
     agent._interruptible_api_call = lambda _kwargs: next(answers)
     agent._handle_max_iterations = MagicMock(return_value="replacement summary")
