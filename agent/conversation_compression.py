@@ -2372,6 +2372,49 @@ def compress_context(
         check_compression_model_feasibility(agent)
         agent._compression_feasibility_checked = True
 
+    # Write-ahead control checkpoint before any summarizer can replace context.
+    # Durable sessions must never cross a compaction boundary on transcript
+    # state alone. Manual/legacy compression entrypoints that did not pass
+    # through turn_context get a bounded synthetic turn identity here.
+    _turn_checkpoint_store = None
+    _checkpoint_db = getattr(agent, "_session_db", None)
+    _checkpoint_db_path = getattr(_checkpoint_db, "db_path", None)
+    if (
+        _checkpoint_db is not None
+        and isinstance(agent.session_id, str)
+        and bool(agent.session_id)
+        and isinstance(_checkpoint_db_path, (str, os.PathLike))
+    ):
+        from agent.turn_checkpoint import checkpoint_store_for_agent
+
+        _turn_checkpoint_store = checkpoint_store_for_agent(agent)
+        if _turn_checkpoint_store is None:
+            raise RuntimeError("durable compaction requires a turn checkpoint store")
+        try:
+            _turn_checkpoint_store.load(agent.session_id)
+        except FileNotFoundError:
+            _last_user_content = ""
+            for _checkpoint_message in reversed(messages):
+                if (
+                    isinstance(_checkpoint_message, dict)
+                    and _checkpoint_message.get("role") == "user"
+                ):
+                    _last_user_content = _checkpoint_message.get("content", "")
+                    break
+            _turn_checkpoint_store.start_turn(
+                agent.session_id,
+                str(getattr(agent, "_current_turn_id", None) or f"manual-compress:{_attempt_id}"),
+                _last_user_content,
+                messages,
+                routing={"platform": str(getattr(agent, "platform", None) or "")},
+            )
+        _turn_checkpoint_store.transition(
+            agent.session_id,
+            phase="compaction_summarizing",
+            next_action="prepare_and_commit_compacted_transcript",
+            changed_paths=sorted(getattr(agent, "_turn_file_mutation_paths", set()) or set()),
+        )
+
     _pre_msg_count = len(messages)
     # In-place compaction (config: compression.in_place, see #38763). When True,
     # this compaction rewrites the message list and refreshes the system prompt
@@ -3341,6 +3384,18 @@ def compress_context(
             new_system_prompt = agent._build_system_prompt(system_message)
             agent._cached_system_prompt = new_system_prompt
 
+        if (
+            agent._session_db
+            and _turn_checkpoint_store is not None
+        ):
+            # Phase 2 of the write-ahead protocol. Both hashes are durable and
+            # read-validated before SessionDB archives/replaces a single row.
+            _turn_checkpoint_store.prepare_compaction(
+                agent.session_id,
+                messages_before_compression,
+                compressed,
+            )
+
         _session_commit_succeeded = False
         split_status = "not_applicable"
         if agent._session_db:
@@ -3776,6 +3831,28 @@ def compress_context(
         )
         return compressed, new_system_prompt
     finally:
+        # A summarizer no-op/abort never crossed the transcript boundary. Reset
+        # the captured control phase so a later restart does not resume a
+        # compaction that was already abandoned.
+        try:
+            if _turn_checkpoint_store is not None and agent.session_id:
+                _checkpoint_final_state = _turn_checkpoint_store.load(agent.session_id)
+                if (
+                    _checkpoint_final_state.get("phase") == "compaction_summarizing"
+                    and _checkpoint_final_state.get("compaction", {}).get("state")
+                    == "captured"
+                ):
+                    _turn_checkpoint_store.transition(
+                        agent.session_id,
+                        phase="turn_active",
+                        next_action="continue_current_turn",
+                    )
+        except Exception:
+            logger.error(
+                "Could not finalize compaction checkpoint phase for session=%s",
+                agent.session_id or "?",
+                exc_info=True,
+            )
         # Release the lock on the OLD session_id only AFTER rotation completed
         # and all post-rotation bookkeeping (memory manager, context engine,
         # file dedup) ran. A concurrent path that wakes up the moment we
