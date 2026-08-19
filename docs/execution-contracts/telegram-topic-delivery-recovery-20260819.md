@@ -46,7 +46,7 @@ Prevent concurrent Telegram Topics in one forum chat from losing final replies w
 - validated-local: true
 - validated-runtime: true
 - validated-target for the lost Topic `41` reply: true
-- accepted: false — requires normal concurrent use without reproducing the original user-visible mixing/disappearance; no artificial messages were injected into project Topics.
+- accepted: true — Maikol confirmed normal use is working correctly without the original user-visible mixing/disappearance. No artificial messages were injected into project Topics.
 
 ## Discovery promotions
 - Updated skill: `messaging-runtime-reliability` with deferred preflight/reconnect replay semantics and regression requirements.
