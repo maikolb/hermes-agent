@@ -22164,15 +22164,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         normalize_project_slug(name) for name in raw_management_names
                     }
                     if not topic_name:
-                        if marker_match is None:
+                        default_project_id = str(
+                            getattr(router_config, "default_project_id", None) or ""
+                        ).strip()
+                        if marker_match is None and not default_project_id:
                             raise
-                        marker_slug = normalize_project_slug(marker_match.group(1))
-                        is_management = marker_slug in management_slugs
-                        project_slug = (
-                            f"{normalize_project_slug(profile)[:53].rstrip('-')}-management"
-                            if is_management
-                            else marker_slug
-                        )
+                        if default_project_id:
+                            project_slug = default_project_id
+                            is_management = False
+                        else:
+                            marker_slug = normalize_project_slug(marker_match.group(1))
+                            is_management = marker_slug in management_slugs
+                            project_slug = (
+                                f"{normalize_project_slug(profile)[:53].rstrip('-')}-management"
+                                if is_management
+                                else marker_slug
+                            )
                         project_context = router.bind_existing_topic(
                             Platform.TELEGRAM.value,
                             chat_id,
