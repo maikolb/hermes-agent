@@ -12,9 +12,10 @@ shared ``state.db`` (same file and conventions as
 bounded retention). The gateway writes three checkpoints around the send:
 
     record_obligation()   state='pending'     before any send attempt
-    mark_attempting()     state='attempting'  immediately before the await
-    mark_delivered() /    state='delivered'   only on SendResult.success
-    mark_failed()         state='failed'      on a definitive rejection
+    mark_attempting()  -> state='attempting'  immediately before adapter.send()
+    mark_delivered()   -> state='delivered'   only on SendResult.success
+    mark_deferred()    -> state='deferred'    adapter explicitly did not touch network
+    mark_failed()      -> state='failed'      definitive rejection/exception
 
 On startup, ``sweep_recoverable()`` claims rows whose owning process is
 dead and hands them to the gateway for redelivery. Crash semantics are
@@ -223,6 +224,45 @@ def mark_failed(obligation_id: str, error: str = "") -> None:
     _update_state(obligation_id, "failed", error=error)
 
 
+def mark_deferred(
+    obligation_id: str,
+    error: str = "",
+    *,
+    refund_attempt: bool = False,
+) -> None:
+    """Keep a known-not-attempted delivery recoverable without ambiguity.
+
+    ``refund_attempt`` is used when a claimed replay loses transport before
+    the adapter touches the network. Such a no-op must not consume the poison
+    row budget.
+    """
+    with _DB_LOCK, _connect() as conn:
+        conn.execute(
+            """UPDATE delivery_obligations
+               SET state='deferred', updated_at=?, last_error=?,
+                   attempts=CASE
+                       WHEN ? AND attempts > 0 THEN attempts - 1
+                       ELSE attempts
+                   END
+               WHERE obligation_id=?""",
+            (
+                time.time(),
+                error[:500] if error else None,
+                int(bool(refund_attempt)),
+                obligation_id,
+            ),
+        )
+
+
+def send_was_not_attempted(result: Any) -> bool:
+    """True only for an adapter's explicit pre-network rejection signal."""
+    if isinstance(result, dict):
+        raw = result.get("raw_response")
+    else:
+        raw = getattr(result, "raw_response", None)
+    return isinstance(raw, dict) and raw.get("send_attempted") is False
+
+
 def _update_state(obligation_id: str, state: str, error: str = "") -> None:
     with _DB_LOCK, _transaction() as conn:
         conn.execute(
@@ -237,9 +277,13 @@ def sweep_recoverable(
     now: Optional[float] = None,
     *,
     deliverable_platforms: Optional[set] = None,
+    include_live_deferred: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Claim undelivered rows owned by dead processes; return them for
-    redelivery.
+    """Claim recoverable rows and return them for redelivery.
+
+    By default only rows owned by dead processes are claimable. The running
+    owner may additionally claim its own explicit ``deferred`` rows after the
+    platform transport reports recovery.
 
     Claiming atomically re-stamps the owner to THIS process and increments
     ``attempts``, so a second gateway racing the same sweep cannot
@@ -263,12 +307,24 @@ def sweep_recoverable(
                       content, state, attempts, created_at,
                       owner_pid, owner_started_at
                FROM delivery_obligations
-               WHERE state IN ('pending', 'attempting', 'failed')"""
+               WHERE state IN ('pending', 'deferred', 'attempting', 'failed')"""
         ).fetchall()
         for (oid, session_key, platform, chat_id, thread_id, content, state,
              attempts, created_at, owner_pid, owner_started_at) in rows:
-            if _owner_alive(owner_pid, owner_started_at):
-                continue  # a live gateway still owns this row
+            owner_alive = _owner_alive(owner_pid, owner_started_at)
+            live_deferred = bool(
+                include_live_deferred
+                and state == "deferred"
+                and owner_alive
+                and owner_pid == pid
+                and (
+                    owner_started_at is None
+                    or started is None
+                    or int(owner_started_at) == int(started)
+                )
+            )
+            if owner_alive and not live_deferred:
+                continue  # a live gateway still owns this non-deferred row
             if attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS:
                 conn.execute(
                     """UPDATE delivery_obligations
@@ -286,9 +342,10 @@ def sweep_recoverable(
             cursor = conn.execute(
                 """UPDATE delivery_obligations
                    SET owner_pid=?, owner_started_at=?, attempts=attempts+1,
-                       updated_at=?
-                   WHERE obligation_id=? AND (owner_pid IS ? OR owner_pid=?)""",
-                (pid, started, now, oid, owner_pid, owner_pid),
+                       state='attempting', updated_at=?
+                   WHERE obligation_id=? AND state=?
+                     AND (owner_pid IS ? OR owner_pid=?)""",
+                (pid, started, now, oid, state, owner_pid, owner_pid),
             )
             if cursor.rowcount:
                 claimed.append({
@@ -298,9 +355,9 @@ def sweep_recoverable(
                     "chat_id": chat_id,
                     "thread_id": thread_id,
                     "content": content,
-                    # pending = send never started, redeliver plainly;
+                    # pending/deferred = send never started, redeliver plainly;
                     # attempting/failed = ambiguous or rejected, carry marker.
-                    "needs_marker": state != "pending",
+                    "needs_marker": state not in {"pending", "deferred"},
                     "attempts": attempts + 1,
                 })
     return claimed

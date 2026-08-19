@@ -111,6 +111,32 @@ class TestSweep:
         _record()  # owner = this (live) process
         assert dl.sweep_recoverable() == []
 
+    def test_live_owner_deferred_claimed_only_when_enabled(self):
+        _record()
+        dl.mark_deferred("ob-1", "send_path_degraded")
+        assert dl.sweep_recoverable() == []
+
+        claimed = dl.sweep_recoverable(include_live_deferred=True)
+
+        assert len(claimed) == 1
+        assert claimed[0]["needs_marker"] is False
+        assert _row("ob-1")["state"] == "attempting"
+        assert dl.sweep_recoverable(include_live_deferred=True) == []
+
+    def test_live_owner_non_deferred_rows_stay_unclaimed(self):
+        for oid, state in (
+            ("pending", None),
+            ("attempting", "attempting"),
+            ("failed", "failed"),
+        ):
+            _record(oid=oid)
+            if state == "attempting":
+                dl.mark_attempting(oid)
+            elif state == "failed":
+                dl.mark_failed(oid, "rejected")
+
+        assert dl.sweep_recoverable(include_live_deferred=True) == []
+
     def test_dead_owner_pending_claimed_without_marker(self):
         _record()
         _orphan("ob-1")

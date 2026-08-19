@@ -6493,8 +6493,10 @@ class BasePlatformAdapter(ABC):
                     if _obligation_id is not None:
                         try:
                             from gateway.delivery_ledger import (
+                                mark_deferred,
                                 mark_delivered,
                                 mark_failed,
+                                send_was_not_attempted,
                             )
 
                             if getattr(result, "success", False):
