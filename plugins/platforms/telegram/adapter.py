@@ -2181,6 +2181,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         if generation != self._polling_generation:
             return
+        was_degraded = bool(self._send_path_degraded)
         self._polling_progress_event.set()
         self._polling_network_error_count = 0
         if generation == self._polling_conflict_recovery_generation:
@@ -2188,6 +2189,31 @@ class TelegramAdapter(BasePlatformAdapter):
         else:
             self._polling_conflict_count = 0
         self._send_path_degraded = False
+        if was_degraded:
+            self._schedule_deferred_delivery_recovery()
+
+    def _schedule_deferred_delivery_recovery(self) -> None:
+        """Replay known-not-attempted final replies after polling heals."""
+        runner = getattr(self, "gateway_runner", None)
+        recover = getattr(runner, "_redeliver_pending_obligations", None)
+        if not callable(recover):
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(
+                recover(
+                    platform=Platform.TELEGRAM,
+                    include_live_deferred=True,
+                )
+            )
+        except Exception:
+            logger.debug(
+                "[%s] Could not schedule deferred Telegram delivery recovery",
+                self.name,
+                exc_info=True,
+            )
+            return
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _observe_polling_request_result(self, request, generation, result):
         """Record getUpdates progress from an observed do_request result.
@@ -4599,7 +4625,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
         # getattr() — tests build adapters via object.__new__() (no __init__).
         if getattr(self, "_send_path_degraded", False):
-            return SendResult(success=False, error="send_path_degraded", retryable=True)
+            return SendResult(
+                success=False,
+                error="send_path_degraded",
+                retryable=True,
+                raw_response={"send_attempted": False},
+            )
 
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():

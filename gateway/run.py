@@ -10580,22 +10580,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if drained:
             logger.info("Drained %d inbound message(s) queued during startup restore", drained)
 
-    @staticmethod
-    def _log_background_resume_result(task: "asyncio.Task") -> None:
-        """Done-callback for a boot-resume turn that outlived the
-        startup-restore gate.  Logs a late failure that would otherwise be
-        swallowed once the task is discarded from ``_background_tasks``.
-        Cancellation is expected (shutdown) and is not an error."""
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.debug(
-                "background startup auto-resume task failed after gate release",
-                exc_info=(type(exc), exc, exc.__traceback__),
-            )
-
-    async def _redeliver_pending_obligations(self) -> int:
+    async def _redeliver_pending_obligations(
+        self,
+        *,
+        platform: Optional[Platform] = None,
+        include_live_deferred: bool = False,
+    ) -> int:
         """Redeliver final responses recorded in the delivery ledger by a
         previous (now dead) gateway process.
 
@@ -10614,9 +10604,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from gateway.delivery_ledger import (
                 RECOVERED_MARKER,
+                mark_deferred,
                 ledger_enabled,
                 mark_delivered,
                 mark_failed,
+                send_was_not_attempted,
                 sweep_recoverable,
             )
 
@@ -10628,8 +10620,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _deliverable = {
                 getattr(p, "value", str(p)) for p in self.adapters
             }
+            if platform is not None:
+                _deliverable.intersection_update({
+                    getattr(platform, "value", str(platform))
+                })
             claimed = await asyncio.to_thread(
-                sweep_recoverable, None, deliverable_platforms=_deliverable
+                sweep_recoverable,
+                None,
+                deliverable_platforms=_deliverable,
+                include_live_deferred=include_live_deferred,
             )
         except Exception:
             logger.debug("delivery ledger sweep failed", exc_info=True)
@@ -10675,10 +10674,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     await asyncio.to_thread(mark_delivered, row["obligation_id"])
                     redelivered += 1
                     logger.info(
-                        "Redelivered recovered final response to %s:%s "
+                        "Redelivered recovered final response to %s:%s thread=%s "
                         "(obligation %s, attempt %d)",
                         row["platform"], row["chat_id"],
+                        row.get("thread_id"),
                         row["obligation_id"], row["attempts"],
+                    )
+                elif result is not None and send_was_not_attempted(result):
+                    mark_deferred(
+                        row["obligation_id"],
+                        str(getattr(result, "error", "") or "send not attempted"),
+                        refund_attempt=True,
                     )
                 else:
                     await asyncio.to_thread(

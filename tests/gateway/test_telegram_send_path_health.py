@@ -5,6 +5,7 @@ can enter a wedged state where ``bot.send_message()`` returns a valid Message
 but nothing reaches the recipient.  ``_send_path_degraded`` short-circuits
 ``send()`` so cron's live-adapter branch falls through to standalone HTTP.
 """
+import asyncio
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -49,6 +50,81 @@ async def test_send_short_circuits_when_path_degraded():
     assert result.success is False
     assert result.error == "send_path_degraded"
     assert result.retryable is True
+    assert result.raw_response == {"send_attempted": False}
     adapter._bot.send_message.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_polling_recovery_schedules_live_deferred_replay():
+    adapter = _make_adapter()
+    adapter._send_path_degraded = True
+    adapter._polling_generation = 7
+    adapter._polling_progress_accepting = True
+    adapter._polling_progress_event = asyncio.Event()
+    runner = MagicMock()
+    runner._redeliver_pending_obligations = AsyncMock(return_value=0)
+    adapter.gateway_runner = runner
+
+    adapter._record_polling_progress(7)
+    await asyncio.sleep(0)
+
+    runner._redeliver_pending_obligations.assert_awaited_once_with(
+        platform=adapter.platform,
+        include_live_deferred=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_me_success_without_polling_progress_does_not_heal(monkeypatch):
+    """A responsive general Bot API path is not proof that getUpdates works."""
+    adapter = _make_adapter()
+    adapter._app = MagicMock()
+    adapter._app.updater = MagicMock()
+    adapter._app.updater.running = True
+    adapter._app.bot = MagicMock()
+    adapter._app.bot.get_me = AsyncMock(return_value=MagicMock())
+
+    generation, progress = adapter._begin_polling_generation()
+    recovery = MagicMock()
+    monkeypatch.setattr(adapter, "_schedule_polling_recovery", recovery)
+    monkeypatch.setattr(
+        "plugins.platforms.telegram.adapter._POLLING_PROGRESS_TIMEOUT", 0,
+        raising=False,
+    )
+    await adapter._verify_polling_after_reconnect(generation, progress)
+
+    adapter._app.bot.get_me.assert_awaited_once()
+    recovery.assert_called_once()
+    assert adapter._send_path_degraded is True
+
+
+@pytest.mark.asyncio
+async def test_successful_reconnect_waits_for_get_updates_progress(monkeypatch):
+    """start_polling() return alone cannot heal; matching progress can."""
+    adapter = _make_adapter()
+    adapter._app = MagicMock()
+    adapter._app.updater = MagicMock()
+    adapter._app.updater.running = True
+    adapter._app.updater.stop = AsyncMock()
+    adapter._app.updater.start_polling = AsyncMock()
+    adapter._app.bot = MagicMock()
+    adapter._app.bot.get_me = AsyncMock(return_value=MagicMock())
+    adapter._polling_error_callback_ref = AsyncMock()
+    monkeypatch.setattr(
+        "plugins.platforms.telegram.adapter.Update", MagicMock(ALL_TYPES=[])
+    )
+    with patch("plugins.platforms.telegram.adapter.asyncio.sleep", new_callable=AsyncMock):
+        await adapter._handle_polling_network_error(OSError("Bad Gateway"))
+
+    verifier = adapter._polling_progress_verifier_task
+    assert adapter._send_path_degraded is True
+    assert adapter._polling_network_error_count == 1
+    blocked = await adapter.send("123", "hello")
+    assert blocked.success is False
+
+    adapter._record_polling_progress(adapter._polling_generation)
+    await verifier
+    assert adapter._send_path_degraded is False
+    assert adapter._polling_network_error_count == 0
+    result = await adapter.send("123", "hello")
+    assert result.success is True

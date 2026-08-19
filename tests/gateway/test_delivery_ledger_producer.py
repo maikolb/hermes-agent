@@ -122,6 +122,27 @@ class TestProducerHook:
         assert len(rows) == 1
         assert rows[0][1] == "failed"
 
+    @pytest.mark.asyncio
+    async def test_preflight_rejection_leaves_deferred_row(self):
+        adapter = _Adapter()
+        adapter.send = AsyncMock(return_value=SendResult(
+            success=False,
+            error="send_path_degraded",
+            retryable=True,
+            raw_response={"send_attempted": False},
+        ))
+        await _run(adapter, _event())
+
+        rows = _rows()
+        assert len(rows) == 1
+        assert rows[0][1] == "deferred"
+
+    @pytest.mark.asyncio
+    async def test_slash_command_not_recorded(self):
+        adapter = _Adapter()
+        await _run(adapter, _event(text="/status"))
+        assert adapter.sent  # reply still sent
+        assert _rows() == []
 
     @pytest.mark.asyncio
     async def test_slow_ledger_record_does_not_block_event_loop(self):

@@ -93,6 +93,31 @@ class TestStateMachine:
         _record()
         assert _row("ob-1")["state"] == "pending"
 
+    def test_full_happy_path(self):
+        _record()
+        dl.mark_attempting("ob-1")
+        assert _row("ob-1")["state"] == "attempting"
+        dl.mark_delivered("ob-1")
+        assert _row("ob-1")["state"] == "delivered"
+
+    def test_failed_records_error(self):
+        _record()
+        dl.mark_attempting("ob-1")
+        dl.mark_failed("ob-1", "chat_not_found")
+        assert _row("ob-1")["state"] == "failed"
+
+    def test_not_attempted_send_is_deferred(self):
+        _record()
+        dl.mark_attempting("ob-1")
+        dl.mark_deferred("ob-1", "transport unavailable")
+        assert _row("ob-1")["state"] == "deferred"
+
+    def test_rerecord_same_id_is_idempotent(self):
+        _record()
+        dl.mark_attempting("ob-1")
+        _record()  # INSERT OR REPLACE resets to pending — same turn re-record
+        assert _row("ob-1")["state"] == "pending"
+
 
 class TestObligationId:
     def test_stable_and_distinct(self):
@@ -110,6 +135,32 @@ class TestSweep:
     def test_live_owner_rows_never_claimed(self):
         _record()  # owner = this (live) process
         assert dl.sweep_recoverable() == []
+
+    def test_live_owner_deferred_claimed_only_when_enabled(self):
+        _record()
+        dl.mark_deferred("ob-1", "send_path_degraded")
+        assert dl.sweep_recoverable() == []
+
+        claimed = dl.sweep_recoverable(include_live_deferred=True)
+
+        assert len(claimed) == 1
+        assert claimed[0]["needs_marker"] is False
+        assert _row("ob-1")["state"] == "attempting"
+        assert dl.sweep_recoverable(include_live_deferred=True) == []
+
+    def test_live_owner_non_deferred_rows_stay_unclaimed(self):
+        for oid, state in (
+            ("pending", None),
+            ("attempting", "attempting"),
+            ("failed", "failed"),
+        ):
+            _record(oid=oid)
+            if state == "attempting":
+                dl.mark_attempting(oid)
+            elif state == "failed":
+                dl.mark_failed(oid, "rejected")
+
+        assert dl.sweep_recoverable(include_live_deferred=True) == []
 
     def test_dead_owner_pending_claimed_without_marker(self):
         _record()
@@ -219,7 +270,107 @@ class TestGatewayRedeliverySweep:
                 runner._redeliver_pending_obligations(), event_loop_witness()
             )
 
-        assert blocked_event_loop == []
+        assert n == 0
+        assert _row("ob-1")["state"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_missing_adapter_leaves_row_recoverable(self):
+        _record()
+        _orphan("ob-1")
+        runner = self._runner(adapter=None)  # slack not connected
+
+        n = await runner._redeliver_pending_obligations()
+
+        assert n == 0
+        # Row still claimed by us but NOT delivered/abandoned — a later boot
+        # (attempts cap permitting) can retry once the platform connects.
+        assert _row("ob-1")["state"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_live_deferred_three_telegram_topics_replay_in_own_threads(self):
+        from gateway.config import Platform
+
+        chat_id = "-5166057708"
+        expected = {
+            "4": "DOVCRM final",
+            "6": "RecuperaCli final",
+            "41": "Concursa AI final",
+        }
+        for thread_id, content in expected.items():
+            oid = f"topic-{thread_id}"
+            _record(
+                oid=oid,
+                session_key=f"agent:main:telegram:group:{chat_id}:{thread_id}",
+                platform="telegram",
+                chat_id=chat_id,
+                thread_id=thread_id,
+                content=content,
+            )
+            dl.mark_deferred(oid, "send_path_degraded")
+
+        adapter = self._adapter()
+        runner = self._runner(adapter=None)
+        runner.adapters = {Platform.TELEGRAM: adapter}
+
+        delivered = await runner._redeliver_pending_obligations(
+            platform=Platform.TELEGRAM,
+            include_live_deferred=True,
+        )
+
+        assert delivered == 3
+        actual = {
+            call.kwargs["metadata"]["thread_id"]: call.kwargs["content"]
+            for call in adapter.send.await_args_list
+        }
+        assert actual == expected
+        assert all(
+            not content.startswith(dl.RECOVERED_MARKER)
+            for content in actual.values()
+        )
+        assert await runner._redeliver_pending_obligations(
+            platform=Platform.TELEGRAM,
+            include_live_deferred=True,
+        ) == 0
+        assert adapter.send.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_replay_preflight_failure_refunds_attempt_and_stays_deferred(self):
+        from gateway.config import Platform
+        from gateway.platforms.base import SendResult
+
+        _record(platform="telegram")
+        dl.mark_deferred("ob-1", "send_path_degraded")
+        adapter = self._adapter()
+        adapter.send = AsyncMock(return_value=SendResult(
+            success=False,
+            error="send_path_degraded",
+            retryable=True,
+            raw_response={"send_attempted": False},
+        ))
+        runner = self._runner(adapter=None)
+        runner.adapters = {Platform.TELEGRAM: adapter}
+
+        delivered = await runner._redeliver_pending_obligations(
+            platform=Platform.TELEGRAM,
+            include_live_deferred=True,
+        )
+
+        assert delivered == 0
+        assert _row("ob-1")["state"] == "deferred"
+        assert _row("ob-1")["attempts"] == 0
+
+    @pytest.mark.asyncio
+    async def test_disabled_gate_short_circuits(self):
+        _record()
+        _orphan("ob-1")
+        adapter = self._adapter()
+        runner = self._runner(adapter)
+        with patch.object(dl, "ledger_enabled", return_value=False), patch(
+            "gateway.delivery_ledger.ledger_enabled", return_value=False
+        ):
+            n = await runner._redeliver_pending_obligations()
+        assert n == 0
+        adapter.send.assert_not_awaited()
 
 
 class TestAttemptsOnlySpentOnRealSends:

@@ -6493,12 +6493,39 @@ class BasePlatformAdapter(ABC):
                     if _obligation_id is not None:
                         try:
                             from gateway.delivery_ledger import (
+                                mark_deferred,
                                 mark_delivered,
                                 mark_failed,
+                                send_was_not_attempted,
                             )
 
                             if getattr(result, "success", False):
-                                await asyncio.to_thread(mark_delivered, _obligation_id)
+                                mark_delivered(_obligation_id)
+                            elif send_was_not_attempted(result):
+                                mark_deferred(
+                                    _obligation_id,
+                                    str(getattr(result, "error", "") or ""),
+                                )
+                                # If transport recovered between the adapter's
+                                # last preflight rejection and this durable
+                                # checkpoint, the transition callback may have
+                                # already run. Close that race by scheduling a
+                                # replay now, but only when the adapter reports
+                                # the path healthy.
+                                _schedule_recovery = getattr(
+                                    delivery_adapter,
+                                    "_schedule_deferred_delivery_recovery",
+                                    None,
+                                )
+                                if (
+                                    callable(_schedule_recovery)
+                                    and not getattr(
+                                        delivery_adapter,
+                                        "_send_path_degraded",
+                                        False,
+                                    )
+                                ):
+                                    _schedule_recovery()
                             else:
                                 await asyncio.to_thread(
                                     mark_failed,
