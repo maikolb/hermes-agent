@@ -14,6 +14,7 @@ def test_project_router_defaults_disabled_and_empty():
     assert config.project_router.db_path is None
     assert config.project_router.managed_chat_ids == []
     assert config.project_router.auto_register_topics is False
+    assert config.project_router.default_project_id is None
     assert config.project_router.management_topic_names == ["🧭 Gestão"]
     assert config.project_router.workspace_root is None
 
@@ -26,6 +27,7 @@ def test_project_router_valid_parse_and_roundtrip():
                 "db_path": "state/router.db",
                 "managed_chat_ids": [-1001, "-1002"],
                 "auto_register_topics": True,
+                "default_project_id": "ceogame",
                 "management_topic_names": ["🧭 Gestão", "Management"],
                 "workspace_root": "C:/Projects",
             }
@@ -37,6 +39,7 @@ def test_project_router_valid_parse_and_roundtrip():
         db_path=Path("state/router.db"),
         managed_chat_ids=["-1001", "-1002"],
         auto_register_topics=True,
+        default_project_id="ceogame",
         management_topic_names=["🧭 Gestão", "Management"],
         workspace_root=Path("C:/Projects"),
     )

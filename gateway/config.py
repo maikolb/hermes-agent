@@ -847,6 +847,7 @@ class ProjectRouterConfig:
     db_path: Optional[Path] = None
     managed_chat_ids: List[str] = field(default_factory=list)
     auto_register_topics: bool = False
+    default_project_id: Optional[str] = None
     management_topic_names: List[str] = field(default_factory=lambda: ["🧭 Gestão"])
     workspace_root: Optional[Path] = None
 
@@ -856,6 +857,7 @@ class ProjectRouterConfig:
             "db_path": str(self.db_path) if self.db_path is not None else None,
             "managed_chat_ids": list(self.managed_chat_ids),
             "auto_register_topics": self.auto_register_topics,
+            "default_project_id": self.default_project_id,
             "management_topic_names": list(self.management_topic_names),
             "workspace_root": (
                 str(self.workspace_root) if self.workspace_root is not None else None
@@ -889,6 +891,16 @@ class ProjectRouterConfig:
         else:
             return cls()
 
+        raw_default_project_id = data.get("default_project_id")
+        if raw_default_project_id is None:
+            default_project_id = None
+        elif isinstance(raw_default_project_id, str):
+            default_project_id = raw_default_project_id.strip() or None
+            if default_project_id is None:
+                return cls()
+        else:
+            return cls()
+
         raw_chat_ids = data.get("managed_chat_ids", [])
         if not isinstance(raw_chat_ids, list):
             return cls()
@@ -918,6 +930,7 @@ class ProjectRouterConfig:
             db_path=db_path,
             managed_chat_ids=managed_chat_ids,
             auto_register_topics=_coerce_bool(data.get("auto_register_topics"), False),
+            default_project_id=default_project_id,
             management_topic_names=management_topic_names,
             workspace_root=workspace_root,
         )

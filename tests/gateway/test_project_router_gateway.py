@@ -635,6 +635,41 @@ def test_existing_bound_topic_repairs_null_workspace_before_context_return(
     ]
 
 
+def test_unnamed_topic_binds_from_explicit_default_project(tmp_path):
+    config = ProjectRouterConfig(
+        enabled=True,
+        managed_chat_ids=["-1001"],
+        auto_register_topics=True,
+        default_project_id="ceogame",
+    )
+    runner = _runner(config)
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+    db_path = tmp_path / "project_router.db"
+    workdir = tmp_path / "ceogame"
+    workdir.mkdir()
+    with ProjectRouter(db_path, "default") as router:
+        router.upsert_project("ceogame", "ceogame", "ceogame", workdir)
+        router.set_acl("-1001", "9", "allow")
+
+    context, denial = runner._resolve_project_context_for_message(
+        _event(), _source(thread_id="2", chat_topic=None)
+    )
+    repeated, repeated_denial = runner._resolve_project_context_for_message(
+        _event(), _source(thread_id="2", chat_topic=None)
+    )
+
+    assert denial is None and repeated_denial is None
+    assert context == repeated
+    assert context.project_id == "ceogame"
+    assert context.thread_id == "2"
+    assert context.workdir == workdir.resolve()
+    with ProjectRouter(db_path, "default") as router:
+        assert router._connection.execute(
+            "SELECT COUNT(*) FROM topic_bindings WHERE profile=? AND thread_id=?",
+            ("default", "2"),
+        ).fetchone()[0] == 1
+
+
 def test_legacy_unnamed_topic_binds_from_authorized_bot_mention(tmp_path):
     config = ProjectRouterConfig(
         enabled=True,
