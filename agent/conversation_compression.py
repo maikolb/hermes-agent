@@ -1001,26 +1001,104 @@ def _insert_real_user_anchor(messages: list, anchor: dict) -> None:
     _merge_anchor_into_user_message(messages[-1], anchor)
 
 
-def _ensure_compressed_has_user_turn(original_messages: list, compressed: list) -> None:
-    """Preserve human intent, not merely a synthetic user-role placeholder."""
-    if any(_is_real_user_message(message) for message in compressed):
-        return
+def _user_turn_signature(message: Any) -> str:
+    """Return a stable content signature for one real user turn."""
+    if not isinstance(message, dict):
+        return ""
+    content = _strip_stale_todo_snapshot(message.get("content"))
+    try:
+        return json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(content)
+
+
+def _ensure_compressed_has_user_turn(
+    original_messages: list,
+    compressed: list,
+    *,
+    current_user_anchor: Optional[dict] = None,
+) -> None:
+    """Keep an active human turn live *after* the compaction summary.
+
+    ``current_user_anchor`` is supplied only by an in-flight conversation turn.
+    Merely retaining any old real-user row is insufficient there: when the
+    current turn lands on the protected-head boundary, the compressor may
+    summarize it as a complete pair while preserving an older user row.  The
+    handoff then says to respond only to messages after the summary, but no such
+    live request exists — the model can resume stale historical work instead.
+
+    Manual/background compression has no active-turn anchor and keeps the legacy
+    behavior: any surviving real user row is sufficient, otherwise restore the
+    latest historical human turn (or the synthetic continuation marker when no
+    human turn exists).
+    """
     from agent.context_compressor import (
         COMPRESSION_CONTINUATION_USER_CONTENT,
+        ContextCompressor,
         _fresh_compaction_message_copy,
     )
 
-    for message in reversed(original_messages):
-        if _is_real_user_message(message):
-            _insert_real_user_anchor(
-                compressed,
-                _fresh_compaction_message_copy(message),
-            )
+    if current_user_anchor is None:
+        if any(_is_real_user_message(message) for message in compressed):
             return
-    compressed.append({
-        "role": "user",
-        "content": COMPRESSION_CONTINUATION_USER_CONTENT,
-    })
+        latest_anchor = next(
+            (
+                _fresh_compaction_message_copy(message)
+                for message in reversed(original_messages)
+                if _is_real_user_message(message)
+            ),
+            None,
+        )
+        if latest_anchor is None:
+            compressed.append({
+                "role": "user",
+                "content": COMPRESSION_CONTINUATION_USER_CONTENT,
+            })
+            return
+        _insert_real_user_anchor(compressed, latest_anchor)
+        return
+
+    if not _is_real_user_message(current_user_anchor):
+        return
+    latest_anchor = _fresh_compaction_message_copy(current_user_anchor)
+
+    anchor_signature = _user_turn_signature(latest_anchor)
+    summary_indices = [
+        index
+        for index, message in enumerate(compressed)
+        if ContextCompressor._is_context_summary_message(message)
+    ]
+    if not summary_indices:
+        if any(
+            _is_real_user_message(message)
+            and _user_turn_signature(message) == anchor_signature
+            for message in compressed
+        ):
+            return
+        _insert_real_user_anchor(compressed, latest_anchor)
+        return
+
+    summary_idx = summary_indices[-1]
+    summary_message = compressed[summary_idx]
+    recovered = ContextCompressor._strip_context_summary_handoff_message(
+        _fresh_compaction_message_copy(summary_message)
+    )
+    candidates = ([recovered] if recovered is not None else []) + compressed[
+        summary_idx + 1:
+    ]
+    if any(
+        _is_real_user_message(message)
+        and _user_turn_signature(message) == anchor_signature
+        for message in candidates
+    ):
+        return
+
+    # Preserve a distinct verbatim row even when the summary itself has role=user
+    # or a synthetic todo snapshot follows it.  ``repair_message_sequence`` owns
+    # provider-role alternation later; keeping this row exact here lets
+    # ``reanchor_current_turn_user_idx`` and SessionDB persistence identify the
+    # real current turn instead of falling back to scaffolding.
+    compressed.insert(summary_idx + 1, latest_anchor)
 
 
 _PENDING_CONTEXT_ENGINE_NOTIFICATION = (
@@ -1547,6 +1625,15 @@ def compress_context(
                     engine_name,
                 )
 
+        _current_user_anchor = None
+        _current_user_idx = getattr(agent, "_persist_user_message_idx", None)
+        if (
+            isinstance(_current_user_idx, int)
+            and 0 <= _current_user_idx < len(messages)
+            and _is_real_user_message(messages[_current_user_idx])
+        ):
+            _current_user_anchor = copy.deepcopy(messages[_current_user_idx])
+
         messages_before_compression = copy.deepcopy(messages)
         _activity_heartbeat = _CompressionActivityHeartbeat(agent).start()
         compressed = compress_fn(messages, **compress_kwargs)
@@ -1756,7 +1843,18 @@ def compress_context(
                     "content": todo_snapshot,
                     "_todo_snapshot_synthetic": True,
                 })
-        _ensure_compressed_has_user_turn(messages, compressed)
+        _ensure_compressed_has_user_turn(
+            messages,
+            compressed,
+            current_user_anchor=_current_user_anchor,
+        )
+        if _current_user_anchor is not None:
+            from agent.turn_context import reanchor_current_turn_user_idx
+
+            agent._persist_user_message_idx = reanchor_current_turn_user_idx(
+                compressed,
+                _current_user_anchor.get("content"),
+            )
 
         cached_system_prompt = agent._cached_system_prompt
         agent._invalidate_system_prompt()

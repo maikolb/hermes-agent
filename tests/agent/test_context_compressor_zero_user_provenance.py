@@ -14,9 +14,12 @@ from agent.context_compressor import (
     SUMMARY_PREFIX,
     ContextCompressor,
     _NO_USER_TASK_SENTINEL,
+    _SUMMARY_END_MARKER,
 )
 from agent.conversation_compression import (
     _ensure_compressed_has_user_turn,
+    _is_real_user_message,
+    _message_text,
     compress_context,
 )
 from hermes_state import SessionDB
@@ -298,6 +301,130 @@ def test_continuation_user_marker_is_not_reused_as_real_provenance():
     }
     projected = [{"role": row["role"], "content": row["content"]} for row in compressed]
     assert ContextCompressor._transcript_has_real_user_turn(projected) is False
+
+
+def test_latest_human_turn_is_restored_after_assistant_summary_boundary():
+    """An older live user row must not hide loss of the current request."""
+    current_request = "GERA O PDF AGORA"
+    original = [
+        {"role": "user", "content": "pedido antigo"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": current_request},
+        {"role": "assistant", "content": "continuando via ferramenta"},
+    ]
+    compressed = [
+        {"role": "user", "content": "pedido antigo"},
+        {
+            "role": "assistant",
+            "content": (
+                f"{SUMMARY_PREFIX}\n{HISTORICAL_TASK_HEADING}\n"
+                f"User asked: {current_request}\n\n{_SUMMARY_END_MARKER}"
+            ),
+        },
+        {"role": "assistant", "content": "continuação após compactação"},
+    ]
+
+    _ensure_compressed_has_user_turn(
+        original,
+        compressed,
+        current_user_anchor=original[2],
+    )
+
+    summary_idx = max(
+        index
+        for index, message in enumerate(compressed)
+        if ContextCompressor._is_context_summary_message(message)
+    )
+    assert any(
+        _is_real_user_message(message)
+        and _message_text(message) == current_request
+        for message in compressed[summary_idx + 1:]
+    )
+    assert compressed[summary_idx + 1]["role"] == "user"
+
+
+def test_latest_human_turn_stays_distinct_after_user_summary_boundary():
+    """Strict alternation repair happens later; persistence keeps an exact row."""
+    current_request = "corrija a compactação agora"
+    original = [
+        {"role": "user", "content": "pedido antigo"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": current_request},
+        {"role": "assistant", "content": "trabalho ainda ativo"},
+    ]
+    compressed = [
+        {"role": "assistant", "content": "estado anterior"},
+        {
+            "role": "user",
+            "content": (
+                f"{SUMMARY_PREFIX}\n{HISTORICAL_TASK_HEADING}\n"
+                f"User asked: {current_request}\n\n{_SUMMARY_END_MARKER}"
+            ),
+        },
+        {"role": "assistant", "content": "continuação após compactação"},
+    ]
+
+    _ensure_compressed_has_user_turn(
+        original,
+        compressed,
+        current_user_anchor=original[2],
+    )
+
+    assert compressed[1]["content"].endswith(_SUMMARY_END_MARKER)
+    assert compressed[2] == {"role": "user", "content": current_request}
+
+
+def test_compress_context_carries_and_reanchors_inflight_user_turn(
+    tmp_path, monkeypatch
+):
+    """The runtime supplies the active row; history-only compression does not."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    db = SessionDB(db_path=tmp_path / "state.db")
+    session_id = "active-user-anchor-lifecycle"
+    db.create_session(session_id, source="telegram", model="test/model")
+    agent = _lifecycle_agent(db, session_id)
+    agent._todo_store._todos = []
+
+    current_request = "GERA O PDF AGORA"
+    original = [
+        {"role": "user", "content": "pedido antigo"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": current_request},
+        {"role": "assistant", "content": "ferramenta ainda em execução"},
+    ]
+    agent._persist_user_message_idx = 2
+    summary = (
+        f"{SUMMARY_PREFIX}\n{HISTORICAL_TASK_HEADING}\n"
+        f"User asked: {current_request}\n\n{_SUMMARY_END_MARKER}"
+    )
+    compressed_seed = [
+        {"role": "user", "content": "pedido antigo"},
+        {"role": "assistant", "content": summary},
+        {"role": "assistant", "content": "continuação após compactação"},
+    ]
+
+    with patch.object(
+        agent.context_compressor,
+        "compress",
+        return_value=compressed_seed,
+    ):
+        result, _ = compress_context(
+            agent,
+            original,
+            "system",
+            approx_tokens=90_000,
+            force=True,
+        )
+
+    assert result[2] == {"role": "user", "content": current_request}
+    assert agent._persist_user_message_idx == 2
+    projected = db.get_messages_as_conversation(session_id)
+    assert any(
+        message.get("role") == "user"
+        and message.get("content") == current_request
+        for message in projected
+    )
+    db.close()
 
 
 def test_continuation_markers_are_not_human_anchors():
