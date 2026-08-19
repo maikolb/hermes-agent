@@ -5,6 +5,7 @@ can enter a wedged state where ``bot.send_message()`` returns a valid Message
 but nothing reaches the recipient.  ``_send_path_degraded`` short-circuits
 ``send()`` so cron's live-adapter branch falls through to standalone HTTP.
 """
+import asyncio
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -61,7 +62,28 @@ async def test_send_short_circuits_when_path_degraded():
     assert result.success is False
     assert result.error == "send_path_degraded"
     assert result.retryable is True
+    assert result.raw_response == {"send_attempted": False}
     adapter._bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_polling_recovery_schedules_live_deferred_replay():
+    adapter = _make_adapter()
+    adapter._send_path_degraded = True
+    adapter._polling_generation = 7
+    adapter._polling_progress_accepting = True
+    adapter._polling_progress_event = asyncio.Event()
+    runner = MagicMock()
+    runner._redeliver_pending_obligations = AsyncMock(return_value=0)
+    adapter.gateway_runner = runner
+
+    adapter._record_polling_progress(7)
+    await asyncio.sleep(0)
+
+    runner._redeliver_pending_obligations.assert_awaited_once_with(
+        platform=adapter.platform,
+        include_live_deferred=True,
+    )
 
 
 @pytest.mark.asyncio
