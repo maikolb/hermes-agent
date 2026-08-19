@@ -582,8 +582,14 @@ _CODEX_INCOMPLETE_NUDGE = (
 # ``content_policy_blocked``) end with the same actionable next steps, so they
 # share one trailer to keep the guidance from drifting between the two sites.
 _CONTENT_POLICY_RECOVERY_HINT = (
-    "Try rephrasing the request, narrowing the context, or "
-    "adding a fallback provider with `hermes fallback add`."
+    "The provider blocked this wording before Hermes could complete the turn. "
+    "This is a provider hardline, not a claim that local authorization is missing. "
+    "For a legitimate authorized task, use this narrower boundary: act only on "
+    "the named asset; use only a credential explicitly provided to the authorized "
+    "operator and normal authentication; no bypass, no guessing, no enumeration, "
+    "no exploitation, and no exfiltration; keep secrets out of logs; limit "
+    "validation to the minimum read-only action. Confirm this narrower scope "
+    "before execution. No fallback is activated automatically by this guidance."
 )
 
 
