@@ -140,6 +140,40 @@ def test_nudge_checks_all_edited_workspaces(tmp_path, monkeypatch):
 
 
 
+def test_nudge_preserves_final_delivery_after_verification(tmp_path, monkeypatch):
+    """Verification evidence must not replace the user's actual deliverable."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    _node_project(tmp_path)
+    changed = str(tmp_path / "src" / "app.ts")
+    mark_workspace_edited(session_id="s1", cwd=tmp_path, paths=[changed])
+
+    nudge = build_verify_on_stop_nudge(session_id="s1", changed_paths=[changed])
+
+    assert nudge is not None
+    assert "one self-contained final answer" in nudge
+    assert "full requested deliverable" in nudge
+    assert "Do not replace the deliverable" in nudge
+
+
+def test_nudge_includes_failed_output_summary(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    _node_project(tmp_path)
+    changed = str(tmp_path / "src" / "app.ts")
+
+    record_terminal_result(
+        command="pnpm test",
+        cwd=tmp_path,
+        session_id="s1",
+        exit_code=1,
+        output="expected 1 got 2",
+    )
+
+    nudge = build_verify_on_stop_nudge(session_id="s1", changed_paths=[changed])
+
+    assert nudge is not None
+    assert "failed" in nudge
+    assert "expected 1 got 2" in nudge
+    assert "repair the code" in nudge
 
 
 
