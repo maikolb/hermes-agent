@@ -4645,6 +4645,11 @@ def run_conversation(
                         # different exit code. ``rate_limit`` / ``billing`` here
                         # mean "quota wall, not a task error".
                         "failure_reason": classified.reason.value,
+                        "retry_not_before": (
+                            error_context.get("reset_at")
+                            if classified.reason == FailoverReason.rate_limit
+                            else None
+                        ),
                         # Present only for billing walls: structured recovery
                         # descriptor (provider, billing_url, is_nous, message).
                         "billing_block": _billing_block,
@@ -5974,9 +5979,48 @@ def run_conversation(
                         messages[-1].get("_thinking_prefill")
                         or messages[-1].get("_empty_recovery_synthetic")
                         or messages[-1].get("_empty_terminal_sentinel")
+                        or messages[-1].get("_checkpoint_resume_synthetic")
                     )
                 ):
                     messages.pop()
+
+                try:
+                    from agent.turn_checkpoint import build_checkpoint_continuation_nudge
+
+                    _checkpoint_resume_nudge = build_checkpoint_continuation_nudge(
+                        agent, final_response,
+                    )
+                except Exception:
+                    logger.debug("checkpoint continuation stop guard failed", exc_info=True)
+                    _checkpoint_resume_nudge = None
+
+                if _checkpoint_resume_nudge:
+                    final_msg["finish_reason"] = "checkpoint_continuation_required"
+                    final_msg["_checkpoint_resume_synthetic"] = True
+                    messages.append(final_msg)
+                    messages.append({
+                        "role": "user",
+                        "content": _checkpoint_resume_nudge,
+                        "_checkpoint_resume_synthetic": True,
+                    })
+                    agent._session_messages = messages
+                    logger.info(
+                        "checkpoint continuation guard rejected status-only exit "
+                        "(attempt %d)",
+                        getattr(agent, "_checkpoint_resume_guard_nudges", 0),
+                    )
+                    final_response = None
+                    continue
+
+                if bool(getattr(agent, "_checkpoint_resume_guard_exhausted", False)):
+                    final_response = (
+                        "⚠️ The durable checkpoint was found, but the resumed turn "
+                        "did not produce a concrete result after three guarded "
+                        "continuation attempts. I am not claiming that the work "
+                        "continued. The checkpoint remains unfinished and recoverable."
+                    )
+                    final_msg["content"] = final_response
+                    final_msg["finish_reason"] = "checkpoint_continuation_blocked"
 
                 try:
                     from agent.verification_stop import (

@@ -356,6 +356,29 @@ class TestPlatformDefaults:
         assert resolve_display_setting(config, "telegram", "long_running_notifications") is False
         assert resolve_display_setting(config, "telegram", "busy_ack_detail") is True
 
+    def test_activity_indicator_is_an_overrideable_platform_setting(self):
+        from gateway.display_config import OVERRIDEABLE_KEYS, resolve_display_setting
+
+        indicator = {
+            "initial_delay_seconds": 10,
+            "update_interval_seconds": 60,
+            "initial_text": "⏳ Trabalhando…",
+            "elapsed_text": "⏳ Trabalhando há {elapsed_human}…",
+        }
+        config = {
+            "display": {
+                "platforms": {
+                    "telegram": {"activity_indicator": indicator},
+                }
+            }
+        }
+
+        assert "activity_indicator" in OVERRIDEABLE_KEYS
+        assert (
+            resolve_display_setting(config, "telegram", "activity_indicator")
+            == indicator
+        )
+
 
 # ---------------------------------------------------------------------------
 # Config migration: tool_progress_overrides → display.platforms

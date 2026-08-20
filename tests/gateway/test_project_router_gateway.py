@@ -13,6 +13,7 @@ from gateway.project_router import (
     UnknownBindingError,
     UnknownUserError,
     ProjectRouter,
+    build_team_resource_namespace,
 )
 from gateway.run import GatewayRunner, _project_context_prompt_block
 from gateway.session import SessionContext, SessionSource
@@ -45,7 +46,14 @@ def _event(*, internal=False, metadata=None):
     return SimpleNamespace(text="hello", internal=internal, metadata=metadata or {})
 
 
-def _project(*, profile="default", thread_id="42", slug="alpha", is_management=False):
+def _project(
+    *,
+    profile="default",
+    thread_id="42",
+    slug="alpha",
+    is_management=False,
+    access="allow",
+):
     return ProjectContext(
         project_id=f"project-{profile}",
         slug=slug,
@@ -57,6 +65,7 @@ def _project(*, profile="default", thread_id="42", slug="alpha", is_management=F
         thread_id=thread_id,
         sender_user_id="9",
         is_management=is_management,
+        access=access,
     )
 
 
@@ -105,8 +114,10 @@ def test_bound_allowed_topic_resolves_and_closes_router(monkeypatch, tmp_path):
         def __exit__(self, *args):
             calls.append(("close",))
 
-        def resolve(self, platform, chat_id, thread_id, sender_user_id):
-            calls.append(("resolve", platform, chat_id, thread_id, sender_user_id))
+        def resolve(self, platform, chat_id, thread_id, sender_user_id, **kwargs):
+            calls.append((
+                "resolve", platform, chat_id, thread_id, sender_user_id, kwargs
+            ))
             return expected
 
         def ensure_bound_board(self, context):
@@ -121,7 +132,17 @@ def test_bound_allowed_topic_resolves_and_closes_router(monkeypatch, tmp_path):
     assert result == (expected, None)
     assert calls == [
         ("open", (tmp_path / "project_router.db").resolve(), "default"),
-        ("resolve", "telegram", "-1001", "42", "9"),
+        (
+            "resolve",
+            "telegram",
+            "-1001",
+            "42",
+            "9",
+            {
+                "allow_implicit_member": False,
+                "verified_sender_user_id": "9",
+            },
+        ),
         ("ensure_board", expected.board_slug),
         ("close",),
     ]
@@ -143,8 +164,8 @@ def test_shared_group_source_uses_verified_telegram_sender_for_project_acl(
         def __exit__(self, *args):
             pass
 
-        def resolve(self, platform, chat_id, thread_id, sender_user_id):
-            calls.append(sender_user_id)
+        def resolve(self, platform, chat_id, thread_id, sender_user_id, **kwargs):
+            calls.append((sender_user_id, kwargs))
             return expected
 
         def ensure_bound_board(self, context):
@@ -161,7 +182,13 @@ def test_shared_group_source_uses_verified_telegram_sender_for_project_acl(
 
     assert denial is None
     assert context == expected
-    assert calls == ["9"]
+    assert calls == [(
+        "9",
+        {
+            "allow_implicit_member": False,
+            "verified_sender_user_id": "9",
+        },
+    )]
 
 
 @pytest.mark.parametrize("error", [UnknownUserError("unknown"), AccessDeniedError("denied")])
@@ -176,7 +203,7 @@ def test_bound_unknown_or_denied_user_returns_short_denial(monkeypatch, error):
         def __exit__(self, *args):
             pass
 
-        def resolve(self, *args):
+        def resolve(self, *args, **kwargs):
             raise error
 
     runner = _runner(ProjectRouterConfig(enabled=True))
@@ -200,7 +227,7 @@ def test_unknown_topic_fails_closed_only_in_managed_chat(monkeypatch, managed):
         def __exit__(self, *args):
             pass
 
-        def resolve(self, *args):
+        def resolve(self, *args, **kwargs):
             raise UnknownBindingError("missing")
 
     managed_ids = ["-1001"] if managed else ["-2000"]
@@ -287,6 +314,23 @@ def test_project_context_block_is_deterministic_and_inert(tmp_path):
     assert "cross-topic session history" in first
 
 
+def test_project_context_block_requires_live_kanban_table_status():
+    prompt = _project_context_prompt_block(_project(slug="alpha"))
+
+    assert "call kanban_list before answering" in prompt
+    assert "never answer from chat memory or stale summaries" in prompt
+    assert "valid GFM pipe table" in prompt
+    assert "bordered header-and-cells appearance" in prompt
+    assert "Choose column names and content dynamically" in prompt
+    assert "do not force a fixed Kanban schema" in prompt
+    assert "three to five columns" in prompt
+    assert "Do not wrap the table in a code fence" in prompt
+    assert "do not replace it with prose or a bullet list" in prompt
+    assert "one explicit empty-state row" in prompt
+    assert "Tarefa, Status, Responsável, and Prioridade" not in prompt
+    assert "Do not invent owners, blockers, progress, deadlines, or next steps" in prompt
+
+
 def test_management_project_context_block_describes_control_plane_without_board():
     prompt = _project_context_prompt_block(_project(is_management=True))
 
@@ -298,6 +342,7 @@ def test_management_project_context_block_describes_control_plane_without_board(
     assert "only projects registered in this profile and managed team" in prompt
     assert "Do not enumerate, confirm, search for, or comment on other teams" in prompt
     assert "When a board is omitted" not in prompt
+    assert "call kanban_list before answering" not in prompt
 
 
 def test_set_session_env_receives_project_values(monkeypatch):
@@ -573,6 +618,80 @@ def test_managed_named_topic_auto_registers_then_enforces_acl(monkeypatch, tmp_p
         ).fetchone()[0] == 1
 
 
+def test_implicit_managed_member_auto_registers_with_team_scoped_resources(
+    monkeypatch, tmp_path,
+):
+    created_boards = set()
+    monkeypatch.setattr(
+        "hermes_cli.kanban_db.create_board",
+        lambda slug, **kwargs: created_boards.add(slug),
+    )
+    workspace_root = tmp_path / "projects"
+    runner = _runner(ProjectRouterConfig(
+        enabled=True,
+        managed_chat_ids=["-1001"],
+        auto_register_topics=True,
+        implicit_managed_chat_members=True,
+        namespace_team_resources=True,
+        workspace_root=workspace_root,
+    ))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+
+    context, denial = runner._resolve_project_context_for_message(
+        _event(), _source(user_id="21", chat_topic="Alpha Project")
+    )
+
+    namespace = build_team_resource_namespace("default", "-1001")
+    assert denial is None
+    assert context.sender_user_id == "21"
+    assert context.access == "member"
+    assert context.board_slug.startswith(f"{namespace}--")
+    assert context.workdir == (workspace_root / namespace / "alpha-project").resolve()
+    assert created_boards == {context.board_slug}
+
+    with ProjectRouter(tmp_path / "project_router.db", "default") as router:
+        router.set_acl("-1001", "21", "deny")
+
+    denied, denied_text = runner._resolve_project_context_for_message(
+        _event(), _source(user_id="21", chat_topic="Alpha Project")
+    )
+    unverified, unverified_text = runner._resolve_project_context_for_message(
+        _event(), _source(user_id=None, chat_topic="Alpha Project")
+    )
+
+    assert denied is None
+    assert "do not have access" in denied_text
+    assert unverified is None
+    assert "do not have access" in unverified_text
+
+
+def test_team_resource_namespace_is_opt_in_for_new_gateway_projects(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(
+        "hermes_cli.kanban_db.create_board",
+        lambda slug, **kwargs: {"slug": slug},
+    )
+    workspace_root = tmp_path / "projects"
+    runner = _runner(ProjectRouterConfig(
+        enabled=True,
+        managed_chat_ids=["-1001"],
+        auto_register_topics=True,
+        workspace_root=workspace_root,
+    ))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+    with ProjectRouter(tmp_path / "project_router.db", "default") as router:
+        router.set_acl("-1001", "9", "allow")
+
+    context, denial = runner._resolve_project_context_for_message(
+        _event(), _source(chat_topic="Legacy Shape")
+    )
+
+    assert denial is None
+    assert context.board_slug == "legacy-shape"
+    assert context.workdir == (workspace_root / "legacy-shape").resolve()
+
+
 def test_managed_named_topic_auto_registers_from_shared_group_source(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "hermes_cli.kanban_db.create_board",
@@ -795,7 +914,7 @@ async def test_router_acl_and_managed_denials_precede_session_creation(
         def __exit__(self, *args):
             pass
 
-        def resolve(self, *args):
+        def resolve(self, *args, **kwargs):
             raise error
 
     runner = _runner(
@@ -882,7 +1001,7 @@ async def test_missing_bound_board_is_ensured_before_session_creation(monkeypatc
         def __exit__(self, *args):
             pass
 
-        def resolve(self, *args):
+        def resolve(self, *args, **kwargs):
             order.append("resolve")
             return project
 
@@ -921,7 +1040,7 @@ async def test_concurrent_profile_topic_resolutions_do_not_cross_values(monkeypa
         def __exit__(self, *args):
             pass
 
-        def resolve(self, platform, chat_id, thread_id, sender_user_id):
+        def resolve(self, platform, chat_id, thread_id, sender_user_id, **kwargs):
             return _project(profile=self.profile, thread_id=thread_id)
 
         def ensure_bound_board(self, context):
@@ -951,6 +1070,75 @@ def _session_context(source):
         home_channels={},
         session_key="session-key",
     )
+
+
+@pytest.mark.parametrize(
+    ("access", "creator_expected"),
+    [("member", False), ("allow", True)],
+)
+def test_management_topic_creator_requires_explicit_acl_access(
+    access, creator_expected,
+):
+    runner = _runner(ProjectRouterConfig(enabled=True))
+    source = _source(message_id="management-access")
+    tokens = runner._set_session_env(
+        _session_context(source),
+        _project(is_management=True, access=access),
+    )
+    try:
+        assert (get_project_topic_creator() is not None) is creator_expected
+    finally:
+        runner._clear_session_env(tokens)
+
+    assert get_project_topic_creator() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_workdir", ["relative/project", "outside"])
+async def test_management_creator_rejects_workdir_outside_workspace_root_before_io(
+    monkeypatch, tmp_path, bad_workdir,
+):
+    workspace_root = tmp_path / "projects"
+    requested = (
+        bad_workdir
+        if bad_workdir.startswith("relative")
+        else str(tmp_path / "outside")
+    )
+    adapter_calls = []
+
+    class Adapter:
+        async def ensure_forum_topic(self, *args):
+            adapter_calls.append(args)
+            raise AssertionError("unsafe workdir must be rejected before Telegram I/O")
+
+    runner = _runner(ProjectRouterConfig(
+        enabled=True,
+        managed_chat_ids=["-1001"],
+        workspace_root=workspace_root,
+    ))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
+    runner.adapters = {Platform.TELEGRAM: Adapter()}
+    monkeypatch.setattr(
+        gateway_run,
+        "ProjectRouter",
+        lambda *args, **kwargs: pytest.fail(
+            "unsafe workdir must be rejected before router provisioning"
+        ),
+    )
+    source = _source(message_id="unsafe-workdir")
+    tokens = runner._set_session_env(
+        _session_context(source), _project(is_management=True, access="allow")
+    )
+    try:
+        result = await get_project_topic_creator()(
+            name="Unsafe Project", workdir=requested
+        )
+    finally:
+        runner._clear_session_env(tokens)
+
+    assert result["success"] is False
+    assert "absolute safe path inside workspace_root" in result["error"]
+    assert adapter_calls == []
 
 
 @pytest.mark.parametrize(

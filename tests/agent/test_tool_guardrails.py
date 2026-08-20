@@ -92,7 +92,7 @@ def test_default_repeated_identical_failed_call_warns_without_blocking():
     assert controller.halt_decision is None
 
 
-def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution():
+def test_hard_stop_enabled_redirects_repeated_exact_failure_before_next_execution():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(
             hard_stop_enabled=True,
@@ -112,10 +112,11 @@ def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution()
     assert second.action == "warn"
     assert second.code == "repeated_exact_failure_warning"
 
-    blocked = controller.before_call("web_search", args)
-    assert blocked.action == "block"
-    assert blocked.code == "repeated_exact_failure_block"
-    assert blocked.count == 2
+    redirected = controller.before_call("web_search", args)
+    assert redirected.action == "redirect"
+    assert redirected.code == "repeated_exact_failure_redirect"
+    assert redirected.count == 2
+    assert not redirected.should_halt
 
 
 def test_success_resets_exact_signature_failure_streak():
@@ -167,7 +168,7 @@ def test_same_tool_varying_args_warns_by_default_without_halting():
     assert controller.halt_decision is None
 
 
-def test_hard_stop_enabled_halts_same_tool_varying_args_failure_streak():
+def test_hard_stop_enabled_redirects_same_tool_varying_args_failure_streak():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(
             hard_stop_enabled=True,
@@ -183,9 +184,10 @@ def test_hard_stop_enabled_halts_same_tool_varying_args_failure_streak():
     assert second.action == "warn"
     assert second.code == "same_tool_failure_warning"
     third = controller.after_call("terminal", {"command": "cmd-3"}, '{"exit_code":1}', failed=True)
-    assert third.action == "halt"
-    assert third.code == "same_tool_failure_halt"
+    assert third.action == "redirect"
+    assert third.code == "same_tool_failure_redirect"
     assert third.count == 3
+    assert not third.should_halt
 
 
 def test_idempotent_no_progress_repeated_result_warns_without_blocking_by_default():
@@ -205,7 +207,7 @@ def test_idempotent_no_progress_repeated_result_warns_without_blocking_by_defaul
     assert controller.halt_decision is None
 
 
-def test_hard_stop_enabled_blocks_idempotent_no_progress_future_repeat():
+def test_hard_stop_enabled_redirects_idempotent_no_progress_future_repeat():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(
             hard_stop_enabled=True,
@@ -223,9 +225,10 @@ def test_hard_stop_enabled_blocks_idempotent_no_progress_future_repeat():
     assert warn.action == "warn"
     assert warn.code == "idempotent_no_progress_warning"
 
-    blocked = controller.before_call("read_file", args)
-    assert blocked.action == "block"
-    assert blocked.code == "idempotent_no_progress_block"
+    redirected = controller.before_call("read_file", args)
+    assert redirected.action == "redirect"
+    assert redirected.code == "idempotent_no_progress_redirect"
+    assert not redirected.should_halt
 
 
 def test_mutating_or_unknown_tools_are_not_blocked_for_repeated_identical_success_output_by_default():
@@ -249,8 +252,8 @@ def test_reset_for_turn_clears_bounded_guardrail_state():
     controller.after_call("read_file", {"path": "/tmp/x"}, "same", failed=False)
     controller.after_call("read_file", {"path": "/tmp/x"}, "same", failed=False)
 
-    assert controller.before_call("web_search", {"query": "same"}).action == "block"
-    assert controller.before_call("read_file", {"path": "/tmp/x"}).action == "block"
+    assert controller.before_call("web_search", {"query": "same"}).action == "redirect"
+    assert controller.before_call("read_file", {"path": "/tmp/x"}).action == "redirect"
 
     controller.reset_for_turn()
 
@@ -276,4 +279,4 @@ def test_after_call_survives_lone_surrogates_in_result_and_args():
     # the exact-failure guard, proving the hash is stable across calls
     controller.after_call("web_search", {"query": dirty}, '{"error":"\ud835 boom"}', failed=True)
     controller.after_call("web_search", {"query": dirty}, '{"error":"\ud835 boom"}', failed=True)
-    assert controller.before_call("web_search", {"query": dirty}).action == "block"
+    assert controller.before_call("web_search", {"query": dirty}).action == "redirect"

@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 
 from tools.vision_tools import (
     _detect_video_mime_type,
@@ -193,6 +195,10 @@ class TestVideoAnalyzeTool:
         assert data["success"] is True
         assert "demo" in data["analysis"].lower()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Symlink creation requires elevated privileges on Windows",
+    )
     def test_local_file_read_guard_blocks_env_via_video_extension(self, tmp_path):
         """A .env file symlinked with a video extension must still be blocked.
 
@@ -258,6 +264,89 @@ class TestVideoAnalyzeTool:
 
         data = json.loads(result)
         assert data["success"] is False
+
+    def test_semantic_missing_video_response_uses_storyboard_fallback(self, tmp_path):
+        """A provider that ignores video_url must not produce a false success."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        refusal = "Não recebi nenhum vídeo ou link acessível nesta conversa."
+
+        with patch(
+            "tools.vision_tools.async_call_llm",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ):
+            with patch(
+                "tools.vision_tools.extract_content_or_reasoning",
+                return_value=refusal,
+            ):
+                with patch(
+                    "tools.vision_tools._analyze_video_storyboard",
+                    new_callable=AsyncMock,
+                    create=True,
+                    return_value="Storyboard shows the requested product.",
+                ) as mock_fallback:
+                    result = self._run(
+                        video_analyze_tool(str(video), "What is this?")
+                    )
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["mode"] == "storyboard_fallback"
+        assert data["analysis"] == "Storyboard shows the requested product."
+        assert "audio" in data["warning"].lower()
+        mock_fallback.assert_awaited_once()
+
+    def test_explicit_unsupported_video_error_uses_storyboard_fallback(self, tmp_path):
+        """A provider-level video incompatibility should degrade to images."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+
+        with patch(
+            "tools.vision_tools.async_call_llm",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("video_url input is not supported"),
+        ):
+            with patch(
+                "tools.vision_tools._analyze_video_storyboard",
+                new_callable=AsyncMock,
+                return_value="Storyboard analysis.",
+            ) as mock_fallback:
+                result = self._run(video_analyze_tool(str(video), "What?"))
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["mode"] == "storyboard_fallback"
+        mock_fallback.assert_awaited_once()
+
+    def test_storyboard_failure_does_not_restore_false_success(self, tmp_path):
+        """If both native video and storyboard fail, return a real failure."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+        mock_response = MagicMock()
+
+        with patch(
+            "tools.vision_tools.async_call_llm",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ):
+            with patch(
+                "tools.vision_tools.extract_content_or_reasoning",
+                return_value="I did not receive a video.",
+            ):
+                with patch(
+                    "tools.vision_tools._analyze_video_storyboard",
+                    new_callable=AsyncMock,
+                    side_effect=RuntimeError("ffmpeg unavailable"),
+                ):
+                    result = self._run(video_analyze_tool(str(video), "What?"))
+
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "storyboard fallback failed" in data["error"].lower()
 
     def test_empty_response_retries(self, tmp_path):
         """Retries once on empty model response."""

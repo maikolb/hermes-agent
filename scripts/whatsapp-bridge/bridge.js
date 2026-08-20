@@ -19,7 +19,7 @@
  *   node bridge.js --port 3000 --session ~/.hermes/whatsapp/session
  */
 
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, getAggregateVotesInPollMessage, decryptPollVote, getKeyAuthor, jidNormalizedUser } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion, downloadMediaMessage, getAggregateVotesInPollMessage, decryptPollVote, getKeyAuthor, jidNormalizedUser } from '@whiskeysockets/baileys';
 import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -31,14 +31,17 @@ import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import { assertOutboundDestination, createDeliveryAckTracker } from './delivery_ack.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
+import { createReconnectCoordinator } from './reconnect_controller.js';
 import {
   buildPollPayload,
   buildLocationPayload,
   buildTextSendPayload,
   createBoundedMessageStore,
   extractBridgeEvent,
+  hasCompletedPairingCredentials,
   inferMediaType,
   mediaPayloadForFile,
   pollCreationMessageFromPayload,
@@ -115,6 +118,8 @@ const CHUNK_DELAY_MS = parseInt(process.env.WHATSAPP_CHUNK_DELAY_MS || '300', 10
 // which pins the bridge's HTTP handler until the upstream aiohttp timeout
 // fires. Fail fast instead so the gateway can surface a real error and retry.
 const SEND_TIMEOUT_MS = parseInt(process.env.WHATSAPP_SEND_TIMEOUT_MS || '60000', 10);
+const DELIVERY_ACK_TIMEOUT_MS = parseInt(process.env.WHATSAPP_DELIVERY_ACK_TIMEOUT_MS || '10000', 10);
+const deliveryAcks = createDeliveryAckTracker({ timeoutMs: DELIVERY_ACK_TIMEOUT_MS });
 
 // --- Send queue: serialise all sock.sendMessage() calls across concurrent
 //     HTTP handlers so a single Baileys socket never has overlapping sends.
@@ -378,6 +383,7 @@ function rememberSentId(id) {
 
 let sock = null;
 let connectionState = 'disconnected';
+const reconnectCoordinator = createReconnectCoordinator();
 
 function emitPairEvent(event) {
   if (!PAIR_JSON) return;
@@ -387,8 +393,13 @@ function emitPairEvent(event) {
 }
 
 async function startSocket() {
+  const socketGeneration = reconnectCoordinator.beginAttempt();
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-  const { version } = await fetchLatestBaileysVersion();
+  const versionResult = await fetchLatestWaWebVersion();
+  if (!hasCompletedPairingCredentials(state.creds) && (!versionResult.isLatest || versionResult.error)) {
+    throw new Error('current WhatsApp Web version is unavailable');
+  }
+  const { version } = versionResult;
 
   sock = makeWASocket({
     version,
@@ -407,9 +418,57 @@ async function startSocket() {
     },
   });
 
-  sock.ev.on('creds.update', () => { saveCreds(); lidToPhone = buildLidMap(); });
+  let credentialSaveQueue = Promise.resolve();
+  let pairExitStarted = false;
 
-  sock.ev.on('connection.update', (update) => {
+  function queueCredentialSave() {
+    credentialSaveQueue = credentialSaveQueue
+      .catch(() => {})
+      .then(() => saveCreds());
+    return credentialSaveQueue;
+  }
+
+  async function finishPairOnly(exitCode, errorCode = null) {
+    if (!PAIR_ONLY || pairExitStarted) return;
+    pairExitStarted = true;
+    reconnectCoordinator.cancel();
+    try {
+      await credentialSaveQueue;
+      if (exitCode === 0) {
+        if (!hasCompletedPairingCredentials(state.creds)) {
+          throw new Error('pairing credentials are incomplete');
+        }
+        await saveCreds();
+        emitPairEvent({ event: 'connected', user: null });
+        if (!PAIR_JSON) {
+          console.log('✅ WhatsApp registration confirmed and saved.');
+        }
+      } else {
+        emitPairEvent({ event: 'error', error: errorCode || 'pairing_failed' });
+      }
+    } catch (err) {
+      emitPairEvent({ event: 'error', error: 'credential_save_failed' });
+      if (!PAIR_JSON) {
+        console.error(`Failed to persist WhatsApp credentials: ${err?.message || String(err)}`);
+      }
+      exitCode = 1;
+    }
+    process.exit(exitCode);
+  }
+
+  sock.ev.on('creds.update', (update) => {
+    if (update && typeof update === 'object') {
+      Object.assign(state.creds, update);
+    }
+    void queueCredentialSave()
+      .then(() => { lidToPhone = buildLidMap(); })
+      .catch((err) => {
+        console.error(`WhatsApp credential save failed: ${err?.message || String(err)}`);
+      });
+  });
+
+  sock.ev.on('connection.update', async (update) => {
+    if (!reconnectCoordinator.isCurrent(socketGeneration)) return;
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -426,12 +485,39 @@ async function startSocket() {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       connectionState = 'disconnected';
 
+      if (PAIR_ONLY && reason === DisconnectReason.restartRequired) {
+        // A pair-success credential update plus 515 only completes the first
+        // half of QR pairing.  The persisted credentials must authenticate on
+        // a fresh socket before the CLI may report success.  Otherwise the
+        // phone can reject the device while the local process reports a false
+        // positive.
+        try {
+          await credentialSaveQueue;
+          await saveCreds();
+        } catch {
+          await finishPairOnly(1, 'credential_save_failed');
+          return;
+        }
+        emitPairEvent({ event: 'verifying' });
+        reconnectCoordinator.schedule(
+          socketGeneration,
+          1000,
+          startSocketWithRetry,
+        );
+        return;
+      }
+
       if (reason === DisconnectReason.loggedOut) {
-        emitPairEvent({ event: 'error', error: 'logged_out', reason });
+        reconnectCoordinator.cancel();
         if (!PAIR_JSON) {
           console.log('❌ Logged out. Delete session and restart to re-authenticate.');
         }
-        process.exit(1);
+        if (PAIR_ONLY) {
+          await finishPairOnly(1, 'logged_out');
+        } else {
+          emitPairEvent({ event: 'error', error: 'logged_out', reason });
+          process.exit(1);
+        }
       } else {
         // 515 = restart requested (common after pairing). Always reconnect.
         emitPairEvent({ event: 'disconnected', reason });
@@ -442,10 +528,19 @@ async function startSocket() {
             console.log(`⚠️  Connection closed (reason: ${reason}). Reconnecting in 3s...`);
           }
         }
-        setTimeout(startSocket, reason === 515 ? 1000 : 3000);
+        reconnectCoordinator.schedule(
+          socketGeneration,
+          reason === 515 ? 1000 : 3000,
+          startSocketWithRetry,
+        );
       }
     } else if (connection === 'open') {
+      reconnectCoordinator.cancelPending(socketGeneration);
       connectionState = 'connected';
+      if (PAIR_ONLY && hasCompletedPairingCredentials(state.creds)) {
+        await finishPairOnly(0);
+        return;
+      }
       const connectedUser = sock?.user
         ? {
             id: sock.user.id || null,
@@ -456,17 +551,11 @@ async function startSocket() {
       if (!PAIR_JSON) {
         console.log('✅ WhatsApp connected!');
       }
-      if (PAIR_ONLY) {
-        if (!PAIR_JSON) {
-          console.log('✅ Pairing complete. Credentials saved.');
-        }
-        // Give Baileys a moment to flush creds, then exit cleanly
-        setTimeout(() => process.exit(0), 2000);
-      }
     }
   });
 
   sock.ev.on('messages.update', async (updates) => {
+    deliveryAcks.observeUpdates(updates);
     for (const { key, update } of updates || []) {
       if (!update?.pollUpdates) continue;
       const pollCreationId = key?.id || update.pollUpdates?.[0]?.pollCreationMessageKey?.id;
@@ -528,6 +617,7 @@ async function startSocket() {
     ].filter(Boolean)));
 
     for (const msg of messages) {
+      deliveryAcks.observeMessage(msg);
       if (!msg.message) continue;
 
       const chatId = msg.key.remoteJid;
@@ -766,6 +856,14 @@ async function startSocket() {
   });
 }
 
+function startSocketWithRetry() {
+  return startSocket().catch((err) => {
+    console.error(`WhatsApp socket start failed: ${err?.message || String(err)}`);
+    const generation = reconnectCoordinator.currentGeneration();
+    reconnectCoordinator.schedule(generation, 3000, startSocketWithRetry);
+  });
+}
+
 // HTTP server
 const app = express();
 app.use(express.json());
@@ -821,6 +919,7 @@ app.post('/send', async (req, res) => {
   try {
     const chunks = splitLongMessage(formatOutgoingMessage(message));
     const messageIds = [];
+    const ackStatuses = [];
     for (let i = 0; i < chunks.length; i += 1) {
       const { content: payload, options } = buildTextSendPayload(chunks[i], {
         chatId,
@@ -828,9 +927,12 @@ app.post('/send', async (req, res) => {
         messageStore,
       });
       const sent = await sendWithTimeout(chatId, payload, options);
+      assertOutboundDestination(sent, chatId);
       trackSentMessageId(sent);
       messageStore.remember(sent);
       if (sent?.key?.id) messageIds.push(sent.key.id);
+      const ackStatus = await deliveryAcks.wait(sent.key.id);
+      ackStatuses.push(ackStatus);
       if (chunks.length > 1 && i < chunks.length - 1) {
         await sleep(CHUNK_DELAY_MS);
       }
@@ -840,6 +942,7 @@ app.post('/send', async (req, res) => {
       success: true,
       messageId: messageIds[messageIds.length - 1],
       messageIds,
+      ackStatuses,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1113,6 +1216,6 @@ if (PAIR_ONLY) {
       console.log(`👤 WHATSAPP_FORWARD_OWNER_MESSAGES=true — owner-typed messages will be forwarded with fromOwner:true`);
     }
     console.log();
-    startSocket();
+    startSocketWithRetry();
   });
 }

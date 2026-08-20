@@ -28,6 +28,7 @@ PRs #9850, #9934, #7536):
 import asyncio
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -39,8 +40,10 @@ from gateway.run import (
     _auto_continue_freshness_window,
     _coerce_gateway_timestamp,
     _is_fresh_gateway_interruption,
+    _is_explicit_checkpoint_continue_request,
     _last_transcript_timestamp,
     _should_clear_resume_pending_after_turn,
+    _should_explicitly_resume_checkpoint,
     build_resume_recovery_note,
 )
 from gateway.session import SessionEntry, SessionSource, SessionStore
@@ -70,6 +73,77 @@ def test_resume_pending_is_cleared_only_after_successful_turn():
     assert _should_clear_resume_pending_after_turn({"failed": True}) is False
     assert _should_clear_resume_pending_after_turn({"partial": True}) is False
     assert _should_clear_resume_pending_after_turn({"error": "boom"}) is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Continue",
+        "Continue de onde parou",
+        "A cota tinha acabado. Continue de onde parou",
+        "Pode retomar o trabalho agora, por favor",
+        "Resume from where you left off",
+    ],
+)
+def test_explicit_checkpoint_continue_request_is_bounded_but_practical(message):
+    assert _is_explicit_checkpoint_continue_request(message) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Não continue de onde parou",
+        "Se der, continue de onde parou",
+        "Continue e mude toda a arquitetura para Rust",
+        "O processo continua rodando?",
+        "Comece uma tarefa nova",
+    ],
+)
+def test_explicit_checkpoint_continue_request_rejects_new_or_negated_work(message):
+    assert _is_explicit_checkpoint_continue_request(message) is False
+
+
+def test_explicit_checkpoint_resume_requires_unfinished_durable_state(tmp_path):
+    from agent.turn_checkpoint import TurnCheckpointStore
+
+    store = TurnCheckpointStore(tmp_path / "checkpoints")
+    store.start_turn(
+        "sid-resumable",
+        "turn-1",
+        "do work",
+        [{"role": "user", "content": "do work"}],
+    )
+    store.transition(
+        "sid-resumable",
+        phase="tool_completed",
+        next_action="continue_original_operation",
+    )
+    store.start_turn(
+        "sid-terminal",
+        "turn-2",
+        "done work",
+        [{"role": "user", "content": "done work"}],
+    )
+    store.transition("sid-terminal", phase="delivered", next_action="none")
+    resumable = SimpleNamespace(
+        session_id="sid-resumable",
+        _session_db=SimpleNamespace(db_path=tmp_path / "state.db"),
+        _turn_checkpoint_store=store,
+    )
+    terminal = SimpleNamespace(
+        session_id="sid-terminal",
+        _session_db=SimpleNamespace(db_path=tmp_path / "state.db"),
+        _turn_checkpoint_store=store,
+    )
+
+    assert _should_explicitly_resume_checkpoint(
+        resumable,
+        "A cota voltou. Continue de onde parou",
+    )
+    assert not _should_explicitly_resume_checkpoint(
+        terminal,
+        "Continue de onde parou",
+    )
 
 
 def _make_source(platform=Platform.TELEGRAM, chat_id="123", user_id="u1"):
@@ -299,6 +373,35 @@ class TestMarkResumePending:
         assert reloaded.resume_pending is True
         assert reloaded.resume_reason == "restart_timeout"
 
+    def test_provider_reset_boundary_and_attempts_survive_roundtrip(self, tmp_path):
+        store = _make_store(tmp_path)
+        source = _make_source()
+        entry = store.get_or_create_session(source)
+        not_before = datetime.now() + timedelta(hours=2)
+
+        assert store.mark_resume_pending(
+            entry.session_key,
+            reason="provider_rate_limit",
+            not_before=not_before,
+        )
+        assert store.claim_automatic_resume_attempt(entry.session_key, max_attempts=3)
+
+        store2 = _make_store(tmp_path)
+        store2._ensure_loaded()
+        reloaded = store2._entries[entry.session_key]
+        assert reloaded.resume_reason == "provider_rate_limit"
+        assert reloaded.resume_not_before == not_before
+        assert reloaded.automatic_resume_attempts == 1
+
+    def test_automatic_resume_attempts_are_bounded(self, tmp_path):
+        store = _make_store(tmp_path)
+        entry = store.get_or_create_session(_make_source())
+        store.mark_resume_pending(entry.session_key, reason="provider_rate_limit")
+
+        assert store.claim_automatic_resume_attempt(entry.session_key, max_attempts=2)
+        assert store.claim_automatic_resume_attempt(entry.session_key, max_attempts=2)
+        assert not store.claim_automatic_resume_attempt(entry.session_key, max_attempts=2)
+
 
 class TestClearResumePending:
     def test_clears_flag(self, tmp_path):
@@ -312,6 +415,8 @@ class TestClearResumePending:
         assert e.resume_pending is False
         assert e.resume_reason is None
         assert e.last_resume_marked_at is None
+        assert e.resume_not_before is None
+        assert e.automatic_resume_attempts == 0
 
     def test_returns_false_when_not_pending(self, tmp_path):
         store = _make_store(tmp_path)
@@ -331,6 +436,25 @@ class TestClearResumePending:
 
 
 class TestGetOrCreateResumePending:
+    def test_provider_quota_resume_survives_normal_freshness_expiry(self, tmp_path):
+        store = _make_store(tmp_path)
+        source = _make_source()
+        first = store.get_or_create_session(source)
+        original_sid = first.session_id
+        store.mark_resume_pending(
+            first.session_key,
+            reason="provider_rate_limit",
+            not_before=datetime.now() + timedelta(hours=8),
+        )
+        store._entries[first.session_key].last_resume_marked_at = (
+            datetime.now() - timedelta(days=2)
+        )
+
+        second = store.get_or_create_session(source)
+
+        assert second.session_id == original_sid
+        assert second.resume_pending is True
+
     def test_resume_pending_preserves_session_id(self, tmp_path):
         """This is THE core behavioural fix — resume_pending ≠ new session."""
         store = _make_store(tmp_path)
@@ -483,13 +607,13 @@ class TestResumePendingSystemNote:
         )
         assert "gateway shutdown" in result
 
-    def test_empty_message_interactive_note_asks_what_next(self):
-        """Interactive platforms: the startup auto-resume turn reports the
-        restore and asks the (present) human what to do next."""
+    def test_empty_message_interactive_note_continues_checkpoint(self):
+        """Chat platforms must continue durable next_action automatically."""
         note = build_resume_recovery_note("restart_timeout", "", interactive=True)
-        assert "session was restored" in note
-        assert "ask what they would like to do next" in note
-        assert "skip any unfinished work" in note
+        assert "CONTINUE the interrupted task" in note
+        assert "checkpoint.next_action" in note
+        assert "session was restored" not in note
+        assert "ask what they would like" not in note
 
     def test_empty_message_noninteractive_note_continues_task(self):
         """Non-interactive platforms (webhook, API server): nobody can answer
@@ -791,11 +915,8 @@ class TestResumePendingSystemNote:
         assert "already" in result and "do NOT re-execute or verify" in result
         assert "restarted!" in result
 
-    def test_resume_pending_empty_message_reports_recovery(self):
-        """On the empty-message auto-resume startup turn there is no NEW user
-        message, so the note instructs the model to report recovery and ask
-        for instructions rather than 'address the user's NEW message'.
-        """
+    def test_resume_pending_empty_message_continues_checkpoint(self):
+        """An empty startup event continues instead of narrating restoration."""
         entry = self._pending_entry(reason="restart_timeout")
         result = _simulate_note_injection(
             history=[
@@ -806,8 +927,9 @@ class TestResumePendingSystemNote:
         )
         assert "[System note:" in result
         assert "gateway restart" in result
-        assert "restored successfully" in result
-        assert "ask what they would like to do next" in result
+        assert "CONTINUE the interrupted task" in result
+        assert "checkpoint.next_action" in result
+        assert "ask what they would like" not in result
         assert "do NOT re-execute or verify" in result
         # No phantom "NEW message" instruction when there is no new message.
         assert "NEW message" not in result
@@ -1068,6 +1190,68 @@ async def test_startup_auto_resume_schedules_fresh_pending_sessions():
 
 
 @pytest.mark.asyncio
+async def test_provider_quota_resume_waits_for_persisted_reset_boundary():
+    runner, adapter = make_restart_runner()
+    source = make_restart_source(chat_id="quota-chat")
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:quota-chat",
+        session_id="sid",
+        created_at=datetime.now() - timedelta(days=1),
+        updated_at=datetime.now() - timedelta(days=1),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="provider_rate_limit",
+        last_resume_marked_at=datetime.now() - timedelta(days=1),
+        resume_not_before=datetime.now() + timedelta(hours=2),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+
+    assert scheduled == 0
+    adapter.handle_message.assert_not_called()
+    delayed = runner._delayed_resume_tasks[pending_entry.session_key]
+    delayed.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await delayed
+
+
+@pytest.mark.asyncio
+async def test_provider_quota_resume_claims_bounded_attempt_when_due():
+    runner, adapter = make_restart_runner()
+    source = make_restart_source(chat_id="quota-ready")
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:quota-ready",
+        session_id="sid",
+        created_at=datetime.now() - timedelta(days=1),
+        updated_at=datetime.now() - timedelta(days=1),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="provider_rate_limit",
+        last_resume_marked_at=datetime.now() - timedelta(days=1),
+        resume_not_before=datetime.now() - timedelta(seconds=1),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    runner.session_store.claim_automatic_resume_attempt = MagicMock(return_value=True)
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+    await asyncio.sleep(0)
+
+    assert scheduled == 1
+    runner.session_store.claim_automatic_resume_attempt.assert_called_once_with(
+        pending_entry.session_key,
+        max_attempts=3,
+    )
+    adapter.handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_startup_auto_resume_includes_crash_recovery():
     """Crash-recovered sessions (reason=restart_interrupted) are also auto-resumed.
 
@@ -1303,6 +1487,32 @@ async def test_startup_auto_resume_skips_when_adapter_unavailable():
     scheduled = runner._schedule_resume_pending_sessions()
 
     assert scheduled == 0
+    adapter.handle_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_due_provider_resume_does_not_consume_attempt_while_adapter_is_offline():
+    runner, adapter = make_restart_runner()
+    source = make_restart_source(chat_id="quota-offline")
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:quota-offline",
+        session_id="sid",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="provider_rate_limit",
+        resume_not_before=datetime.now() - timedelta(seconds=1),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    runner.session_store.claim_automatic_resume_attempt = MagicMock(return_value=True)
+    runner.adapters = {}
+    adapter.handle_message = AsyncMock()
+
+    assert runner._schedule_resume_pending_sessions() == 0
+    runner.session_store.claim_automatic_resume_attempt.assert_not_called()
     adapter.handle_message.assert_not_called()
 
 

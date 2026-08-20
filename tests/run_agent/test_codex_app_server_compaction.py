@@ -230,7 +230,6 @@ def test_codex_app_server_compression_failure_preserves_bookkeeping():
     assert agent.status_events == [
         ("lifecycle", COMPACTION_STATUS),
         ("warn", "⚠ Codex app-server compaction failed: compact failed"),
-        ("compacted", COMPACTION_DONE_STATUS),
     ]
 
 

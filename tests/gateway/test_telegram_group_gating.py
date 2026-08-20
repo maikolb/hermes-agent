@@ -220,6 +220,7 @@ def test_observed_group_context_uses_shared_source_and_prompt_for_later_mentions
         assert event.source.chat_type == "group"
         assert event.source.user_id is None
         assert event.source.user_name is None
+        assert event.metadata["telegram_sender_user_id"] == "222"
         assert event.text == "[Bob Example|222]\nwhat did Alice say?"
         assert "Existing topic prompt" in event.channel_prompt
         assert "observed Telegram group context" in event.channel_prompt
@@ -314,6 +315,34 @@ def test_observed_group_context_replays_normally_without_telegram_prompt():
 
     assert observed_context is None
     assert agent_history == [{"role": "user", "content": "[Alice|111]\nside chatter"}]
+
+
+def test_observed_group_context_keeps_recent_messages_with_bounded_size():
+    from gateway.run import (
+        _TELEGRAM_OBSERVED_CONTEXT_MAX_CHARS,
+        _TELEGRAM_OBSERVED_CONTEXT_MAX_MESSAGES,
+        _build_gateway_agent_history,
+    )
+
+    history = [
+        {
+            "role": "user",
+            "observed": True,
+            "content": f"observed-{index:03d}-" + ("x" * 500),
+        }
+        for index in range(_TELEGRAM_OBSERVED_CONTEXT_MAX_MESSAGES + 12)
+    ]
+
+    agent_history, observed_context = _build_gateway_agent_history(
+        history,
+        channel_prompt="observed Telegram group context",
+    )
+
+    assert agent_history == []
+    assert observed_context is not None
+    assert "observed-000" not in observed_context
+    assert f"observed-{len(history) - 1:03d}" in observed_context
+    assert len(observed_context) <= _TELEGRAM_OBSERVED_CONTEXT_MAX_CHARS
 
 
 def test_observed_group_context_preserves_slash_command_text_for_dispatch():

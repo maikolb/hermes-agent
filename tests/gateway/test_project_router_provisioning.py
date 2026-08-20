@@ -10,6 +10,7 @@ from gateway.project_router import (
     BindingConflictError,
     ProjectRouter,
     UnknownUserError,
+    build_team_resource_namespace,
     normalize_project_slug,
 )
 
@@ -171,6 +172,32 @@ def test_dynamic_provisioning_checks_acl_before_any_state_or_board(tmp_path: Pat
             "SELECT COUNT(*) FROM topic_bindings WHERE profile=?", ("default",)
         ).fetchone()[0] == 0
     assert board_calls == []
+
+
+def test_dynamic_provisioning_marks_verified_implicit_sender_as_member(tmp_path: Path):
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        provisioned = router.provision_topic_project(
+            "Member Project",
+            "Member Project",
+            "telegram",
+            "chat",
+            "thread",
+            sender_user_id="member",
+            allow_implicit_member=True,
+            verified_sender_user_id="member",
+            board_creator=lambda *args, **kwargs: None,
+        )
+        resolved = router.resolve(
+            "telegram",
+            "chat",
+            "thread",
+            "member",
+            allow_implicit_member=True,
+            verified_sender_user_id="member",
+        )
+
+    assert provisioned.access == "member"
+    assert resolved.access == "member"
 
 
 def test_dynamic_provisioning_is_atomic_and_same_name_topics_get_stable_slugs(tmp_path: Path):
@@ -354,6 +381,41 @@ def test_workspace_root_reuses_unique_normalized_folder_and_creates_missing_one(
     ]
 
 
+def test_team_namespaces_separate_same_topic_board_and_workspace(tmp_path: Path):
+    workspace_root = tmp_path / "projects"
+    boards = set()
+    results = []
+
+    for profile, chat_id in (("team-one", "-1001"), ("team-two", "-2002")):
+        namespace = build_team_resource_namespace(profile, chat_id)
+        with ProjectRouter(tmp_path / "router.db", profile) as router:
+            results.append((
+                namespace,
+                router.provision_topic_project(
+                    "Alpha Project",
+                    "Alpha Project",
+                    "telegram",
+                    chat_id,
+                    "42",
+                    workspace_root=workspace_root,
+                    resource_namespace=namespace,
+                    board_creator=lambda slug, **kwargs: boards.add(slug),
+                ),
+            ))
+
+    (first_namespace, first), (second_namespace, second) = results
+    assert first_namespace != second_namespace
+    assert first.board_slug != second.board_slug
+    assert first.board_slug.startswith(f"{first_namespace}--")
+    assert second.board_slug.startswith(f"{second_namespace}--")
+    assert first.workdir == (workspace_root / first_namespace / first.slug).resolve()
+    assert second.workdir == (workspace_root / second_namespace / second.slug).resolve()
+    assert first.workdir.is_dir() and second.workdir.is_dir()
+    assert boards == {first.board_slug, second.board_slug}
+    assert "1001" not in first_namespace
+    assert "2002" not in second_namespace
+
+
 def test_workspace_root_ambiguity_fails_closed_before_project_persistence(tmp_path: Path):
     workspace_root = tmp_path / "projects"
     (workspace_root / "Concursa_ai").mkdir(parents=True)
@@ -383,6 +445,7 @@ def test_existing_null_workdir_is_repaired_idempotently(tmp_path: Path):
     existing = workspace_root / "Concursa_ai"
     existing.mkdir(parents=True)
     calls = []
+    resource_namespace = build_team_resource_namespace("default", "chat")
 
     with ProjectRouter(tmp_path / "router.db", "default") as router:
         router.upsert_project("concursa-ai", "concursa-ai", "concursa-ai", None)
@@ -393,12 +456,14 @@ def test_existing_null_workdir_is_repaired_idempotently(tmp_path: Path):
             context,
             workspace_root,
             display_name="Concursa AI",
+            resource_namespace=resource_namespace,
             board_creator=lambda slug, **kwargs: calls.append((slug, kwargs)),
         )
         retried = router.ensure_bound_workspace(
             repaired,
             workspace_root,
             display_name="Concursa AI",
+            resource_namespace=resource_namespace,
             board_creator=lambda *args, **kwargs: pytest.fail(
                 "a repaired workspace must be an idempotent no-op"
             ),

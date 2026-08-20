@@ -184,6 +184,33 @@ class TestDataInitialized:
         assert adapter._running is True
 
 
+class TestWindowsBridgeLifecycle:
+    """The gateway must own the actual Node bridge process on Windows."""
+
+    @pytest.mark.asyncio
+    async def test_connect_marks_bridge_for_direct_hidden_lifecycle(self):
+        adapter = _make_adapter()
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 12345
+        mock_fh = MagicMock()
+        mock_client_cls = _mock_aiohttp(
+            status=200, json_data={"status": "connected"},
+        )
+        patches = _connect_patches(mock_proc, mock_fh, mock_client_cls)
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4] as popen, \
+             patches[5], patches[6], patches[7], patches[8], \
+             patch("plugins.platforms.whatsapp.adapter._IS_WINDOWS", True), \
+             patch("plugins.platforms.whatsapp.adapter._write_bridge_pidfile"), \
+             patch.object(type(adapter), "_poll_messages", return_value=MagicMock()):
+            result = await adapter.connect()
+
+        assert result is True
+        child_env = popen.call_args.kwargs["env"]
+        assert child_env["HERMES_INTERNAL_DIRECT_HIDDEN_CHILD"] == "1"
+
+
 # ---------------------------------------------------------------------------
 # File handle cleanup on error paths
 # ---------------------------------------------------------------------------

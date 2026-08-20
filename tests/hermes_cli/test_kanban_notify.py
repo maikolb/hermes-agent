@@ -490,6 +490,98 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
 
 
 @pytest.mark.asyncio
+async def test_gateway_kanban_rejects_cross_project_board(kanban_home):
+    """A project Topic cannot select a different global board via slash."""
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+    from gateway.project_router import ProjectContext
+
+    kb.create_board("project-alpha")
+    kb.create_board("project-beta")
+
+    runner = object.__new__(GatewayRunner)
+    runner._resolve_project_context_for_message = lambda _event, _source: (
+        ProjectContext(
+            project_id="p_alpha",
+            slug="alpha",
+            board_slug="project-alpha",
+            workdir=None,
+            status="active",
+            platform="telegram",
+            chat_id="team",
+            thread_id="topic",
+            sender_user_id="member",
+            is_management=False,
+        ),
+        None,
+    )
+    event = SimpleNamespace(
+        text="/kanban --board project-beta list",
+        source=SimpleNamespace(
+            platform=Platform.TELEGRAM,
+            chat_id="team",
+            thread_id="topic",
+            user_id="member",
+        ),
+    )
+
+    out = await GatewayRunner._handle_kanban_command(runner, event)
+
+    assert "refusing explicit board" in out
+
+
+@pytest.mark.asyncio
+async def test_gateway_project_create_is_bound_and_event_idempotent(kanban_home):
+    """A redelivered slash event creates one card on the Topic board."""
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+    from gateway.project_router import ProjectContext
+
+    kb.create_board("project-alpha")
+    runner = object.__new__(GatewayRunner)
+    runner._kanban_notifier_profile = "default"
+    runner._resolve_project_context_for_message = lambda _event, _source: (
+        ProjectContext(
+            project_id="p_alpha",
+            slug="alpha",
+            board_slug="project-alpha",
+            workdir=None,
+            status="active",
+            platform="telegram",
+            chat_id="team",
+            thread_id="topic",
+            sender_user_id="member",
+            is_management=False,
+        ),
+        None,
+    )
+    source = SimpleNamespace(
+        platform=Platform.TELEGRAM,
+        profile="team-profile",
+        chat_id="team",
+        thread_id="topic",
+        user_id="member",
+    )
+    event = SimpleNamespace(
+        text='/kanban create "same request" --assignee alice',
+        message_id="message-42",
+        source=source,
+    )
+
+    first = await GatewayRunner._handle_kanban_command(runner, event)
+    second = await GatewayRunner._handle_kanban_command(runner, event)
+
+    assert "created" in first.lower()
+    assert second
+    conn = kb.connect(board="project-alpha")
+    try:
+        tasks = kb.list_tasks(conn)
+    finally:
+        conn.close()
+    assert [task.title for task in tasks] == ["same request"]
+
+
+@pytest.mark.asyncio
 async def test_notifier_uploads_artifacts_on_completion(kanban_home, tmp_path, monkeypatch):
     """When a completed event carries ``artifacts`` in its payload, the
     notifier uploads each file to the subscribed chat as a native
