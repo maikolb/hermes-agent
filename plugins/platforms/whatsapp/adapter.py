@@ -721,6 +721,15 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             bridge_env["HERMES_IMAGE_CACHE_DIR"] = str(_get_img_dir())
             bridge_env["HERMES_AUDIO_CACHE_DIR"] = str(_get_audio_dir())
             bridge_env["HERMES_DOCUMENT_CACHE_DIR"] = str(_get_doc_dir())
+            if _IS_WINDOWS:
+                # The bridge is a long-lived service: its Popen PID, poll(),
+                # stdio and teardown must refer to the real Node process, not
+                # the broker's short-lived pythonw runner. The broker still
+                # starts it suspended on the private desktop, assigns a
+                # kill-on-close Job Object, and keeps all windows invisible.
+                from hermes_cli.windows_process_broker import direct_hidden_child_env
+
+                bridge_env = direct_hidden_child_env(bridge_env)
 
             self._bridge_process = subprocess.Popen(
                 [
@@ -963,8 +972,26 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     if resp.status == 200:
                         data = await resp.json()
                         last_message_id = data.get("messageId")
-                        if last_message_id:
-                            sent_message_ids.append(str(last_message_id))
+                        ack_statuses = data.get("ackStatuses")
+                        ack_confirmed = (
+                            data.get("success") is True
+                            and bool(last_message_id)
+                            and isinstance(ack_statuses, list)
+                            and bool(ack_statuses)
+                            and all(
+                                isinstance(status, (int, float)) and status >= 2
+                                for status in ack_statuses
+                            )
+                        )
+                        if not ack_confirmed:
+                            return SendResult(
+                                success=False,
+                                error=(
+                                    "WhatsApp delivery acknowledgement missing or incomplete; "
+                                    "send outcome is uncertain"
+                                ),
+                            )
+                        sent_message_ids.append(str(last_message_id))
                     else:
                         error = await resp.text()
                         return SendResult(success=False, error=error)

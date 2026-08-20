@@ -212,7 +212,9 @@ class HonchoSessionManager:
         Routes every access through ``get_honcho_client`` (which returns the same
         cached singleton) so a long session can't outlive its 1h access token.
         """
-        self._honcho = get_honcho_client()
+        # Reuse the config that captured this session's digest-only effective
+        # workspace.  Honcho's async writer threads do not inherit ContextVars.
+        self._honcho = get_honcho_client(self._config)
         return self._honcho
 
     def _record_auth_failure(self, exc: BaseException) -> None:

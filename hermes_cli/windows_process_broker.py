@@ -1,10 +1,11 @@
 """Process-wide zero-UI subprocess boundary for native Windows Hermes.
 
 Normal children are delegated to a real base ``pythonw.exe`` runner. The
-runner creates the requested process suspended on a private desktop, assigns
-it to a kill-on-close Job Object, resumes it, and proxies its exit code. The
-single interactive-desktop subprocess capability (cua-driver) uses the same
-no-window + pre-resume Job path directly.
+runner creates the requested process suspended and windowless on a private
+desktop, assigns it to a kill-on-close Job Object, resumes it, and proxies its
+exit code. Automatic gateways add the stronger OS boundary: Task Scheduler
+runs them with S4U on a non-interactive desktop, so even unpatched descendants
+cannot compete with the user's desktop.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from ctypes import wintypes
 from pathlib import Path
 
@@ -32,6 +34,7 @@ _KILL_ON_CLOSE = 0x00002000
 _EXTENDED_LIMIT_INFO = 9
 _DESKTOP_ALL_ACCESS = 0x01FF
 _INTERACTIVE_CHILD_ENV = "HERMES_INTERNAL_INTERACTIVE_DESKTOP_CHILD"
+_DIRECT_HIDDEN_CHILD_ENV = "HERMES_INTERNAL_DIRECT_HIDDEN_CHILD"
 
 _install_lock = threading.Lock()
 _installed = False
@@ -40,6 +43,7 @@ _popen_signature = inspect.signature(_original_popen)
 _hidden_desktop_handle = None
 _hidden_desktop_name = ""
 _runner_path = Path(__file__).with_name("windows_process_runner.py")
+_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 
 
 class _IOCounters(ctypes.Structure):
@@ -134,6 +138,18 @@ def hidden_spawn_policy(
     return flags, info
 
 
+def _runner_spawn_policy(
+    startupinfo: object | None = None,
+) -> tuple[int, object | None]:
+    """Hide only the GUI-subsystem broker runner; it never owns the console."""
+    if not IS_WINDOWS:
+        return 0, startupinfo
+    info = copy.copy(startupinfo) if startupinfo is not None else subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = subprocess.SW_HIDE
+    return _NO_WINDOW, info
+
+
 def activate_hidden_desktop() -> bool:
     global _hidden_desktop_handle, _hidden_desktop_name
     if not IS_WINDOWS:
@@ -161,6 +177,22 @@ def interactive_desktop_child_env(
     """Mark the capability-owned cua-driver child for interactive inspection."""
     env = dict(base_env if base_env is not None else os.environ)
     env[_INTERACTIVE_CHILD_ENV] = "1"
+    return env
+
+
+def direct_hidden_child_env(
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Require the broker handshake to expose the real target PID.
+
+    Long-lived services such as the WhatsApp bridge depend on ``Popen.pid``
+    referring to the actual service process. They still use the canonical
+    private-desktop runner; the runner publishes the target PID before this
+    constructor returns. The marker is removed before the target receives its
+    environment.
+    """
+    env = dict(base_env if base_env is not None else os.environ)
+    env[_DIRECT_HIDDEN_CHILD_ENV] = "1"
     return env
 
 
@@ -205,15 +237,18 @@ def _shell_command(command_line: str, env: dict[str, str] | None) -> tuple[str, 
     return comspec, f'{subprocess.list2cmdline([comspec])} /c "{command_line}"'
 
 
-def _write_payload(payload: dict) -> str:
+def _write_payload(payload: dict) -> tuple[str, str]:
     cache_dir = Path(tempfile.gettempdir()) / "hermes-zero-ui"
     cache_dir.mkdir(parents=True, exist_ok=True)
     fd, raw_path = tempfile.mkstemp(prefix="spawn-", suffix=".json", dir=cache_dir)
     path = Path(raw_path)
+    status_path = path.with_name(path.stem + "-status.json")
+    payload = dict(payload)
+    payload["status_path"] = str(status_path)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False)
-        return str(path)
+        return str(path), str(status_path)
     except BaseException:
         try:
             path.unlink()
@@ -222,8 +257,51 @@ def _write_payload(payload: dict) -> str:
         raise
 
 
+def _consume_spawn_handshake(
+    popen: "WindowsHiddenPopen",
+    status_path: str,
+    *,
+    required: bool,
+) -> int | None:
+    """Read the runner's atomic child-PID handshake without trusting stale data."""
+    path = Path(status_path)
+    deadline = time.monotonic() + _HANDSHAKE_TIMEOUT_SECONDS
+    error_code = "missing"
+    while time.monotonic() < deadline:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            child_pid = int(payload.get("child_pid", 0))
+            if child_pid > 0:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                return child_pid
+            error_code = str(payload.get("error", "invalid"))
+            break
+        except FileNotFoundError:
+            if _original_popen.poll(popen) is not None:
+                error_code = "runner-exited-before-handshake"
+                break
+            time.sleep(0.01)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            error_code = "invalid-handshake"
+            break
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    if required:
+        try:
+            _original_popen.terminate(popen)
+        except OSError:
+            pass
+        raise RuntimeError(f"Hermes zero-UI runner handshake failed: {error_code}")
+    return None
+
+
 class WindowsHiddenPopen(_original_popen):
-    """Canonical Windows Popen: brokered by default, direct only for cua-driver."""
+    """Canonical Windows Popen with explicit direct lifecycle capabilities."""
 
     def __init__(self, *args, **kwargs):
         bound = _popen_signature.bind(*args, **kwargs)
@@ -239,45 +317,15 @@ class WindowsHiddenPopen(_original_popen):
             isinstance(child_env, dict)
             and child_env.get(_INTERACTIVE_CHILD_ENV) == "1"
         )
-        if interactive_child:
+        require_child_pid = bool(
+            isinstance(child_env, dict)
+            and child_env.get(_DIRECT_HIDDEN_CHILD_ENV) == "1"
+        )
+        if interactive_child or require_child_pid:
             child_env = dict(child_env)
             child_env.pop(_INTERACTIVE_CHILD_ENV, None)
+            child_env.pop(_DIRECT_HIDDEN_CHILD_ENV, None)
             params["env"] = child_env
-            flags, startup = hidden_spawn_policy(target_flags, target_startup, suspend=True)
-            self._hermes_job_handle = None
-            _original_popen.__init__(
-                self,
-                target_args,
-                executable=target_executable,
-                shell=target_shell,
-                creationflags=flags,
-                startupinfo=startup,
-                **params,
-            )
-            job = None
-            process_handle = wintypes.HANDLE(int(self._handle))
-            try:
-                job = _new_job()
-                if not _kernel32.AssignProcessToJobObject(job, process_handle):
-                    raise ctypes.WinError(ctypes.get_last_error())
-                self._hermes_job_handle = job
-                status = int(_ntdll.NtResumeProcess(process_handle))
-                if status < 0:
-                    raise OSError(
-                        f"NtResumeProcess failed with NTSTATUS 0x{status & 0xFFFFFFFF:08X}"
-                    )
-            except BaseException:
-                try:
-                    if job:
-                        _kernel32.TerminateJobObject(job, 1)
-                    else:
-                        _original_popen.kill(self)
-                finally:
-                    if job:
-                        _kernel32.CloseHandle(job)
-                raise
-            self.args = target_args
-            return
 
         command_line = _command_line(target_args)
         if target_shell:
@@ -285,13 +333,13 @@ class WindowsHiddenPopen(_original_popen):
         elif target_executable is not None:
             target_executable = os.fsdecode(target_executable)
 
-        payload_path = _write_payload({
+        payload_path, status_path = _write_payload({
             "command_line": command_line,
             "executable": target_executable,
             "creationflags": target_flags,
-            "desktop": _hidden_desktop_name,
+            "desktop": "winsta0\\default" if interactive_child else _hidden_desktop_name,
         })
-        runner_flags, runner_startup = hidden_spawn_policy(0, target_startup, suspend=False)
+        runner_flags, runner_startup = _runner_spawn_policy(target_startup)
         self._hermes_job_handle = None
         try:
             _original_popen.__init__(
@@ -303,9 +351,21 @@ class WindowsHiddenPopen(_original_popen):
                 startupinfo=runner_startup,
                 **params,
             )
+            self._hermes_runner_pid = self.pid
+            child_pid = _consume_spawn_handshake(
+                self,
+                status_path,
+                required=require_child_pid or interactive_child,
+            )
+            if child_pid is not None:
+                self.pid = child_pid
         except BaseException:
             try:
                 Path(payload_path).unlink()
+            except OSError:
+                pass
+            try:
+                Path(status_path).unlink()
             except OSError:
                 pass
             raise
@@ -346,6 +406,15 @@ class WindowsHiddenPopen(_original_popen):
             self._close_job()
 
 
+def _popen_uses_hidden_broker() -> bool:
+    """True for the broker itself or a policy wrapper subclassing it."""
+    candidate = subprocess.Popen
+    try:
+        return isinstance(candidate, type) and issubclass(candidate, WindowsHiddenPopen)
+    except TypeError:
+        return candidate is WindowsHiddenPopen
+
+
 def install_windows_process_broker() -> bool:
     global _installed
     if not IS_WINDOWS:
@@ -353,7 +422,7 @@ def install_windows_process_broker() -> bool:
     with _install_lock:
         activate_hidden_desktop()
         _base_pythonw()
-        if _installed or subprocess.Popen is WindowsHiddenPopen:
+        if _popen_uses_hidden_broker():
             _installed = True
             return False
         subprocess.Popen = WindowsHiddenPopen
@@ -365,5 +434,5 @@ def broker_installed() -> bool:
     return bool(
         IS_WINDOWS
         and hidden_desktop_ready()
-        and subprocess.Popen is WindowsHiddenPopen
+        and _popen_uses_hidden_broker()
     )

@@ -751,7 +751,10 @@ class TelegramAdapter(BasePlatformAdapter):
         # can happen on every keep-typing tick while the agent is waiting on a
         # long model call. Back off per chat so a short Telegram-side outage
         # does not spam the API/logs or burn the keep-typing budget.
-        self._telegram_typing_cooldown_until: Dict[str, float] = {}
+        # A forum group can host many independent Topics. One transient
+        # sendChatAction failure must cool down only the affected Topic, not
+        # every run in the same chat (#topic-scoped-typing-cooldown).
+        self._telegram_typing_cooldown_until: Dict[tuple[str, Optional[str]], float] = {}
         self._telegram_typing_cooldown_seconds: float = self._coerce_float_extra(
             "typing_cooldown_seconds",
             30.0,
@@ -7707,8 +7710,21 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
         return False
 
-    def _record_typing_cooldown(self, chat_id: str, exc: Exception) -> None:
-        """Suppress Telegram typing refreshes for this chat after transient failures."""
+    def _typing_cooldown_key(
+        self,
+        chat_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[str, Optional[str]]:
+        """Return the chat+Topic identity that owns a typing cooldown."""
+        return str(chat_id), self._metadata_thread_id(metadata)
+
+    def _record_typing_cooldown(
+        self,
+        chat_id: str,
+        exc: Exception,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Suppress Telegram typing refreshes only for the affected Topic."""
         if not hasattr(self, "_telegram_typing_cooldown_until"):
             self._telegram_typing_cooldown_until = {}
         loop = asyncio.get_running_loop()
@@ -7718,25 +7734,33 @@ class TelegramAdapter(BasePlatformAdapter):
         except (TypeError, ValueError):
             delay = self._telegram_typing_cooldown_seconds
         delay = max(1.0, min(delay, 300.0))
-        self._telegram_typing_cooldown_until[str(chat_id)] = loop.time() + delay
+        self._telegram_typing_cooldown_until[
+            self._typing_cooldown_key(chat_id, metadata)
+        ] = loop.time() + delay
 
-    def _typing_in_cooldown(self, chat_id: str) -> bool:
+    def _typing_in_cooldown(
+        self,
+        chat_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         if not hasattr(self, "_telegram_typing_cooldown_until"):
             self._telegram_typing_cooldown_until = {}
             self._telegram_typing_cooldown_seconds = 30.0
-        until = self._telegram_typing_cooldown_until.get(str(chat_id))
+        key = self._typing_cooldown_key(chat_id, metadata)
+        until = self._telegram_typing_cooldown_until.get(key)
         if until is None:
             return False
         if asyncio.get_running_loop().time() < until:
             return True
-        self._telegram_typing_cooldown_until.pop(str(chat_id), None)
+        self._telegram_typing_cooldown_until.pop(key, None)
         return False
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Send typing indicator."""
-        if not self._bot or self._typing_in_cooldown(chat_id):
+        if not self._bot or self._typing_in_cooldown(chat_id, metadata):
             return
 
+        cooldown_key = self._typing_cooldown_key(chat_id, metadata)
         _is_dm_topic: bool = False
         message_thread_id: Optional[int] = None
         try:
@@ -7748,7 +7772,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 action="typing",
                 message_thread_id=message_thread_id,
             )
-            self._telegram_typing_cooldown_until.pop(str(chat_id), None)
+            self._telegram_typing_cooldown_until.pop(cooldown_key, None)
         except Exception as e:
             # For DM topic lanes, Telegram may reject message_thread_id.
             # Fall back to sending typing without thread_id so the typing
@@ -7759,13 +7783,13 @@ class TelegramAdapter(BasePlatformAdapter):
                         chat_id=normalize_telegram_chat_id(chat_id),
                         action="typing",
                     )
-                    self._telegram_typing_cooldown_until.pop(str(chat_id), None)
+                    self._telegram_typing_cooldown_until.pop(cooldown_key, None)
                     return
                 except Exception as fallback_exc:
                     if self._is_transient_typing_error(fallback_exc):
-                        self._record_typing_cooldown(chat_id, fallback_exc)
+                        self._record_typing_cooldown(chat_id, fallback_exc, metadata)
             elif self._is_transient_typing_error(e):
-                self._record_typing_cooldown(chat_id, e)
+                self._record_typing_cooldown(chat_id, e, metadata)
             # Typing failures are non-fatal; log at debug level only.
             logger.debug(
                 "[%s] Failed to send Telegram typing indicator: %s",
@@ -8632,11 +8656,20 @@ class TelegramAdapter(BasePlatformAdapter):
                 event,
                 channel_prompt=channel_prompt,
             )
+        metadata = dict(event.metadata or {})
+        sender_user_id = str(event.source.user_id or "").strip()
+        if sender_user_id:
+            # The shared group source intentionally removes the sender from the
+            # session key, but authorization/routing still needs the verified
+            # Telegram identity carried by the original update. Keep it in
+            # adapter-owned metadata; never recover identity from prompt text.
+            metadata["telegram_sender_user_id"] = sender_user_id
         return dataclasses.replace(
             event,
             text=self._telegram_group_observe_attributed_text(event),
             source=shared_source,
             channel_prompt=channel_prompt,
+            metadata=metadata,
         )
 
     def _media_message_type(self, msg: Message) -> MessageType:

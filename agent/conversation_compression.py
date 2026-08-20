@@ -100,6 +100,12 @@ COMPACTION_STATUS = (
 
 COMPACTION_DONE_STATUS = "✓ Context compaction complete — continuing turn..."
 
+# A contended compressor lock means another compaction worker is still active.
+# Keep automatic callers out for the same five-minute window used by gateway
+# hygiene failures; a shorter retry simply re-enters the live worker and causes
+# the repeated compaction/status loop seen on long-running Telegram turns.
+COMPRESSION_LOCK_CONTENTION_COOLDOWN_SECONDS = 300.0
+
 
 def _emit_compaction_done(agent: Any) -> None:
     """Emit the structured terminal edge for a started compaction."""
@@ -2650,6 +2656,19 @@ def compress_context(
                     agent.context_compressor._begin_compression_telemetry(current_tokens=approx_tokens)
             except Exception:
                 pass
+            try:
+                recorder = getattr(
+                    agent.context_compressor,
+                    "_record_compression_failure_cooldown",
+                    None,
+                )
+                if callable(recorder):
+                    recorder(
+                        COMPRESSION_LOCK_CONTENTION_COOLDOWN_SECONDS,
+                        "compression_lock_contended",
+                    )
+            except Exception:
+                logger.debug("compression lock cooldown record failed", exc_info=True)
             _emit_compression_attempt_telemetry(
                 agent,
                 started_at=_attempt_started_at,
@@ -2657,7 +2676,6 @@ def compress_context(
                 split_status="aborted",
                 failure_class="lock_contended",
             )
-            _complete_compaction_lifecycle()
             return messages, _existing_sp
     _lock_released = False
     _lock_release_guard = threading.Lock()
@@ -3829,6 +3847,7 @@ def compress_context(
                 else None
             ),
         )
+        _complete_compaction_lifecycle()
         return compressed, new_system_prompt
     finally:
         # A summarizer no-op/abort never crossed the transcript boundary. Reset
@@ -3941,7 +3960,6 @@ def _compress_context_via_codex_app_server(
     except BaseException:
         if _activity_heartbeat is not None:
             _activity_heartbeat.stop("context compression failed")
-        _complete_compaction_lifecycle()
         raise
 
     if getattr(result, "interrupted", False) or getattr(result, "error", None):
@@ -3966,7 +3984,6 @@ def _compress_context_via_codex_app_server(
         existing_prompt = getattr(agent, "_cached_system_prompt", None)
         if not existing_prompt:
             existing_prompt = agent._build_system_prompt(system_message)
-        _complete_compaction_lifecycle()
         return messages, existing_prompt
 
     try:

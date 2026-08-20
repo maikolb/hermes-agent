@@ -1,10 +1,11 @@
 """Native Windows runner used by the process-wide Hermes subprocess broker.
 
 This module is launched with the real base ``pythonw.exe``. It reads one
-user-private payload, deletes it, creates the requested process suspended on a
-non-interactive desktop, assigns it to a kill-on-close Job Object, resumes it,
-waits, and proxies its exit code. Standard handles are inherited from the
-runner, so the parent Popen keeps normal stdin/stdout/stderr semantics.
+user-private payload, deletes it, creates the requested process suspended and
+windowless on a private desktop, assigns it to a kill-on-close Job Object,
+resumes it, atomically publishes the real target PID, waits, and proxies its
+exit code. Standard handles are inherited from the runner, so the parent Popen
+keeps normal stdin/stdout/stderr semantics.
 """
 
 from __future__ import annotations
@@ -159,6 +160,12 @@ def _new_job(k):
     return job
 
 
+def _write_handshake(path: Path, payload: dict) -> None:
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.replace(temp_path, path)
+
+
 def _run(payload_path: str) -> int:
     payload_file = Path(payload_path)
     try:
@@ -208,6 +215,10 @@ def _run(payload_path: str) -> int:
             raise ctypes.WinError(ctypes.get_last_error())
         k.CloseHandle(process.hThread)
         process.hThread = None
+        _write_handshake(
+            Path(payload["status_path"]),
+            {"child_pid": int(process.dwProcessId)},
+        )
 
         wait_result = k.WaitForSingleObject(process.hProcess, _INFINITE)
         if wait_result != 0:

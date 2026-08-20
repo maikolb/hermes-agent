@@ -6,10 +6,12 @@ from pathlib import Path
 import pytest
 
 from agent.turn_checkpoint import (
+    build_checkpoint_continuation_nudge,
     CheckpointConflictError,
     CheckpointIntegrityError,
     CheckpointWriteError,
     TurnCheckpointStore,
+    checkpoint_is_resumable,
     transcript_hash,
 )
 
@@ -220,6 +222,28 @@ def test_commit_compaction_requires_after_hash_readback(tmp_path):
     assert committed["transcript"]["current_hash"] == transcript_hash(after)
 
 
+def test_transcript_hash_canonicalizes_live_and_persisted_tool_names():
+    """The loop emits ``name`` while SessionDB replays ``tool_name``."""
+    live = [
+        {
+            "role": "tool",
+            "name": "read_file",
+            "tool_call_id": "call-1",
+            "content": "ok",
+        }
+    ]
+    persisted = [
+        {
+            "role": "tool",
+            "tool_name": "read_file",
+            "tool_call_id": "call-1",
+            "content": "ok",
+        }
+    ]
+
+    assert transcript_hash(live) == transcript_hash(persisted)
+
+
 def test_terminal_checkpoint_keeps_delivery_reference_without_payload_duplication(tmp_path):
     store = _store(tmp_path)
     messages = _messages("answer")
@@ -310,3 +334,143 @@ def test_agent_restart_restores_pending_deliverable_and_unknown_tool(tmp_path):
     assert restarted._restored_pending_deliverable == candidate
     assert state["unknown_outcomes"][0]["name"] == "write_file"
     assert state["pending_tool"] is None
+
+
+def test_synthetic_gateway_resume_restores_unfinished_checkpoint_despite_empty_event(tmp_path):
+    store = _store(tmp_path)
+    messages = _messages("perform the long operation")
+    original = store.start_turn(
+        "session-1",
+        "turn-original",
+        "perform the long operation",
+        messages,
+    )
+    store.transition(
+        "session-1",
+        phase="planning",
+        next_action="inspect_authoritative_target",
+    )
+
+    restored = store.start_turn(
+        "session-1",
+        "synthetic-restart-event",
+        "",
+        messages,
+        resume_existing=True,
+    )
+
+    assert restored["turn_id"] == original["turn_id"]
+    assert restored["active_user_turn"] == original["active_user_turn"]
+    assert restored["next_action"] == "inspect_authoritative_target"
+    assert restored["recovery"]["restored"] is True
+
+
+def test_agent_synthetic_resume_flag_is_consumed_once(tmp_path):
+    from types import SimpleNamespace
+
+    from agent.turn_checkpoint import initialize_agent_turn_checkpoint
+
+    class FakeSessionDB:
+        db_path = tmp_path / "state.db"
+
+        def get_messages(self, session_id, include_inactive=False):
+            return []
+
+    messages = _messages("perform the long operation")
+    first = SimpleNamespace(session_id="session-1", _session_db=FakeSessionDB())
+    initialize_agent_turn_checkpoint(
+        first,
+        turn_id="turn-original",
+        user_content="perform the long operation",
+        messages=messages,
+    )
+    first._turn_checkpoint_store.transition(
+        "session-1",
+        phase="planning",
+        next_action="continue_original_operation",
+    )
+
+    restarted = SimpleNamespace(
+        session_id="session-1",
+        _session_db=FakeSessionDB(),
+        _resume_turn_from_checkpoint=True,
+    )
+    state = initialize_agent_turn_checkpoint(
+        restarted,
+        turn_id="synthetic-restart-event",
+        user_content="",
+        messages=messages,
+    )
+
+    assert state["turn_id"] == "turn-original"
+    assert state["next_action"] == "continue_original_operation"
+    assert restarted._resume_turn_from_checkpoint is False
+
+
+def test_checkpoint_resumable_requires_unfinished_phase_and_next_action():
+    assert checkpoint_is_resumable({"phase": "planning", "next_action": "run tests"})
+    assert not checkpoint_is_resumable({"phase": "delivered", "next_action": "run tests"})
+    assert not checkpoint_is_resumable({"phase": "planning", "next_action": "none"})
+
+
+def test_explicit_resume_guard_rejects_false_restore_acknowledgement():
+    from types import SimpleNamespace
+
+    agent = SimpleNamespace(
+        _gateway_explicit_checkpoint_resume=True,
+        _turn_checkpoint_state={
+            "phase": "planning",
+            "next_action": "implement fix",
+            "recovery": {"restored": True},
+        },
+        _checkpoint_resume_guard_nudges=0,
+    )
+
+    nudge = build_checkpoint_continuation_nudge(
+        agent,
+        "Retomado do checkpoint. A implementação está em execução.",
+    )
+
+    assert nudge is not None
+    assert "status-only acknowledgement is not a resumed task" in nudge
+    assert agent._checkpoint_resume_guard_nudges == 1
+
+
+def test_explicit_resume_guard_accepts_concrete_result():
+    from types import SimpleNamespace
+
+    agent = SimpleNamespace(
+        _gateway_explicit_checkpoint_resume=True,
+        _turn_checkpoint_state={
+            "phase": "planning",
+            "next_action": "implement fix",
+            "recovery": {"restored": True},
+        },
+        _checkpoint_resume_guard_nudges=0,
+    )
+
+    assert build_checkpoint_continuation_nudge(
+        agent,
+        "Corrigi o gerador, rodei 18 testes e todos passaram.",
+    ) is None
+
+
+def test_explicit_resume_guard_exhausts_instead_of_accepting_false_status():
+    from types import SimpleNamespace
+
+    agent = SimpleNamespace(
+        _gateway_explicit_checkpoint_resume=True,
+        _turn_checkpoint_state={
+            "phase": "planning",
+            "next_action": "implement fix",
+            "recovery": {"restored": True},
+        },
+        _checkpoint_resume_guard_nudges=3,
+        _checkpoint_resume_guard_exhausted=False,
+    )
+
+    assert build_checkpoint_continuation_nudge(
+        agent,
+        "Continuidade ativa; a implementação está em execução.",
+    ) is None
+    assert agent._checkpoint_resume_guard_exhausted is True

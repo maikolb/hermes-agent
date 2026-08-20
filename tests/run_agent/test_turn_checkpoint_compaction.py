@@ -70,6 +70,46 @@ def test_in_place_compaction_commits_checkpoint_after_db_readback(tmp_path):
     assert transcript_hash(compressed) == transcript_hash(live)
 
 
+def test_in_place_compaction_round_trips_live_tool_result_name(tmp_path):
+    """Regression: live tool results use ``name`` but SQLite stores ``tool_name``."""
+    from agent.conversation_compression import compress_context
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    sid = "checkpoint-tool-name-roundtrip"
+    messages = _seed(db, sid)
+    agent = _agent(db, sid, in_place=True)
+    agent.context_compressor.compress = lambda *a, **k: [
+        {"role": "user", "content": "[CONTEXT COMPACTION] durable summary"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "read_file",
+            "tool_call_id": "call-1",
+            "content": "ok",
+        },
+    ]
+
+    compressed, _ = compress_context(
+        agent, messages, approx_tokens=100_000, system_message="sys"
+    )
+
+    live = db.get_messages_as_conversation(sid)
+    assert live[-1]["tool_name"] == "read_file"
+    assert transcript_hash(compressed) == transcript_hash(live)
+    assert agent._turn_checkpoint_store.load(sid)["compaction"]["state"] == "committed"
+
+
 def test_prepare_failure_aborts_before_transcript_swap(tmp_path, monkeypatch):
     from agent.conversation_compression import compress_context
     from hermes_state import SessionDB

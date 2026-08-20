@@ -28,6 +28,7 @@ PRs #9850, #9934, #7536):
 import asyncio
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -39,8 +40,10 @@ from gateway.run import (
     _auto_continue_freshness_window,
     _coerce_gateway_timestamp,
     _is_fresh_gateway_interruption,
+    _is_explicit_checkpoint_continue_request,
     _last_transcript_timestamp,
     _should_clear_resume_pending_after_turn,
+    _should_explicitly_resume_checkpoint,
     build_resume_recovery_note,
 )
 from gateway.session import SessionEntry, SessionSource, SessionStore
@@ -70,6 +73,77 @@ def test_resume_pending_is_cleared_only_after_successful_turn():
     assert _should_clear_resume_pending_after_turn({"failed": True}) is False
     assert _should_clear_resume_pending_after_turn({"partial": True}) is False
     assert _should_clear_resume_pending_after_turn({"error": "boom"}) is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Continue",
+        "Continue de onde parou",
+        "A cota tinha acabado. Continue de onde parou",
+        "Pode retomar o trabalho agora, por favor",
+        "Resume from where you left off",
+    ],
+)
+def test_explicit_checkpoint_continue_request_is_bounded_but_practical(message):
+    assert _is_explicit_checkpoint_continue_request(message) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Não continue de onde parou",
+        "Se der, continue de onde parou",
+        "Continue e mude toda a arquitetura para Rust",
+        "O processo continua rodando?",
+        "Comece uma tarefa nova",
+    ],
+)
+def test_explicit_checkpoint_continue_request_rejects_new_or_negated_work(message):
+    assert _is_explicit_checkpoint_continue_request(message) is False
+
+
+def test_explicit_checkpoint_resume_requires_unfinished_durable_state(tmp_path):
+    from agent.turn_checkpoint import TurnCheckpointStore
+
+    store = TurnCheckpointStore(tmp_path / "checkpoints")
+    store.start_turn(
+        "sid-resumable",
+        "turn-1",
+        "do work",
+        [{"role": "user", "content": "do work"}],
+    )
+    store.transition(
+        "sid-resumable",
+        phase="tool_completed",
+        next_action="continue_original_operation",
+    )
+    store.start_turn(
+        "sid-terminal",
+        "turn-2",
+        "done work",
+        [{"role": "user", "content": "done work"}],
+    )
+    store.transition("sid-terminal", phase="delivered", next_action="none")
+    resumable = SimpleNamespace(
+        session_id="sid-resumable",
+        _session_db=SimpleNamespace(db_path=tmp_path / "state.db"),
+        _turn_checkpoint_store=store,
+    )
+    terminal = SimpleNamespace(
+        session_id="sid-terminal",
+        _session_db=SimpleNamespace(db_path=tmp_path / "state.db"),
+        _turn_checkpoint_store=store,
+    )
+
+    assert _should_explicitly_resume_checkpoint(
+        resumable,
+        "A cota voltou. Continue de onde parou",
+    )
+    assert not _should_explicitly_resume_checkpoint(
+        terminal,
+        "Continue de onde parou",
+    )
 
 
 def _make_source(platform=Platform.TELEGRAM, chat_id="123", user_id="u1"):

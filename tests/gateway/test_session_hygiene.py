@@ -507,6 +507,7 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
                 bind_session_state=MagicMock(),
                 _last_compress_aborted=False,
                 _last_aux_model_failure_model=None,
+                _record_compression_failure_cooldown=MagicMock(),
             )
             self.shutdown_memory_provider = MagicMock()
             self.close = MagicMock(side_effect=cleanup_done.set)

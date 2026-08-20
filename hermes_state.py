@@ -241,6 +241,11 @@ def workspace_key(row: Dict[str, Any]) -> Optional[str]:
     return cwd or None
 
 
+def _system_prompt_hash(system_prompt: str) -> str:
+    """Return the content address used by shared system-prompt snapshots."""
+    return hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+
+
 def _delegate_from_json(col: str = "model_config") -> str:
     return f"json_extract(COALESCE({col}, '{{}}'), '$._delegate_from')"
 
@@ -7151,6 +7156,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     {_sql_session_last_active("s")} AS last_active,
                     COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
                 FROM sessions s
+                {prompt_join}
                 LEFT JOIN chain_max cm ON cm.root_id = s.id
                 {prompt_join}
                 {outer_where}
@@ -7972,7 +7978,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     self._encode_content(msg.get("content")),
                     msg.get("tool_call_id"),
                     tool_calls_json,
-                    _scrub_surrogates(msg.get("tool_name")),
+                    _scrub_surrogates(msg.get("tool_name") or msg.get("name")),
                     msg.get("effect_disposition"),
                     message_timestamp,
                     msg.get("token_count"),

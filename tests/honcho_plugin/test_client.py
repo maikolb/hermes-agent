@@ -493,7 +493,7 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
         )
 
         with patch("honcho.Honcho", return_value=fake_honcho) as mock_honcho, \
-             patch("hermes_cli.config.load_config", return_value={}):
+             patch("hermes_cli.config.load_config_readonly", return_value={}):
             get_honcho_client(cfg)
 
         mock_honcho.assert_called_once()
@@ -534,7 +534,7 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
         mock_honcho = MagicMock(return_value=fake_honcho)
         fake_honcho_module = types.SimpleNamespace(Honcho=mock_honcho)
         with patch.dict(sys.modules, {"honcho": fake_honcho_module}), \
-             patch("hermes_cli.config.load_config", return_value={}):
+             patch("hermes_cli.config.load_config_readonly", return_value={}):
             get_honcho_client(cfg)
 
         mock_honcho.assert_called_once()
@@ -576,7 +576,7 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
         )
 
         with patch("honcho.Honcho", return_value=fake_honcho) as mock_honcho, \
-             patch("hermes_cli.config.load_config", return_value={}):
+             patch("hermes_cli.config.load_config_readonly", return_value={}):
             get_honcho_client(cfg)
 
         mock_honcho.assert_called_once()

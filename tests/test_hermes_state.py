@@ -3651,7 +3651,8 @@ def test_refresh_cannot_resurrect_a_lock_already_reclaimed(db, monkeypatch):
 
 class TestCompactRows:
     """list_sessions_rich and _get_session_rich_row with compact_rows=True
-    must omit system_prompt but return all other metadata fields."""
+    must omit system_prompt payload/reference fields but return all other
+    metadata fields."""
 
     def _create(self, db, sid, *, system_prompt="big blob " * 500):
         db.create_session(session_id=sid, source="cli", model="m")
@@ -3663,6 +3664,7 @@ class TestCompactRows:
         rows = db.list_sessions_rich(compact_rows=True)
         assert len(rows) == 1
         assert "system_prompt" not in rows[0]
+        assert "system_prompt_hash" not in rows[0]
 
 
 
@@ -3672,6 +3674,7 @@ class TestCompactRows:
         row = db._get_session_rich_row("s1", compact_rows=True)
         assert row is not None
         assert "system_prompt" not in row
+        assert "system_prompt_hash" not in row
         assert row["id"] == "s1"
 
     def test_batch_compact_rows_omits_system_prompt_keeps_git_fields(self, db):

@@ -76,6 +76,7 @@ class ProvisionedProject:
     chat_id: str
     thread_id: str
     is_management: bool
+    access: str = "allow"
 
 
 _SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -117,20 +118,47 @@ def _slug(value: object, name: str) -> str:
     return normalized
 
 
+def build_team_resource_namespace(profile: object, chat_id: object) -> str:
+    """Return a path-safe, non-identifying namespace for one Telegram team.
+
+    The readable prefix helps operators identify the owning profile while the
+    digest binds the namespace to both profile and chat without exposing the
+    raw Telegram chat id in a board name or filesystem path.
+    """
+    profile_s = _required(profile, "profile")
+    chat_s = _id(chat_id, "chat_id")
+    try:
+        profile_stem = normalize_project_slug(profile_s)
+    except ValueError:
+        profile_stem = "team"
+    profile_stem = profile_stem[:20].rstrip("-") or "team"
+    digest = hashlib.sha256(
+        f"{profile_s.casefold()}\0{chat_s}".encode("utf-8")
+    ).hexdigest()[:16]
+    return _slug(f"{profile_stem}-{digest}", "resource_namespace").lower()
+
+
+def build_team_board_slug(resource_namespace: object, project_slug: object) -> str:
+    """Return a global-board-safe slug scoped to one team namespace."""
+    namespace_s = _slug(resource_namespace, "resource_namespace").lower()
+    project_s = normalize_project_slug(_slug(project_slug, "project_slug"))
+    available = 64 - len(namespace_s) - 2
+    if available < 12:
+        raise ValueError("resource_namespace is too long for a scoped board slug")
+    if len(project_s) > available:
+        digest = hashlib.sha256(project_s.encode("utf-8")).hexdigest()[:10]
+        project_s = f"{project_s[:available - len(digest) - 1].rstrip('-')}-{digest}"
+    return _slug(f"{namespace_s}--{project_s}", "board_slug").lower()
+
+
 def _workdir(value: Path | str) -> str:
     raw = _required(value, "workdir")
     return str(Path(raw).expanduser().resolve(strict=False))
 
 
-def _resolve_or_create_workspace(root: Path | str, slug: str) -> tuple[Path, bool]:
-    """Resolve one direct normalized child or create ``root/slug`` deterministically."""
-    workspace_root = Path(_workdir(root))
-    workspace_root.mkdir(parents=True, exist_ok=True)
-    if not workspace_root.is_dir():
-        raise BindingConflictError("workspace_root is not a directory")
-
+def _matching_workspace(parent: Path, slug: str) -> Path | None:
     matches: list[Path] = []
-    for child in workspace_root.iterdir():
+    for child in parent.iterdir():
         try:
             same_slug = normalize_project_slug(child.name) == slug
         except ValueError:
@@ -143,10 +171,48 @@ def _resolve_or_create_workspace(root: Path | str, slug: str) -> tuple[Path, boo
 
     if len(matches) > 1:
         raise BindingConflictError("multiple workspace directories match the project slug")
-    if matches:
-        return matches[0], False
+    return matches[0] if matches else None
 
-    target = workspace_root / slug
+
+def _resolve_or_create_workspace(
+    root: Path | str,
+    slug: str,
+    *,
+    resource_namespace: str | None = None,
+    prefer_legacy_existing: bool = False,
+) -> tuple[Path, bool]:
+    """Resolve or create a deterministic project workspace.
+
+    Legacy callers continue to use ``root/slug``. Opted-in team routing uses
+    ``root/resource_namespace/slug``. Existing legacy projects with a missing
+    persisted workdir may still reuse an already-present root-level folder.
+    """
+    workspace_root = Path(_workdir(root))
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    if not workspace_root.is_dir():
+        raise BindingConflictError("workspace_root is not a directory")
+
+    if resource_namespace is not None and prefer_legacy_existing:
+        legacy = _matching_workspace(workspace_root, slug)
+        if legacy is not None:
+            return legacy, False
+
+    workspace_parent = workspace_root
+    if resource_namespace is not None:
+        namespace_s = _slug(resource_namespace, "resource_namespace").lower()
+        workspace_parent = workspace_root / namespace_s
+        try:
+            workspace_parent.mkdir()
+        except FileExistsError:
+            pass
+        if workspace_parent.is_symlink() or not workspace_parent.is_dir():
+            raise BindingConflictError("workspace namespace is not a safe directory")
+
+    existing = _matching_workspace(workspace_parent, slug)
+    if existing is not None:
+        return existing, False
+
+    target = workspace_parent / slug
     try:
         target.mkdir()
         return target.resolve(), True
@@ -318,6 +384,60 @@ class ProjectRouter:
                     self._connection.execute("ROLLBACK")
                 raise
 
+    def _authorize_sender(
+        self,
+        connection: sqlite3.Connection,
+        chat_id: str,
+        sender_user_id: str,
+        *,
+        allow_implicit_member: bool = False,
+        verified_sender_user_id: object | None = None,
+    ) -> str:
+        """Apply explicit ACL first, then the opt-in verified-member fallback."""
+        acl = connection.execute(
+            """SELECT effect FROM acl_entries
+               WHERE profile=? AND chat_id=? AND user_id=?""",
+            (self.profile, chat_id, sender_user_id),
+        ).fetchone()
+        if acl is not None and acl["effect"] == "deny":
+            raise AccessDeniedError("sender is denied by ACL")
+        if acl is not None and acl["effect"] == "allow":
+            return "allow"
+
+        verified_s = (
+            _id(verified_sender_user_id, "verified_sender_user_id")
+            if verified_sender_user_id is not None
+            else None
+        )
+        if allow_implicit_member and verified_s == sender_user_id:
+            return "member"
+        raise UnknownUserError("sender has no ACL entry")
+
+    def authorize_sender(
+        self,
+        chat_id: object,
+        sender_user_id: object,
+        *,
+        allow_implicit_member: bool = False,
+        verified_sender_user_id: object | None = None,
+    ) -> str:
+        """Return the sender capability without resolving or mutating a Topic.
+
+        Slash-command gating runs before ordinary Topic provisioning. Expose
+        the same deny-first ACL decision there so a verified implicit member
+        can receive project-safe commands without being promoted to admin.
+        """
+        chat_s = _id(chat_id, "chat_id")
+        sender_s = _id(sender_user_id, "sender_user_id")
+        with self._lock:
+            return self._authorize_sender(
+                self._connection,
+                chat_s,
+                sender_s,
+                allow_implicit_member=allow_implicit_member,
+                verified_sender_user_id=verified_sender_user_id,
+            )
+
     def upsert_project(
         self,
         project_id: object,
@@ -360,9 +480,12 @@ class ProjectRouter:
         board_slug: object | None = None,
         workdir: Path | str | None = None,
         workspace_root: Path | str | None = None,
+        resource_namespace: object | None = None,
         status: object = "active",
         is_management: bool = False,
         sender_user_id: object | None = None,
+        allow_implicit_member: bool = False,
+        verified_sender_user_id: object | None = None,
         allowed_users: Mapping[object, object] | None = None,
         board_creator: Callable[..., object] | None = None,
     ) -> ProvisionedProject:
@@ -379,10 +502,20 @@ class ProjectRouter:
             slug if slug is not None else normalize_project_slug(display_name),
             "slug",
         )
-        requested_board = _slug(
-            board_slug if board_slug is not None else base_slug,
-            "board_slug",
+        resource_namespace_s = (
+            _slug(resource_namespace, "resource_namespace").lower()
+            if resource_namespace is not None
+            else None
         )
+        if resource_namespace_s is not None:
+            requested_board = build_team_board_slug(resource_namespace_s, base_slug)
+            if board_slug is not None and _slug(board_slug, "board_slug") != requested_board:
+                raise ValueError("board_slug does not match resource_namespace")
+        else:
+            requested_board = _slug(
+                board_slug if board_slug is not None else base_slug,
+                "board_slug",
+            )
         platform_s = _id(platform, "platform")
         chat_s = _id(chat_id, "chat_id")
         thread_s = _id(thread_id, "thread_id")
@@ -411,7 +544,7 @@ class ProjectRouter:
 
             creator = create_board
 
-        def as_result(row: sqlite3.Row) -> ProvisionedProject:
+        def as_result(row: sqlite3.Row, *, access: str = "allow") -> ProvisionedProject:
             return ProvisionedProject(
                 project_id=row["project_id"],
                 slug=row["slug"],
@@ -421,10 +554,12 @@ class ProjectRouter:
                 chat_id=chat_s,
                 thread_id=thread_s,
                 is_management=bool(row["is_management"]),
+                access=access,
             )
 
         def operation(connection: sqlite3.Connection) -> ProvisionedProject:
             nonlocal created_workspace
+            sender_access = "allow"
             for user_id, effect in (allowed_users or {}).items():
                 normalized_effect = _required(effect, "effect").lower()
                 if normalized_effect not in {"allow", "deny"}:
@@ -438,15 +573,13 @@ class ProjectRouter:
                 )
 
             if sender_s is not None:
-                acl = connection.execute(
-                    """SELECT effect FROM acl_entries
-                       WHERE profile=? AND chat_id=? AND user_id=?""",
-                    (self.profile, chat_s, sender_s),
-                ).fetchone()
-                if acl is None:
-                    raise UnknownUserError("sender has no ACL entry")
-                if acl["effect"] == "deny":
-                    raise AccessDeniedError("sender is denied by ACL")
+                sender_access = self._authorize_sender(
+                    connection,
+                    chat_s,
+                    sender_s,
+                    allow_implicit_member=allow_implicit_member,
+                    verified_sender_user_id=verified_sender_user_id,
+                )
 
             existing = connection.execute(
                 """SELECT p.project_id, p.slug, p.board_slug, p.workdir,
@@ -458,14 +591,17 @@ class ProjectRouter:
                 key,
             ).fetchone()
             if existing is not None:
-                result = as_result(existing)
+                result = as_result(existing, access=sender_access)
                 if (
                     result.workdir is None
                     and not result.is_management
                     and canonical_workspace_root is not None
                 ):
                     resolved_workdir, was_created = _resolve_or_create_workspace(
-                        canonical_workspace_root, result.slug
+                        canonical_workspace_root,
+                        result.slug,
+                        resource_namespace=resource_namespace_s,
+                        prefer_legacy_existing=True,
                     )
                     if was_created:
                         created_workspace = resolved_workdir
@@ -511,7 +647,11 @@ class ProjectRouter:
                     resolved_slug = _slug(
                         f"{base_slug[:53].rstrip('-')}-{suffix}", "slug"
                     )
-                    resolved_board = resolved_slug
+                    resolved_board = (
+                        build_team_board_slug(resource_namespace_s, resolved_slug)
+                        if resource_namespace_s is not None
+                        else resolved_slug
+                    )
                     resolved_project_id = resolved_slug
                     collision = connection.execute(
                         """SELECT project_id FROM projects
@@ -532,7 +672,10 @@ class ProjectRouter:
                 and canonical_workspace_root is not None
             ):
                 canonical_project_workdir, was_created = _resolve_or_create_workspace(
-                    canonical_workspace_root, resolved_slug
+                    canonical_workspace_root,
+                    resolved_slug,
+                    resource_namespace=resource_namespace_s,
+                    prefer_legacy_existing=project is not None,
                 )
                 if was_created:
                     created_workspace = canonical_project_workdir
@@ -568,7 +711,7 @@ class ProjectRouter:
                    WHERE b.profile=? AND b.platform=? AND b.chat_id=? AND b.thread_id=?""",
                 key,
             ).fetchone()
-            provisioned = as_result(created)
+            provisioned = as_result(created, access=sender_access)
             if not provisioned.is_management:
                 assert creator is not None
                 creator(
@@ -596,6 +739,7 @@ class ProjectRouter:
         workspace_root: Path | str,
         *,
         display_name: str | None = None,
+        resource_namespace: object | None = None,
         board_creator: Callable[..., object] | None = None,
     ) -> ProjectContext:
         """Repair a bound project's missing workdir without user intervention."""
@@ -631,7 +775,14 @@ class ProjectRouter:
                 return replace(project_context, workdir=Path(row["workdir"]))
 
             resolved_workdir, was_created = _resolve_or_create_workspace(
-                workspace_root, project_context.slug
+                workspace_root,
+                project_context.slug,
+                resource_namespace=(
+                    _slug(resource_namespace, "resource_namespace").lower()
+                    if resource_namespace is not None
+                    else None
+                ),
+                prefer_legacy_existing=True,
             )
             if was_created:
                 created_workspace = resolved_workdir
@@ -725,6 +876,8 @@ class ProjectRouter:
         sender_user_id: object,
         *,
         is_management: bool = False,
+        allow_implicit_member: bool = False,
+        verified_sender_user_id: object | None = None,
     ) -> ProjectContext:
         """Bind an unbound topic to an existing active project after ACL validation."""
         platform_s = _id(platform, "platform")
@@ -734,15 +887,13 @@ class ProjectRouter:
         slug_s = _slug(project_slug, "project_slug")
 
         def operation(connection: sqlite3.Connection) -> None:
-            acl = connection.execute(
-                """SELECT effect FROM acl_entries
-                   WHERE profile=? AND chat_id=? AND user_id=?""",
-                (self.profile, chat_s, user_s),
-            ).fetchone()
-            if acl is None:
-                raise UnknownUserError("sender has no ACL entry")
-            if acl["effect"] == "deny":
-                raise AccessDeniedError("sender is denied by ACL")
+            self._authorize_sender(
+                connection,
+                chat_s,
+                user_s,
+                allow_implicit_member=allow_implicit_member,
+                verified_sender_user_id=verified_sender_user_id,
+            )
 
             project = connection.execute(
                 """SELECT project_id FROM projects
@@ -775,7 +926,14 @@ class ProjectRouter:
             )
 
         self._transaction(operation)
-        return self.resolve(platform_s, chat_s, thread_s, user_s)
+        return self.resolve(
+            platform_s,
+            chat_s,
+            thread_s,
+            user_s,
+            allow_implicit_member=allow_implicit_member,
+            verified_sender_user_id=verified_sender_user_id,
+        )
 
     def transition_topic_project(
         self,
@@ -820,24 +978,13 @@ class ProjectRouter:
             ).fetchone()
             if row is None:
                 raise UnknownBindingError("no project binding exists for this topic")
-            acl = connection.execute(
-                """SELECT effect FROM acl_entries
-                   WHERE profile=? AND chat_id=? AND user_id=?""",
-                (self.profile, chat_s, user_s),
-            ).fetchone()
-            if acl is not None and acl["effect"] == "deny":
-                raise AccessDeniedError("sender is denied by ACL")
-            if acl is not None and acl["effect"] == "allow":
-                access = "allow"
-            else:
-                verified_s = (
-                    _id(verified_sender_user_id, "verified_sender_user_id")
-                    if verified_sender_user_id is not None
-                    else None
-                )
-                if not allow_implicit_member or verified_s != user_s:
-                    raise UnknownUserError("sender has no ACL entry")
-                access = "member"
+            access = self._authorize_sender(
+                connection,
+                chat_s,
+                user_s,
+                allow_implicit_member=allow_implicit_member,
+                verified_sender_user_id=verified_sender_user_id,
+            )
 
             connection.execute(
                 """UPDATE topic_bindings SET is_closed=?
@@ -919,6 +1066,9 @@ class ProjectRouter:
         chat_id: object,
         thread_id: object,
         sender_user_id: object,
+        *,
+        allow_implicit_member: bool = False,
+        verified_sender_user_id: object | None = None,
     ) -> ProjectContext:
         platform_s = _id(platform, "platform")
         chat_s = _id(chat_id, "chat_id")
@@ -938,15 +1088,13 @@ class ProjectRouter:
             ).fetchone()
             if row is None:
                 raise UnknownBindingError("no project binding exists for this topic")
-            acl = self._connection.execute(
-                """SELECT effect FROM acl_entries
-                   WHERE profile=? AND chat_id=? AND user_id=?""",
-                (self.profile, chat_s, user_s),
-            ).fetchone()
-        if acl is None:
-            raise UnknownUserError("sender has no ACL entry")
-        if acl["effect"] == "deny":
-            raise AccessDeniedError("sender is denied by ACL")
+            access = self._authorize_sender(
+                self._connection,
+                chat_s,
+                user_s,
+                allow_implicit_member=allow_implicit_member,
+                verified_sender_user_id=verified_sender_user_id,
+            )
         return ProjectContext(
             project_id=row["project_id"],
             slug=row["slug"],
@@ -958,6 +1106,7 @@ class ProjectRouter:
             thread_id=thread_s,
             sender_user_id=user_s,
             is_management=bool(row["is_management"]),
+            access=access,
         )
 
     def find_telegram_binding(
