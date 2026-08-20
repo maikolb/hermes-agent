@@ -1,4 +1,4 @@
-"""Tests for cronjob action='run' immediate execution (#41037).
+"""Tests for bounded cronjob action='run' immediate execution (#41037).
 
 Before this fix, `cronjob(action='run')` only set next_run_at=now and returned
 success, relying on the scheduler ticker to actually run the job. With no
@@ -21,11 +21,27 @@ from tools.cronjob_tools import cronjob, _execute_job_now
 from tools.environments.base import set_activity_callback
 
 
-_JOB = {"id": "job-run-1", "name": "manual run", "prompt": "hi",
-        "schedule": {"kind": "cron", "expr": "0 9 * * *"}}
+_JOB = {"id": "job-run-1", "name": "manual script run", "prompt": "hi",
+        "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+        "script": "bounded.py", "no_agent": True}
+_AGENT_JOB = {"id": "job-agent-1", "name": "manual agent run", "prompt": "hi",
+              "schedule": {"kind": "cron", "expr": "0 9 * * *"}}
 
 
 class TestCronjobRunExecutesImmediately:
+    def test_run_blocks_agent_backed_job_before_claim(self):
+        """Agent-backed manual run must use the asynchronous scheduler path."""
+        with patch("tools.cronjob_tools.resolve_job_ref", return_value=dict(_AGENT_JOB)), \
+             patch("tools.cronjob_tools.claim_job_for_fire") as m_claim, \
+             patch("cron.scheduler.run_one_job") as m_run:
+            out = json.loads(cronjob(action="run", job_id="job-agent-1"))
+
+        assert out["success"] is False
+        assert out["guard"] == "manual_agent_cron_run_blocked"
+        assert "synchronously" in out["error"]
+        m_claim.assert_not_called()
+        m_run.assert_not_called()
+
     def test_run_action_claims_and_fires_via_run_one_job(self):
         """action='run' must claim the job then fire it through run_one_job."""
         ran = {"job": "after-run", "last_status": "ok", "last_error": None}
