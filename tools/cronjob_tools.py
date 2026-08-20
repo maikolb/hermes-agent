@@ -1228,16 +1228,26 @@ def cronjob(
             return json.dumps({"success": True, "job": _format_job(updated)}, indent=2)
 
         if normalized in {"run", "run_now", "trigger"}:
-            # Per-run context (#57331, salvaged from #57342/@liuhao1024 and
-            # #57360/@ghedeselmabot): `prompt` on the run action is transient
-            # context appended to the stored prompt for THIS fire only, never
-            # persisted. It goes through the same strict injection scan as
-            # stored prompts before firing.
-            extra_prompt = prompt or None
-            if extra_prompt:
-                scan_error = _scan_cron_prompt(extra_prompt)
-                if scan_error:
-                    return tool_error(scan_error, success=False)
+            # Agent-backed manual runs execute the entire model/tool loop inline
+            # and can hold a messaging-gateway caller until gateway_timeout.
+            # The scheduler remains the canonical asynchronous path. Keep manual
+            # execution only for bounded script-only jobs, where blocking is an
+            # explicit part of the no_agent contract.
+            if not job.get("no_agent"):
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            "Manual run is blocked for agent-backed cron jobs because it "
+                            "executes synchronously in the caller. Resume or update the "
+                            "schedule and let the scheduler fire the job independently. "
+                            "Manual run remains available for bounded no_agent scripts."
+                        ),
+                        "guard": "manual_agent_cron_run_blocked",
+                        "job": _format_job(job),
+                    },
+                    indent=2,
+                )
             # Execute the job immediately rather than only scheduling it for the
             # next scheduler tick — a manual `run` should actually run, even when
             # no gateway/ticker is active (the #41037 case). The claim (taken
