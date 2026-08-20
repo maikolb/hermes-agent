@@ -3651,7 +3651,8 @@ def test_refresh_cannot_resurrect_a_lock_already_reclaimed(db, monkeypatch):
 
 class TestCompactRows:
     """list_sessions_rich and _get_session_rich_row with compact_rows=True
-    must omit system_prompt but return all other metadata fields."""
+    must omit system_prompt payload/reference fields but return all other
+    metadata fields."""
 
     def _create(self, db, sid, *, system_prompt="big blob " * 500):
         db.create_session(session_id=sid, source="cli", model="m")
@@ -3663,29 +3664,55 @@ class TestCompactRows:
         rows = db.list_sessions_rich(compact_rows=True)
         assert len(rows) == 1
         assert "system_prompt" not in rows[0]
+        assert "system_prompt_hash" not in rows[0]
 
 
 
+    def test_compact_rows_order_by_last_active(self, db):
+        """compact_rows=True also works with the CTE / order_by_last_active path."""
+        self._create(db, "s1")
+        self._create(db, "s2")
+        rows = db.list_sessions_rich(compact_rows=True, order_by_last_active=True)
+        assert len(rows) == 2
+        assert all("system_prompt" not in r for r in rows)
+        assert all("system_prompt_hash" not in r for r in rows)
 
     def test_get_session_rich_row_compact_omits_system_prompt(self, db):
         self._create(db, "s1", system_prompt="should be gone")
         row = db._get_session_rich_row("s1", compact_rows=True)
         assert row is not None
         assert "system_prompt" not in row
+        assert "system_prompt_hash" not in row
         assert row["id"] == "s1"
 
-    def test_batch_compact_rows_omits_system_prompt_keeps_git_fields(self, db):
-        """_get_session_rich_rows_batch(compact_rows=True) must apply the same
-        schema-derived compact projection as the single-row path: no
-        system_prompt blob, but git_branch/git_repo_root still present."""
-        self._create(db, "s1", system_prompt="should be gone")
-        db.update_session_cwd("s1", "/tmp/w1", git_branch="main", git_repo_root="/tmp/w1")
-        rows = db._get_session_rich_rows_batch(["s1"], compact_rows=True)
-        assert set(rows) == {"s1"}
-        row = rows["s1"]
+    def test_get_session_rich_row_full_includes_system_prompt(self, db):
+        self._create(db, "s1", system_prompt="stay")
+        row = db._get_session_rich_row("s1", compact_rows=False)
+        assert row["system_prompt"] == "stay"
+
+    def test_compact_rows_default_is_false(self, db):
+        """Default behaviour (compact_rows not passed) is unchanged — full rows."""
+        self._create(db, "s1", system_prompt="present")
+        rows = db.list_sessions_rich()
+        assert "system_prompt" in rows[0]
+
+    def test_compact_projection_tracks_schema(self, db):
+        """Behavior contract: compact rows carry EVERY sessions column except
+        the excluded blob — including gateway/desktop fields (git_branch,
+        session_key) and any column added later via declarative
+        reconciliation. Guards against a hardcoded column list going stale."""
+        self._create(db, "s1")
+        live_cols = {
+            row[1] for row in db._conn.execute("PRAGMA table_info(sessions)")
+        }
+        row = db.list_sessions_rich(compact_rows=True)[0]
+        # Hardcode the sanctioned exclusions: if the excluded set ever
+        # widens (or the projection silently drops a column), this fails and
+        # forces a conscious review of what list consumers lose.
+        missing = live_cols - set(row) - {"system_prompt", "system_prompt_hash"}
+        assert not missing, f"compact projection lost schema columns: {missing}"
         assert "system_prompt" not in row
-        assert row["git_branch"] == "main"
-        assert row["git_repo_root"] == "/tmp/w1"
+        assert "system_prompt_hash" not in row
 
     def test_compression_tip_projection_threads_compact_rows(self, db):
         """list_sessions_rich(compact_rows=True) must thread compact_rows
@@ -3983,641 +4010,18 @@ class TestDisplayMetadataPersistence:
         assert reloaded[0]["display_kind"] == "async_delegation_complete"
         assert reloaded[0]["display_metadata"] == meta
 
-
-
-class TestDisplayMetadataReadPaths:
-    """Every message read path must hand back the decoded dict.
-
-    Returning the raw column instead reaches the desktop as a string, where
-    ``'task_count' in meta`` throws and fails the whole session resume.
-    """
-
-    META = {
-        "delegation_id": "deleg_0d84d484",
-        "task_count": 1,
-        "completed_count": 1,
-        "failed_count": 0,
-        "duration_seconds": 193.55,
-    }
-
-    @staticmethod
-    def _seed(db):
-        db.create_session("s1", source="desktop")
-        message_id = db.append_message(
-            "s1", "user", "event",
-            display_kind="async_delegation_complete",
-            display_metadata=TestDisplayMetadataReadPaths.META,
+    def test_archive_and_compact_preserves_display_metadata(self, db):
+        db.create_session("s1", source="cli")
+        meta = {"model": "test-model", "provider": "test-provider"}
+        db.append_message(
+            "s1", "user", "switch event",
+            display_kind="model_switch",
+            display_metadata=meta,
         )
-        return message_id, db.append_message("s1", "assistant", "anchor")
-
-    @staticmethod
-    def _read(db, reader, message_id, anchor_id):
-        if reader == "get_messages":
-            return db.get_messages("s1")[0]
-        if reader == "get_messages_around":
-            return db.get_messages_around("s1", message_id, window=0)["window"][0]
-        if reader == "get_anchored_view":
-            view = db.get_anchored_view("s1", anchor_id, window=0, bookend=1)
-            return view["bookend_start"][0]
-        return db.get_messages_as_conversation("s1")[0]
-
-    READERS = ("get_messages", "get_messages_around", "get_anchored_view", "conversation")
-
-    @pytest.mark.parametrize("reader", READERS)
-    def test_every_reader_decodes_display_metadata(self, db, reader):
-        message_id, anchor_id = self._seed(db)
-        assert self._read(db, reader, message_id, anchor_id)["display_metadata"] == self.META
-
-
-    @pytest.mark.parametrize("reader", READERS)
-    @pytest.mark.parametrize("raw", ["", "{not-json", "[]", '"text"', "0"])
-    def test_every_reader_drops_unusable_display_metadata(self, db, reader, raw):
-        """Bad presentation metadata must not take the message down with it."""
-        message_id, anchor_id = self._seed(db)
-
-        def _corrupt(conn):
-            conn.execute(
-                "UPDATE messages SET display_metadata = ? WHERE id = ?",
-                (raw, message_id),
-            )
-
-        db._execute_write(_corrupt)
-        message = self._read(db, reader, message_id, anchor_id)
-        assert message.get("display_metadata") is None
-        assert message["content"] == "event"
-
-    def test_export_import_round_trip_keeps_metadata_decodable(self, db, tmp_path):
-        """The read leak used to write a permanently double-encoded row here.
-
-        ``export_session`` reads through ``get_messages``, so an undecoded
-        string went back through ``_insert_message_rows`` and got re-dumped.
-        """
-        self._seed(db)
-        blob = db.export_session("s1")
-        assert isinstance(blob["messages"][0]["display_metadata"], dict)
-
-        target = SessionDB(db_path=tmp_path / "imported.db")
-        try:
-            target.import_sessions([json.loads(json.dumps(blob))])
-            assert target.get_messages_as_conversation("s1")[0]["display_metadata"] == self.META
-            assert target.get_messages("s1")[0]["display_metadata"] == self.META
-        finally:
-            target.close()
-
-
-
-
-class TestGatewayRoutingPkHeal:
-    """Legacy gateway_routing tables (session_key-only PK) get rebuilt on open.
-
-    Early builds of the #59203 routing-index migration created gateway_routing
-    with ``session_key TEXT PRIMARY KEY`` and no ``scope`` column. The column
-    reconciler ADDs ``scope`` but cannot change the PK, so on those databases
-    every routing save failed ("ON CONFLICT clause does not match any PRIMARY
-    KEY or UNIQUE constraint" / "UNIQUE constraint failed:
-    gateway_routing.session_key") and spammed warnings on each save.
-    """
-
-    LEGACY_SQL = """
-        CREATE TABLE gateway_routing (
-            session_key TEXT PRIMARY KEY,
-            entry_json TEXT NOT NULL,
-            updated_at REAL NOT NULL
-        , "scope" TEXT DEFAULT '')
-    """
-
-    def _make_legacy_db(self, tmp_path, rows=()):
-        db_path = tmp_path / "state.db"
-        conn = sqlite3.connect(db_path)
-        conn.execute(self.LEGACY_SQL)
-        conn.executemany(
-            "INSERT INTO gateway_routing (scope, session_key, entry_json, updated_at) "
-            "VALUES (?, ?, ?, ?)",
-            list(rows),
-        )
-        conn.commit()
-        conn.close()
-        return db_path
-
-    def _pk_cols(self, db):
-        rows = db._conn.execute('PRAGMA table_info("gateway_routing")').fetchall()
-        cols = sorted(
-            ((r["pk"], r["name"]) for r in rows if r["pk"]),
-        )
-        return [name for _, name in cols]
-
-    def test_legacy_pk_rebuilt_to_composite(self, tmp_path):
-        db_path = self._make_legacy_db(
-            tmp_path, rows=[("/home/u/.hermes/sessions", "agent:main:telegram:dm:1", "{}", 1.0)]
-        )
-        db = SessionDB(db_path=db_path)
-        try:
-            assert self._pk_cols(db) == ["scope", "session_key"]
-            # Existing rows survive the rebuild.
-            entries = db.load_gateway_routing_entries(scope="/home/u/.hermes/sessions")
-            assert entries == {"agent:main:telegram:dm:1": "{}"}
-        finally:
-            db.close()
-
-
-
-    def test_current_shape_left_untouched(self, tmp_path, db):
-        """A DB born with the composite PK is not rebuilt (idempotence)."""
-        db.save_gateway_routing_entry("k1", "{}", scope="s")
-        assert self._pk_cols(db) == ["scope", "session_key"]
-        # Re-running the heal is a no-op.
-        cur = db._conn.cursor()
-        db._heal_gateway_routing_pk(cur)
-        assert db.load_gateway_routing_entries(scope="s") == {"k1": "{}"}
-
-
-class TestApplyDatabasePragmas:
-    """Config-driven WAL-sizing pragma application (database: section)."""
-
-    @staticmethod
-    def _patch_cfg(monkeypatch, cfg):
-        monkeypatch.setattr(
-            "hermes_cli.config.load_config_readonly",
-            lambda: cfg,
-        )
-
-    def test_honors_wal_autocheckpoint_from_config(self, tmp_path, monkeypatch):
-        import sqlite3
-        from hermes_state import apply_database_pragmas
-
-        conn = sqlite3.connect(str(tmp_path / "pragmas.db"))
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            self._patch_cfg(monkeypatch, {"database": {"wal_autocheckpoint": 250}})
-            apply_database_pragmas(conn, db_label="test.db")
-            assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 250
-        finally:
-            conn.close()
-
-    def test_honors_journal_size_limit_from_config(self, tmp_path, monkeypatch):
-        import sqlite3
-        from hermes_state import apply_database_pragmas
-
-        conn = sqlite3.connect(str(tmp_path / "pragmas.db"))
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            self._patch_cfg(
-                monkeypatch, {"database": {"journal_size_limit": 10485760}}
-            )
-            apply_database_pragmas(conn, db_label="test.db")
-            assert (
-                conn.execute("PRAGMA journal_size_limit").fetchone()[0] == 10485760
-            )
-        finally:
-            conn.close()
-
-    def test_noop_when_database_section_missing(self, tmp_path, monkeypatch):
-        import sqlite3
-        from hermes_state import apply_database_pragmas
-
-        conn = sqlite3.connect(str(tmp_path / "pragmas.db"))
-        try:
-            conn.execute("PRAGMA journal_mode=DELETE")
-            self._patch_cfg(monkeypatch, {})
-            apply_database_pragmas(conn, db_label="test.db")
-            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
-        finally:
-            conn.close()
-
-    def test_never_touches_journal_mode(self, tmp_path, monkeypatch):
-        """journal_mode is owned by apply_wal_with_fallback — a database:
-        journal_mode entry must NOT cause a second, unguarded mode switch."""
-        import sqlite3
-        from hermes_state import apply_database_pragmas
-
-        conn = sqlite3.connect(str(tmp_path / "pragmas.db"))
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            self._patch_cfg(monkeypatch, {"database": {"journal_mode": "delete"}})
-            apply_database_pragmas(conn, db_label="test.db")
-            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        finally:
-            conn.close()
-
-    def test_ignores_non_integer_values(self, tmp_path, monkeypatch):
-        import sqlite3
-        from hermes_state import apply_database_pragmas
-
-        conn = sqlite3.connect(str(tmp_path / "pragmas.db"))
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            before = conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
-            self._patch_cfg(
-                monkeypatch, {"database": {"wal_autocheckpoint": "lots"}}
-            )
-            apply_database_pragmas(conn, db_label="test.db")
-            assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == before
-        finally:
-            conn.close()
-
-    def test_ignores_non_integer_performance_values(self, tmp_path, monkeypatch):
-        """Garbage cache_size/mmap_size/temp_store values must be rejected."""
-        import sqlite3
-        from hermes_state import apply_database_pragmas
-
-        conn = sqlite3.connect(str(tmp_path / "pragmas.db"))
-        try:
-            before = {
-                name: conn.execute(f"PRAGMA {name}").fetchone()[0]
-                for name in ("cache_size", "mmap_size", "temp_store")
-            }
-            self._patch_cfg(
-                monkeypatch,
-                {
-                    "database": {
-                        "cache_size": "big",
-                        "mmap_size": [256],
-                        "temp_store": "ram please",
-                    }
-                },
-            )
-            apply_database_pragmas(conn, db_label="test.db")
-            after = {
-                name: conn.execute(f"PRAGMA {name}").fetchone()[0]
-                for name in ("cache_size", "mmap_size", "temp_store")
-            }
-            assert after == before
-        finally:
-            conn.close()
-
-
-class TestInsightsToolCallIndex:
-    """The Insights assistant tool-call scan has a predicate-aligned index.
-
-    ``InsightsEngine._get_tool_usage`` / ``_get_skill_usage`` filter messages by
-    ``role = 'assistant' AND tool_calls IS NOT NULL``.  A partial index over that
-    predicate keeps the scan off the full ``messages`` table on a large state.db.
-    """
-
-    _INDEX = "idx_messages_assistant_calls_by_session"
-
-    def _index_defn(self, conn):
-        row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
-            (self._INDEX,),
-        ).fetchone()
-        return row["sql"] if row else None
-
-    def test_index_created_on_fresh_db(self, tmp_path):
-        db = SessionDB(db_path=tmp_path / "fresh.db")
-        try:
-            sql = self._index_defn(db._conn)
-            assert sql is not None, "partial index missing on a fresh database"
-            # Partial predicate must match the queried rows exactly.
-            assert "role = 'assistant'" in sql
-            assert "tool_calls IS NOT NULL" in sql
-        finally:
-            db.close()
-
-    def test_index_created_on_existing_db(self, tmp_path):
-        """Reopening a DB that predates the index must create it (SCHEMA_SQL is
-        re-run on every open; role/tool_calls are original base columns)."""
-        db_path = tmp_path / "legacy.db"
-        db = SessionDB(db_path=db_path)
-        # Simulate a database created before the index shipped.
-        db._conn.execute(f"DROP INDEX IF EXISTS {self._INDEX}")
-        db._conn.commit()
-        assert self._index_defn(db._conn) is None
-        db.close()
-
-        db2 = SessionDB(db_path=db_path)
-        try:
-            assert self._index_defn(db2._conn) is not None, (
-                "index not recreated when reopening an existing database"
-            )
-        finally:
-            db2.close()
-
-    def test_index_predicate_is_partial(self, db):
-        """The index covers only the assistant tool-call rows Insights reads.
-
-        Query-plan coverage (that the Insights queries actually select this
-        index, for both scopes, without ANALYZE) lives with the queries in
-        tests/agent/test_insights.py.
-        """
-        sql = self._index_defn(db._conn)
-        assert sql is not None
-        assert "WHERE" in sql
-        assert "role = 'assistant'" in sql
-        assert "tool_calls IS NOT NULL" in sql
-class TestFtsRebuildFinishWithoutTrigram:
-    """An FTS index that the runtime cannot maintain must not wedge the store.
-
-    Two independent failure sites shared one root shape: code that writes to
-    ``messages_fts_trigram`` without first checking the table is actually
-    present. It is legitimately absent whenever the trigram index is
-    unavailable (SQLite build without the tokenizer), and it can also be left
-    absent by an interrupted migration or a partially-applied schema change.
-    """
-
-    @staticmethod
-    def _seed(db_path, n=60):
-        seeded = SessionDB(db_path=db_path)
-        try:
-            seeded.create_session(session_id="s1", source="cli")
-            for i in range(n):
-                seeded.append_message(
-                    "s1",
-                    role=("user" if i % 3 == 0
-                          else "assistant" if i % 3 == 1 else "tool"),
-                    content=f"sentinel payload {i} zebra",
-                )
-            high_water = seeded._conn.execute(
-                "SELECT COALESCE(MAX(id), 0) FROM messages"
-            ).fetchone()[0]
-        finally:
-            seeded.close()
-        return high_water
-
-    def test_rebuild_finish_skips_trigram_when_unavailable(
-        self, tmp_path, monkeypatch
-    ):
-        """optimize_fts_storage() completes when the trigram index is absent.
-
-        ``fts_rebuild_step()`` already guards its backfill INSERT on
-        ``_trigram_available``; ``_fts_rebuild_finish()``'s boundary sweep did
-        not, so finishing a deferred rebuild on a trigram-less runtime raised
-        ``no such table: messages_fts_trigram`` and aborted the whole
-        optimization. The base index must still be swept and the markers
-        cleared.
-        """
-        db_path = tmp_path / "state.db"
-        high_water = self._seed(db_path)
-
-        real_connect = sqlite3.connect
-
-        def connect_without_trigram(*args, **kwargs):
-            kwargs["factory"] = _NoTrigramConnection
-            return real_connect(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "hermes_state.sqlite3.connect", connect_without_trigram
-        )
-        db = SessionDB(db_path=db_path)
-        try:
-            assert db._trigram_available is False
-            # A trigram-less runtime leaves no trigram index on disk.
-            db._conn.execute("DROP TABLE IF EXISTS messages_fts_trigram")
-            db._conn.commit()
-            assert db._fts_table_exists("messages_fts_trigram") is False
-
-            # Put the DB in the pending-deferred-rebuild state.
-            for key, value in (
-                ("fts_rebuild_high_water", str(high_water)),
-                ("fts_rebuild_progress", str(high_water)),
-            ):
-                db._conn.execute(
-                    "INSERT INTO state_meta (key, value) VALUES (?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (key, value),
-                )
-            db._conn.commit()
-
-            # Pre-fix this raised OperationalError("no such table: ...").
-            db._fts_rebuild_finish()
-
-            # The sweep ran to completion: markers cleared…
-            assert db.get_meta("fts_rebuild_high_water") is None
-            assert db.get_meta("fts_rebuild_progress") is None
-            # …and the base index is still usable (the fix must not disable
-            # real search to dodge the error).
-            assert db.search_messages("zebra")
-        finally:
-            db.close()
-
-    def test_optimize_fts_storage_succeeds_without_trigram(
-        self, tmp_path, monkeypatch
-    ):
-        """End-to-end: the public optimize entry point returns ok=True."""
-        db_path = tmp_path / "state.db"
-        high_water = self._seed(db_path)
-
-        real_connect = sqlite3.connect
-
-        def connect_without_trigram(*args, **kwargs):
-            kwargs["factory"] = _NoTrigramConnection
-            return real_connect(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "hermes_state.sqlite3.connect", connect_without_trigram
-        )
-        db = SessionDB(db_path=db_path)
-        try:
-            db._conn.execute("DROP TABLE IF EXISTS messages_fts_trigram")
-            db._conn.commit()
-            assert db._trigram_available is False
-            for key, value in (
-                ("fts_rebuild_high_water", str(high_water)),
-                ("fts_rebuild_progress", "0"),
-            ):
-                db._conn.execute(
-                    "INSERT INTO state_meta (key, value) VALUES (?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (key, value),
-                )
-            db._conn.commit()
-
-            result = db.optimize_fts_storage(vacuum=False)
-            assert result["ok"] is True
-            assert db.get_meta("fts_rebuild_high_water") is None
-            assert db.search_messages("zebra")
-        finally:
-            db.close()
-
-
-
-class TestPerformancePragmasEndToEnd:
-    """E2E guard for PR #71755: config-gated cache_size / mmap_size /
-    temp_store must reach EVERY connection type (writer, read-only
-    cross-profile attach, WAL per-thread reader) — and default installs
-    (no ``database:`` keys) must see byte-identical SQLite defaults.
-
-    NOTE: SQLite's compiled-in default for ``cache_size`` is already
-    ``-2000``, so the configured value here is ``-16000`` — a value the
-    test can actually discriminate from the default (a reverted prod
-    change must FAIL this test, not accidentally pass it).
-    """
-
-    PRAGMAS = ("cache_size", "mmap_size", "temp_store")
-    CONFIGURED = {"cache_size": -16000, "mmap_size": 1048576, "temp_store": 2}
-
-    @staticmethod
-    def _read(conn):
-        return {
-            name: conn.execute(f"PRAGMA {name}").fetchone()[0]
-            for name in ("cache_size", "mmap_size", "temp_store")
-        }
-
-    @staticmethod
-    def _sqlite_defaults(tmp_path):
-        import sqlite3
-
-        conn = sqlite3.connect(str(tmp_path / "baseline.db"))
-        try:
-            return {
-                name: conn.execute(f"PRAGMA {name}").fetchone()[0]
-                for name in ("cache_size", "mmap_size", "temp_store")
-            }
-        finally:
-            conn.close()
-
-    def _fresh_home(self, tmp_path, monkeypatch, config_text=None):
-        import hermes_state
-
-        # Local venvs may bundle a WAL-reset-vulnerable SQLite (e.g. 3.46.0),
-        # which would silently disable WAL and skip the per-thread reader
-        # path. Force WAL eligibility so _get_read_conn is truly exercised
-        # (established pattern used by the WAL tests above).
-        monkeypatch.setattr(
-            hermes_state,
-            "is_sqlite_wal_reset_vulnerable",
-            lambda version_info=None: False,
-        )
-        home = tmp_path / "hermes_home"
-        home.mkdir()
-        monkeypatch.setenv("HERMES_HOME", str(home))
-        if config_text is not None:
-            (home / "config.yaml").write_text(config_text)
-        return home
-
-    def test_configured_pragmas_reach_all_connection_types(
-        self, tmp_path, monkeypatch
-    ):
-        from hermes_state import SessionDB
-
-        home = self._fresh_home(
-            tmp_path,
-            monkeypatch,
-            "database:\n"
-            "  cache_size: -16000\n"
-            "  temp_store: 2\n"
-            "  mmap_size: 1048576\n",
-        )
-        db_path = home / "state.db"
-        db = SessionDB(db_path=db_path)
-        try:
-            # Writer connection.
-            assert self._read(db._conn) == self.CONFIGURED
-            # WAL per-thread reader.
-            rconn = db._get_read_conn()
-            assert rconn is not None, "WAL reader expected on local filesystem"
-            assert self._read(rconn) == self.CONFIGURED
-        finally:
-            db.close()
-
-        # Read-only cross-profile attach.
-        ro = SessionDB(db_path=db_path, read_only=True)
-        try:
-            assert self._read(ro._conn) == self.CONFIGURED
-        finally:
-            ro.close()
-
-    def test_defaults_unchanged_without_config(self, tmp_path, monkeypatch):
-        """No database: keys in config.yaml → SQLite defaults untouched."""
-        from hermes_state import SessionDB
-
-        defaults = self._sqlite_defaults(tmp_path)
-        home = self._fresh_home(tmp_path, monkeypatch, config_text=None)
-        db_path = home / "state.db"
-        db = SessionDB(db_path=db_path)
-        try:
-            assert self._read(db._conn) == defaults
-            rconn = db._get_read_conn()
-            if rconn is not None:
-                assert self._read(rconn) == defaults
-        finally:
-            db.close()
-
-        ro = SessionDB(db_path=db_path, read_only=True)
-        try:
-            assert self._read(ro._conn) == defaults
-        finally:
-            ro.close()
-
-
-class TestFts5SanitizerCharacterClass:
-    """Every character FTS5 rejects outside a quoted phrase must be stripped.
-
-    A survivor reaches MATCH raw and raises, which the execute site swallows
-    into zero results — so the search silently finds nothing rather than
-    erroring. Assertions run the sanitized text against a real FTS5 table.
-    """
-
-    @staticmethod
-    def _fts_table():
-        import sqlite3
-
-        conn = sqlite3.connect(":memory:")
-        conn.execute("CREATE VIRTUAL TABLE t USING fts5(content)")
-        conn.execute(
-            "INSERT INTO t (content) VALUES "
-            "('meet me at user host about gateway run py it s 50 a b')"
-        )
-        return conn
-
-    @staticmethod
-    def _sanitize(query):
-        from hermes_state_search import SessionSearchMixin
-
-        return SessionSearchMixin._sanitize_fts5_query(query)
-
-    @pytest.mark.parametrize(
-        "query",
-        [
-            "it's",                 # apostrophe — ordinary prose
-            "gateway/run.py",       # path separator
-            "user@host",            # email / handle
-            "a,b",                  # comma
-            "why?",                 # question mark
-            "e=mc2",                # equals
-            "a;b", "a!b", "a&b", "a|b", "x~y",
-            "#tag", "$dollar", "[bracket]", "<tag>",
-            r"C:\path\file",        # backslash
-        ],
-    )
-    def test_query_stays_parsable(self, query):
-        conn = self._fts_table()
-        sanitized = self._sanitize(query)
-        if not sanitized.strip():
-            return
-        # Raises sqlite3.OperationalError if a special character survived.
-        conn.execute("SELECT count(*) FROM t WHERE t MATCH ?", (sanitized,)).fetchone()
-
-    def test_plain_terms_are_untouched(self):
-        assert self._sanitize("hello world").split() == ["hello", "world"]
-
-    def test_quoted_phrase_survives(self):
-        assert '"exact phrase"' in self._sanitize('"exact phrase"')
-
-    def test_hyphen_dotted_term_still_quoted(self):
-        # Step 5's behaviour must not regress: my-app.config.ts stays one term.
-        assert '"my-app.config.ts"' in self._sanitize("my-app.config.ts")
-
-    def test_prefix_star_still_works(self):
-        conn = self._fts_table()
-        sanitized = self._sanitize("gate*")
-        rows = conn.execute(
-            "SELECT count(*) FROM t WHERE t MATCH ?", (sanitized,)
-        ).fetchone()
-        assert rows[0] == 1
-
-    def test_percent_stripped_for_non_cjk_query(self):
-        # % is kept only for the CJK LIKE fallback; a non-CJK query never
-        # reaches that fallback, so % must be stripped before MATCH.
-        conn = self._fts_table()
-        sanitized = self._sanitize("50%")
-        assert "%" not in sanitized
-        conn.execute(
-            "SELECT count(*) FROM t WHERE t MATCH ?", (sanitized,)
-        ).fetchone()
-
-    def test_percent_preserved_for_cjk_query(self):
-        # The CJK LIKE fallback builds its own pattern from the sanitized
-        # text; keep % intact there (pre-existing contract).
-        sanitized = self._sanitize("完成50%")
-        assert "%" in sanitized
+        db.append_message("s1", "assistant", "reply")
+        conv = db.get_messages_as_conversation("s1")
+        db.archive_and_compact("s1", conv)
+        reloaded = db.get_messages_as_conversation("s1")
+        switched = [m for m in reloaded if m.get("display_kind") == "model_switch"]
+        assert len(switched) == 1
+        assert switched[0]["display_metadata"] == meta

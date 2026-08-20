@@ -182,6 +182,195 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
 
 
 @pytest.mark.asyncio
+async def test_gateway_kanban_rejects_cross_project_board(kanban_home):
+    """A project Topic cannot select a different global board via slash."""
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+    from gateway.project_router import ProjectContext
+
+    kb.create_board("project-alpha")
+    kb.create_board("project-beta")
+
+    runner = object.__new__(GatewayRunner)
+    runner._resolve_project_context_for_message = lambda _event, _source: (
+        ProjectContext(
+            project_id="p_alpha",
+            slug="alpha",
+            board_slug="project-alpha",
+            workdir=None,
+            status="active",
+            platform="telegram",
+            chat_id="team",
+            thread_id="topic",
+            sender_user_id="member",
+            is_management=False,
+        ),
+        None,
+    )
+    event = SimpleNamespace(
+        text="/kanban --board project-beta list",
+        source=SimpleNamespace(
+            platform=Platform.TELEGRAM,
+            chat_id="team",
+            thread_id="topic",
+            user_id="member",
+        ),
+    )
+
+    out = await GatewayRunner._handle_kanban_command(runner, event)
+
+    assert "refusing explicit board" in out
+
+
+@pytest.mark.asyncio
+async def test_gateway_project_create_is_bound_and_event_idempotent(kanban_home):
+    """A redelivered slash event creates one card on the Topic board."""
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+    from gateway.project_router import ProjectContext
+
+    kb.create_board("project-alpha")
+    runner = object.__new__(GatewayRunner)
+    runner._kanban_notifier_profile = "default"
+    runner._resolve_project_context_for_message = lambda _event, _source: (
+        ProjectContext(
+            project_id="p_alpha",
+            slug="alpha",
+            board_slug="project-alpha",
+            workdir=None,
+            status="active",
+            platform="telegram",
+            chat_id="team",
+            thread_id="topic",
+            sender_user_id="member",
+            is_management=False,
+        ),
+        None,
+    )
+    source = SimpleNamespace(
+        platform=Platform.TELEGRAM,
+        profile="team-profile",
+        chat_id="team",
+        thread_id="topic",
+        user_id="member",
+    )
+    event = SimpleNamespace(
+        text='/kanban create "same request" --assignee alice',
+        message_id="message-42",
+        source=source,
+    )
+
+    first = await GatewayRunner._handle_kanban_command(runner, event)
+    second = await GatewayRunner._handle_kanban_command(runner, event)
+
+    assert "created" in first.lower()
+    assert second
+    conn = kb.connect(board="project-alpha")
+    try:
+        tasks = kb.list_tasks(conn)
+    finally:
+        conn.close()
+    assert [task.title for task in tasks] == ["same request"]
+
+
+@pytest.mark.asyncio
+async def test_notifier_uploads_artifacts_on_completion(kanban_home, tmp_path, monkeypatch):
+    """When a completed event carries ``artifacts`` in its payload, the
+    notifier uploads each file to the subscribed chat as a native
+    attachment. Images batch through send_multiple_images; documents
+    route through send_document. See the artifacts wiring in
+    gateway/run.py._deliver_kanban_artifacts.
+    """
+    import hermes_cli.kanban_db as kb
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+    from tools import kanban_tools as kt
+
+    # ``_deliver_kanban_artifacts`` routes candidates through
+    # ``BasePlatformAdapter.filter_local_delivery_paths``, which only accepts
+    # paths under ``MEDIA_DELIVERY_SAFE_ROOTS`` or roots explicitly allowlisted
+    # via ``HERMES_MEDIA_ALLOW_DIRS``. Test fixtures live under ``tmp_path``,
+    # so allowlist it for the duration of the test.
+    monkeypatch.setenv("HERMES_MEDIA_ALLOW_DIRS", str(tmp_path))
+
+    # Materialize real files so os.path.isfile passes inside the helper.
+    chart_path = tmp_path / "q3-revenue.png"
+    chart_path.write_bytes(b"PNG-fake-bytes")
+    report_path = tmp_path / "report.pdf"
+    report_path.write_bytes(b"%PDF-fake")
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="render q3 chart", assignee="worker1")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat1")
+    finally:
+        conn.close()
+
+    # Use the production handler so we exercise the full path: tool args
+    # → metadata.artifacts → event payload promotion.
+    import os
+    os.environ["HERMES_KANBAN_TASK"] = tid
+    try:
+        out = kt._handle_complete({
+            "summary": "rendered the chart",
+            "artifacts": [str(chart_path), str(report_path)],
+        })
+    finally:
+        os.environ.pop("HERMES_KANBAN_TASK", None)
+    import json as _json
+    assert _json.loads(out)["ok"] is True
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+
+    fake_adapter = MagicMock()
+    fake_adapter.name = "telegram"
+
+    sends: list = []
+    images_uploaded: list = []
+    documents_uploaded: list = []
+
+    async def _send(chat_id, msg, metadata=None):
+        sends.append((chat_id, msg))
+        runner._running = False
+
+    async def _send_images(chat_id, images, metadata=None, **_kw):
+        images_uploaded.extend(p for p, _ in images)
+
+    async def _send_document(chat_id, file_path, metadata=None, **_kw):
+        documents_uploaded.append(file_path)
+
+    fake_adapter.send = AsyncMock(side_effect=_send)
+    fake_adapter.send_multiple_images = AsyncMock(side_effect=_send_images)
+    fake_adapter.send_document = AsyncMock(side_effect=_send_document)
+    # extract_local_files is used internally for legacy path fallback;
+    # the real BasePlatformAdapter implementation lives there, so wire it.
+    from gateway.platforms.base import BasePlatformAdapter
+    fake_adapter.extract_local_files = BasePlatformAdapter.extract_local_files
+
+    runner.adapters = {Platform.TELEGRAM: fake_adapter}
+
+    _orig_sleep = asyncio.sleep
+
+    async def _fast_sleep(_):
+        await _orig_sleep(0)
+
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
+        await asyncio.wait_for(
+            runner._kanban_notifier_watcher(interval=1),
+            timeout=10.0,
+        )
+
+    # The text completion notification fired.
+    assert len(sends) == 1
+    # The PNG rode the image-batch path.
+    assert any("q3-revenue.png" in p for p in images_uploaded), images_uploaded
+    # The PDF rode the document path.
+    assert any("report.pdf" in p for p in documents_uploaded), documents_uploaded
+
+
+@pytest.mark.asyncio
 async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_path, monkeypatch):
     """Missing artifact paths are silently skipped — they may have been
     referenced by name only. The notifier must not crash and must still

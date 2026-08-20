@@ -33,6 +33,15 @@ from agent.redact import redact_sensitive_text
 
 SCHEMA_VERSION = 1
 _MAX_LITERAL_CHARS = 131_072
+_TERMINAL_PHASES = frozenset({"terminal", "delivered", "cancelled"})
+_CONTINUATION_ONLY_RESPONSE_RE = re.compile(
+    r"(?i)(?:"
+    r"\bretom(?:ado|ada|ei|amos)\b|\bcontinuidade\s+ativa\b|"
+    r"\breativad[oa]\b|\b(?:est[aá]|est[aã]o)\s+(?:em\s+execu[cç][aã]o|sendo\s+)\b|"
+    r"\b(?:vou|iremos|seguirei|continuarei)\s+(?:continuar|prosseguir|retomar)\b|"
+    r"\b(?:resumed|continuation\s+active|work\s+is\s+running)\b"
+    r")"
+)
 
 
 class CheckpointError(RuntimeError):
@@ -49,6 +58,15 @@ class CheckpointIntegrityError(CheckpointError):
 
 class CheckpointConflictError(CheckpointError):
     """Live transcript matches neither side of a prepared compaction."""
+
+
+def checkpoint_is_resumable(state: Mapping[str, Any] | None) -> bool:
+    """Return whether *state* represents unfinished operational work."""
+    return bool(
+        isinstance(state, Mapping)
+        and state.get("phase") not in _TERMINAL_PHASES
+        and str(state.get("next_action") or "").strip().lower() not in {"", "none"}
+    )
 
 
 _LOCKS_GUARD = threading.Lock()
@@ -120,13 +138,19 @@ def _message_projection(message: Any) -> dict[str, Any]:
     if not isinstance(message, Mapping):
         return {"role": "unknown", "content": str(message)}
     projected: dict[str, Any] = {}
+    # The live conversation loop emits tool-result identity as ``name`` while
+    # SessionDB persists/replays the same value as ``tool_name``.  A checkpoint
+    # hash spans that durability boundary, so these are aliases, not two
+    # independent fields.  Hash the replay-canonical key and omit an empty name
+    # exactly as SessionDB's read path does.
+    tool_name = message.get("tool_name") or message.get("name")
+    if tool_name:
+        projected["tool_name"] = tool_name
     for key in (
         "role",
         "content",
         "tool_call_id",
         "tool_calls",
-        "name",
-        "tool_name",
         "finish_reason",
         "reasoning",
         "reasoning_content",
@@ -339,6 +363,7 @@ class TurnCheckpointStore:
         user_content: Any,
         messages: Sequence[Any],
         routing: Mapping[str, Any] | None = None,
+        resume_existing: bool = False,
     ) -> dict[str, Any]:
         raw_user = user_content if isinstance(user_content, str) else _canonical_json(user_content)
         user_sha = _sha256_text(raw_user)
@@ -349,7 +374,10 @@ class TurnCheckpointStore:
         if (
             existing
             and existing.get("phase") not in {"terminal", "delivered", "cancelled"}
-            and existing.get("active_user_turn", {}).get("sha256") == user_sha
+            and (
+                resume_existing
+                or existing.get("active_user_turn", {}).get("sha256") == user_sha
+            )
         ):
             state = copy.deepcopy(existing)
             state["revision"] = int(state.get("revision", 0)) + 1
@@ -809,6 +837,23 @@ def checkpoint_store_for_agent(agent: Any) -> TurnCheckpointStore | None:
     return store
 
 
+def resumable_checkpoint_for_agent(agent: Any) -> dict[str, Any] | None:
+    """Load the profile-scoped unfinished checkpoint for *agent*, if any.
+
+    This is deliberately a read-only predicate used by the gateway before it
+    interprets a human message as control-plane continuation.  A generic
+    "continue" without durable unfinished state remains an ordinary new turn.
+    """
+    store = checkpoint_store_for_agent(agent)
+    if store is None:
+        return None
+    try:
+        state = store.load(str(agent.session_id))
+    except (FileNotFoundError, CheckpointError, OSError, ValueError):
+        return None
+    return state if checkpoint_is_resumable(state) else None
+
+
 def _content_sha256(value: Any) -> str:
     if not isinstance(value, str):
         value = _canonical_json(value)
@@ -867,15 +912,33 @@ def initialize_agent_turn_checkpoint(
         "thread_id": str(getattr(agent, "thread_id", None) or ""),
         "task_id": str(getattr(agent, "task_id", None) or ""),
     }
-    state = store.start_turn(
-        str(agent.session_id),
-        str(turn_id),
-        user_content,
-        messages,
-        routing=routing,
-    )
+    resume_existing = bool(getattr(agent, "_resume_turn_from_checkpoint", False))
+    try:
+        state = store.start_turn(
+            str(agent.session_id),
+            str(turn_id),
+            user_content,
+            messages,
+            routing=routing,
+            resume_existing=resume_existing,
+        )
+    finally:
+        # One-shot: a reused gateway agent must not bind the next genuine user
+        # turn to an older unfinished checkpoint.
+        agent._resume_turn_from_checkpoint = False
     agent._turn_checkpoint_state = state
     agent._turn_checkpoint_restored = bool(state.get("recovery", {}).get("restored"))
+    if agent._turn_checkpoint_restored:
+        agent._turn_checkpoint_resume_baseline = {
+            "revision": int(state.get("revision", 0) or 0),
+            "phase": str(state.get("phase") or ""),
+            "next_action": str(state.get("next_action") or ""),
+            "completed_tools_count": len(state.get("completed_tools") or []),
+        }
+    else:
+        agent._turn_checkpoint_resume_baseline = None
+    agent._checkpoint_resume_guard_nudges = 0
+    agent._checkpoint_resume_guard_exhausted = False
     agent._restored_pending_deliverable = recover_checkpoint_message_content(
         agent, state, messages
     )
@@ -915,6 +978,48 @@ def build_checkpoint_resume_note(state: Mapping[str, Any]) -> str:
     )
 
 
+def build_checkpoint_continuation_nudge(
+    agent: Any,
+    final_response: str,
+    *,
+    max_nudges: int = 3,
+) -> str | None:
+    """Reject status-only exits from an explicit checkpoint continuation.
+
+    The model may acknowledge a restore and stop without performing the next
+    action.  That is not continuity.  This guard keeps the same model turn
+    alive and never exposes the false acknowledgement as a completed answer.
+    """
+    if not bool(getattr(agent, "_gateway_explicit_checkpoint_resume", False)):
+        return None
+    state = getattr(agent, "_turn_checkpoint_state", None)
+    if not isinstance(state, Mapping):
+        return None
+    restored = bool(state.get("recovery", {}).get("restored"))
+    text = str(final_response or "").strip()
+    status_only = bool(text and _CONTINUATION_ONLY_RESPONSE_RE.search(text))
+    if restored and not status_only:
+        return None
+    attempts = int(getattr(agent, "_checkpoint_resume_guard_nudges", 0) or 0)
+    if attempts >= max_nudges:
+        agent._checkpoint_resume_guard_exhausted = True
+        return None
+    agent._checkpoint_resume_guard_nudges = attempts + 1
+    if not restored:
+        return (
+            "[CHECKPOINT CONTINUATION GUARD] The requested checkpoint was not "
+            "restored. Do not claim continuity or progress. Re-read the durable "
+            "checkpoint and restore the original turn before answering."
+        )
+    return (
+        "[CHECKPOINT CONTINUATION GUARD] A status-only acknowledgement is not "
+        "a resumed task. Do not say that work is active, resumed, running, or "
+        "being completed. Continue now from checkpoint.next_action, execute the "
+        "remaining material steps, and stop only with a concrete result or a "
+        "specific evidence-backed blocker."
+    )
+
+
 def update_checkpoint_delivery(
     session_id: str | None,
     *,
@@ -947,9 +1052,12 @@ __all__ = [
     "CheckpointWriteError",
     "TurnCheckpointStore",
     "build_checkpoint_resume_note",
+    "build_checkpoint_continuation_nudge",
+    "checkpoint_is_resumable",
     "checkpoint_store_for_agent",
     "initialize_agent_turn_checkpoint",
     "recover_checkpoint_message_content",
+    "resumable_checkpoint_for_agent",
     "tool_fingerprint",
     "transcript_hash",
     "update_checkpoint_delivery",

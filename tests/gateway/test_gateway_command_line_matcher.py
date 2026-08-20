@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from gateway.status import (
+    _looks_like_hidden_profile_gateway_launcher as matches_hidden_launcher,
     looks_like_gateway_command_line as matches,
     looks_like_gateway_runtime_command_line as matches_runtime,
 )
@@ -58,3 +59,29 @@ def test_accepts_real_gateway_run(cmd):
     assert matches(cmd) is True
 
 
+@pytest.mark.parametrize("cmd", REJECT)
+def test_rejects_non_gateway_run(cmd):
+    assert matches(cmd) is False
+
+
+def test_runtime_matcher_accepts_no_supervisor_restart_process():
+    assert matches("python -m hermes_cli.main gateway restart") is False
+    assert matches_runtime("python -m hermes_cli.main gateway restart") is True
+    assert matches_runtime("python -m hermes_cli.main gateway status") is False
+
+
+def test_hidden_profile_launcher_requires_exact_file_inside_profile_home(tmp_path):
+    launcher = tmp_path / "launch-project-factory-gateway-hidden.pyw"
+    launcher.write_text("# launcher\n", encoding="utf-8")
+    command = f'"C:/Python311/pythonw.exe" "{launcher}"'
+
+    assert matches_hidden_launcher(command, tmp_path) is True
+    assert matches_hidden_launcher(command, tmp_path / "other-profile") is False
+    assert matches_hidden_launcher(
+        f'"C:/Python311/pythonw.exe" "{tmp_path / "arbitrary.pyw"}"',
+        tmp_path,
+    ) is False
+    assert matches_hidden_launcher(
+        f'"C:/Python311/python.exe" "{launcher}"',
+        tmp_path,
+    ) is False

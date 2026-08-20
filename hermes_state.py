@@ -15,8 +15,6 @@ Key design decisions:
 """
 
 import asyncio
-import atexit
-import errno
 import hashlib
 import json
 import logging
@@ -241,6 +239,11 @@ def workspace_key(row: Dict[str, Any]) -> Optional[str]:
     return cwd or None
 
 
+def _system_prompt_hash(system_prompt: str) -> str:
+    """Return the content address used by shared system-prompt snapshots."""
+    return hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+
+
 def _delegate_from_json(col: str = "model_config") -> str:
     return f"json_extract(COALESCE({col}, '{{}}'), '$._delegate_from')"
 
@@ -333,9 +336,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-# Import-time snapshot used by _default_db_path() to detect a deliberately
-# re-pointed DEFAULT_DB_PATH (tests monkeypatch the constant directly).
-_IMPORT_DEFAULT_DB_PATH = DEFAULT_DB_PATH
+SCHEMA_VERSION = 25
 
 
 def _default_db_path() -> Path:
@@ -1863,6 +1864,323 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
     return report
 
 
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS system_prompts (
+    hash TEXT PRIMARY KEY,
+    prompt TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    user_id TEXT,
+    session_key TEXT,
+    chat_id TEXT,
+    chat_type TEXT,
+    thread_id TEXT,
+    display_name TEXT,
+    origin_json TEXT,
+    expiry_finalized INTEGER DEFAULT 0,
+    model TEXT,
+    model_config TEXT,
+    system_prompt TEXT,
+    system_prompt_hash TEXT,
+    parent_session_id TEXT,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    end_reason TEXT,
+    message_count INTEGER DEFAULT 0,
+    tool_call_count INTEGER DEFAULT 0,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    cache_read_tokens INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
+    reasoning_tokens INTEGER DEFAULT 0,
+    cwd TEXT,
+    git_branch TEXT,
+    git_repo_root TEXT,
+    billing_provider TEXT,
+    billing_base_url TEXT,
+    billing_mode TEXT,
+    estimated_cost_usd REAL,
+    actual_cost_usd REAL,
+    cost_status TEXT,
+    cost_source TEXT,
+    pricing_version TEXT,
+    title TEXT,
+    api_call_count INTEGER DEFAULT 0,
+    handoff_state TEXT,
+    handoff_platform TEXT,
+    handoff_error TEXT,
+    compression_failure_cooldown_until REAL,
+    compression_failure_error TEXT,
+    compression_fallback_streak INTEGER NOT NULL DEFAULT 0,
+    compression_ineffective_count INTEGER NOT NULL DEFAULT 0,
+    profile_name TEXT,
+    rewind_count INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (parent_session_id) REFERENCES sessions(id),
+    FOREIGN KEY (system_prompt_hash) REFERENCES system_prompts(hash)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    role TEXT NOT NULL,
+    content TEXT,
+    tool_call_id TEXT,
+    tool_calls TEXT,
+    tool_name TEXT,
+    effect_disposition TEXT,
+    timestamp REAL NOT NULL,
+    token_count INTEGER,
+    finish_reason TEXT,
+    reasoning TEXT,
+    reasoning_content TEXT,
+    reasoning_details TEXT,
+    codex_reasoning_items TEXT,
+    codex_message_items TEXT,
+    platform_message_id TEXT,
+    observed INTEGER DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    compacted INTEGER NOT NULL DEFAULT 0,
+    api_content TEXT,
+    display_kind TEXT,
+    display_metadata TEXT
+);
+
+CREATE TABLE IF NOT EXISTS session_model_usage (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    billing_provider TEXT NOT NULL DEFAULT '',
+    billing_base_url TEXT NOT NULL DEFAULT '',
+    billing_mode TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL DEFAULT '',
+    api_call_count INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_usd REAL NOT NULL DEFAULT 0,
+    actual_cost_usd REAL NOT NULL DEFAULT 0,
+    cost_status TEXT,
+    cost_source TEXT,
+    first_seen REAL,
+    last_seen REAL,
+    PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
+);
+
+CREATE TABLE IF NOT EXISTS state_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS gateway_routing (
+    scope TEXT NOT NULL DEFAULT '',
+    session_key TEXT NOT NULL,
+    entry_json TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (scope, session_key)
+);
+
+CREATE TABLE IF NOT EXISTS compression_locks (
+    session_id TEXT PRIMARY KEY,
+    holder TEXT NOT NULL,
+    acquired_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS async_delegations (
+    delegation_id TEXT PRIMARY KEY,
+    origin_session TEXT NOT NULL,
+    origin_ui_session_id TEXT NOT NULL DEFAULT '',
+    parent_session_id TEXT,
+    state TEXT NOT NULL,
+    dispatched_at REAL NOT NULL,
+    completed_at REAL,
+    updated_at REAL NOT NULL,
+    event_json TEXT,
+    result_json TEXT,
+    delivery_state TEXT NOT NULL DEFAULT 'pending',
+    delivery_attempts INTEGER NOT NULL DEFAULT 0,
+    delivered_at REAL,
+    owner_pid INTEGER,
+    owner_started_at INTEGER,
+    task_json TEXT,
+    delivery_claim TEXT,
+    delivery_claimed_at REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
+CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
+CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
+CREATE INDEX IF NOT EXISTS idx_session_model_usage_session ON session_model_usage(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_model_usage_model ON session_model_usage(model);
+CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
+    ON async_delegations(delivery_state, completed_at);
+"""
+
+# Indexes that reference columns added in later schema versions must be
+# created AFTER _reconcile_columns() has had a chance to ADD them on
+# existing databases. SCHEMA_SQL above is run by sqlite executescript
+# which would otherwise fail on legacy DBs ("no such column: active").
+DEFERRED_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_messages_session_active
+    ON messages(session_id, active, timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_active_null
+    ON messages(active) WHERE active IS NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_session_key
+    ON sessions(session_key, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_gateway_peer
+    ON sessions(source, user_id, chat_id, chat_type, thread_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
+    ON sessions(handoff_state, started_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_system_prompt_hash
+    ON sessions(system_prompt_hash);
+"""
+
+# ── Deferred FTS rebuild bookkeeping (schema v23) ──
+# While a background index rebuild is pending, two state_meta keys define
+# which message rows are currently IN the FTS indexes:
+#
+#   fts_rebuild_high_water  H — MAX(messages.id) at the moment the old
+#                                indexes were dropped
+#   fts_rebuild_progress    P — highest id the chunked backfill has indexed
+#
+# A row is indexed iff  id <= P  (backfilled)  OR  id > H  (inserted after
+# the drop; ids are AUTOINCREMENT so new rows are always > H and the insert
+# triggers index them live).  Rows in (P, H] are not yet indexed.
+#
+# Every trigger below gates on that same predicate: firing an FTS5
+# external-content 'delete' for a row that is NOT in the index corrupts the
+# index, and skipping it for a row that IS indexed leaves a stale entry.
+# When no rebuild is pending both keys are absent and COALESCE turns the
+# predicate into a tautology (id > -1 OR id <= -1), i.e. normal operation.
+# The two state_meta PK probes per write are negligible next to the FTS
+# insert itself.
+FTS_SQL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content,
+    tool_name,
+    tool_calls,
+    content='messages',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages
+WHEN (new.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                         WHERE key = 'fts_rebuild_high_water'), -1)
+   OR new.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                          WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts(rowid, content, tool_name, tool_calls)
+    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages
+WHEN (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                         WHERE key = 'fts_rebuild_high_water'), -1)
+   OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                          WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls)
+    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages
+WHEN (old.content IS NOT new.content
+    OR old.tool_name IS NOT new.tool_name
+    OR old.tool_calls IS NOT new.tool_calls)
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls)
+    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
+    INSERT INTO messages_fts(rowid, content, tool_name, tool_calls)
+    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
+END;
+"""
+
+# Trigram FTS5 table for CJK substring search.  The default unicode61
+# tokenizer splits CJK characters into individual tokens, breaking phrase
+# matching.  The trigram tokenizer creates overlapping 3-byte sequences so
+# substring queries work natively for any script (CJK, Thai, etc.).
+#
+# The trigram index is the most expensive index in state.db (~2.6x the size
+# of the text it covers), and ``role='tool'`` rows are ~90% of message bytes
+# while being almost entirely machine noise (base64 payloads, file dumps,
+# delegation transcripts).  The index therefore reads through
+# ``messages_fts_trigram_src``, a view that excludes tool rows — they stay
+# fully stored in ``messages`` and fully searchable via the standard
+# ``messages_fts`` index; they just don't get trigram (CJK substring)
+# treatment.  ``search_messages`` routes CJK queries that filter on
+# ``role='tool'`` to the LIKE fallback for the same reason.
+FTS_TRIGRAM_SQL = """
+CREATE VIEW IF NOT EXISTS messages_fts_trigram_src AS
+    SELECT id, role, content, tool_name, tool_calls
+    FROM messages
+    WHERE role <> 'tool';
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
+    content,
+    tool_name,
+    tool_calls,
+    content='messages_fts_trigram_src',
+    content_rowid='id',
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON messages
+WHEN new.role <> 'tool'
+   AND (new.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR new.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(rowid, content, tool_name, tool_calls)
+    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_delete AFTER DELETE ON messages
+WHEN old.role <> 'tool'
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content, tool_name, tool_calls)
+    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update AFTER UPDATE ON messages
+WHEN (old.content IS NOT new.content
+    OR old.tool_name IS NOT new.tool_name
+    OR old.tool_calls IS NOT new.tool_calls
+    OR old.role IS NOT new.role)
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content, tool_name, tool_calls)
+    SELECT 'delete', old.id, old.content, old.tool_name, old.tool_calls
+    WHERE old.role <> 'tool';
+    INSERT INTO messages_fts_trigram(rowid, content, tool_name, tool_calls)
+    SELECT new.id, new.content, new.tool_name, new.tool_calls
+    WHERE new.role <> 'tool';
+END;
+"""
+
 # ── CJK-bigram FTS index (replaces the trigram index when available) ────
 #
 # The trigram tokenizer needs >=3 chars per query term, so 1-2 char CJK
@@ -2480,6 +2798,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
     @staticmethod
     def _store_system_prompt(conn, system_prompt: Optional[str]) -> Optional[str]:
+        """Store one prompt once and return its stable content hash."""
         if system_prompt is None:
             return None
         prompt_hash = _system_prompt_hash(system_prompt)
@@ -2491,6 +2810,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
     @staticmethod
     def _delete_unreferenced_system_prompts(conn) -> None:
+        """Collect shared prompt rows after references are replaced or deleted."""
         conn.execute(
             "DELETE FROM system_prompts "
             "WHERE NOT EXISTS ("
@@ -2501,6 +2821,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
     @staticmethod
     def _session_row_dict(row: sqlite3.Row) -> Dict[str, Any]:
+        """Hydrate hashed prompts while preserving inline legacy fallback."""
         data = dict(row)
         if "_system_prompt_resolved" in data:
             resolved = data.pop("_system_prompt_resolved")
@@ -2916,6 +3237,61 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             self.db_path,
             exc,
         )
+
+    def _dedupe_legacy_system_prompts(self, cursor: sqlite3.Cursor) -> None:
+        """Reconcile inline prompt snapshots into content-addressed storage.
+
+        A v23 writer can leave new inline rows in a database whose version was
+        already advanced to v25 by a newer process. Run this repair
+        idempotently on every writable open rather than trusting only the
+        version marker. When both representations exist and the hash resolves,
+        preserve the hashed value (the read contract's authority) and only
+        clear the stale inline copy. If the hash is absent or broken, promote
+        the inline value so a partial migration remains recoverable.
+        """
+        try:
+            rows = cursor.execute(
+                "SELECT id, system_prompt, system_prompt_hash FROM sessions "
+                "WHERE system_prompt IS NOT NULL"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+
+        for row in rows:
+            session_id = row["id"] if isinstance(row, sqlite3.Row) else row[0]
+            prompt = row["system_prompt"] if isinstance(row, sqlite3.Row) else row[1]
+            existing_hash = (
+                row["system_prompt_hash"]
+                if isinstance(row, sqlite3.Row)
+                else row[2]
+            )
+            if existing_hash is not None and cursor.execute(
+                "SELECT 1 FROM system_prompts WHERE hash = ? LIMIT 1",
+                (existing_hash,),
+            ).fetchone() is not None:
+                cursor.execute(
+                    "UPDATE sessions SET system_prompt = NULL WHERE id = ?",
+                    (session_id,),
+                )
+                continue
+            prompt_hash = self._store_system_prompt(cursor, prompt)
+            cursor.execute(
+                "UPDATE sessions "
+                "SET system_prompt_hash = ?, system_prompt = NULL "
+                "WHERE id = ?",
+                (prompt_hash, session_id),
+            )
+
+    def _sqlite_supports_fts5(self, cursor: sqlite3.Cursor) -> bool:
+        try:
+            cursor.execute("CREATE VIRTUAL TABLE temp._hermes_fts5_probe USING fts5(x)")
+            cursor.execute("DROP TABLE temp._hermes_fts5_probe")
+            return True
+        except sqlite3.OperationalError as exc:
+            if not self._is_fts5_unavailable_error(exc):
+                raise
+            self._warn_fts5_unavailable(exc)
+            return False
 
     def _ensure_fts_cjk_schema(self, cursor) -> None:
         """Create / repair / self-heal the CJK-bigram index surface.
@@ -3492,6 +3868,717 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             (self._FTS_TRASH_PREFIX.replace("_", "\\_") + "%",),
         ).fetchone())
 
+    def _demote_legacy_fts_to_trash(self) -> int:
+        """Demote the legacy inline FTS vtables and stage their shadow tables
+        for chunked teardown. Returns MAX(messages.id) as the rebuild high
+        water. O(1) schema surgery — the heavy delete is deferred to the
+        chunked teardown, exactly as the validated auto path did."""
+        def _do(conn):
+            self._drop_fts_triggers(conn)
+            conn.execute("DROP VIEW IF EXISTS messages_fts_trigram_src")
+            had = bool(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('messages_fts', 'messages_fts_trigram') "
+                "AND sql LIKE 'CREATE VIRTUAL TABLE%' LIMIT 1"
+            ).fetchone())
+            if had:
+                conn.execute("PRAGMA writable_schema=ON")
+                conn.execute(
+                    "DELETE FROM sqlite_master WHERE type = 'table' "
+                    "AND name IN ('messages_fts', 'messages_fts_trigram') "
+                    "AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+                )
+                conn.execute("PRAGMA writable_schema=RESET")
+                shadows = [
+                    r[0] for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' "
+                        "AND (name LIKE 'messages_fts_%' ESCAPE '\\' "
+                        "OR name LIKE 'messages_fts_trigram_%' ESCAPE '\\')"
+                    ).fetchall()
+                ]
+                for sh in shadows:
+                    conn.execute(f"ALTER TABLE {sh} RENAME TO fts_v22_trash_{sh}")
+            # Create the new v23 empty schema + set the backfill markers.
+            self._ensure_fts_schema(conn, "messages_fts", FTS_SQL)
+            self._ensure_fts_schema(conn, "messages_fts_trigram", FTS_TRIGRAM_SQL)
+            hw = conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
+            for k, v in (
+                ("fts_rebuild_high_water", str(hw)),
+                ("fts_rebuild_progress", "0"),
+            ):
+                conn.execute(
+                    "INSERT INTO state_meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (k, v),
+                )
+            conn.execute("DELETE FROM state_meta WHERE key = 'fts_optimize_available'")
+            return hw
+        return int(self._execute_write(_do))
+
+    def optimize_fts_storage(
+        self,
+        *,
+        progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+        vacuum: bool = True,
+    ) -> Dict[str, Any]:
+        """Migrate a legacy v22 inline-FTS DB to the v23 external-content
+        schema, foreground and to completion. Safe to re-run: if a previous
+        attempt was interrupted it resumes from the progress marker.
+
+        ``progress_cb`` receives {"phase", "percent", "indexed", "total"}
+        dicts for a CLI progress bar. Returns a summary dict.
+
+        The trigram tokenizer being unavailable is not fatal — the base index
+        is still rebuilt (CJK falls back to LIKE), mirroring normal startup.
+        """
+        if not self._fts_enabled:
+            return {"ok": False, "reason": "fts5_unavailable"}
+        if self.read_only:
+            return {"ok": False, "reason": "read_only"}
+
+        # Only demote if we're actually still on the legacy shape. If a prior
+        # run already demoted (markers/trash present), skip straight to
+        # finishing the backfill + teardown — this is what makes re-running
+        # after an interruption safe.
+        with self._lock:
+            legacy = self._db_has_legacy_inline_fts(self._conn)
+        pending = self.get_meta("fts_rebuild_high_water") is not None
+        if legacy and not pending:
+            self._demote_legacy_fts_to_trash()
+
+        # A stale CJK index (triggers dropped by a tokenizer-less process)
+        # can only be recovered from scratch — reset it now so the cjk
+        # backfill phase below rebuilds it. No-op without the tokenizer.
+        self._fts_cjk_reset_if_stale()
+        # An optimized v23 DB gaining the cjk index for the first time (no
+        # legacy work left, tokenizer newly installed): ensure the table +
+        # markers exist so the backfill phase has work to claim.
+        if self._fts_cjk_loaded:
+            with self._lock:
+                self._ensure_fts_cjk_schema(self._conn)
+                self._conn.commit()
+
+        def _emit(phase: str) -> None:
+            if progress_cb is None:
+                return
+            st = self.fts_rebuild_status()
+            if st is None:
+                st = self.fts_cjk_rebuild_status()
+            progress_cb({
+                "phase": phase,
+                "percent": st["percent"] if st else 100,
+                "indexed": st["indexed"] if st else 0,
+                "total": st["total"] if st else 0,
+            })
+
+        def _pause(chunk_seconds: float) -> None:
+            """Inter-chunk throttle (see the chunk-engine note above).
+
+            The chunk methods themselves never sleep, so this loop is the
+            single place the duty cycle is enforced: without it, back-to-back
+            BEGIN IMMEDIATE chunks starve any live gateway/CLI process
+            sharing the DB out of its lock retries (the measured ~85%
+            write-lock ownership that froze concurrent sessions).
+            """
+            time.sleep(max(
+                self._FTS_REBUILD_MIN_PAUSE,
+                chunk_seconds * self._FTS_REBUILD_DUTY_FACTOR,
+            ))
+
+        # Phase 1: backfill (foreground, throttled between chunks so a live
+        # gateway sharing the DB stays responsive).
+        _emit("backfill")
+        while True:
+            _t0 = time.monotonic()
+            if not self.fts_rebuild_step():
+                break
+            _emit("backfill")
+            _pause(time.monotonic() - _t0)
+        _emit("backfill")
+
+        # Phase 1b: backfill the CJK-bigram index (its own marker pair; a
+        # no-op when the tokenizer isn't loadable or nothing is pending).
+        while True:
+            _t0 = time.monotonic()
+            if not self.fts_cjk_rebuild_step():
+                break
+            _emit("backfill")
+            _pause(time.monotonic() - _t0)
+
+        # Phase 2: tear down the demoted legacy shadow tables in chunks.
+        _emit("teardown")
+        while True:
+            _t0 = time.monotonic()
+            if not self._fts_teardown_trash_step():
+                break
+            _emit("teardown")
+            _pause(time.monotonic() - _t0)
+
+        # Phase 3: reclaim freed pages to the OS.
+        vacuum_ok = None
+        if vacuum:
+            _emit("vacuum")
+            try:
+                with self._lock:
+                    self._conn.execute("VACUUM")
+                vacuum_ok = True
+            except sqlite3.OperationalError as exc:
+                # Most common cause: not enough free disk for VACUUM's temp
+                # copy. The optimization still succeeded; space just isn't
+                # reclaimed until a later VACUUM. Non-fatal.
+                logger.warning("VACUUM after FTS optimize failed: %s", exc)
+                vacuum_ok = False
+
+        # Phase 4: stamp the FTS storage layout as current, clear the "available"
+        # flag, and advance schema_version if it was somehow still behind (the
+        # main version normally advances on open now, but bump defensively so a
+        # DB opened only by pre-decoupling code still settles). The FTS-layout
+        # marker is the source of truth for "is this DB optimized".
+        def _settle(conn):
+            conn.execute(
+                "INSERT INTO state_meta (key, value) VALUES ('fts_storage_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(FTS_STORAGE_VERSION),),
+            )
+            conn.execute("DELETE FROM state_meta WHERE key = 'fts_optimize_available'")
+            conn.execute(
+                "UPDATE schema_version SET version = ? WHERE version < ?",
+                (SCHEMA_VERSION, SCHEMA_VERSION),
+            )
+        self._execute_write(_settle)
+        _emit("done")
+        logger.info(
+            "FTS storage optimization complete (layout v%d).", FTS_STORAGE_VERSION
+        )
+        return {"ok": True, "vacuumed": vacuum_ok}
+
+    @staticmethod
+    def _parse_schema_columns(schema_sql: str) -> Dict[str, Dict[str, str]]:
+        """Extract expected columns per table from SCHEMA_SQL.
+
+        Uses an in-memory SQLite database to parse the SQL — SQLite itself
+        handles all syntax (DEFAULT expressions with commas, inline
+        REFERENCES, CHECK constraints, etc.) so there are zero regex
+        edge cases.  The in-memory DB is opened, the schema DDL is
+        executed, and PRAGMA table_info extracts the column metadata.
+
+        Adding a column to SCHEMA_SQL is all that's needed; the
+        reconciliation loop picks it up automatically.
+        """
+        ref = sqlite3.connect(":memory:")
+        try:
+            ref.executescript(schema_sql)
+            table_columns: Dict[str, Dict[str, str]] = {}
+            for (tbl,) in ref.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall():
+                cols: Dict[str, str] = {}
+                for row in ref.execute(
+                    f'PRAGMA table_info("{tbl}")'
+                ).fetchall():
+                    # row: (cid, name, type, notnull, dflt_value, pk)
+                    col_name = row[1]
+                    col_type = row[2] or ""
+                    notnull = row[3]
+                    default = row[4]
+                    pk = row[5]
+                    # Reconstruct the type expression for ALTER TABLE ADD COLUMN
+                    parts = [col_type] if col_type else []
+                    if notnull and not pk:
+                        parts.append("NOT NULL")
+                    if default is not None:
+                        parts.append(f"DEFAULT {default}")
+                    cols[col_name] = " ".join(parts)
+                table_columns[tbl] = cols
+            return table_columns
+        finally:
+            ref.close()
+
+    def _reconcile_columns(self, cursor: sqlite3.Cursor) -> None:
+        """Ensure live tables have every column declared in SCHEMA_SQL.
+
+        Follows the Beets/sqlite-utils pattern: the CREATE TABLE definition
+        in SCHEMA_SQL is the single source of truth for the desired schema.
+        On every startup this method diffs the live columns (via PRAGMA
+        table_info) against the declared columns, and ADDs any that are
+        missing.
+
+        This makes column additions a declarative operation — just add
+        the column to SCHEMA_SQL and it appears on the next startup.
+        Version-gated migration blocks are no longer needed for ADD COLUMN.
+        """
+        expected = self._parse_schema_columns(SCHEMA_SQL)
+        for table_name, declared_cols in expected.items():
+            # Get current columns from the live table
+            try:
+                rows = cursor.execute(
+                    f'PRAGMA table_info("{table_name}")'
+                ).fetchall()
+            except sqlite3.OperationalError:
+                continue  # Table doesn't exist yet (shouldn't happen after executescript)
+            live_cols = set()
+            for row in rows:
+                # PRAGMA table_info returns (cid, name, type, notnull, dflt_value, pk)
+                name = row[1] if isinstance(row, (tuple, list)) else row["name"]
+                live_cols.add(name)
+
+            for col_name, col_type in declared_cols.items():
+                if col_name not in live_cols:
+                    safe_name = col_name.replace('"', '""')
+                    try:
+                        cursor.execute(
+                            f'ALTER TABLE "{table_name}" ADD COLUMN "{safe_name}" {col_type}'
+                        )
+                    except sqlite3.OperationalError as exc:
+                        # Expected: "duplicate column name" from a race or
+                        # re-run.  Unexpected: "Cannot add a NOT NULL column
+                        # with default value NULL" from a schema mistake.
+                        # Log at DEBUG so it's visible in agent.log.
+                        logger.debug(
+                            "reconcile %s.%s: %s", table_name, col_name, exc,
+                        )
+
+    def _init_schema(self):
+        """Create tables and FTS if they don't exist, reconcile columns.
+
+        Schema management follows the declarative reconciliation pattern
+        (Beets, sqlite-utils): SCHEMA_SQL is the single source of truth.
+        On existing databases, _reconcile_columns() diffs live columns
+        against SCHEMA_SQL and ADDs any missing ones.  This eliminates
+        the version-gated migration chain for column additions, making
+        it impossible for reordered or inserted migrations to skip columns.
+
+        The schema_version table is retained for future data migrations
+        (transforming existing rows) which cannot be handled declaratively.
+        """
+        cursor = self._conn.cursor()
+
+        cursor.executescript(SCHEMA_SQL)
+
+        # ── Declarative column reconciliation ──────────────────────────
+        # Diff live tables against SCHEMA_SQL and ADD any missing columns.
+        # This is idempotent and self-healing: even if a version-gated
+        # migration was skipped (e.g. due to version renumbering), the
+        # column gets created here.
+        self._reconcile_columns(cursor)
+
+        # Indexes that reference reconciler-added columns must be created
+        # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
+        # makes the initial executescript fail on legacy DBs (the index's
+        # WHERE clause references a column that doesn't exist yet).
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id "
+                "ON messages(session_id, platform_message_id) "
+                "WHERE platform_message_id IS NOT NULL"
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
+
+        # Deferred indexes that reference the reconciler-added ``active``
+        # column (idx_messages_session_active) — same ordering constraint.
+        cursor.executescript(DEFERRED_INDEX_SQL)
+
+        # Heal NULL ``active`` rows unconditionally on every startup.
+        # On real-world DBs the reconciler-added ``active`` column can lack
+        # its NOT NULL DEFAULT 1 (older reconciler builds reconstructed the
+        # type without the default — see #51646: PRAGMA shows
+        # (17,'active','INTEGER',0,None,0) in the wild), so INSERTs that
+        # omitted the column wrote NULL and the ``WHERE active = 1``
+        # transcript loaders hid the whole history.  The INSERTs now set
+        # active=1 explicitly; this idempotent repair un-hides rows written
+        # before the fix.  It was previously gated at ``current_version <
+        # 12`` which never re-ran for already-v12+ databases.
+        try:
+            cursor.execute(
+                "UPDATE messages SET active = 1 WHERE active IS NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        fts5_available = self._sqlite_supports_fts5(cursor)
+        fts_migrations_complete = True
+        if not fts5_available:
+            # Existing FTS triggers can still fire on messages INSERT/UPDATE
+            # even though the current sqlite runtime cannot read the virtual
+            # tables they target. Drop only the triggers so core persistence
+            # continues; if a future runtime has FTS5, _ensure_fts_schema()
+            # recreates them.
+            self._drop_fts_triggers(cursor)
+
+        # ── Schema version bookkeeping ─────────────────────────────────
+        # Bump to current so future data migrations (if any) can gate on
+        # version.  No version-gated column additions remain.
+        cursor.execute("SELECT version FROM schema_version LIMIT 1")
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                "INSERT INTO schema_version (version) VALUES (?)",
+                (SCHEMA_VERSION,),
+            )
+        else:
+            current_version = row["version"] if isinstance(row, sqlite3.Row) else row[0]
+            # Data migrations that can't be expressed declaratively (row
+            # backfills, index changes tied to a specific version step) stay
+            # in a version-gated chain. Column additions are handled by
+            # _reconcile_columns() above and no longer need entries here.
+            if current_version < 10 and SCHEMA_VERSION == 10:
+                # v10: trigram FTS5 table for CJK/substring search. The
+                # virtual table + triggers are created unconditionally via
+                # FTS_TRIGRAM_SQL below, but existing rows need a one-time
+                # backfill into the FTS index.
+                #
+                # Only run this when v10 itself is the target schema. Current
+                # v11+ code drops and rebuilds both FTS tables below, so doing
+                # the v10-only trigram backfill first only burns startup time
+                # and WAL space before v11 throws the work away.
+                if fts5_available:
+                    _fts_trigram_exists = self._fts_table_probe(
+                        cursor, "messages_fts_trigram"
+                    )
+                    if _fts_trigram_exists is False:
+                        if self._ensure_fts_schema(
+                            cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
+                        ):
+                            cursor.execute(
+                                "INSERT INTO messages_fts_trigram(rowid, content) "
+                                "SELECT id, content FROM messages WHERE content IS NOT NULL"
+                            )
+                        else:
+                            fts_migrations_complete = False
+                    elif _fts_trigram_exists is None:
+                        fts_migrations_complete = False
+                else:
+                    fts_migrations_complete = False
+            if current_version < 11 and SCHEMA_VERSION < 23:
+                # v11 (SUPERSEDED by v23): re-index FTS5 tables to cover
+                # tool_name + tool_calls in inline mode (#16751). v23 drops
+                # and rebuilds both FTS tables in external-content form, so
+                # running the v11 inline backfill first would only burn
+                # startup time and WAL space before v23 throws the work
+                # away — and its inline INSERT shape no longer matches the
+                # current external-content FTS_SQL anyway. Kept only for
+                # source archaeology; unreachable while SCHEMA_VERSION >= 23.
+                pass
+            if current_version < 16:
+                # v16: tag delegate subagent rows so pickers stay clean after
+                # parent deletes that used to orphan them (parent_session_id → NULL).
+                try:
+                    cursor.execute(
+                        "UPDATE sessions SET model_config = json_set("
+                        "COALESCE(model_config, '{}'), '$._delegate_from', parent_session_id) "
+                        f"WHERE parent_session_id IS NOT NULL "
+                        "AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL "
+                        f"AND {_ephemeral_child_sql('sessions')}"
+                    )
+                    cursor.execute(
+                        "UPDATE sessions SET model_config = json_set("
+                        "COALESCE(model_config, '{}'), '$._delegate_from', '__orphaned__') "
+                        "WHERE parent_session_id IS NULL "
+                        "AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL "
+                        "AND json_extract(COALESCE(model_config, '{}'), '$._branched_from') IS NULL "
+                        "AND title IS NULL "
+                        "AND message_count <= 25 "
+                        "AND EXISTS (SELECT 1 FROM messages m "
+                        "            WHERE m.session_id = sessions.id AND m.role = 'tool') "
+                        "AND NOT EXISTS (SELECT 1 FROM sessions ch "
+                        "                WHERE ch.parent_session_id = sessions.id)"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            if current_version < 18:
+                # v18: gateway metadata consolidation (#9006). Backfill
+                # display_name / origin_json / expiry_finalized from
+                # sessions.json so pre-migration gateway sessions are
+                # discoverable from state.db without the JSON index.
+                try:
+                    self._backfill_gateway_metadata_from_sessions_json(cursor)
+                except Exception as exc:
+                    # Backfill is best-effort: sessions.json may be absent,
+                    # corrupted, or partially stale. Missing metadata simply
+                    # means consumers fall back to sessions.json for those
+                    # rows until the gateway rewrites them.
+                    logger.debug("v18 gateway metadata backfill skipped: %s", exc)
+            if current_version < 20:
+                # v20: per-model usage attribution (issue #51607). Going
+                # forward update_token_counts() records each API call into
+                # session_model_usage keyed by the live model, but existing
+                # sessions only have their aggregate totals on the sessions
+                # row. Seed one usage row per historical session from those
+                # aggregates so insights reads uniformly from the new table.
+                # INSERT OR IGNORE keeps it idempotent: if newer code already
+                # wrote a (session_id, model, provider) row for a session, the
+                # PK conflict skips the stale aggregate rather than doubling it.
+                try:
+                    cursor.execute(
+                        """INSERT OR IGNORE INTO session_model_usage (
+                               session_id, model, billing_provider,
+                               billing_base_url, billing_mode,
+                               api_call_count, input_tokens,
+                               output_tokens, cache_read_tokens,
+                               cache_write_tokens, reasoning_tokens,
+                               estimated_cost_usd, actual_cost_usd,
+                               cost_status, cost_source, first_seen, last_seen
+                           )
+                           SELECT id, COALESCE(model, 'unknown'),
+                                  COALESCE(billing_provider, ''),
+                                  COALESCE(billing_base_url, ''),
+                                  COALESCE(billing_mode, ''),
+                                  COALESCE(api_call_count, 0),
+                                  COALESCE(input_tokens, 0),
+                                  COALESCE(output_tokens, 0),
+                                  COALESCE(cache_read_tokens, 0),
+                                  COALESCE(cache_write_tokens, 0),
+                                  COALESCE(reasoning_tokens, 0),
+                                  COALESCE(estimated_cost_usd, 0),
+                                  COALESCE(actual_cost_usd, 0),
+                                  cost_status, cost_source,
+                                  started_at, COALESCE(ended_at, started_at)
+                           FROM sessions
+                           WHERE COALESCE(input_tokens, 0)
+                                 + COALESCE(output_tokens, 0)
+                                 + COALESCE(cache_read_tokens, 0)
+                                 + COALESCE(cache_write_tokens, 0)
+                                 + COALESCE(reasoning_tokens, 0) > 0"""
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            if current_version < 22:
+                # v22: task-dimension usage attribution (issue #23270).
+                # session_model_usage gains a ``task`` column ('' = main agent
+                # loop; 'vision'/'compression'/'title_generation'/... =
+                # auxiliary calls) so aux model spend is visible in analytics.
+                # The column participates in the PRIMARY KEY and SQLite cannot
+                # ALTER a PK, so rebuild the table. The reconciler will have
+                # already ADDed the plain column on legacy DBs (harmless);
+                # the rebuild bakes it into the PK properly. Existing rows are
+                # main-loop accounting by definition → task=''.
+                try:
+                    legacy_pk = cursor.execute(
+                        "SELECT COUNT(*) FROM pragma_table_info('session_model_usage') "
+                        "WHERE name = 'task' AND pk > 0"
+                    ).fetchone()[0]
+                    if not legacy_pk:
+                        cursor.execute("ALTER TABLE session_model_usage RENAME TO session_model_usage_v21")
+                        cursor.execute(
+                            """CREATE TABLE session_model_usage (
+                                   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                                   model TEXT NOT NULL,
+                                   billing_provider TEXT NOT NULL DEFAULT '',
+                                   billing_base_url TEXT NOT NULL DEFAULT '',
+                                   billing_mode TEXT NOT NULL DEFAULT '',
+                                   task TEXT NOT NULL DEFAULT '',
+                                   api_call_count INTEGER NOT NULL DEFAULT 0,
+                                   input_tokens INTEGER NOT NULL DEFAULT 0,
+                                   output_tokens INTEGER NOT NULL DEFAULT 0,
+                                   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                                   cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                                   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                                   estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                                   actual_cost_usd REAL NOT NULL DEFAULT 0,
+                                   cost_status TEXT,
+                                   cost_source TEXT,
+                                   first_seen REAL,
+                                   last_seen REAL,
+                                   PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
+                               )"""
+                        )
+                        cursor.execute(
+                            """INSERT INTO session_model_usage (
+                                   session_id, model, billing_provider, billing_base_url,
+                                   billing_mode, task, api_call_count, input_tokens,
+                                   output_tokens, cache_read_tokens, cache_write_tokens,
+                                   reasoning_tokens, estimated_cost_usd, actual_cost_usd,
+                                   cost_status, cost_source, first_seen, last_seen
+                               )
+                               SELECT session_id, model, billing_provider, billing_base_url,
+                                      billing_mode, '', api_call_count, input_tokens,
+                                      output_tokens, cache_read_tokens, cache_write_tokens,
+                                      reasoning_tokens, estimated_cost_usd, actual_cost_usd,
+                                      cost_status, cost_source, first_seen, last_seen
+                               FROM session_model_usage_v21"""
+                        )
+                        cursor.execute("DROP TABLE session_model_usage_v21")
+                        cursor.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_session_model_usage_session "
+                            "ON session_model_usage(session_id)"
+                        )
+                        cursor.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_session_model_usage_model "
+                            "ON session_model_usage(model)"
+                        )
+                except sqlite3.OperationalError as exc:
+                    logger.debug("v22 session_model_usage rebuild skipped: %s", exc)
+            if current_version < 23:
+                # v23: FTS storage redesign (issues #22478, #43690, #55233).
+                # The v11 inline-mode FTS tables each store a full private
+                # copy of every message (content || tool_name || tool_calls),
+                # and the trigram index additionally covers role='tool' rows
+                # (~90% of message bytes: base64 payloads, file dumps) at
+                # ~2.6x amplification — together ~75% of state.db on heavy
+                # installs (observed: 18.9 GB of a 25 GB DB).
+                #
+                # OPT-IN, NOT AUTOMATIC. The transition (demote old vtables →
+                # new external-content schema → backfill → teardown → VACUUM)
+                # is disk-heavy (transient ~2x file size to fully reclaim via
+                # VACUUM) and long (~1-2h background on a 25 GB DB). Doing it
+                # silently on every big user's next open — with a completeness
+                # guarantee that depends on the process staying alive long
+                # enough — is the wrong default. So on an EXISTING install we
+                # touch nothing here: the v22 inline FTS keeps working exactly
+                # as before, and we only record a flag advertising that the
+                # optimization is available. `hermes sessions optimize-storage`
+                # performs the whole transition as one deliberate, disk-checked,
+                # progress-reported foreground operation.
+                #
+                # DECOUPLED VERSIONING. Crucially, this does NOT hold back the
+                # main schema_version. The FTS storage LAYOUT is tracked by an
+                # independent `fts_storage_version` marker (see
+                # _fts_storage_version / SETTLE below), so schema_version
+                # advances to SCHEMA_VERSION here like every other migration —
+                # future v24+ migrations land automatically for legacy-FTS
+                # users too. Only the FTS *layout* waits for opt-in.
+                if fts5_available and self._db_has_legacy_inline_fts(cursor):
+                    self.set_meta("fts_optimize_available", "1", cursor=cursor)
+
+            # The FTS storage layout is versioned independently of the main
+            # schema (see the v23 note above). Stamp the current layout so the
+            # main version can always advance: a fresh/optimized DB is at
+            # FTS_STORAGE_VERSION; a legacy DB is left at whatever it had
+            # (absent/0) until `optimize-storage` runs. An INTERRUPTED
+            # optimize (legacy vtables already demoted, but rebuild markers
+            # or demoted trash tables still present) is NOT stamped either —
+            # the marker is the source of truth for "fully optimized", and
+            # `fts_optimize_available()` keeps offering the resume until the
+            # transition actually completes.
+            if (
+                fts5_available
+                and not self._db_has_legacy_inline_fts(cursor)
+                and cursor.execute(
+                    "SELECT 1 FROM state_meta "
+                    "WHERE key = 'fts_rebuild_high_water' LIMIT 1"
+                ).fetchone() is None
+                and not self._has_fts_trash(cursor)
+            ):
+                self.set_meta(
+                    "fts_storage_version", str(FTS_STORAGE_VERSION), cursor=cursor
+                )
+
+            # Advance schema_version to current for ALL non-FTS-layout
+            # migrations. This is deliberately NOT gated on the FTS opt-in —
+            # holding the whole version back would block every future schema
+            # migration for a user who never optimizes. FTS5 being unavailable
+            # is the one case we skip (we can't have created the current FTS
+            # objects, so claiming the current schema would be a lie).
+            if (
+                current_version < SCHEMA_VERSION
+                and fts_migrations_complete
+                and fts5_available
+            ):
+                cursor.execute(
+                    "UPDATE schema_version SET version = ?",
+                    (SCHEMA_VERSION,),
+                )
+
+        # v25: de-duplicate per-session system prompt snapshots into shared
+        # content-addressed storage. This intentionally runs even when the
+        # version already says 25: an older concurrent/deferred gateway may
+        # have written new inline-only rows after the original migration.
+        self._dedupe_legacy_system_prompts(cursor)
+
+        # Unique title index — always ensure it exists. Older databases may
+        # contain duplicate aliases from before the constraint was enforced;
+        # preserve every session while letting the newest one retain the alias.
+        title_index_sql = (
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique "
+            "ON sessions(title) WHERE title IS NOT NULL"
+        )
+        try:
+            cursor.execute(title_index_sql)
+        except sqlite3.IntegrityError:
+            # The index is an optimization — its creation must never abort
+            # opening the database, so the repair itself is also guarded.
+            try:
+                cursor.execute(
+                    """UPDATE sessions AS older
+                       SET title = NULL
+                       WHERE title IS NOT NULL
+                         AND EXISTS (
+                             SELECT 1 FROM sessions AS newer
+                             WHERE newer.title = older.title
+                               AND newer.rowid > older.rowid
+                         )"""
+                )
+                logger.warning(
+                    "Cleared %d duplicate session title(s) while restoring the unique index",
+                    cursor.rowcount,
+                )
+                cursor.execute(title_index_sql)
+            except sqlite3.Error:
+                logger.exception(
+                    "Could not repair duplicate session titles; "
+                    "unique title index not created"
+                )
+        except sqlite3.OperationalError:
+            pass  # Index already exists
+
+        if fts5_available:
+            # FTS5 setup. Run the DDL even when the virtual table exists so
+            # CREATE TRIGGER IF NOT EXISTS repairs trigger-only degradation from
+            # an earlier no-FTS5 runtime.
+            #
+            # OPT-IN v23 boundary: a legacy v22 install (inline-content FTS,
+            # not yet opted into `hermes db optimize`) must keep its EXISTING
+            # inline schema + triggers. Running the v23 external-content DDL
+            # here would create the trigram source VIEW and leave the DB in a
+            # mixed inline/external state. So for a legacy DB we only ensure
+            # its inline triggers exist (via the legacy DDL), and skip the
+            # v23 view/external tables entirely. Fresh installs and opted-in
+            # DBs have no legacy inline FTS, so they get the v23 DDL.
+            if self._db_has_legacy_inline_fts(cursor):
+                triggers_need_repair = (
+                    self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)
+                )
+                self._fts_enabled = self._ensure_fts_schema(
+                    cursor, "messages_fts", LEGACY_FTS_SQL
+                )
+                if self._fts_enabled:
+                    trigram_enabled = self._ensure_fts_schema(
+                        cursor, "messages_fts_trigram", LEGACY_FTS_TRIGRAM_SQL
+                    )
+                    self._trigram_available = trigram_enabled
+                    if triggers_need_repair:
+                        self._rebuild_legacy_fts_indexes(
+                            cursor, include_trigram=trigram_enabled
+                        )
+            else:
+                triggers_need_repair = (
+                    self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)
+                )
+                self._fts_enabled = self._ensure_fts_schema(
+                    cursor, "messages_fts", FTS_SQL
+                )
+
+                # Trigram FTS5 for CJK/substring search. This is optional
+                # relative to the main FTS table; if it cannot be created,
+                # CJK search falls back to LIKE.
+                if self._fts_enabled:
+                    trigram_enabled = self._ensure_fts_schema(
+                        cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
+                    )
+                    self._trigram_available = trigram_enabled
+                    if triggers_need_repair:
+                        self._rebuild_fts_indexes(
+                            cursor,
+                            include_trigram=trigram_enabled,
+                        )
+                    # CJK-bigram index (cjk_unicode61). Strictly additive to
+                    # the surfaces above and gated on the loadable tokenizer:
+                    self._ensure_fts_cjk_schema(cursor)
+
+        self._conn.commit()
+
     # =========================================================================
     # Session lifecycle
     # =========================================================================
@@ -3556,10 +4643,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 """INSERT INTO sessions (
                    id, source, user_id, session_key, chat_id, chat_type, thread_id,
                    model, model_config, system_prompt, system_prompt_hash,
-                   parent_session_id, cwd, profile_name, git_repo_root,
-                   origin_json, display_name, started_at
+                   parent_session_id, cwd, profile_name, git_repo_root, started_at
                 )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        model = COALESCE(sessions.model, excluded.model),
                        model_config = COALESCE(sessions.model_config, excluded.model_config),
@@ -3604,6 +4690,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 ),
             )
             if system_prompt_hash is not None:
+                # An existing row may already reference a different prompt;
+                # collect the unused candidate inserted above without touching
+                # prompts still shared by any session.
                 self._delete_unreferenced_system_prompts(conn)
             if parent_session_id:
                 conn.execute(
@@ -3919,7 +5008,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             SELECT sessions.*,
                    COALESCE(sp.prompt, sessions.system_prompt)
                        AS _system_prompt_resolved,
-                   {_sql_session_last_active("sessions")} AS last_active
+                   COALESCE(
+                       (SELECT MAX(m.timestamp) FROM messages m
+                        WHERE m.session_id = sessions.id),
+                       sessions.started_at
+                   ) AS last_active
             FROM sessions
             LEFT JOIN system_prompts sp
               ON sp.hash = sessions.system_prompt_hash
@@ -4037,28 +5130,16 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 """
                 SELECT s.*,
                        COALESCE(sp.prompt, s.system_prompt)
-                           AS _system_prompt_resolved,
-                       (COALESCE(s.message_count, 0) > 0 OR EXISTS (
-                           SELECT 1 FROM messages WHERE messages.session_id = s.id LIMIT 1
-                       )) AS _has_messages
+                           AS _system_prompt_resolved
                 FROM sessions s
                 LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash
                 WHERE s.session_key = ?
                   AND s.source = ?
                   AND (s.ended_at IS NULL OR s.end_reason IN ('agent_close', 'ws_orphan_reap'))
-                  AND NOT EXISTS (
-                      SELECT 1 FROM sessions b
-                      WHERE b.session_key = s.session_key
-                        AND b.source = s.source
-                        AND b.ended_at IS NOT NULL
-                        AND b.end_reason IN ('session_reset', 'session_switch',
-                                             'idle', 'daily', 'suspended',
-                                             'resume_pending_expired')
-                        AND b.ended_at
-                            > COALESCE(s.last_activity_at, s.started_at)
-                  )
-                ORDER BY _has_messages DESC,
-                         COALESCE(s.last_activity_at, s.started_at) DESC
+                  AND (COALESCE(s.message_count, 0) > 0 OR EXISTS (
+                      SELECT 1 FROM messages WHERE messages.session_id = s.id LIMIT 1
+                  ))
+                ORDER BY s.started_at DESC
                 LIMIT 1
                 """,
                 (session_key, source),
@@ -4075,10 +5156,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 """
                 SELECT s.*,
                        COALESCE(sp.prompt, s.system_prompt)
-                           AS _system_prompt_resolved,
-                       (COALESCE(s.message_count, 0) > 0 OR EXISTS (
-                           SELECT 1 FROM messages WHERE messages.session_id = s.id LIMIT 1
-                       )) AS _has_messages
+                           AS _system_prompt_resolved
                 FROM sessions s
                 LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash
                 WHERE s.source = ?
@@ -4090,499 +5168,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                   AND (COALESCE(s.message_count, 0) > 0 OR EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = s.id LIMIT 1
                   ))
-                  AND NOT EXISTS (
-                      SELECT 1 FROM sessions b
-                      WHERE b.source = s.source
-                        AND COALESCE(b.user_id, '') = COALESCE(s.user_id, '')
-                        AND COALESCE(b.chat_id, '') = COALESCE(s.chat_id, '')
-                        AND COALESCE(b.chat_type, '') = COALESCE(s.chat_type, '')
-                        AND COALESCE(b.thread_id, '') = COALESCE(s.thread_id, '')
-                        AND b.ended_at IS NOT NULL
-                        AND b.end_reason IN ('session_reset', 'session_switch',
-                                             'idle', 'daily', 'suspended',
-                                             'resume_pending_expired')
-                        AND b.ended_at
-                            > COALESCE(s.last_activity_at, s.started_at)
-                  )
-                ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC
+                ORDER BY s.started_at DESC
                 LIMIT 1
                 """,
                 (source, user_id, chat_id, chat_type, thread_id),
             ).fetchone()
         return self._session_row_dict(row) if row else None
-
-    # ── Orphaned gateway-session repair (#82616) ──────────────────────────
-    # A write-path failure (corrupt FTS, crash between routing publication
-    # and row creation) can leave the live conversation in a session row
-    # that never received its identity columns. Both queries above require
-    # those columns, so the row holding the real transcript is invisible to
-    # recovery: the chat resolves to the last keyed row instead — days older
-    # — and the conversation time-travels. Hardening the write side cannot
-    # reach a row that is *already* damaged; these two methods are the
-    # offline repair path behind ``hermes sessions repair-routing``.
-
-    # Widest plausible gap between a keyed predecessor going quiet and its
-    # unkeyed successor being minted. The reported incident gap was ~60s;
-    # 15 minutes stays generous without spanning unrelated conversations.
-    _ORPHAN_ADOPTION_MAX_GAP_S = 900.0
-
-    def find_orphaned_gateway_sessions(
-        self, *, max_gap_s: Optional[float] = None
-    ) -> List[Dict[str, Any]]:
-        """Report message-bearing session rows that lost their routing identity.
-
-        A row is a candidate orphan when it has messages but no
-        ``session_key``. It is only *adoptable* when exactly one keyed
-        predecessor can be named as the conversation it continues:
-
-        * ``lineage`` — ``parent_session_id`` points at a keyed row of the
-          same source. That is a recorded fact, so no time window applies.
-        * ``contiguity`` — exactly one keyed row of the same source (and
-          compatible ``user_id``) fell quiet within *max_gap_s* of the
-          orphan's start, and is older than the orphan's own last activity.
-
-        Anything ambiguous is reported with ``adoptable=False`` and a reason
-        rather than guessed at: mis-adopting would splice one person's
-        conversation into another person's chat. Branch/delegate/tool rows
-        are excluded outright — they are unkeyed by design, not by damage.
-        """
-        gap = (
-            self._ORPHAN_ADOPTION_MAX_GAP_S
-            if max_gap_s is None
-            else float(max_gap_s)
-        )
-        orphan_active = _sql_session_last_active("o")
-        donor_active = _sql_session_last_active("d")
-        donor_columns = (
-            "d.id, d.session_key, d.chat_id, d.chat_type, d.thread_id, "
-            "d.user_id, d.origin_json, d.display_name, d.end_reason"
-        )
-        records: List[Dict[str, Any]] = []
-
-        with self._lock:
-            orphans = self._conn.execute(
-                f"""
-                SELECT o.id, o.source, o.user_id, o.started_at,
-                       o.parent_session_id,
-                       {orphan_active} AS last_active,
-                       (SELECT COUNT(*) FROM messages m
-                         WHERE m.session_id = o.id) AS message_count
-                FROM sessions o
-                WHERE o.session_key IS NULL
-                  AND EXISTS (SELECT 1 FROM messages m
-                               WHERE m.session_id = o.id)
-                  AND COALESCE(o.source, '') != 'tool'
-                  AND json_extract(COALESCE(o.model_config, '{{}}'),
-                                   '$._branched_from') IS NULL
-                  AND json_extract(COALESCE(o.model_config, '{{}}'),
-                                   '$._delegate_from') IS NULL
-                ORDER BY o.started_at ASC
-                """
-            ).fetchall()
-
-            for orphan in orphans:
-                donor = None
-                evidence = ""
-                reason = ""
-
-                if orphan["parent_session_id"]:
-                    evidence = "lineage"
-                    donor = self._conn.execute(
-                        f"""
-                        SELECT {donor_columns}
-                        FROM sessions d
-                        WHERE d.id = ?
-                          AND d.session_key IS NOT NULL
-                          AND COALESCE(d.source, '') = COALESCE(?, '')
-                        """,
-                        (orphan["parent_session_id"], orphan["source"]),
-                    ).fetchone()
-                    if donor is None:
-                        reason = (
-                            "parent session carries no gateway identity of "
-                            "this source"
-                        )
-                else:
-                    evidence = "contiguity"
-                    candidates = self._conn.execute(
-                        f"""
-                        SELECT {donor_columns}, {donor_active} AS last_active
-                        FROM sessions d
-                        WHERE d.session_key IS NOT NULL
-                          AND d.id != ?
-                          AND COALESCE(d.source, '') = COALESCE(?, '')
-                          AND (COALESCE(d.user_id, '') = ''
-                               OR COALESCE(?, '') = ''
-                               OR d.user_id = ?)
-                          AND {donor_active} BETWEEN ? AND ?
-                          AND {donor_active} < ?
-                        ORDER BY last_active DESC
-                        LIMIT 2
-                        """,
-                        (
-                            orphan["id"],
-                            orphan["source"],
-                            orphan["user_id"],
-                            orphan["user_id"],
-                            (orphan["started_at"] or 0) - gap,
-                            (orphan["started_at"] or 0) + gap,
-                            orphan["last_active"],
-                        ),
-                    ).fetchall()
-                    if not candidates:
-                        reason = (
-                            f"no keyed predecessor fell quiet within {gap:.0f}s "
-                            "of this session's start"
-                        )
-                    elif len(candidates) > 1:
-                        reason = (
-                            "ambiguous: more than one keyed predecessor "
-                            "matches this window"
-                        )
-                    else:
-                        donor = candidates[0]
-
-                records.append(
-                    {
-                        "orphan_id": orphan["id"],
-                        "source": orphan["source"],
-                        "message_count": orphan["message_count"],
-                        "started_at": orphan["started_at"],
-                        "last_active": orphan["last_active"],
-                        "donor_id": donor["id"] if donor else None,
-                        "session_key": donor["session_key"] if donor else None,
-                        "evidence": evidence if donor else "",
-                        "adoptable": donor is not None,
-                        "reason": reason,
-                    }
-                )
-
-        # Two unkeyed successors claiming the same predecessor means at most
-        # one of them continues that chat, and nothing here says which.
-        contested = {
-            r["donor_id"]
-            for r in records
-            if r["adoptable"]
-            and sum(1 for x in records if x["donor_id"] == r["donor_id"]) > 1
-        }
-        for record in records:
-            if record["donor_id"] in contested:
-                record["adoptable"] = False
-                record["reason"] = (
-                    "ambiguous: more than one unkeyed session claims this "
-                    "predecessor"
-                )
-        return records
-
-    def adopt_orphaned_gateway_session(
-        self, orphan_id: str, donor_id: str
-    ) -> bool:
-        """Stamp *orphan_id* with *donor_id*'s routing identity, retire *donor_id*.
-
-        Re-verifies the pair inside the write transaction, so a concurrent
-        gateway that healed either row in the meantime turns this into a
-        no-op instead of a conflicting write. Existing non-NULL columns on
-        the orphan are preserved. Returns True when the adoption applied.
-        """
-        if not orphan_id or not donor_id or orphan_id == donor_id:
-            return False
-
-        def _do(conn):
-            donor = conn.execute(
-                "SELECT session_key, chat_id, chat_type, thread_id, user_id, "
-                "origin_json, display_name, source FROM sessions WHERE id = ?",
-                (donor_id,),
-            ).fetchone()
-            orphan = conn.execute(
-                "SELECT session_key, source FROM sessions WHERE id = ?",
-                (orphan_id,),
-            ).fetchone()
-            if donor is None or orphan is None:
-                return False
-            if not donor["session_key"] or orphan["session_key"]:
-                return False
-            if (donor["source"] or "") != (orphan["source"] or ""):
-                return False
-
-            conn.execute(
-                """UPDATE sessions
-                      SET session_key = ?,
-                          chat_id = COALESCE(chat_id, ?),
-                          chat_type = COALESCE(chat_type, ?),
-                          thread_id = COALESCE(thread_id, ?),
-                          user_id = COALESCE(user_id, ?),
-                          origin_json = COALESCE(origin_json, ?),
-                          display_name = COALESCE(display_name, ?),
-                          parent_session_id = COALESCE(parent_session_id, ?)
-                    WHERE id = ? AND session_key IS NULL""",
-                (
-                    donor["session_key"],
-                    donor["chat_id"],
-                    donor["chat_type"],
-                    donor["thread_id"],
-                    donor["user_id"],
-                    donor["origin_json"],
-                    donor["display_name"],
-                    donor_id,
-                    orphan_id,
-                ),
-            )
-            # Retire the predecessor under a reason recovery does NOT treat
-            # as resumable — 'agent_close'/'ws_orphan_reap' would keep it in
-            # the running, and the newly keyed orphan could lose the chat
-            # again on the next restart.
-            conn.execute(
-                "UPDATE sessions SET ended_at = COALESCE(ended_at, ?), "
-                "end_reason = 'superseded_by_repair' WHERE id = ?",
-                (time.time(), donor_id),
-            )
-            return True
-
-        return self._execute_write(_do)
-
-    # Children that carry a ``parent_session_id`` but are NOT compression
-    # continuations: branches, delegate/subagent runs, and tool sessions.
-    # A marker only disqualifies a child when it points at the parent being
-    # queried — compression continuations inherit the rotated agent's
-    # ``model_config`` verbatim (``publish_compression_child`` callers pass
-    # ``agent._session_init_model_config``), so a delegate subagent's
-    # continuation carries ``_delegate_from=<the delegate's own parent>``.
-    # Matching markers by mere presence misclassified those real
-    # continuations as delegate children (fail-open for orphan reopen,
-    # fail-closed for adoption). Bind the parent id for both markers.
-    _NON_CONTINUATION_CHILD_FILTER_SQL = (
-        "  AND COALESCE(json_extract(COALESCE({alias}model_config, '{{}}'),"
-        " '$._branched_from'), '') != ?\n"
-        "  AND COALESCE(json_extract(COALESCE({alias}model_config, '{{}}'),"
-        " '$._delegate_from'), '') != ?\n"
-        "  AND COALESCE({alias}source, '') != 'tool'\n"
-    )
-
-    def find_live_compression_child(
-        self, parent_session_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """Return the unique live direct child of a compression-ended session.
-
-        A stale agent may observe that another compression path already rotated
-        its parent. Recovery is safe only when the durable lineage identifies
-        exactly one live direct continuation. Multiple children are treated as
-        ambiguous and fail closed rather than guessing which transcript owns
-        subsequent messages.
-        """
-        if not parent_session_id:
-            return None
-        with self._lock:
-            parent = self._conn.execute(
-                "SELECT ended_at, end_reason FROM sessions WHERE id = ?",
-                (parent_session_id,),
-            ).fetchone()
-            if (
-                parent is None
-                or parent["ended_at"] is None
-                or parent["end_reason"] != "compression"
-            ):
-                return None
-            rows = self._conn.execute(
-                """
-                SELECT s.*,
-                       COALESCE(sp.prompt, s.system_prompt)
-                           AS _system_prompt_resolved
-                FROM sessions s
-                LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash
-                WHERE s.parent_session_id = ?
-                  AND s.ended_at IS NULL
-                """
-                + self._NON_CONTINUATION_CHILD_FILTER_SQL.format(alias="s.")
-                + """
-                ORDER BY s.started_at ASC
-                LIMIT 2
-                """,
-                (parent_session_id, parent_session_id, parent_session_id),
-            ).fetchall()
-        return self._session_row_dict(rows[0]) if len(rows) == 1 else None
-
-    def reopen_orphaned_compression_session(self, session_id: str) -> bool:
-        """Reopen a compression parent only when no continuation was published.
-
-        Compression publication is atomic in current builds, but older builds
-        could leave a closed parent behind after an interrupted handoff.  This
-        recovery is deliberately conservative: an active compression lease or
-        any canonical child means the lineage is still owned by another path,
-        so the caller must fail closed instead of reopening the parent.
-        """
-        if not session_id:
-            return False
-
-        def _do(conn):
-            parent = conn.execute(
-                "SELECT ended_at, end_reason FROM sessions WHERE id = ?",
-                (session_id,),
-            ).fetchone()
-            if (
-                parent is None
-                or parent["ended_at"] is None
-                or parent["end_reason"] != "compression"
-            ):
-                return False
-
-            # Treat any direct non-branch/non-delegate/non-tool child as a
-            # continuation, regardless of its current ended state. Reopening
-            # in that case could create a second live head for one lineage.
-            child = conn.execute(
-                """
-                SELECT 1
-                FROM sessions
-                WHERE parent_session_id = ?
-                """
-                + self._NON_CONTINUATION_CHILD_FILTER_SQL.format(alias="")
-                + """
-                LIMIT 1
-                """,
-                (session_id, session_id, session_id),
-            ).fetchone()
-            if child is not None:
-                return False
-
-            # refresh_compression_lock() deliberately lets an owner revive its
-            # own expired row. Reclaim that row inside this write transaction
-            # before reopening: refresh-first makes the lease active and aborts
-            # recovery; recovery-first deletes the holder identity so a later
-            # refresh cannot resurrect it.
-            now = time.time()
-            lock_row = conn.execute(
-                "SELECT holder, expires_at FROM compression_locks "
-                "WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
-            if lock_row is not None:
-                expires_at = lock_row["expires_at"]
-                if expires_at is None or float(expires_at) >= now:
-                    return False
-                deleted = conn.execute(
-                    "DELETE FROM compression_locks "
-                    "WHERE session_id = ? AND holder = ? AND expires_at = ?",
-                    (session_id, lock_row["holder"], expires_at),
-                )
-                if deleted.rowcount != 1:
-                    return False
-
-            updated = conn.execute(
-                "UPDATE sessions SET ended_at = NULL, end_reason = NULL "
-                "WHERE id = ? AND ended_at IS NOT NULL "
-                "AND end_reason = 'compression'",
-                (session_id,),
-            )
-            # rowcount==1 is guaranteed by the parent SELECT at the top of
-            # this same BEGIN IMMEDIATE transaction. If this is ever edited
-            # to return False past this point, note that the lease DELETE
-            # above will still COMMIT (_execute_write commits unless _do
-            # raises) — raise instead of returning False to roll back.
-            return updated.rowcount == 1
-
-        return bool(self._execute_write(_do))
-
-    def publish_compression_child(
-        self,
-        *,
-        parent_session_id: str,
-        child_session_id: str,
-        source: str,
-        messages: List[Dict[str, Any]],
-        model: str = None,
-        model_config: Dict[str, Any] = None,
-        system_prompt: str = None,
-        cwd: str = None,
-        profile_name: str = None,
-        compression_lock_holder: str = None,
-        require_compression_lease: bool = True,
-    ) -> None:
-        """Atomically close a parent and publish its durable compression child.
-
-        The parent closure, child row, and compacted handoff become visible in
-        one transaction. Readers can therefore observe either the live parent or
-        a complete child, never an ended parent with a missing/empty child.
-        """
-        def _do(conn):
-            lock_row = conn.execute(
-                "SELECT holder, expires_at FROM compression_locks WHERE session_id = ?",
-                (parent_session_id,),
-            ).fetchone()
-            if require_compression_lease and (
-                lock_row is None
-                or not compression_lock_holder
-                or lock_row["holder"] != compression_lock_holder
-                or float(lock_row["expires_at"]) <= time.time()
-            ):
-                raise CompressionSessionBusyError(
-                    f"Compression lease lost before publication: {parent_session_id}"
-                )
-            parent = conn.execute(
-                """SELECT ended_at, cwd, git_branch, git_repo_root,
-                          user_id, session_key, chat_id, chat_type,
-                          thread_id, display_name, origin_json, profile_name
-                   FROM sessions WHERE id = ?""",
-                (parent_session_id,),
-            ).fetchone()
-            if parent is None:
-                raise RuntimeError(f"Compression parent not found: {parent_session_id}")
-            if parent["ended_at"] is not None:
-                raise RuntimeError(f"Compression parent already ended: {parent_session_id}")
-            if not messages:
-                raise RuntimeError("Compression child handoff must not be empty")
-            system_prompt_hash = self._store_system_prompt(conn, system_prompt)
-
-            conn.execute(
-                """INSERT INTO sessions (
-                   id, source, model, model_config, system_prompt,
-                   system_prompt_hash,
-                   parent_session_id, cwd, git_branch, git_repo_root,
-                   profile_name, user_id, session_key, chat_id, chat_type,
-                   thread_id, display_name, origin_json, started_at
-                ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    child_session_id,
-                    source,
-                    model,
-                    json.dumps(model_config) if model_config else None,
-                    system_prompt_hash,
-                    parent_session_id,
-                    cwd or parent["cwd"],
-                    parent["git_branch"],
-                    parent["git_repo_root"],
-                    # Same inheritance contract as _insert_session_row's
-                    # compression-fork backfill (#59527 / cross-profile jump
-                    # fix): the child stays on the parent's profile and keeps
-                    # the gateway routing/origin columns so peer recovery
-                    # still works after a crash at the boundary.
-                    profile_name or parent["profile_name"],
-                    parent["user_id"],
-                    parent["session_key"],
-                    parent["chat_id"],
-                    parent["chat_type"],
-                    parent["thread_id"],
-                    parent["display_name"],
-                    parent["origin_json"],
-                    time.time(),
-                ),
-            )
-            total_messages, total_tool_calls = self._insert_message_rows(
-                conn, child_session_id, messages
-            )
-            conn.execute(
-                "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
-                (total_messages, total_tool_calls, child_session_id),
-            )
-            updated = conn.execute(
-                "UPDATE sessions SET ended_at = ?, end_reason = 'compression' "
-                "WHERE id = ? AND ended_at IS NULL",
-                (time.time(), parent_session_id),
-            )
-            if updated.rowcount != 1:
-                raise RuntimeError(
-                    f"Compression parent changed during publication: {parent_session_id}"
-                )
-
-        self._execute_write(_do)
 
     def end_session(self, session_id: str, end_reason: str) -> None:
         """Mark a session as ended.
@@ -5329,11 +5920,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         Unlike ``update_token_counts`` which uses ``COALESCE(model, ?)``
         (only filling in NULL), this unconditionally sets the model column
-        so that the dashboard reflects the user's latest /model choice.
-        Also nulls ``system_prompt`` so stale ``Model:`` / ``Provider:``
-        footer metadata is rebuilt on the next turn. A successful /model
-        switch explicitly replaces any confirmed Browser runtime lock while
-        preserving unrelated lineage markers in ``model_config``.
+        so that the dashboard reflects the user's latest /model choice. Also
+        clears the cached prompt snapshot so model/provider footer metadata is
+        rebuilt on the next turn.
         """
         # This write bypasses the token queue, so deltas enqueued before the
         # switch must land first: a still-queued first delta carries the
@@ -5345,17 +5934,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         def _do(conn):
             conn.execute(
-                """UPDATE sessions SET
-                   model = ?,
-                   model_config = CASE
-                       WHEN model_config IS NULL THEN NULL
-                       WHEN json_valid(model_config)
-                           THEN json_remove(model_config, '$.browser_model_lock')
-                       ELSE model_config
-                   END,
-                   system_prompt = NULL,
-                   system_prompt_hash = NULL
-                   WHERE id = ?""",
+                "UPDATE sessions SET model = ?, system_prompt = NULL, "
+                "system_prompt_hash = NULL WHERE id = ?",
                 (model, session_id),
             )
             self._delete_unreferenced_system_prompts(conn)
@@ -6245,12 +6825,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get a session by ID."""
-        # Cost/usage readers (/status, /usage, gateway endpoints) reach the
-        # row through here; drain queued token deltas so they see exact
-        # totals. No-op attribute check when nothing is queued.
-        self.flush_token_counts()
-        with self._read_ctx() as conn:
-            cursor = conn.execute(
+        with self._lock:
+            cursor = self._conn.execute(
                 "SELECT s.*, "
                 "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
                 "FROM sessions s "
@@ -6739,8 +7315,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
     def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         """Look up a session by exact title. Returns session dict or None."""
-        with self._read_ctx() as conn:
-            cursor = conn.execute(
+        with self._lock:
+            cursor = self._conn.execute(
                 "SELECT s.*, "
                 "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
                 "FROM sessions s "
@@ -7036,9 +7612,6 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             where_clauses.append("s.archived = 0")
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        # Snapshot the filter params before the query builders below extend
-        # them with LIMIT/OFFSET — the pinned back-fill reuses the same WHERE.
-        base_where_params = list(params)
         prompt_select = (
             "" if compact_rows
             else ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved"
@@ -7151,6 +7724,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     {_sql_session_last_active("s")} AS last_active,
                     COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
                 FROM sessions s
+                {prompt_join}
                 LEFT JOIN chain_max cm ON cm.root_id = s.id
                 {prompt_join}
                 {outer_where}
@@ -7216,19 +7790,26 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     ) AS last_active
                 FROM sessions s
                 {prompt_join}
-                {pinned_where}
+                {where_sql}
                 ORDER BY s.started_at DESC
             """
-            with self._read_ctx() as conn:
-                pinned_cursor = conn.execute(pinned_query, base_where_params)
-                pinned_rows = pinned_cursor.fetchall()
-            for row in pinned_rows:
-                s = self._session_row_dict(row)
-                if s["id"] in seen_ids:
-                    continue
-                s["preview"] = _shape_preview(s.pop("_preview_raw", ""))
-                seen_ids.add(s["id"])
-                sessions.append(s)
+            params.extend([limit, offset])
+        with self._lock:
+            cursor = self._conn.execute(query, params)
+            rows = cursor.fetchall()
+        sessions = []
+        for row in rows:
+            s = self._session_row_dict(row)
+            # Build the preview from the raw substring
+            raw = s.pop("_preview_raw", "").strip()
+            if raw:
+                text = raw[:60]
+                s["preview"] = text + ("..." if len(raw) > 60 else "")
+            else:
+                s["preview"] = ""
+            # Drop the internal ordering column so callers see a clean dict.
+            s.pop("_effective_last_active", None)
+            sessions.append(s)
 
         # Project compression roots forward to their tips. Each row whose
         # end_reason is 'compression' has a continuation child; replace the
@@ -7287,6 +7868,122 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             s["unread"] = self.session_unread(s)
 
         return sessions
+
+    def list_cron_job_runs(
+        self,
+        job_id: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List the run sessions produced by a single cron job, newest first.
+
+        Cron runs are flat, independent sessions whose id is
+        ``cron_{job_id}_{timestamp}`` (see ``cron/scheduler.run_job``). They are
+        never compression roots and never branch, so this deliberately skips the
+        ``list_sessions_rich`` recursive compression-chain CTE / leading-wildcard
+        ``id_query`` path — that path seeds from *every* ``source='cron'`` row in
+        the DB and only filters to one job's runs after the scan, so it scales
+        with the whole cron pile (a heavy history makes the desktop run-history
+        endpoint time out before it eventually populates).
+
+        Instead this binds to one job with a ``[prefix, prefix_hi)`` range over
+        the id (an index range scan, not a ``%...%`` substring), filters
+        ``source='cron'``, and orders by ``started_at DESC``. Work scales with
+        the requested window, not the total cron history.
+
+        Returns the same enriched row shape as ``list_sessions_rich`` (adds
+        ``preview`` + ``last_active``) so callers can reuse it.
+        """
+        prefix = f"cron_{job_id}_"
+        # Half-open upper bound for an index range scan: increment the final
+        # byte of the prefix so the range covers exactly the ids that start
+        # with ``prefix`` and nothing else. ``prefix`` always ends in '_', but
+        # compute it generically rather than hardcoding the successor char.
+        prefix_hi = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+
+        query = """
+            SELECT s.*,
+                COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved,
+                COALESCE(
+                    (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
+                     FROM messages m
+                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                     ORDER BY m.timestamp, m.id LIMIT 1),
+                    ''
+                ) AS _preview_raw,
+                COALESCE(
+                    (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
+                    s.started_at
+                ) AS last_active
+            FROM sessions s
+            LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash
+            WHERE s.source = 'cron' AND s.id >= ? AND s.id < ?
+            ORDER BY s.started_at DESC, s.id DESC
+            LIMIT ? OFFSET ?
+        """
+        with self._lock:
+            cursor = self._conn.execute(query, (prefix, prefix_hi, limit, offset))
+            rows = cursor.fetchall()
+
+        runs: List[Dict[str, Any]] = []
+        for row in rows:
+            s = self._session_row_dict(row)
+            raw = s.pop("_preview_raw", "").strip()
+            if raw:
+                text = raw[:60]
+                s["preview"] = text + ("..." if len(raw) > 60 else "")
+            else:
+                s["preview"] = ""
+            runs.append(s)
+        return runs
+
+    def _get_session_rich_row(self, session_id: str, compact_rows: bool = False) -> Optional[Dict[str, Any]]:
+        """Fetch a single session with the same enriched columns as
+        ``list_sessions_rich`` (preview + last_active). Returns None if the
+        session doesn't exist.
+
+        Pass ``compact_rows=True`` to omit the ``system_prompt`` blob (see
+        ``list_sessions_rich`` for details).
+        """
+        _sel = self._compact_session_cols() if compact_rows else "s.*"
+        prompt_select = (
+            "" if compact_rows
+            else ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved"
+        )
+        prompt_join = (
+            "" if compact_rows
+            else "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash"
+        )
+        query = f"""
+            SELECT {_sel}{prompt_select},
+                COALESCE(
+                    (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
+                     FROM messages m
+                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                     ORDER BY m.timestamp, m.id LIMIT 1),
+                    ''
+                ) AS _preview_raw,
+                COALESCE(
+                    (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
+                    s.started_at
+                ) AS last_active
+            FROM sessions s
+            {prompt_join}
+            WHERE s.id = ?
+        """
+        with self._lock:
+            cursor = self._conn.execute(query, (session_id,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        s = self._session_row_dict(row)
+        raw = s.pop("_preview_raw", "").strip()
+        if raw:
+            text = raw[:60]
+            s["preview"] = text + ("..." if len(raw) > 60 else "")
+        else:
+            s["preview"] = ""
+        return s
 
     # =========================================================================
     # Message storage
@@ -7972,7 +8669,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     self._encode_content(msg.get("content")),
                     msg.get("tool_call_id"),
                     tool_calls_json,
-                    _scrub_surrogates(msg.get("tool_name")),
+                    _scrub_surrogates(msg.get("tool_name") or msg.get("name")),
                     msg.get("effect_disposition"),
                     message_timestamp,
                     msg.get("token_count"),
@@ -9031,9 +9728,13 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         select_with_last_active = (
             "SELECT s.*, "
             "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved, "
-            f"{_sql_session_last_active('s')} AS last_active "
+            "COALESCE(m.last_active, s.started_at) AS last_active "
             "FROM sessions s "
             "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
+            "LEFT JOIN ("
+            "SELECT session_id, MAX(timestamp) AS last_active "
+            "FROM messages GROUP BY session_id"
+            ") m ON m.session_id = s.id "
         )
         where_clauses = []
         params: list = []
@@ -9047,12 +9748,19 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         params.extend([limit, offset])
         with self._lock:
-            cursor = self._conn.execute(
-                f"{select_with_last_active}"
-                f"{where_sql} "
-                "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
-                params,
-            )
+            if source:
+                cursor = self._conn.execute(
+                    f"{select_with_last_active}"
+                    "WHERE s.source = ? "
+                    "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                    (source, limit, offset),
+                )
+            else:
+                cursor = self._conn.execute(
+                    f"{select_with_last_active}"
+                    "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                )
             return [self._session_row_dict(row) for row in cursor.fetchall()]
 
     # =========================================================================
@@ -9280,6 +9988,447 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 # requested session itself was compacted.
                 continue
         return lineage if session_id in lineage else [session_id]
+
+    def export_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Export a single session with all its messages as a dict."""
+        session = self.get_session(session_id)
+        if not session:
+            return None
+        messages = self.get_messages(session_id)
+        return {**session, "messages": messages}
+
+    def export_session_lineage(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Export a compression lineage as one logical session dict."""
+        lineage_ids = self.get_compression_lineage(session_id)
+        if not lineage_ids:
+            return None
+        segments = []
+        for sid in lineage_ids:
+            segment = self.export_session(sid)
+            if segment:
+                segments.append(segment)
+        if not segments:
+            return None
+        base = dict(segments[-1])
+        total_messages = sum(len(seg.get("messages") or []) for seg in segments)
+        base["segments"] = segments
+        base["lineage_session_ids"] = [seg["id"] for seg in segments]
+        base["message_count"] = total_messages
+        base["messages"] = [msg for seg in segments for msg in (seg.get("messages") or [])]
+        return base
+
+    def export_all(self, source: str = None) -> List[Dict[str, Any]]:
+        """
+        Export all sessions (with messages) as a list of dicts.
+        Suitable for writing to a JSONL file for backup/analysis.
+        """
+        sessions = self.search_sessions(source=source, limit=100000)
+        results = []
+        for session in sessions:
+            messages = self.get_messages(session["id"])
+            results.append({**session, "messages": messages})
+        return results
+
+    @staticmethod
+    def _import_text_or_none(value: Any, field: str) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        raise ValueError(f"{field} must be a string")
+
+    @staticmethod
+    def _import_json_object_or_none(value: Any, field: str) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{field} must be valid JSON") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError(f"{field} must be a JSON object")
+            return value
+        if not isinstance(value, dict):
+            raise ValueError(f"{field} must be a JSON object")
+        try:
+            return json.dumps(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field} must be JSON serializable") from exc
+
+    @staticmethod
+    def _float_or_none(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _import_int_or_none(value: Any, field: str) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field} must be an integer") from exc
+
+    @staticmethod
+    def _int_or_default(value: Any, default: int = 0) -> int:
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _reasoning_json_value(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+
+    @staticmethod
+    def _import_error(index: int, session_id: str, error: str) -> Dict[str, Any]:
+        item: Dict[str, Any] = {"index": index, "error": error}
+        if session_id:
+            item["session_id"] = session_id
+        return item
+
+    def import_sessions(self, sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Import sessions exported by :meth:`export_session` or ``export_all``.
+
+        Existing session IDs are skipped. Imported child sessions keep their
+        parent only when that parent already exists or is included in the same
+        import payload; otherwise the child is detached so partial imports don't
+        fail foreign-key validation. Gateway routing, handoff, rewind, and other
+        live runtime state are intentionally reset: this restores conversation
+        history, not ownership of a live channel or process.
+        """
+        if not isinstance(sessions, list):
+            raise ValueError("sessions must be a list")
+        if len(sessions) > self._IMPORT_MAX_SESSIONS:
+            raise ValueError(
+                f"sessions must contain at most {self._IMPORT_MAX_SESSIONS} entries"
+            )
+
+        normalized: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        total_messages = 0
+        total_bytes = 0
+        session_text_fields = (
+            "source",
+            "user_id",
+            "model",
+            "system_prompt",
+            "end_reason",
+            "cwd",
+            "git_branch",
+            "git_repo_root",
+            "billing_provider",
+            "billing_base_url",
+            "billing_mode",
+            "cost_status",
+            "cost_source",
+            "pricing_version",
+            "title",
+        )
+        message_text_fields = (
+            "role",
+            "tool_call_id",
+            "tool_name",
+            "effect_disposition",
+            "finish_reason",
+            "reasoning",
+            "reasoning_content",
+            "platform_message_id",
+            "message_id",
+        )
+
+        for index, raw in enumerate(sessions):
+            if not isinstance(raw, dict):
+                errors.append(self._import_error(index, "", "session must be an object"))
+                continue
+            session_id = str(raw.get("id") or "").strip()
+            if not session_id:
+                errors.append(self._import_error(index, "", "session id is required"))
+                continue
+            if session_id in seen_ids:
+                errors.append(self._import_error(index, session_id, "duplicate session id"))
+                continue
+            messages = raw.get("messages") or []
+            if not isinstance(messages, list):
+                errors.append(self._import_error(index, session_id, "messages must be a list"))
+                continue
+            if len(messages) > self._IMPORT_MAX_MESSAGES_PER_SESSION:
+                errors.append(
+                    self._import_error(
+                        index,
+                        session_id,
+                        "messages exceeds the per-session import limit",
+                    )
+                )
+                continue
+            if any(not isinstance(msg, dict) for msg in messages):
+                errors.append(
+                    self._import_error(
+                        index,
+                        session_id,
+                        "messages must contain only objects",
+                    )
+                )
+                continue
+
+            try:
+                session_bytes = len(
+                    json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                )
+            except (TypeError, ValueError):
+                errors.append(
+                    self._import_error(index, session_id, "session must be JSON serializable")
+                )
+                continue
+            if session_bytes > self._IMPORT_MAX_SESSION_BYTES:
+                errors.append(
+                    self._import_error(index, session_id, "session exceeds the import size limit")
+                )
+                continue
+            total_bytes += session_bytes
+            if total_bytes > self._IMPORT_MAX_TOTAL_BYTES:
+                errors.append(
+                    self._import_error(index, session_id, "import exceeds the total size limit")
+                )
+                continue
+
+            try:
+                clean_session = dict(raw)
+                clean_session["id"] = session_id
+                clean_session["model_config"] = self._import_json_object_or_none(
+                    clean_session.get("model_config"), "model_config"
+                )
+                clean_session["parent_session_id"] = self._import_text_or_none(
+                    clean_session.get("parent_session_id"), "parent_session_id"
+                )
+                for field in session_text_fields:
+                    clean_session[field] = self._import_text_or_none(
+                        clean_session.get(field), field
+                    )
+
+                clean_messages: List[Dict[str, Any]] = []
+                for message_index, message in enumerate(messages):
+                    clean_message = dict(message)
+                    role = clean_message.get("role")
+                    if not isinstance(role, str) or not role:
+                        raise ValueError(f"messages[{message_index}].role must be a non-empty string")
+                    for field in message_text_fields:
+                        if field == "role":
+                            continue
+                        clean_message[field] = self._import_text_or_none(
+                            clean_message.get(field), field
+                        )
+                    clean_message["token_count"] = self._import_int_or_none(
+                        clean_message.get("token_count"), "token_count"
+                    )
+                    clean_messages.append(clean_message)
+            except ValueError as exc:
+                errors.append(self._import_error(index, session_id, str(exc)))
+                continue
+
+            total_messages += len(clean_messages)
+            if total_messages > self._IMPORT_MAX_TOTAL_MESSAGES:
+                errors.append(
+                    self._import_error(
+                        index,
+                        session_id,
+                        "messages exceeds the total import limit",
+                    )
+                )
+                continue
+            seen_ids.add(session_id)
+            normalized.append(
+                {"index": index, "session": clean_session, "messages": clean_messages}
+            )
+
+        if errors:
+            return {
+                "ok": False,
+                "imported": 0,
+                "skipped": 0,
+                "detached": 0,
+                "errors": errors,
+            }
+
+        def _do(conn):
+            imported_ids: List[str] = []
+            skipped_ids: List[str] = []
+            parent_updates: List[tuple[str, str]] = []
+            detached = 0
+
+            for item in normalized:
+                raw = item["session"]
+                messages = item["messages"]
+                session_id = str(raw.get("id") or "").strip()
+                exists = conn.execute(
+                    "SELECT 1 FROM sessions WHERE id = ? LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                if exists:
+                    skipped_ids.append(session_id)
+                    continue
+
+                started_at = self._float_or_none(raw.get("started_at"))
+                if started_at is None:
+                    started_at = time.time()
+                archived = 1 if raw.get("archived") else 0
+                system_prompt_hash = self._store_system_prompt(
+                    conn, raw.get("system_prompt")
+                )
+
+                conn.execute(
+                    """INSERT INTO sessions (
+                           id, source, user_id, model, model_config, system_prompt,
+                           system_prompt_hash,
+                           parent_session_id, started_at, ended_at, end_reason,
+                           message_count, tool_call_count, input_tokens, output_tokens,
+                           cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                           cwd, git_branch, git_repo_root,
+                           billing_provider, billing_base_url, billing_mode,
+                           estimated_cost_usd, actual_cost_usd, cost_status, cost_source,
+                           pricing_version, title, api_call_count, archived
+                       )
+                       VALUES (
+                           :id, :source, :user_id, :model, :model_config,
+                           NULL, :system_prompt_hash, NULL, :started_at, :ended_at,
+                           :end_reason, 0, 0, :input_tokens, :output_tokens,
+                           :cache_read_tokens, :cache_write_tokens,
+                           :reasoning_tokens, :cwd, :git_branch, :git_repo_root,
+                           :billing_provider, :billing_base_url, :billing_mode,
+                           :estimated_cost_usd, :actual_cost_usd, :cost_status,
+                           :cost_source, :pricing_version, :title,
+                           :api_call_count, :archived
+                       )""",
+                    {
+                        "id": session_id,
+                        "source": str(raw.get("source") or "import"),
+                        "user_id": raw.get("user_id"),
+                        "model": raw.get("model"),
+                        "model_config": raw.get("model_config"),
+                        "system_prompt_hash": system_prompt_hash,
+                        "started_at": started_at,
+                        "ended_at": self._float_or_none(raw.get("ended_at")),
+                        "end_reason": raw.get("end_reason"),
+                        "input_tokens": self._int_or_default(raw.get("input_tokens")),
+                        "output_tokens": self._int_or_default(raw.get("output_tokens")),
+                        "cache_read_tokens": self._int_or_default(
+                            raw.get("cache_read_tokens")
+                        ),
+                        "cache_write_tokens": self._int_or_default(
+                            raw.get("cache_write_tokens")
+                        ),
+                        "reasoning_tokens": self._int_or_default(
+                            raw.get("reasoning_tokens")
+                        ),
+                        "cwd": raw.get("cwd"),
+                        "git_branch": raw.get("git_branch"),
+                        "git_repo_root": raw.get("git_repo_root"),
+                        "billing_provider": raw.get("billing_provider"),
+                        "billing_base_url": raw.get("billing_base_url"),
+                        "billing_mode": raw.get("billing_mode"),
+                        "estimated_cost_usd": self._float_or_none(
+                            raw.get("estimated_cost_usd")
+                        ),
+                        "actual_cost_usd": self._float_or_none(
+                            raw.get("actual_cost_usd")
+                        ),
+                        "cost_status": raw.get("cost_status"),
+                        "cost_source": raw.get("cost_source"),
+                        "pricing_version": raw.get("pricing_version"),
+                        "title": raw.get("title"),
+                        "api_call_count": self._int_or_default(raw.get("api_call_count")),
+                        "archived": archived,
+                    },
+                )
+
+                sanitized_messages: List[Dict[str, Any]] = []
+                for msg in messages:
+                    clean = dict(msg)
+                    for key in (
+                        "reasoning_details",
+                        "codex_reasoning_items",
+                        "codex_message_items",
+                    ):
+                        clean[key] = self._reasoning_json_value(clean.get(key))
+                    sanitized_messages.append(clean)
+
+                total_messages, total_tool_calls = self._insert_message_rows(
+                    conn,
+                    session_id,
+                    sanitized_messages,
+                )
+                conn.execute(
+                    "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
+                    (total_messages, total_tool_calls, session_id),
+                )
+
+                parent_id = str(raw.get("parent_session_id") or "").strip()
+                if parent_id:
+                    parent_updates.append((session_id, parent_id))
+                imported_ids.append(session_id)
+
+            parent_by_child = dict(parent_updates)
+
+            def _would_create_cycle(session_id: str, parent_id: str) -> bool:
+                seen = {session_id}
+                current = parent_id
+                while current:
+                    if current in seen:
+                        return True
+                    seen.add(current)
+                    if current in parent_by_child:
+                        current = parent_by_child[current]
+                        continue
+                    row = conn.execute(
+                        "SELECT parent_session_id FROM sessions WHERE id = ? LIMIT 1",
+                        (current,),
+                    ).fetchone()
+                    if row is None:
+                        return False
+                    current = row["parent_session_id"]
+                return False
+
+            for session_id, parent_id in parent_updates:
+                parent_exists = conn.execute(
+                    "SELECT 1 FROM sessions WHERE id = ? LIMIT 1",
+                    (parent_id,),
+                ).fetchone()
+                if parent_exists and not _would_create_cycle(session_id, parent_id):
+                    conn.execute(
+                        "UPDATE sessions SET parent_session_id = ? WHERE id = ?",
+                        (parent_id, session_id),
+                    )
+                else:
+                    # Drop only the closing edge. Later entries can still attach
+                    # to this now-root session, preserving the acyclic portion
+                    # of a malformed imported lineage.
+                    parent_by_child.pop(session_id, None)
+                    detached += 1
+
+            return {
+                "ok": True,
+                "imported": len(imported_ids),
+                "skipped": len(skipped_ids),
+                "detached": detached,
+                "imported_ids": imported_ids,
+                "skipped_ids": skipped_ids,
+                "errors": [],
+            }
+
+        return self._execute_write(_do)
 
     def clear_messages(self, session_id: str) -> None:
         """Delete all messages for a session and reset its counters."""
@@ -10637,7 +11786,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         sessions: List[Dict[str, Any]] = []
         for row in rows:
             session = self._session_row_dict(row)
-            session["preview"] = _shape_preview(session.pop("_preview_raw", ""))
+            raw = str(session.pop("_preview_raw", "") or "").strip()
+            session["preview"] = raw[:60] + ("..." if len(raw) > 60 else "") if raw else ""
             sessions.append(session)
         return sessions
 
@@ -10923,8 +12073,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
                 "FROM sessions s "
                 "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
-                "WHERE s.handoff_state = 'pending' "
-                "ORDER BY s.started_at ASC"
+                "WHERE handoff_state = 'pending' "
+                "ORDER BY started_at ASC"
             )
             return [self._session_row_dict(r) for r in cur.fetchall()]
         except Exception:

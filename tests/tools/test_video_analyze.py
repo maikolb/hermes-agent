@@ -3,9 +3,10 @@
 import asyncio
 import base64
 import json
-from types import SimpleNamespace
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 
 from tools.vision_tools import (
     _detect_video_mime_type,
@@ -145,6 +146,10 @@ class TestVideoAnalyzeTool:
         assert data["success"] is True
         assert "demo" in data["analysis"].lower()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Symlink creation requires elevated privileges on Windows",
+    )
     def test_local_file_read_guard_blocks_env_via_video_extension(self, tmp_path):
         """A .env file symlinked with a video extension must still be blocked.
 
@@ -179,6 +184,153 @@ class TestVideoAnalyzeTool:
         assert data["success"] is False
         assert "unsupported video format" in data["analysis"].lower()
 
+    def test_video_too_large(self, tmp_path, monkeypatch):
+        """Video exceeding max size is rejected."""
+        video = tmp_path / "huge.mp4"
+        # Don't actually write 50MB — mock the stat
+        video.write_bytes(b"\x00" * 100)
+
+        # Patch the base64 encoding to return something huge
+        with patch("tools.vision_tools._video_to_base64_data_url") as mock_encode:
+            mock_encode.return_value = "data:video/mp4;base64," + "A" * (_MAX_VIDEO_BASE64_BYTES + 1)
+            result = self._run(video_analyze_tool(str(video), "What?"))
+
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "too large" in data["analysis"].lower()
+
+    def test_interrupt_check(self, tmp_path):
+        """Tool respects interrupt flag."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+
+        with patch("tools.interrupt.is_interrupted", return_value=True):
+            result = self._run(video_analyze_tool(str(video), "What?"))
+
+        data = json.loads(result)
+        assert data["success"] is False
+
+    def test_semantic_missing_video_response_uses_storyboard_fallback(self, tmp_path):
+        """A provider that ignores video_url must not produce a false success."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        refusal = "Não recebi nenhum vídeo ou link acessível nesta conversa."
+
+        with patch(
+            "tools.vision_tools.async_call_llm",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ):
+            with patch(
+                "tools.vision_tools.extract_content_or_reasoning",
+                return_value=refusal,
+            ):
+                with patch(
+                    "tools.vision_tools._analyze_video_storyboard",
+                    new_callable=AsyncMock,
+                    create=True,
+                    return_value="Storyboard shows the requested product.",
+                ) as mock_fallback:
+                    result = self._run(
+                        video_analyze_tool(str(video), "What is this?")
+                    )
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["mode"] == "storyboard_fallback"
+        assert data["analysis"] == "Storyboard shows the requested product."
+        assert "audio" in data["warning"].lower()
+        mock_fallback.assert_awaited_once()
+
+    def test_explicit_unsupported_video_error_uses_storyboard_fallback(self, tmp_path):
+        """A provider-level video incompatibility should degrade to images."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+
+        with patch(
+            "tools.vision_tools.async_call_llm",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("video_url input is not supported"),
+        ):
+            with patch(
+                "tools.vision_tools._analyze_video_storyboard",
+                new_callable=AsyncMock,
+                return_value="Storyboard analysis.",
+            ) as mock_fallback:
+                result = self._run(video_analyze_tool(str(video), "What?"))
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["mode"] == "storyboard_fallback"
+        mock_fallback.assert_awaited_once()
+
+    def test_storyboard_failure_does_not_restore_false_success(self, tmp_path):
+        """If both native video and storyboard fail, return a real failure."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+        mock_response = MagicMock()
+
+        with patch(
+            "tools.vision_tools.async_call_llm",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ):
+            with patch(
+                "tools.vision_tools.extract_content_or_reasoning",
+                return_value="I did not receive a video.",
+            ):
+                with patch(
+                    "tools.vision_tools._analyze_video_storyboard",
+                    new_callable=AsyncMock,
+                    side_effect=RuntimeError("ffmpeg unavailable"),
+                ):
+                    result = self._run(video_analyze_tool(str(video), "What?"))
+
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "storyboard fallback failed" in data["error"].lower()
+
+    def test_empty_response_retries(self, tmp_path):
+        """Retries once on empty model response."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+
+        call_count = 0
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Video analysis result."
+
+        async def fake_llm(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return mock_response
+
+        with patch("tools.vision_tools.async_call_llm", side_effect=fake_llm):
+            with patch("tools.vision_tools.extract_content_or_reasoning", side_effect=["", "Video analysis result."]):
+                result = self._run(video_analyze_tool(str(video), "What?"))
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert call_count == 2  # Initial call + retry
+
+    def test_file_scheme_stripped(self, tmp_path):
+        """file:// prefix is stripped correctly."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "OK"
+
+        with patch("tools.vision_tools.async_call_llm", new_callable=AsyncMock, return_value=mock_response):
+            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="OK"):
+                result = self._run(video_analyze_tool(f"file://{video}", "What?"))
+
+        data = json.loads(result)
+        assert data["success"] is True
 
     def test_api_message_format(self, tmp_path):
         """Verify the message sent to LLM uses video_url content type."""

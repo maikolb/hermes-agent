@@ -626,8 +626,9 @@ def _write_task_script() -> Path:
     tmp.write_text(content, encoding="utf-8", newline="")
     tmp.replace(script_path)
 
-    # Keep the legacy VBS artifact for Startup-folder compatibility, but the
-    # Scheduled Task itself uses the native base-pythonw -> pyw entrypoint.
+    # Keep the VBS artifact only for the Startup-folder fallback. The Scheduled
+    # Task uses the synchronous base-pythonw -> pyw entrypoint below so Task
+    # Scheduler owns the real gateway lifetime and can restart it after a crash.
     vbs_content = _build_gateway_vbs_script(python_path, working_dir, hermes_home, profile_arg)
     vbs_path = script_path.with_suffix(".vbs")
     vbs_tmp = vbs_path.with_name(vbs_path.name + ".tmp")
@@ -641,6 +642,7 @@ def _write_task_script() -> Path:
     pyw_tmp = pyw_path.with_name(pyw_path.name + ".tmp")
     pyw_tmp.write_text(pyw_content, encoding="utf-8", newline="")
     pyw_tmp.replace(pyw_path)
+
     return script_path
 
 
@@ -665,7 +667,9 @@ def _build_scheduled_task_xml(
     user: str | None,
     pythonw_path: Path,
 ) -> str:
-    """Render a Task Scheduler definition for the native hidden entrypoint."""
+    """Render a tracked gateway task on a non-interactive Windows desktop."""
+    if not user:
+        raise RuntimeError("Hermes S4U gateway task requires an explicit user")
     user_principal = f"\n      <UserId>{escape(user)}</UserId>" if user else ""
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -673,6 +677,10 @@ def _build_scheduled_task_xml(
     <Description>{escape(_TASK_DESCRIPTION)}</Description>
   </RegistrationInfo>
   <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT1M</Delay>
+    </BootTrigger>
     <LogonTrigger>
       <Enabled>true</Enabled>
       <Delay>{_TASK_LOGON_DELAY}</Delay>
@@ -680,7 +688,7 @@ def _build_scheduled_task_xml(
   </Triggers>
   <Principals>
     <Principal id="Author">{user_principal}
-      <LogonType>InteractiveToken</LogonType>
+      <LogonType>S4U</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
@@ -697,7 +705,7 @@ def _build_scheduled_task_xml(
     </IdleSettings>
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
+    <Hidden>true</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
@@ -739,7 +747,7 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
     Always recreate instead of ``/Change``. Older Hermes builds and failed
     experiments may have left repeat/restart settings on the task; ``/Change``
     preserves those stale triggers and can make the gateway relaunch every
-    minute. Delete+create gives us a clean ONLOGON task every install.
+    minute. Delete+create gives us a clean boot+logon task every install.
     """
     delete_code, delete_out, delete_err = _exec_schtasks(["/Delete", "/F", "/TN", task_name])
     delete_detail = (delete_err or delete_out or "").strip()
@@ -749,6 +757,8 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
         # Non-fatal: /Create /F below may still replace it. Keep the detail in
         # the final error if creation also fails.
     user = _resolve_task_user()
+    if not user:
+        return (False, "Cannot install a non-interactive gateway task without a user")
     launcher_path = script_path.with_suffix(".pyw")
     from hermes_cli.gateway import get_python_path
 
@@ -757,7 +767,9 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
         task_name, launcher_path, user, pythonw_path,
     )
     base = ["/Create", "/F", "/TN", task_name, "/XML", str(xml_path)]
-    variants = [[*base, "/RU", user, "/NP", "/IT"]] if user else []
+    # /NP is the documented non-interactive, no-stored-password mode. Never
+    # add /IT: it forces the entire descendant tree back onto the user's desktop.
+    variants = [[*base, "/RU", user, "/NP"]]
     variants.append(base)
 
     last_code = 1

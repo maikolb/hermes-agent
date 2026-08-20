@@ -192,6 +192,68 @@ class TestGatewayRuntimeStatus:
         assert payload["pid"] == os.getpid(), "PID should be overwritten, not preserved via setdefault"
         assert payload["start_time"] != 1000.0, "start_time should be overwritten on restart"
 
+    def test_write_runtime_status_overwrites_stale_argv_on_restart(self, tmp_path, monkeypatch):
+        """Regression: gateway_state.json must not keep the previous launch argv."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        state_path = tmp_path / "gateway_state.json"
+        state_path.write_text(json.dumps({
+            "pid": 99999,
+            "start_time": 1000.0,
+            "kind": "hermes-gateway",
+            "argv": ["/old/path/hermes", "gateway", "run"],
+            "platforms": {},
+            "updated_at": "2025-01-01T00:00:00Z",
+        }))
+
+        monkeypatch.setattr(status.sys, "argv", ["/new/path/hermes", "gateway", "run"])
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 2000)
+
+        status.write_runtime_status(gateway_state="running")
+
+        payload = status.read_runtime_status()
+        assert payload["argv"] == ["/new/path/hermes", "gateway", "run"]
+        assert payload["pid"] == os.getpid()
+        assert payload["start_time"] == 2000
+
+    def test_runtime_status_running_pid_rejects_stale_record_for_supervisor_pid(self, monkeypatch):
+        """Regression: stale profile runtime state must not mark s6 supervisors live.
+
+        Docker per-profile supervision can leave a named profile with
+        ``gateway_state=running`` metadata while the real gateway process is gone
+        and the recorded PID now belongs to ``s6-supervise`` or ``s6-log``.  If
+        the live command line is readable, it wins over the stale record argv.
+        """
+        payload = {
+            "pid": 132,
+            "start_time": 123,
+            "gateway_state": "running",
+            "kind": "hermes-gateway",
+            "argv": ["/opt/hermes/.venv/bin/hermes", "gateway", "run", "--replace"],
+        }
+
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: "s6-supervise gateway-coder")
+
+        assert status.get_runtime_status_running_pid(payload) is None
+
+    def test_runtime_status_running_pid_uses_record_when_cmdline_unreadable(self, monkeypatch):
+        """Keep the strong persisted-identity fallback when cmdline is unavailable."""
+        payload = {
+            "pid": 132,
+            "start_time": 123,
+            "gateway_state": "running",
+            "kind": "hermes-gateway",
+            "argv": ["/opt/hermes/.venv/bin/hermes", "gateway", "run", "--replace"],
+            "hermes_home": "/opt/data",
+        }
+
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+
+        assert status.get_runtime_status_running_pid(payload) == 132
 
     def test_runtime_status_running_pid_rejects_pid_reused_by_other_profile(self, monkeypatch):
         """Regression (user report): a stale profile's recycled PID must not be
@@ -258,6 +320,77 @@ class TestGatewayRuntimeStatus:
         cmdline = r"hermes_home=c:\opt\data\profiles\coder hermes gateway run --replace"
         assert status._command_line_belongs_to_profile(cmdline, home) is True
 
+        assert (
+            status.get_runtime_status_running_pid(payload, expected_home=default_home)
+            is None
+        )
+
+    def test_runtime_status_running_pid_default_profile_accepts_bare_cmdline(self, monkeypatch):
+        """The default/root gateway (bare ``hermes gateway run``) is reported
+        running for the default profile."""
+        payload = {
+            "pid": 139,
+            "gateway_state": "running",
+            "kind": "hermes-gateway",
+            "argv": ["hermes", "gateway", "run"],
+            "start_time": 1000,
+        }
+        default_home = Path("/opt/data")
+
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 1000)
+        monkeypatch.setattr(
+            status, "_read_process_cmdline", lambda pid: "hermes gateway run --replace"
+        )
+
+        assert (
+            status.get_runtime_status_running_pid(payload, expected_home=default_home)
+            == 139
+        )
+
+    def test_runtime_status_running_pid_profile_scope_fails_closed_without_recorded_home(self, monkeypatch):
+        """An unreadable command line plus no persisted home is unprovable.
+
+        Older snapshots can still prove the PID birth and gateway-shaped argv,
+        but cannot prove which profile owns that process. Cross-profile health
+        therefore fails closed instead of rendering a false green badge.
+        """
+        payload = {
+            "pid": 139,
+            "gateway_state": "running",
+            "kind": "hermes-gateway",
+            "argv": ["hermes", "gateway", "run"],
+            "start_time": 1000,
+        }
+        coder_home = Path("/opt/data/profiles/coder")
+
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 1000)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+
+        assert status.get_runtime_status_running_pid(
+            payload,
+            expected_home=coder_home,
+        ) is None
+
+    def test_write_runtime_status_records_platform_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        status.write_runtime_status(
+            gateway_state="startup_failed",
+            exit_reason="telegram conflict",
+            platform="telegram",
+            platform_state="fatal",
+            error_code="telegram_polling_conflict",
+            error_message="another poller is active",
+        )
+
+        payload = status.read_runtime_status()
+        assert payload["gateway_state"] == "startup_failed"
+        assert payload["exit_reason"] == "telegram conflict"
+        assert payload["platforms"]["telegram"]["state"] == "fatal"
+        assert payload["platforms"]["telegram"]["error_code"] == "telegram_polling_conflict"
+        assert payload["platforms"]["telegram"]["error_message"] == "another poller is active"
 
     def test_write_runtime_status_explicit_none_clears_stale_fields(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

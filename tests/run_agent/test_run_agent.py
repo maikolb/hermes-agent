@@ -4995,6 +4995,27 @@ class TestCredentialPoolRecovery:
         assert context["reason"] == "usage_limit_reached"
         assert context["message"] == "The usage limit has been reached"
 
+    def test_extract_api_error_context_converts_resets_in_seconds(self, agent, monkeypatch):
+        from agent import agent_runtime_helpers
+
+        monkeypatch.setattr(agent_runtime_helpers.time, "time", lambda: 10_000.0)
+        error = SimpleNamespace(
+            body={
+                "error": {
+                    "type": "usage_limit_reached",
+                    "resets_in_seconds": 7200,
+                }
+            },
+            response=SimpleNamespace(headers={}),
+        )
+
+        context = agent._extract_api_error_context(error)
+
+        assert context["reason"] == "usage_limit_reached"
+        assert context["reset_at"] == 17_200.0
+
+    def test_extract_api_error_context_parses_resets_in_hours_and_minutes(self, agent, monkeypatch):
+        from agent import agent_runtime_helpers
 
 
 

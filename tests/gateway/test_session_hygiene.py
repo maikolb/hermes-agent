@@ -507,6 +507,7 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
                 bind_session_state=MagicMock(),
                 _last_compress_aborted=False,
                 _last_aux_model_failure_model=None,
+                _record_compression_failure_cooldown=MagicMock(),
             )
             self.shutdown_memory_provider = MagicMock()
             self.close = MagicMock(side_effect=cleanup_done.set)
@@ -612,12 +613,11 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
     assert elapsed < 2.0
     assert worker_started.is_set()
     assert runner._run_agent.await_count == 1
-    # Cooldown must be persisted to the state DB (survives restart, #74136),
-    # not stashed in an in-memory dict.
-    assert fake_db.record_compression_failure_cooldown.called
-    _cd_args = fake_db.record_compression_failure_cooldown.call_args[0]
-    assert _cd_args[0] == "sess-timeout"
-    assert _cd_args[1] > time.time()
+    assert runner._hygiene_compression_failure_cooldowns["sess-timeout"] > time.time()
+    SlowCompressAgent.last_instance.context_compressor._record_compression_failure_cooldown.assert_called_once_with(
+        120.0,
+        "gateway_hygiene_timeout",
+    )
     timeout_warnings = [s for s in adapter.sent if "Context compression timed out" in s["content"]]
     assert len(timeout_warnings) == 1
     fake_db.archive_and_compact.assert_not_called()

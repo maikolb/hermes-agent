@@ -755,6 +755,43 @@ display:
       long_running_notifications: false
 ```
 
+### Quiet edit-in-place activity indicator
+
+Long-running notifications can use one temporary message instead of tool or
+stage updates. The first delay and later edit cadence are independently
+configurable under `display.activity_indicator` or per platform under
+`display.platforms.<platform>.activity_indicator`:
+
+```yaml
+display:
+  platforms:
+    telegram:
+      tool_progress: off
+      interim_assistant_messages: false
+      busy_ack_detail: false
+      long_running_notifications: true
+      cleanup_progress: true
+      activity_indicator:
+        initial_delay_seconds: 10
+        update_interval_seconds: 60
+        initial_text: "⏳ Trabalhando…"
+        elapsed_text: "⏳ Trabalhando há {elapsed_human}…"
+```
+
+A turn that finishes before `initial_delay_seconds` creates no status message.
+After the first message, Hermes edits only that owned message at
+`update_interval_seconds`; retryable edit failures do not create replacement
+bubbles. Supported placeholders in `elapsed_text` are `{elapsed_human}`,
+`{elapsed_minutes}`, and `{elapsed_seconds}`. If the block is omitted, the
+existing `agent.gateway_notify_interval` controls both delays and the legacy
+heartbeat text remains unchanged. Setting `agent.gateway_notify_interval: 0`
+still disables long-running notifications.
+
+Custom text owns the complete heartbeat content, so tool and iteration details
+are not appended. The final answer is delivered through the normal path;
+`cleanup_progress: true` deletes the temporary indicator only after successful
+final delivery. Failed runs keep it as a breadcrumb.
+
 ### Progress bubble cleanup (opt-in)
 
 Tool-progress messages, the "still working…" heartbeat, and status-callback bubbles can also be auto-deleted after the final response lands. Enable per-platform via `display.platforms.<platform>.cleanup_progress`:

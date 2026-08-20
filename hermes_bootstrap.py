@@ -227,12 +227,27 @@ def activate_durable_lazy_target() -> None:
 
 
 def activate_windows_process_broker() -> bool:
-    """Install the process-wide zero-UI subprocess boundary on Windows."""
+    """Install and verify the process-wide zero-UI boundary on Windows.
+
+    Every Hermes entrypoint/profile must either have the broker and private
+    desktop ready before tool discovery or fail closed.  Returning after a
+    best-effort install allowed lightweight workers to reach Git/CMD/Node on
+    the interactive desktop when adoption drifted.
+    """
     if not _IS_WINDOWS:
         return False
-    from hermes_cli.windows_process_broker import install_windows_process_broker
+    from hermes_cli.windows_process_broker import (
+        broker_installed,
+        hidden_desktop_ready,
+        install_windows_process_broker,
+    )
 
-    return install_windows_process_broker()
+    installed_now = install_windows_process_broker()
+    if not broker_installed() or not hidden_desktop_ready():
+        raise RuntimeError(
+            "Hermes Windows zero-UI broker/private desktop failed to initialize"
+        )
+    return installed_now
 
 
 # Apply on import — entry points just need ``import hermes_bootstrap``

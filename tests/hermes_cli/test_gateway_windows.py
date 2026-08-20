@@ -87,6 +87,33 @@ class TestStableWindowsGatewayWorkingDir:
         assert gateway_windows._stable_gateway_working_dir(project) == str(project)
 
 
+def test_write_task_script_anchors_cmd_cd_at_hermes_home(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    venv = project / "venv"
+    python_exe = venv / "Scripts" / "python.exe"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+    base = tmp_path / "base-python"
+    base.mkdir()
+    (base / "pythonw.exe").write_text("", encoding="utf-8")
+    (venv / "pyvenv.cfg").write_text(f"home = {base}\n", encoding="utf-8")
+    script_path = tmp_path / "gateway.cmd"
+
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(gateway, "PROJECT_ROOT", project)
+    monkeypatch.setattr(gateway, "get_python_path", lambda: str(python_exe))
+    monkeypatch.setattr(gateway, "_profile_arg", lambda hermes_home: "")
+    monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(gateway_windows, "get_task_script_path", lambda: script_path)
+
+    written = gateway_windows._write_task_script()
+    content = script_path.read_text(encoding="utf-8")
+
+    assert written == script_path
+    assert f"cd /d {gateway_windows._quote_cmd_script_arg(str(hermes_home.resolve()))}" in content
+    assert f"cd /d {gateway_windows._quote_cmd_script_arg(str(project))}" not in content
 
 
 def _arrange_startup_fallback(monkeypatch, tmp_path, running_pids):
@@ -165,8 +192,10 @@ def test_elevated_gateway_command_uses_hidden_console_python(monkeypatch):
     assert cwd
 
 
-def test_install_scheduled_task_recreates_with_native_pythonw_entrypoint(monkeypatch, tmp_path):
-    """Install must delete+create and persist base-pythonw -> generated pyw."""
+def test_install_scheduled_task_recreates_with_noninteractive_native_entrypoint(
+    monkeypatch, tmp_path,
+):
+    """Install must track base-pythonw directly in an S4U task."""
     calls = []
     project = tmp_path / "project"
     venv = project / "venv"
@@ -205,8 +234,13 @@ def test_install_scheduled_task_recreates_with_native_pythonw_entrypoint(monkeyp
     assert calls[0][:4] == ("/Delete", "/F", "/TN", "Hermes_Gateway_alice")
     assert calls[1][0] == "/Create"
     assert "/XML" in calls[1]
+    assert "/NP" in calls[1]
+    assert "/IT" not in calls[1]
     assert "/SC" not in calls[1]
+    assert "<BootTrigger>" in xml_seen["text"]
     assert "<Delay>PT30S</Delay>" in xml_seen["text"]
+    assert "<LogonType>S4U</LogonType>" in xml_seen["text"]
+    assert "<Hidden>true</Hidden>" in xml_seen["text"]
     assert "<StartWhenAvailable>true</StartWhenAvailable>" in xml_seen["text"]
     assert "<StopOnIdleEnd>false</StopOnIdleEnd>" in xml_seen["text"]
     assert "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>" in xml_seen["text"]
@@ -222,13 +256,12 @@ def test_install_scheduled_task_recreates_with_native_pythonw_entrypoint(monkeyp
     assert "cmd.exe" not in xml_seen["text"]
 
 
-def test_gateway_vbs_script_is_console_less(monkeypatch):
-    """The .vbs launcher must avoid cmd.exe entirely and Run pythonw hidden
-    (issue #45599 fix A: no console -> no logon CTRL_CLOSE_EVENT / 0xC000013A)."""
+def test_gateway_vbs_script_uses_hidden_console_python(monkeypatch):
+    """VBS hides console python so descendants inherit one hidden console."""
     monkeypatch.setattr(
         gateway_windows,
         "_resolve_detached_python",
-        lambda exe: (r"C:\venv\Scripts\pythonw.exe", Path(r"C:\venv"), []),
+        lambda exe: (r"C:\venv\Scripts\python.exe", Path(r"C:\venv"), []),
     )
     content = gateway_windows._build_gateway_vbs_script(
         r"C:\venv\Scripts\python.exe",
@@ -238,7 +271,8 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
     )
     assert "cmd.exe" not in content.lower()
     assert 'CreateObject("WScript.Shell")' in content
-    assert "pythonw.exe" in content
+    assert "python.exe" in content
+    assert "pythonw.exe" not in content
     assert "hermes_cli.main" in content
     assert "gateway run" in content
     assert ", 0, False" in content  # hidden window, detached/async
@@ -248,6 +282,22 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
     assert content.endswith("\r\n")
 
 
+def test_gateway_vbs_script_quotes_spaced_paths(monkeypatch):
+    """Spaced exe/dir paths stay correctly quoted through the VBScript literal."""
+    monkeypatch.setattr(
+        gateway_windows,
+        "_resolve_detached_python",
+        lambda exe: (r"C:\Program Files\Py\python.exe", Path(r"C:\v env"), []),
+    )
+    content = gateway_windows._build_gateway_vbs_script(
+        r"C:\Program Files\Py\python.exe",
+        r"C:\work dir",
+        r"C:\h home",
+        "",
+    )
+    # list2cmdline quotes the spaced exe; _quote_vbs_string doubles those quotes.
+    assert '""C:\\Program Files\\Py\\python.exe""' in content
+    assert 'sh.CurrentDirectory = "C:\\work dir"' in content
 
 
 

@@ -31,6 +31,27 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+
+# Tool modules can be imported by lightweight workers that do not execute the
+# full ``hermes_bootstrap`` entrypoint first.  Enforce the process-wide Windows
+# boundary here as well because this is the shared subprocess compatibility
+# seam used by terminal, execute_code, browser, validators and launchers.
+# Installation is idempotent; Windows fails closed if the private desktop is
+# unavailable, rather than allowing Git/CMD/Node/Playwright onto Default.
+from hermes_cli.windows_process_broker import (
+    IS_WINDOWS as _BROKER_IS_WINDOWS,
+    broker_installed as _broker_installed,
+    hidden_desktop_ready as _hidden_desktop_ready,
+    install_windows_process_broker as _install_windows_process_broker,
+)
+
+_install_windows_process_broker()
+if _BROKER_IS_WINDOWS and not (
+    _broker_installed() and _hidden_desktop_ready()
+):
+    raise RuntimeError(
+        "Hermes Windows zero-UI subprocess broker/private desktop is unavailable"
+    )
 import sys
 from typing import Mapping, Sequence
 

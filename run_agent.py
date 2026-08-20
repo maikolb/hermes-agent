@@ -2233,29 +2233,24 @@ class AIAgent:
                     ]
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
-                _batch_rows.append({
-                    "role": role,
-                    "content": content,
-                    "tool_name": msg.get("tool_name"),
-                    "tool_calls": tool_calls_data,
-                    "tool_call_id": msg.get("tool_call_id"),
-                    "finish_reason": msg.get("finish_reason"),
-                    # Reasoning/codex fields are role-gated (assistant-only)
-                    # inside _insert_message_rows — pass through untouched.
-                    "reasoning": msg.get("reasoning"),
-                    "reasoning_content": msg.get("reasoning_content"),
-                    "reasoning_details": msg.get("reasoning_details"),
-                    "codex_reasoning_items": msg.get("codex_reasoning_items"),
-                    "codex_message_items": msg.get("codex_message_items"),
-                    "timestamp": _row_timestamp,
-                    "api_content": _row_api_content,
-                    # Standalone reference handoffs are always hidden, even
-                    # when the summarized transcript contained a user turn —
-                    # otherwise they occupy the active user slot in
-                    # retry/undo/session dispatch (#80622). Merge-into-tail
-                    # carriers keep prior visibility rules so preserved tail
-                    # content stays readable.
-                    "display_kind": (
+                self._session_db.append_message(
+                    session_id=self.session_id,
+                    role=role,
+                    content=content,
+                    # Live tool results use ``name``; SessionDB's durable
+                    # schema/replay surface calls the same field ``tool_name``.
+                    tool_name=msg.get("tool_name") or msg.get("name"),
+                    tool_calls=tool_calls_data,
+                    tool_call_id=msg.get("tool_call_id"),
+                    finish_reason=msg.get("finish_reason"),
+                    reasoning=msg.get("reasoning") if role == "assistant" else None,
+                    reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
+                    reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
+                    codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
+                    codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    timestamp=_row_timestamp,
+                    api_content=_row_api_content,
+                    display_kind=(
                         "hidden"
                         if (
                             msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
@@ -7695,10 +7690,8 @@ class AIAgent:
     def _toolguard_controlled_halt_response(self, decision: ToolGuardrailDecision) -> str:
         tool = decision.tool_name or "a tool"
         return (
-            f"I stopped retrying {tool} because it hit the tool-call guardrail "
-            f"({decision.code}) after {decision.count} repeated non-progressing "
-            "attempts. The last tool result explains the blocker; the next step is "
-            "to change strategy instead of repeating the same call."
+            f"A safety policy blocked {tool} ({decision.code}). "
+            f"{decision.message or 'The requested operation cannot continue safely in this turn.'}"
         )
 
     def _append_guardrail_observation(
@@ -7715,7 +7708,7 @@ class AIAgent:
             function_result,
             failed=failed,
         )
-        if decision.action in {"warn", "halt"}:
+        if decision.action in {"warn", "redirect", "halt"}:
             function_result = append_toolguard_guidance(function_result, decision)
         if decision.should_halt:
             self._set_tool_guardrail_halt(decision)
