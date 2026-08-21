@@ -3039,7 +3039,7 @@ def _event_media_is_video(event, index: int) -> bool:
     return getattr(event, "message_type", None) == MessageType.VIDEO
 
 
-def _build_media_placeholder(event) -> str:
+def _build_media_placeholder(event, *, skip_stt_inputs: bool = False) -> str:
     """Build a text placeholder for media-only events so they aren't dropped.
 
     When a photo/document is queued during active processing and later
@@ -3050,6 +3050,8 @@ def _build_media_placeholder(event) -> str:
     parts = []
     media_urls = getattr(event, "media_urls", None) or []
     for i, url in enumerate(media_urls):
+        if skip_stt_inputs and _event_media_is_stt_input(event, i):
+            continue
         if _event_media_is_image(event, i):
             parts.append(f"[User sent an image: {url}]")
         elif _event_media_is_audio(event, i):
@@ -9310,7 +9312,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._enqueue_fifo(session_key, event, adapter)
 
     async def _prepare_busy_steer_text(self, event: MessageEvent) -> str:
-        """Return steerable text for a busy follow-up, transcribing voice first.
+        """Return steerable text for a busy follow-up, preserving all media.
 
         Fresh and queued voice messages reach the normal inbound STT pipeline,
         but successful steer messages intentionally bypass that queue. Without
@@ -9319,8 +9321,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         Audio file attachments remain files; only voice-message media follows
         the automatic STT contract used by ``_prepare_inbound_message_text``.
-        If transcription fails, preserve any caption and let the existing
-        steer fallback handle an otherwise empty event without losing it.
+        Non-STT media is represented by the same local-path placeholder used
+        by queued media, so a text reply to an image can still be steered into
+        the active run without losing the referenced evidence.
 
         Routes through ``_transcribe_and_echo_pending_voice`` — the single
         out-of-band transcription choke point shared with the interrupt
@@ -9331,20 +9334,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         paying for a second STT call or re-echoing the same line.
         """
         text = (event.text or "").strip()
-        if not self._pending_event_audio_paths(event):
-            return text
+        if self._pending_event_audio_paths(event):
+            adapter = self._adapter_for_source(event.source)
+            enriched_text, successful_transcripts = await self._transcribe_and_echo_pending_voice(
+                event,
+                adapter,
+                event.source,
+                text,
+                log_context="Busy-steer",
+            )
+            if successful_transcripts:
+                text = (enriched_text or text).strip()
 
-        adapter = self._adapter_for_source(event.source)
-        enriched_text, successful_transcripts = await self._transcribe_and_echo_pending_voice(
-            event,
-            adapter,
-            event.source,
-            text,
-            log_context="Busy-steer",
-        )
-        if not successful_transcripts:
-            return text
-        return (enriched_text or text).strip()
+        media_context = _build_media_placeholder(event, skip_stt_inputs=True)
+        if media_context:
+            text = f"{text}\n\n{media_context}".strip()
+        return text
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
@@ -9535,24 +9540,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         redirected = False
         if effective_mode == "steer":
             steer_text = await self._prepare_busy_steer_text(event)
-            # A follow-up qualifies for steering when it is plain text, OR
-            # when every attachment is STT-eligible voice media whose
-            # transcript was just folded into steer_text — otherwise a voice
-            # note in steer mode silently degrades to queue mode (#58780).
+            # _prepare_busy_steer_text folds voice transcripts and local-path
+            # placeholders for all other media into the injected text. This
+            # keeps replied-to images/files available without queueing the
+            # operator's independent request behind the current turn.
             _steer_media_urls = getattr(event, "media_urls", None) or []
-            _steer_all_voice = bool(_steer_media_urls) and (
-                len(self._pending_event_audio_paths(event)) == len(_steer_media_urls)
-            )
             can_steer = (
                 steer_text
-                and (
-                    (
-                        event.message_type == MessageType.TEXT
-                        and not event.media_urls
-                        and not event.media_types
-                    )
-                    or _steer_all_voice
-                )
+                and (event.message_type == MessageType.TEXT or bool(_steer_media_urls))
                 and running_agent is not None
                 and running_agent is not _AGENT_PENDING_SENTINEL
                 and hasattr(running_agent, "steer")
@@ -15692,7 +15687,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event, _cmd_def_inner, _quick_key, source,
                 )
 
-            if event.message_type == MessageType.PHOTO:
+            if (
+                event.message_type == MessageType.PHOTO
+                and self._busy_input_mode != "steer"
+            ):
                 logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key)
                 adapter = self._adapter_for_source(source)
                 if adapter:
@@ -15762,16 +15760,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 self._queue_or_replace_pending_event(_quick_key, event)
                 return None
             if self._busy_input_mode == "steer":
-                # Steer mode: inject text into the running agent mid-run via
-                # agent.steer().  Falls back to queue semantics if the payload
-                # is empty, the agent lacks steer(), or steer() rejects.
-                steer_text = (event.text or "").strip()
+                # Steer mode: inject text plus referenced media context into
+                # the running agent mid-run via agent.steer(). Falls back to
+                # queue semantics only when the payload is empty, the agent
+                # lacks steer(), or steer() rejects.
+                steer_text = await self._prepare_busy_steer_text(event)
                 steered = False
                 if (
-                    event.message_type == MessageType.TEXT
-                    and not event.media_urls
-                    and not event.media_types
-                    and steer_text
+                    steer_text
                     and hasattr(running_agent, "steer")
                 ):
                     try:

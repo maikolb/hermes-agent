@@ -226,6 +226,80 @@ class TestBusySessionAck:
         assert "Interrupting" not in content
 
     @pytest.mark.asyncio
+    async def test_steer_mode_preserves_replied_image_context_no_queue(self, monkeypatch):
+        """A text reply carrying an image reference must steer, not silently queue."""
+        import gateway.run as _gr
+
+        monkeypatch.delenv("HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED", raising=False)
+        monkeypatch.setattr(_gr, "_load_gateway_config", lambda: {})
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "steer"
+        adapter = _make_adapter()
+
+        event = _make_event(text="cria um worker para verificar esse erro 404")
+        event.media_urls = ["C:/cache/replied-error.jpg"]
+        event.media_types = ["image/jpeg"]
+        sk = build_session_key(event.source)
+        runner.adapters[event.source.platform] = adapter
+
+        agent = MagicMock()
+        agent.steer = MagicMock(return_value=True)
+        runner._running_agents[sk] = agent
+
+        await runner._handle_active_session_busy_message(event, sk)
+
+        agent.steer.assert_called_once_with(
+            "cria um worker para verificar esse erro 404\n\n"
+            "[User sent an image: C:/cache/replied-error.jpg]"
+        )
+        agent.interrupt.assert_not_called()
+        assert sk not in adapter._pending_messages
+        content = adapter._send_with_retry.call_args.kwargs["content"]
+        assert "Steered" in content
+        assert "Queued" not in content
+
+    @pytest.mark.asyncio
+    async def test_priority_steer_preserves_replied_image_context(self, monkeypatch):
+        """The gateway fast path must use the same media-aware steer contract."""
+        from gateway.run import GatewayRunner
+
+        monkeypatch.setenv("HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS", "0")
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "steer"
+        runner._queued_events = {}
+        adapter = _make_adapter()
+
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="123",
+            chat_type="group",
+            user_id="user1",
+        )
+        event = MessageEvent(
+            text="cria um worker para verificar esse erro 404",
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id="msg-with-replied-photo",
+            media_urls=["C:/cache/replied-error.jpg"],
+            media_types=["image/jpeg"],
+        )
+        sk = build_session_key(source)
+        runner.adapters[source.platform] = adapter
+
+        agent = MagicMock()
+        agent.steer = MagicMock(return_value=True)
+        runner._running_agents[sk] = agent
+
+        result = await GatewayRunner._handle_message(runner, event)
+
+        assert result is None
+        agent.steer.assert_called_once_with(
+            "cria um worker para verificar esse erro 404\n\n"
+            "[User sent an image: C:/cache/replied-error.jpg]"
+        )
+        assert sk not in adapter._pending_messages
+
+    @pytest.mark.asyncio
     async def test_steer_mode_transcribes_voice_before_injection(self, monkeypatch):
         """A busy voice follow-up is transcribed and steered, never queued."""
         import gateway.run as _gr
