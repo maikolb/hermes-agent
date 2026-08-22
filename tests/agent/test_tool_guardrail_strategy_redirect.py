@@ -70,6 +70,22 @@ def test_redirect_blocks_same_tool_but_keeps_other_tools_available():
     assert alternative.allows_execution
 
 
+def test_reset_for_turn_clears_prior_redirects():
+    guard = _controller()
+    guard.after_call(
+        "search_files",
+        {"pattern": "("},
+        '{"error":"regex parse error: unclosed group"}',
+        failed=True,
+    )
+    assert guard.before_call("search_files", {"pattern": "different"}).should_redirect
+
+    guard.reset_for_turn()
+
+    assert guard.before_call("search_files", {"pattern": "different"}).allows_execution
+    assert guard.before_call("skill_view", {"name": "hermes-agent"}).allows_execution
+
+
 def test_repeated_generic_failure_redirects_instead_of_halting():
     guard = _controller(same_tool_failure_halt_after=2)
     first = guard.after_call("web_extract", {"urls": ["a"]}, "timeout", failed=True)

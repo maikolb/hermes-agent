@@ -101,3 +101,14 @@ Autoridade canônica de regressões operacionais deste checkout.
 - Prevenção vinculada: testes focados de explicit-resume, provider recovery persistida e falsa confirmação; `docs/EXECUTION_CONTRACT.md`.
 - Comando de validação: pytest focado nos módulos de checkpoint/restart-resume/provider failure, seguido de reload controlado do PF e observação passiva do runtime sem mensagem sintética a terceiros.
 - Evidência local: 121/121 nos testes de explicit-resume + checkpoint; 103/103 no recorte de resume/provider error; gate integrado 199/199; py_compile e diff-check verdes. O gateway PF ainda executa código anterior porque um monitor read-only de 30 minutos confirmou `active_agents=1`, workers em atividade e checkpoints Telegram/subagente avançando; target permanece corretamente pendente.
+
+## REG-2026-08-21-001 — Guard de redirecionamento cai ao registrar a primeira falha estrutural
+
+- Status: mitigated — isolated source candidate validated-local; live cutover pending
+- Cenário reproduzível: `ToolCallGuardrailController.after_call()` recebe a primeira falha estrutural de `read_file`, `search_files` ou outra ferramenta e tenta registrar a decisão de redirecionamento. A chamada cai com `AttributeError: 'ToolCallGuardrailController' object has no attribute '_redirected_signatures'`; o redirecionamento por ferramenta também cai em `_redirected_tools`.
+- Causa raiz: o commit que introduziu o redirecionamento passou a ler e escrever os dois mapas, mas não os adicionou ao estado criado por `reset_for_turn()`. O caminho de `before_call()` também não consultava os redirecionamentos registrados, portanto apenas inicializar os campos eliminaria a exceção sem restaurar o comportamento planejado.
+- Correção aplicada: os dois mapas tipados são inicializados e limpos junto do restante do estado por turno; `before_call()` consulta primeiro a assinatura e depois a rota da ferramenta, sem bloquear ferramentas não relacionadas; `reset_for_turn()` volta a permitir a rota no turno seguinte.
+- Prevenção vinculada: `tests/agent/test_tool_guardrail_strategy_redirect.py` executa falha estrutural, bloqueio da mesma assinatura/rota, disponibilidade da alternativa, redirecionamento de falha genérica e limpeza por reset.
+- Comando de validação: `scripts/run_tests.sh tests/agent/test_tool_guardrail_strategy_redirect.py` pelo wrapper obrigatório do repositório, com `HERMES_PYTHON` apontando para o venv de desenvolvimento existente.
+- Evidência: baseline reproduziu 5/5 falhas com os dois `AttributeError`; após a correção, 6/6 testes passaram sem retry. Nenhum gateway/processo foi recarregado e o checkout Hermes vivo não foi editado nem recebeu operação Git.
+- Aceite pendente: cutover drenado e smoke no runtime real em janela controlada; o change-set permanece isolado até essa etapa.

@@ -298,6 +298,10 @@ class ToolCallGuardrailController:
         self._same_tool_failure_counts: dict[str, int] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
+        self._redirected_signatures: dict[
+            ToolCallSignature, ToolGuardrailDecision
+        ] = {}
+        self._redirected_tools: dict[str, ToolGuardrailDecision] = {}
         # Per-turn runaway-loop cap counters. Reset every turn (this method
         # runs at the start of each run_conversation), so the caps bound a
         # single agent loop rather than accumulating across the session.
@@ -310,6 +314,35 @@ class ToolCallGuardrailController:
 
     def before_call(self, tool_name: str, args: Mapping[str, Any] | None) -> ToolGuardrailDecision:
         signature = ToolCallSignature.from_call(tool_name, _coerce_args(args))
+        prior_signature_redirect = self._redirected_signatures.get(signature)
+        if prior_signature_redirect is not None:
+            return ToolGuardrailDecision(
+                action="redirect",
+                code="tool_signature_redirected",
+                message=(
+                    f"Do not repeat this {tool_name} route with equivalent arguments in this "
+                    "turn. Keep working through a changed route, canonical source, or different tool."
+                ),
+                tool_name=tool_name,
+                count=prior_signature_redirect.count,
+                signature=signature,
+            )
+
+        prior_tool_redirect = self._redirected_tools.get(tool_name)
+        if prior_tool_redirect is not None:
+            return ToolGuardrailDecision(
+                action="redirect",
+                code="tool_route_redirected",
+                message=(
+                    f"Do not call {tool_name} again in this turn: its current route already "
+                    "failed or stopped making progress. Keep the turn running and use a "
+                    "different tool, canonical source, or in-process surface. Retry only "
+                    "after a relevant condition changes."
+                ),
+                tool_name=tool_name,
+                count=prior_tool_redirect.count,
+                signature=signature,
+            )
 
         # ── Per-turn runaway-loop caps ──────────────────────────────────
         # These are hard ceilings on how many times a runaway-prone tool may
