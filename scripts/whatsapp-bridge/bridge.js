@@ -128,6 +128,10 @@ const CHUNK_DELAY_MS = parseInt(process.env.WHATSAPP_CHUNK_DELAY_MS || '300', 10
 // fires. Fail fast instead so the gateway can surface a real error and retry.
 const SEND_TIMEOUT_MS = parseInt(process.env.WHATSAPP_SEND_TIMEOUT_MS || '60000', 10);
 const DELIVERY_ACK_TIMEOUT_MS = parseInt(process.env.WHATSAPP_DELIVERY_ACK_TIMEOUT_MS || '10000', 10);
+const PASSIVE_MEDIA_TIMEOUT_MS = Math.min(
+  Math.max(parseInt(process.env.WHATSAPP_PASSIVE_MEDIA_TIMEOUT_MS || '60000', 10), 5000),
+  120000,
+);
 const passiveIntake = createPassiveIntake({
   rawConfig: process.env.WHATSAPP_PASSIVE_INTAKE_CONFIG || '',
   rootDir: process.env.HERMES_PASSIVE_INTAKE_ROOT || '',
@@ -653,12 +657,58 @@ async function startSocket() {
           const result = msg.message
             ? passiveIntake.captureMessage({ msg, chatId, senderId })
             : { persisted: false, reason: 'empty_protocol_message' };
+          let mediaStatus;
+          if (result.hasMedia && result.eventId && passiveIntake.mediaState(result.project, result.eventId) === 'pending') {
+            if (result.privacyRestricted) {
+              mediaStatus = passiveIntake.captureMediaFailure({
+                project: result.project,
+                eventId: result.eventId,
+                spoolPath: result.spoolPath,
+                code: 'media-privacy-restricted',
+              }).status;
+            } else {
+              let timeout;
+              try {
+                const mediaBytes = await Promise.race([
+                  downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage }),
+                  new Promise((_, reject) => {
+                    timeout = setTimeout(
+                      () => reject(Object.assign(new Error('passive media timeout'), { code: 'MEDIA_TIMEOUT' })),
+                      PASSIVE_MEDIA_TIMEOUT_MS,
+                    );
+                  }),
+                ]);
+                const metadata = result.mediaMetadata?.[0] || {};
+                mediaStatus = passiveIntake.captureMedia({
+                  project: result.project,
+                  eventId: result.eventId,
+                  spoolPath: result.spoolPath,
+                  kind: metadata.kind,
+                  mime: metadata.mime,
+                  bytes: mediaBytes,
+                }).status;
+              } catch (mediaError) {
+                const code = mediaError?.code === 'MEDIA_TIMEOUT'
+                  ? 'media-download-timeout'
+                  : 'media-download-failed';
+                mediaStatus = passiveIntake.captureMediaFailure({
+                  project: result.project,
+                  eventId: result.eventId,
+                  spoolPath: result.spoolPath,
+                  code,
+                }).status;
+              } finally {
+                if (timeout) clearTimeout(timeout);
+              }
+            }
+          }
           console.log(JSON.stringify({
             event: 'passive_intake_consumed',
             project: passiveRoute.project,
             persisted: result.persisted === true,
             duplicate: result.duplicate === true,
             reason: result.reason || undefined,
+            media: mediaStatus,
           }));
         } catch (error) {
           // Fail closed: persistence failure must never fall through into the

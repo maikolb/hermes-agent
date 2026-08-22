@@ -10,6 +10,7 @@
 - Garantir continuidade durável de estado conhecido através de compactação/restart, retomada operacional automática e compactações menos frequentes, sem sacrificar a qualidade do contexto recente nem apagar o transcript original; eliminar também janelas visíveis produzidas por qualquer descendente dos gateways Hermes no Windows.
 
 ## In Scope
+- Passive WhatsApp intake addendum (2026-08-21): persist sandbox media encrypted before analysis, prohibit view-once download, expose no egress, and pass only hashes plus sanitized derivatives to the standalone intake hub. Changes are limited to `scripts/whatsapp-bridge/passive_intake.js`, its bridge call site, and focused tests.
 - `agent/turn_checkpoint.py`: projeção canônica do transcript usada no protocolo write-ahead.
 - `hermes_state.py` e `run_agent.py`: persistência/replay do nome de resultados de ferramenta apenas no ponto necessário para estabilidade do round-trip.
 - Auditoria e, somente se necessário, hardening mínimo do estado operacional persistido pelo checkpoint: fase, próxima ação, transcript before/after, ferramentas incertas, verificação, entrega, paths, artefatos e bloqueios.

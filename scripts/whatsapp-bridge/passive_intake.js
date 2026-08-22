@@ -24,6 +24,7 @@ const MAX_ROUTES = 32;
 const MAX_TEXT_LENGTH = 32_768;
 const MAX_FILENAME_LENGTH = 255;
 const MAX_MIME_LENGTH = 128;
+const MAX_MEDIA_BYTES = 100_000_000;
 
 export class PassiveIntakeConfigError extends Error {
   constructor(message) {
@@ -133,6 +134,24 @@ function unwrapMessage(message) {
   return current;
 }
 
+function isViewOnceMessage(message) {
+  let current = isPlainObject(message) ? message : {};
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (
+      isPlainObject(current.viewOnceMessage)
+      || isPlainObject(current.viewOnceMessageV2)
+      || isPlainObject(current.viewOnceMessageV2Extension)
+    ) {
+      return true;
+    }
+    const nested = current.ephemeralMessage?.message
+      || current.documentWithCaptionMessage?.message;
+    if (!isPlainObject(nested)) break;
+    current = nested;
+  }
+  return false;
+}
+
 function firstText(message) {
   const candidates = [
     message.conversation,
@@ -200,7 +219,11 @@ function atomicWriteExclusive(finalPath, data, { mode = 0o600 } = {}) {
   let descriptor;
   try {
     descriptor = openSync(temporaryPath, 'wx', mode);
-    writeFileSync(descriptor, data, { encoding: 'utf8' });
+    if (typeof data === 'string') {
+      writeFileSync(descriptor, data, { encoding: 'utf8' });
+    } else {
+      writeFileSync(descriptor, data);
+    }
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
@@ -255,6 +278,33 @@ function encryptEnvelope(envelope, key) {
   };
 }
 
+function encryptMediaRecord({ eventId, kind, mime, bytes }, key) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const ciphertext = Buffer.concat([cipher.update(bytes), cipher.final()]);
+  return {
+    schema: 'EncryptedIntakeMediaV1',
+    version: 1,
+    algorithm: 'A256GCM',
+    keyId: createHash('sha256').update(key).digest('hex').slice(0, 16),
+    eventId,
+    kind,
+    mime,
+    bytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+  };
+}
+
+function mediaRecordPath(projectRoot, eventId) {
+  if (!/^[a-f0-9]{64}$/.test(String(eventId || ''))) {
+    throw new Error('passive intake media event ID is invalid');
+  }
+  return path.join(projectRoot, 'media', `${eventId}.json`);
+}
+
 function decryptEnvelope(record, key) {
   if (!isPlainObject(record) || record.schema !== 'EncryptedIntakeEnvelopeV1' || record.algorithm !== 'A256GCM') {
     throw new Error('passive intake spool record has an unsupported format');
@@ -299,6 +349,7 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
       return { matched: true, project: route.project, persisted: false, reason: 'from_me' };
     }
 
+    const privacyRestricted = isViewOnceMessage(msg?.message);
     const message = unwrapMessage(msg?.message);
     const ingestedAtMs = now();
     const occurredAtMs = timestampMilliseconds(msg?.messageTimestamp, ingestedAtMs);
@@ -318,6 +369,7 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
     const eventId = createHash('sha256')
       .update(`${route.project}\u0000${routeId}\u0000${eventMaterial}`)
       .digest('hex');
+    const attachments = attachmentMetadata(message);
     const envelope = {
       schema: 'IntakeEnvelopeV1',
       version: 1,
@@ -333,7 +385,7 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
         kind: contentKind,
         text,
         replyToNativeId: boundedString(contextInfo.stanzaId, 256) || null,
-        attachments: attachmentMetadata(message),
+        attachments,
       },
       integrity: {
         eventHash: eventId,
@@ -356,7 +408,85 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
       persisted,
       duplicate: !persisted,
       spoolPath,
+      hasMedia: attachments.length > 0,
+      mediaMetadata: attachments,
+      privacyRestricted,
     };
+  }
+
+  function captureMedia({ project, eventId, spoolPath, kind, mime, bytes }) {
+    if (!Buffer.isBuffer(bytes) || bytes.length <= 0 || bytes.length > MAX_MEDIA_BYTES) {
+      throw new Error('passive intake media size is invalid');
+    }
+    const projectRoot = safeProjectRoot(config.rootDir, project);
+    const resolvedSpoolPath = path.resolve(String(spoolPath || ''));
+    if (!resolvedSpoolPath.startsWith(`${path.join(projectRoot, 'spool')}${path.sep}`) || !existsSync(resolvedSpoolPath)) {
+      throw new Error('passive intake media has no durable source envelope');
+    }
+    const safeKind = ['image', 'video', 'audio', 'document', 'sticker'].includes(kind) ? kind : 'document';
+    const safeMime = boundedString(mime, MAX_MIME_LENGTH).toLowerCase();
+    const storageKey = readOrCreateSecret(path.join(projectRoot, 'private', 'storage.key'));
+    const record = encryptMediaRecord({ eventId, kind: safeKind, mime: safeMime, bytes }, storageKey);
+    const target = mediaRecordPath(projectRoot, eventId);
+    const persisted = atomicWriteExclusive(target, `${JSON.stringify(record)}\n`);
+    return { persisted, duplicate: !persisted, status: 'captured', sha256: record.sha256 };
+  }
+
+  function captureMediaFailure({ project, eventId, spoolPath, code }) {
+    const projectRoot = safeProjectRoot(config.rootDir, project);
+    const resolvedSpoolPath = path.resolve(String(spoolPath || ''));
+    if (!resolvedSpoolPath.startsWith(`${path.join(projectRoot, 'spool')}${path.sep}`) || !existsSync(resolvedSpoolPath)) {
+      throw new Error('passive intake media failure has no durable source envelope');
+    }
+    const allowedCodes = new Set([
+      'media-download-failed',
+      'media-download-timeout',
+      'media-empty',
+      'media-privacy-restricted',
+      'media-too-large',
+    ]);
+    const reasonCode = allowedCodes.has(code) ? code : 'media-download-failed';
+    const target = mediaRecordPath(projectRoot, eventId);
+    const record = {
+      schema: 'IntakeMediaFailureV1',
+      version: 1,
+      eventId,
+      reasonCode,
+    };
+    const persisted = atomicWriteExclusive(target, `${JSON.stringify(record)}\n`);
+    return { persisted, duplicate: !persisted, status: 'failed', reasonCode };
+  }
+
+  function mediaState(project, eventId) {
+    const projectRoot = safeProjectRoot(config.rootDir, project);
+    const target = mediaRecordPath(projectRoot, eventId);
+    if (!existsSync(target)) return 'pending';
+    try {
+      const record = JSON.parse(readFileSync(target, 'utf8'));
+      if (record?.schema === 'EncryptedIntakeMediaV1') return 'captured';
+      if (record?.schema === 'IntakeMediaFailureV1') return 'failed';
+    } catch {}
+    return 'invalid';
+  }
+
+  function readMedia(project, eventId) {
+    const projectRoot = safeProjectRoot(config.rootDir, project);
+    const target = mediaRecordPath(projectRoot, eventId);
+    const record = JSON.parse(readFileSync(target, 'utf8'));
+    if (record?.schema !== 'EncryptedIntakeMediaV1' || record?.algorithm !== 'A256GCM') {
+      throw new Error('passive intake media record has an unsupported format');
+    }
+    const storageKey = readOrCreateSecret(path.join(projectRoot, 'private', 'storage.key'));
+    const decipher = createDecipheriv('aes-256-gcm', storageKey, Buffer.from(record.iv, 'base64'));
+    decipher.setAuthTag(Buffer.from(record.tag, 'base64'));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(record.ciphertext, 'base64')),
+      decipher.final(),
+    ]);
+    if (plaintext.length !== record.bytes || createHash('sha256').update(plaintext).digest('hex') !== record.sha256) {
+      throw new Error('passive intake media integrity validation failed');
+    }
+    return { ...record, plaintext };
   }
 
   function readEnvelope(spoolPath, project) {
@@ -376,6 +506,10 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
     routeFor,
     assertEgressAllowed,
     captureMessage,
+    captureMedia,
+    captureMediaFailure,
+    mediaState,
+    readMedia,
     readEnvelope,
   });
 }

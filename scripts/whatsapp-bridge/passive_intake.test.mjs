@@ -25,14 +25,30 @@ function message({ id = 'MSG-1', text = 'Tela trava ao salvar', fromMe = false, 
   };
 }
 
-test('disabled-by-default configuration has no routes', () => {
+function mediaMessage({ id = 'MEDIA-1', viewOnce = false, ephemeral = false } = {}) {
+  const inner = {
+    imageMessage: {
+      caption: 'Erro mostrado no print',
+      mimetype: 'image/png',
+      fileLength: 12,
+    },
+  };
+  const wrapped = viewOnce ? { viewOnceMessageV2: { message: inner } } : inner;
+  return {
+    key: { id, remoteJid: CONCURSA_JID, participant: '5511999999999@s.whatsapp.net', fromMe: false },
+    messageTimestamp: 1_787_266_800,
+    message: ephemeral ? { ephemeralMessage: { message: wrapped } } : wrapped,
+  };
+}
+
+await test('disabled-by-default configuration has no routes', () => {
   const intake = createPassiveIntake({ rawConfig: '', rootDir: '' });
   assert.equal(intake.enabled, false);
   assert.equal(intake.routeCount, 0);
   assert.equal(intake.routeFor(CONCURSA_JID), null);
 });
 
-test('invalid enabled configuration fails closed at initialization', () => {
+await test('invalid enabled configuration fails closed at initialization', () => {
   const root = path.resolve(os.tmpdir(), 'hermes-passive-config-test');
   assert.throws(
     () => createPassiveIntake({ rawConfig: '{broken', rootDir: root }),
@@ -58,7 +74,7 @@ test('invalid enabled configuration fails closed at initialization', () => {
   );
 });
 
-test('routes only the exact configured JID and denies its egress', () => {
+await test('routes only the exact configured JID and denies its egress', () => {
   const root = path.resolve(os.tmpdir(), 'hermes-passive-route-test');
   const intake = createPassiveIntake({
     rawConfig: config([{ project: 'concursa-ai', jid: CONCURSA_JID }]),
@@ -73,7 +89,7 @@ test('routes only the exact configured JID and denies its egress', () => {
   assert.doesNotThrow(() => intake.assertEgressAllowed(DOV_JID, 'send'));
 });
 
-test('persists encrypted, idempotent and project-isolated envelopes', () => {
+await test('persists encrypted, idempotent and project-isolated envelopes', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'hermes-passive-intake-'));
   try {
     const intake = createPassiveIntake({
@@ -125,7 +141,7 @@ test('persists encrypted, idempotent and project-isolated envelopes', () => {
   }
 });
 
-test('fromMe messages in passive groups are consumed without being spooled', () => {
+await test('fromMe messages in passive groups are consumed without being spooled', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'hermes-passive-from-me-'));
   try {
     const intake = createPassiveIntake({
@@ -143,6 +159,73 @@ test('fromMe messages in passive groups are consumed without being spooled', () 
       persisted: false,
       reason: 'from_me',
     });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await test('captures media encrypted and binds it to the durable source event', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'hermes-passive-media-'));
+  try {
+    const intake = createPassiveIntake({
+      rawConfig: config([{ project: 'concursa-ai', jid: CONCURSA_JID }]),
+      rootDir: root,
+    });
+    const captured = intake.captureMessage({
+      msg: mediaMessage(),
+      chatId: CONCURSA_JID,
+      senderId: '5511999999999@s.whatsapp.net',
+    });
+    assert.equal(captured.hasMedia, true);
+    assert.equal(intake.mediaState('concursa-ai', captured.eventId), 'pending');
+    const bytes = Buffer.from('89504e470d0a1a0a74657374', 'hex');
+    const media = intake.captureMedia({
+      project: 'concursa-ai',
+      eventId: captured.eventId,
+      spoolPath: captured.spoolPath,
+      kind: captured.mediaMetadata[0].kind,
+      mime: captured.mediaMetadata[0].mime,
+      bytes,
+    });
+    assert.equal(media.status, 'captured');
+    assert.equal(intake.mediaState('concursa-ai', captured.eventId), 'captured');
+    const recordPath = path.join(root, 'concursa-ai', 'media', `${captured.eventId}.json`);
+    assert.doesNotMatch(readFileSync(recordPath, 'utf8'), new RegExp(bytes.toString('base64')));
+    assert.deepEqual(intake.readMedia('concursa-ai', captured.eventId).plaintext, bytes);
+    assert.equal(intake.captureMedia({
+      project: 'concursa-ai',
+      eventId: captured.eventId,
+      spoolPath: captured.spoolPath,
+      kind: 'image',
+      mime: 'image/png',
+      bytes,
+    }).duplicate, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await test('view-once media is marked privacy-restricted without capturing bytes', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'hermes-passive-view-once-'));
+  try {
+    const intake = createPassiveIntake({
+      rawConfig: config([{ project: 'concursa-ai', jid: CONCURSA_JID }]),
+      rootDir: root,
+    });
+    const captured = intake.captureMessage({
+      msg: mediaMessage({ viewOnce: true, ephemeral: true }),
+      chatId: CONCURSA_JID,
+      senderId: '5511999999999@s.whatsapp.net',
+    });
+    assert.equal(captured.privacyRestricted, true);
+    const failure = intake.captureMediaFailure({
+      project: 'concursa-ai',
+      eventId: captured.eventId,
+      spoolPath: captured.spoolPath,
+      code: 'media-privacy-restricted',
+    });
+    assert.equal(failure.status, 'failed');
+    assert.equal(intake.mediaState('concursa-ai', captured.eventId), 'failed');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
