@@ -1,124 +1,70 @@
-# CODEX Execution Contract
+# Hermes Execution Contract
 
 ## Contract Metadata
-- Mode: CHANGE_THEN_VERIFY
-- Risk Level: high
-- Workspace: C:\Users\maiko\AppData\Local\hermes\hermes-agent
-- Updated At: 2026-08-21T10:35:00-03:00
+- Contract Version: 2
+- Mode: IMPLEMENT
+- Risk Level: HIGH
+- Workspace: C:\Users\maiko\Projetos\hermes-aof-route-runtime-20260821
+- Updated At: 2026-08-21T22:00:00-03:00
+- Machine Runtime Authority: none: operator-driven bounded foreground source, test, integration, and cutover sequence; no autonomous, scheduled, resumable, concurrent, or unattended agent loop
+- Discovery Route Authority: C:\Users\maiko\.codex\GLOBAL_DISCOVERY_PROMOTIONS.json
 
 ## Requested Outcome
-- Garantir continuidade durável de estado conhecido através de compactação/restart, retomada operacional automática e compactações menos frequentes, sem sacrificar a qualidade do contexto recente nem apagar o transcript original; eliminar também janelas visíveis produzidas por qualquer descendente dos gateways Hermes no Windows.
+- Preserve Hermes as an independent runtime while integrating the proven guard-state repair into the current branch and validating that its existing plugin narrow waist can enforce the external AOF route authority before dispatch and observe outcomes afterward.
+
+## Acceptance Criteria
+- `ToolCallGuardrailController` initializes and resets redirect state deterministically; one structural failure redirects only the equivalent signature/tool and leaves declared alternatives usable.
+- A standalone plugin installed from AOF, not policy logic embedded in Hermes core, is discovered through a real temporary `HERMES_HOME` and receives exactly one `pre_tool_call` and one terminal `post_tool_call` per dispatch path.
+- A matched AOF deny/redirect decision prevents the underlying tool dispatcher from running and returns bounded alternatives to the agent.
+- A non-match and an unrelated tool preserve existing behavior byte-for-byte at the dispatch boundary.
+- Hook/plugin errors do not expose secrets or corrupt unrelated tool calls; deterministic safety-policy authority corruption is reported as a bounded block only for the configured policy surface.
+- Focused tests run through `scripts/run_tests.sh`, compile/diff checks pass, and the final current-branch integration is clean before any live checkout update or reload.
 
 ## In Scope
-- `agent/turn_checkpoint.py`: projeção canônica do transcript usada no protocolo write-ahead.
-- `hermes_state.py` e `run_agent.py`: persistência/replay do nome de resultados de ferramenta apenas no ponto necessário para estabilidade do round-trip.
-- Auditoria e, somente se necessário, hardening mínimo do estado operacional persistido pelo checkpoint: fase, próxima ação, transcript before/after, ferramentas incertas, verificação, entrega, paths, artefatos e bloqueios.
-- Política de compactação nos seis perfis locais: `threshold=0.85`, `target_ratio=0.30`, `protect_first_n=5`, `protect_last_n=20`, `max_attempts=3`, mantendo `abort_on_summary_failure=true` e `in_place=true`.
-- Testes focados de checkpoint, compactação real com SQLite, persistência de mensagens e parse/effective config dos seis perfis.
-- `docs/REVISION_PROTOCOL.md` e este contrato.
-- Reload controlado apenas dos gateways Hermes atualmente ativos depois dos gates locais.
-- Cadeia canônica de auto-start Windows em `hermes_cli/gateway_windows.py`, artefatos/task actions dos perfis ativos e testes de descendentes reais (`git`, `gh`, `cmd`, `bash`, Node e browser/CUA).
-- Retomada de checkpoint/restart: converter `reconcile_required` em reconciliação operacional automática e continuar da `next_action`, pedindo intervenção humana somente quando não houver autoridade consultável ou existir risco irreversível não reconciliável.
-- Retomada explícita após falha recuperável: pedidos estritos como "continue de onde parou" devem reutilizar o checkpoint inacabado, preservar o turno original e reativar execução material; é proibido confirmar restauração/progresso com `recovery.restored=false` ou sem avanço verificável do checkpoint.
-- Falhas de quota/rate limit: persistir a recuperação e agendar no horário de liberação com tentativas bounded, sem depender de nova mensagem do usuário e sem loop de chamadas ao provedor.
-- Lifecycle da compactação: emitir conclusão apenas após commit real; timeout, contenção de lock, cancelamento e falha não podem produzir falso status de sucesso nem deixar novas compactações concorrentes iniciarem.
-- Configuração global dos seis perfis: podar deterministicamente resultados antigos de ferramenta antes da sumarização completa, silenciar apenas os avisos rotineiros de compactação e desativar a autoedição periódica de skills; falhas e `/compress` manual continuam visíveis.
-- Integridade do runtime vivo: o agente não pode executar `checkout`, `switch`, `merge`, `pull`, `rebase`, `cherry-pick` ou operação equivalente no checkout que sustenta o próprio processo; manutenção deve ocorrer em worktree/clone separado e só chegar ao runtime por cutover drenado e validado.
-- Continuidade observável do Kanban: um tópico só pode receber “em execução” depois do evento material `claimed`; o notifier deve mostrar esse início automaticamente, sem transformar mero enfileiramento em execução nem despejar heartbeats por minuto.
-- Helper global de restart zero-UI: verificação de PID S4U deve usar o ambiente Hermes real e não produzir falso-negativo por `OpenProcess` negado.
-- Notificações Kanban: convergir eventos internos para o estado material mais recente de cada card; um tick com vários cards no mesmo tópico deve produzir um único digest, nunca uma bolha por transição. Retries, crashes, timeouts, heartbeats e mudanças internas de status não são notificações de usuário. O primeiro `claimed`, bloqueio acionável, pedido de revisão, desistência final e conclusão permanecem observáveis.
+- `docs/EXECUTION_CONTRACT.md`, `docs/REVISION_PROTOCOL.md`, `agent/tool_guardrails.py`, its focused tests, and narrowly relevant generic plugin-dispatch tests or documentation if the existing seam needs conformance coverage.
+- Git commit/merge of the validated isolated candidate into `integrate/local-runtime-v2-20260820` after AOF adapter tests are green.
+- Read-only inspection of the live checkout and controlled reload through its existing hidden task/launcher after idle and rollback checks.
 
 ## Out of Scope
-- Roteadores de modelo, credenciais, allowlists, projetos, boards, conteúdo das conversas, bancos fora do round-trip de teste e qualquer projeto de usuário.
-- Alterar ou desativar o checkpoint durável, apagar sessões, usar `/reset`, repetir tarefas do usuário ou enviar mensagens de teste a terceiros.
-- Reescrever evidências históricas e mudanças preexistentes do worktree.
-- Alegar que estado interno invisível do provedor ou efeito externo em voo pode ser serializado: esse estado deve ficar explicitamente `unknown/reconcile_required`, nunca inventado nem repetido automaticamente.
+- Copying AOF registry schemas, route matching, precedence, or policy content into Hermes core.
+- Modifying model-visible tool schemas, prompts, channels, credentials, providers, business state, unrelated config, or the plugin framework architecture.
+- Refactoring the agent loop, adding dependencies, force-pushing, rewriting history, or reloading an active profile.
 
 ## Failure Signal / Repro
-- Em 2026-08-19, Titan/Telegram (17:43), Titan/WhatsApp (17:59 e 18:05) e Project Factory/Telegram (18:18 e 18:21) concluíram a sumarização e falharam imediatamente na retomada.
-- Os logs registram em todos os casos `CheckpointConflictError: cannot commit checkpoint: live transcript does not match after transcript`, seguido de falha do rollback pelo mesmo conflito e da resposta genérica do gateway.
-- O defeito começou depois do commit `f91f7865b`, que introduziu a validação de hash do checkpoint, e se reproduz quando o transcript contém resultado de ferramenta com `name`.
-- Em 19/08, os logs do default e Project Factory registraram 92 gatilhos de compactação; 43 ocorreram a menos de 10 minutos do gatilho anterior. A configuração ativa compactava a 85% para um tail budget de 50% do limiar e admitia dez tentativas por turno.
-- Exemplo real: ~242.749 tokens antes da compactação e ~220.943 depois; a redução de ~9% deixou o turno imediatamente próximo do gatilho de 231.200 tokens.
-- O Project Factory abriu repetidamente Windows Terminal/`cmd.exe` durante tarefas DOVCRM/RecuperaCli. A atribuição forense mostrou `cmd -> node/bash -> pythonw` sob workers do PF; o gateway e workers foram iniciados por `base uv pythonw.exe`, apesar de a cadeia canônica do upstream usar `wscript.exe -> console python.exe` oculto precisamente para impedir flashes de descendentes.
-- Após a primeira correção e 660 s de watchers verdes, o problema voltou. O vídeo de 20:39 mostra uma janela do Windows Terminal permanecendo visível e reaparecendo. O listener atribuiu a ocorrência imediatamente anterior a uma árvore do PF que atravessou o broker interno: `python.exe (gateway) -> pythonw.exe (broker) -> hidden-run.exe -> cmd.exe -> node.exe/powershell.exe`, seguida por novos `WindowsTerminal.exe`/`OpenConsole.exe`.
-- Após restart, uma sessão reportou "Sessão restaurada" mas devolveu "O que você quer fazer agora?" em vez de executar a `next_action`/reconciliação persistida.
-- Em 20/08 às 08:03, o Project Factory recebeu "Continue de onde parou" após `usage_limit_reached`. O checkpoint novo terminou com `recovery.restored=false`, `resolution=new_turn`, mas o bot afirmou "Retomado do checkpoint" e depois "implementação ... está em execução". Houve um subagente separado que expirou; o turno original não foi restaurado nem continuado.
-- Em 20/08, uma compactação de higiene do Titan excedeu 120 s, continuou viva em thread após o timeout e manteve o lock. Três tentativas subsequentes abortaram por `lock_contended`; todas foram mostradas ao usuário como "Context compaction complete", embora nenhuma tivesse concluído. Apenas a tentativa final posterior realizou commit.
-- Em 20/08, o Titan/default permitiu 200 iterações, manteve `proactive_prune_tokens=0` e reintroduziu dezenas de milhares de caracteres de resultados por chamada; um turno chegou a estimativa de ~727 mil tokens antes de nova compactação. No mesmo turno, o agente executou merge/cherry-picks no checkout vivo, produziu conflito/syntax error transitório e trocou o branch do runtime enquanto três agentes estavam ativos.
-- Em 20/08 às 17:12, uma mensagem nova ao Titan/default no Telegram caiu antes da primeira chamada ao modelo com `NameError: _resolve_activity_indicator_settings is not defined`. O merge vivo havia preservado call sites e perdido definições/imports; a mesma integração também deixou `_should_explicitly_resume_checkpoint()` sem qualquer call site produtivo.
-- Em 20/08 às 17:11, o CEOGame caiu antes da chamada ao modelo com `ImportError: cannot import name 'CHECK_FN_CACHE_BYPASS' from 'tools.registry'`. O símbolo existe e importa corretamente no source atual; o PID do gateway havia nascido antes da integração e mantinha uma combinação antiga de módulos em memória.
-- No DOVCRM, o hotfix realmente foi assumido pelo writer imediatamente após a dependência concluir, mas o tópico não recebeu sinal automático. O notifier filtrava somente eventos terminais; `claimed` e `spawned` ficavam invisíveis, obrigando o operador a perguntar se o trabalho havia começado.
-- Após o cutover drenado do Project Factory às 19:32, o notifier publicou em segundos uma sequência de estados históricos e de retry de múltiplos cards (`started`, timeout, retry, crash, `gave_up`, `done`) em Concursa e DOVCRM. O saneamento posterior do board era legítimo e terminou em um resumo coerente; a falha foi transformar telemetria interna/backlog em uma enxurrada de mensagens.
+- `ToolCallGuardrailController.before_call()` references `_redirected_signatures` and `_redirected_tools` although construction/reset did not guarantee those fields.
+- Without a loaded AOF plugin, `search_files` reaches the normal dispatcher before the cross-session promotion authority can deny or redirect it.
 
 ## Root-Cause Hypothesis
-- Facts: o loop cria resultados de ferramenta com a chave `name`; `transcript_hash()` inclui `name` e `tool_name` como chaves diferentes; a persistência SQLite grava somente `tool_name`, mas os caminhos de insert/flush não promovem `name` para esse campo; o read-back portanto não pode produzir o mesmo hash preparado em memória. Os testes originais usam somente mensagens user/assistant e não cobrem o round-trip com ferramenta.
-- Assumptions: outras normalizações de round-trip podem existir; o novo teste deve falhar fechado se aparecerem e a correção deve limitar-se à projeção persistível já suportada.
-- Chosen fix point: canonicalizar `name`/`tool_name` como uma única identidade durável, persistir o fallback de `name` em `tool_name` nos dois caminhos de escrita e provar prepare -> archive/read-back -> commit com `SessionDB` real.
-- Compaction-thrash cause: `target_ratio=0.50` reserva 115.600 tokens só para a cauda, antes de prompt fixo, ferramentas, cabeçalho e resumo; `protect_first_n=10` fixa ainda mais contexto antigo, e `max_attempts=10` amplifica a repetição no mesmo turno. O `protect_last_n=100` é limitado internamente sob pressão, mas torna a intenção da config enganosa.
-- Chosen configuration: manter o gatilho conservador de 85%, mas reduzir o tail budget para 30% do limiar (69.360 tokens), preservar cinco mensagens iniciais e a política oficial de vinte mensagens recentes, limitando a três tentativas. O transcript original continua soft-archived, pesquisável e recuperável sob a mesma sessão.
-- Zero-UI root cause, revisão 2: `CREATE_NO_WINDOW`/desktop privado reduziram flashes, mas não isolavam a árvore do desktop enquanto o gateway permanecia na sessão interativa. A cadeia real `python -> pythonw -> hidden-run -> cmd -> node/powershell` podia acionar o terminal delegado do Windows mesmo atravessando o broker.
-- Zero-UI root cause estrutural, revisão 3: as tarefas automáticas usavam `InteractiveToken`/`/IT` e executavam um VBS assíncrono. Isso colocava gateway e descendentes na sessão 1 e fazia o Task Scheduler perder ownership do processo real. A correção passa a ser `S4U`/sessão 0 + ação síncrona `base pythonw -> .pyw`, com boot+logon e restart supervisionado; o broker interno mantém a implementação estável de stdio/lifecycle.
-- Alternativas rejeitadas: `CREATE_NEW_CONSOLE` + `SW_HIDE` abriu Windows Terminal; o protótipo ConPTY não preservou a interface de stdout/stderr do broker e foi removido antes de qualquer ativação. O isolamento final usa a fronteira de sessão do Windows, que impede descendentes do gateway de materializarem UI no desktop compartilhado.
-- Resume root cause: o evento sintético de restart chegava ao agente como um novo turno vazio; `start_turn()` comparava o hash desse vazio com o pedido original e criava um checkpoint novo. Além disso, `build_resume_recovery_note()` mandava transportes interativos relatarem o restore e perguntarem o que fazer. O fix vincula o evento vazio one-shot ao checkpoint inacabado original e exige continuação de `checkpoint.next_action`; efeitos incertos são lidos/reconciliados antes de qualquer retry.
-- Explicit-resume root cause: a flag one-shot só era armada para evento sintético vazio. Uma mensagem humana de continuação sempre forçava `_resume_turn_from_checkpoint=false`; `start_turn()` então substituía o checkpoint inacabado por um turno novo. Nenhum gate ligava alegações de "retomado/continuidade ativa" a `recovery.restored=true` ou a avanço material.
-- Provider-recovery root cause: `usage_limit_reached` era devolvido como falha comum. O gateway preservava o texto de entrada, mas não persistia `resume_pending` com `not_before`, não agendava wakeup e não retomava quando a quota voltava.
-- Compaction lifecycle root cause: `_complete_compaction_lifecycle()` emitia o mesmo status de sucesso em caminhos de exceção, lock contendido e cancelamento. O timeout de higiene cancelava somente a commit fence; a thread continuava executando e segurando o lock enquanto o turno avançava para novas tentativas.
-- Context-growth root cause: o podador determinístico e sem LLM já existe, preserva a cauda recente e mantém o resultado integral no store, mas estava desabilitado em todos os perfis. `progress_notices=true` tornava cada ciclo rotineiro visível, sem reduzir sua frequência. A revisão automática de skills era disparada por contagem de iterações e podia alterar o catálogo logo após respostas parciais.
-- Live-runtime mutation root cause: a proteção determinística contra operações Git destrutivas no próprio checkout já está no source integrado, mas o gateway default em execução nasceu antes desse código e portanto não a aplicava. O runtime carregado permitiu que o próprio turno trocasse branch e resolvesse commits no diretório do qual importava módulos.
-- Continuation-wiring regression: o classificador de “continue de onde parou” e o guard de status existiam e tinham testes isolados, mas o call site que armava `_resume_turn_from_checkpoint`/`_gateway_explicit_checkpoint_resume` desapareceu na integração feita dentro do checkout vivo. Assim, o helper parecia verde sem participar do fluxo real.
-- Kanban visibility root cause: `_kanban_notifier_watcher()` consultava somente o conjunto chamado `TERMINAL_KINDS`; o banco registrava `claimed`, `spawned` e heartbeats corretamente, mas o cursor do assinante só avançava e notificava na conclusão/bloqueio. A correção inclui somente `claimed` como prova de início e mantém `heartbeat` silencioso para evitar spam.
-- Restart-helper false-negative: o helper roda pelo Python GUI base, mas `psutil` está instalado no venv Hermes. Sem adicionar o `site-packages` do venv, `_pid_alive()` caía no fallback `OpenProcess`, que pode negar acesso ao processo S4U e declarar um PID vivo como morto.
-- Kanban flood root cause: o watcher reivindica todos os eventos notificáveis desde o cursor e executa `adapter.send()` dentro de um loop por evento. A inclusão de `claimed` ampliou uma política já orientada a event-log: um mesmo card podia emitir início, timeout, novo início e desistência no mesmo tick; vários cards no mesmo tópico multiplicavam as bolhas. Cursores legados preservados durante o downtime tornaram esse comportamento visível imediatamente após o restart.
+- Facts: the redirect maps are missing from the controller's reset invariant; Hermes already invokes `resolve_pre_tool_block()` before dispatch and emits `post_tool_call` after terminal outcomes.
+- Assumptions: no Hermes core feature is required for AOF semantics; source integration should be limited to the independent guard regression and conformance tests for the existing plugin boundary.
+- Chosen fix point: restore the controller invariant, exercise real plugin discovery/dispatch, and leave all AOF policy evaluation in the separately versioned adapter.
+
+## Claim Discipline
+- Isolated source/tests: at most `validated-local`.
+- Current live checkout commit integration: `released-source`, not runtime validation.
+- Each profile: `validated-target` only after a new runtime loads the plugin and passes actual block/outcome/health/zero-UI probes.
 
 ## Forbidden Actions
-- No scope expansion beyond the requested outcome.
-- No hidden side effects.
-- No behavior changes outside the declared scope.
-- No placeholders, fake values, temporary keys, or config overrides unless explicitly requested.
-- Não desativar o checkpoint nem relaxar o compare-and-swap para aceitar qualquer hash.
-- Não apagar, recompactar ou editar sessões reais para fazer o teste passar.
-- Não abrir terminal, navegador ou janela visível; reload somente pelos launchers já aprovados e sob monitor zero-UI.
-- Não aumentar artificialmente o context window de 272.000 observado no runtime OAuth com base no limite da API direta; não habilitar chave sem consumidor comprovado.
+- No live source mutation or reload before the isolated branch is green and recovery state is recorded.
+- No visible console/browser/editor/dialog, direct `.cmd`/`.bat` launcher, credentials in output, or reload while work is active.
+- No duplicated AOF policy implementation in Hermes.
+- No broad formatting/refactor, dependency changes, force-push, destructive reset, or deletion of user state.
+
+## Loop Control
+- Controlled micro-loop qualification: not required because this is a single-writer foreground implementation with deterministic gates; each profile reload is a separately reconciled one-shot action after idle proof.
+- Maximum iterations: 3 per focused gate.
+- Green condition: focused controller tests, real plugin discovery/dispatch integration, affected Hermes suite, compile, diff, idle/readiness checks, hidden reload, health, target policy probe, and `VisibleWindows=0`.
+- Escalation: stop if hook order is not truly pre-dispatch, the live branch diverged unexpectedly, a profile cannot drain, or rollback identity cannot be proven.
 
 ## Validation Plan
-- Analyze/lint: `py_compile` nos módulos tocados e `git diff --check`.
-- Unit tests: projeção canônica `name`/`tool_name`, escrita atômica/checksum/CAS, recuperação before/after, ferramenta incerta, deliverable e compactação in-place com SQLite real.
-- Integration/contract tests: suíte focada de turn checkpoint + compaction + anti-thrash + session sync e parse/effective config dos seis perfis, até 3 ciclos bounded, zero falhas.
-- Windows target test: iniciar o gateway pela task canônica e observar descendentes reais por listener/watcher; `VisibleWindows=0`, nenhuma nova janela Windows Terminal atribuível e nenhuma árvore PF órfã após parada planejada.
-- Resume target test: interromper um turno com checkpoint em `planning` e outro em ferramenta incerta; o primeiro continua automaticamente e o segundo reconcilia sem perguntar "o que fazer agora" quando existe autoridade consultável.
-- Explicit-resume test: checkpoint inacabado + mensagem humana estrita de continuação reutiliza o mesmo `turn_id`, marca `recovery.restored=true` e executa a `next_action`; mensagem comum cria turno novo. Alegação de retomada sem esses fatos deve ser bloqueada.
-- Provider recovery test: `usage_limit_reached` persiste `resume_pending/not_before`, agenda exatamente um wakeup bounded e, após sucesso, limpa todo o estado; serialização/restart preservam o contrato.
-- Compaction lifecycle test: timeout/lock contention/cancelamento não emitem `COMPACTION_DONE_STATUS`; timeout e lock contendido gravam cooldown durável para impedir novas tentativas enquanto o worker anterior termina; uma compactação com commit emite exatamente um status de conclusão.
-- Build/install/deploy checks: nenhuma instalação; source live é o checkout atual. Depois do verde, reload somente das tasks ativas e prova de PID novo/saúde.
-- Manual smoke checks: validação passiva dos canais e ausência de novos conflitos de checkpoint; compactação target fica `pending` até ocorrer novamente em turno real, pois não será forçada em sessão do usuário.
-- Kanban notifier test: tarefa inscrita permanece silenciosa enquanto apenas enfileirada, envia exatamente um início após `claim_task()` e continua entregando conclusão/bloqueio sem replay.
-- Kanban convergence test: `claimed -> timed_out -> claimed -> gave_up` converge para uma única desistência; um segundo `claimed` do mesmo card é silencioso; dois ou mais cards no mesmo destino viram um único digest; falha de envio rebobina todos os cursores do lote; um único card atual mantém a mensagem compacta e entrega artefatos somente quando não agrupado.
-- Wiring regression test: inspecionar o método produtivo `TurnRunner.run_sync` e falhar se uma integração voltar a deixar os helpers/flags de retomada sem call site.
+- Analyze/lint: `py_compile`, `git diff --check`, exact diff and import-boundary review.
+- Unit tests: constructor/reset invariants, structural redirect equivalence, alternatives remain usable, no cross-tool contamination.
+- Integration/contract tests: use `scripts/run_tests.sh`; temporary real `HERMES_HOME` plugin discovery; actual dispatcher is not called on block and is called once on non-match; post hook records terminal outcome.
+- Build/install/deploy checks: clean isolated commit, merge into current integration branch, target plugin checksum/config fingerprint, rollback commit/config backups.
+- Manual smoke checks: profile idle/drain proof, hidden canonical reload, PID/health/channel check, target pre-dispatch/outcome probes, zero-visible-UI verifier.
 
 ## Status
-- Contract preflight: validated for zero-UI + automatic-resume scope
-- Implementation: separação fail-closed entre notificação e execução concluída; eventos anteriores ao boot são convergidos sem entrega; auto-resume exige checkpoint íntegro; configuração PF explicita ambos os gates.
-- Validation: 82 testes focados verdes, `py_compile`, parse efetivo da configuração PF e `git diff --check` verdes. A dependência direta `filelock` foi incorporada ao manifesto/lock após o ambiente reproduzível revelar a omissão.
-- Completion: o processo antigo do PF morreu e deixou um worker S4U órfão; após autorização explícita, o cutover validou a identidade completa desse worker, encerrou somente ele pela própria tarefa privilegiada, recarregou o PF corrigido e restaurou byte a byte o launcher canônico. A tarefa permanece habilitada/`Running`, Telegram conectado, zero replay e zero janela. Titan/default e CEOGame não fizeram parte deste cutover.
-
-## Evidence
-- Exact runtime trace: all five reported failures raised `CheckpointConflictError` at the `commit_compaction()` read-back boundary and then `CheckpointWriteError` after the compensating rollback compared the same non-canonical shape.
-- Red test: the new three-test repro failed 3/3 before the fix (hash alias, SQLite compaction round-trip, normal flush) and passed 3/3 after it.
-- Regression gate: 91 tests passed across turn checkpoint, in-place compaction, persistence, identity flush, legacy compression and gateway failure synchronization.
-- Runtime safety state: default, CEOGame e Project Factory foram drenados sem kill e agora são processos `pythonw.exe` diretamente possuídos por tarefas `S4U` em estado `Running`; Exocortex já fornecia a prova local prévia de S4U. Os canais configurados reconectaram.
-- The compare-and-swap remains strict: only `name` and `tool_name` are canonicalized as the same durable tool identity; arbitrary transcript drift is still rejected.
-- State-persistence audit: pre-compaction rows are soft-archived (`active=0`) under the same session; checkpoint records before/after hashes before the atomic transcript swap; restart distinguishes swap-not-applied, committed-before-ack and conflict; uncertain tool effects block first exact replay until authoritative reconciliation.
-- Resume integration gate: the synthetic empty-event test preserves the original turn id, original user-turn hash and exact `next_action`; the flag is one-shot and cleared before a later genuine user turn.
-- Resume target gate: Project Factory scheduled exactly two restart-interrupted sessions; both reused and updated their pre-restart checkpoint files, both executed post-restart tools, and neither emitted the generic restore-and-ask response. At the observation boundary they remained active, so `resume_pending` intentionally remained durable for another crash.
-- Windows source/target gate: o instalador e os dois artefatos ativos resolvem `S4U`, `<Hidden>true</Hidden>`, boot+logon e ação direta `base pythonw.exe -> launcher .pyw` com WorkingDirectory. Os XMLs anteriores, o manifesto de migração e a ponte administrativa one-shot ficam preservados sob `C:\Users\maiko\agent-ops\repairs\hermes-compaction-checkpoint-20260819`; o VBS default foi restaurado byte a byte após o registro.
-- Zero-UI target evidence final: PF PID 36616/SessionId 0, Telegram connected, com cadeia real `pythonw -> hidden-run -> cmd -> conhost/node` inteira na sessão 0 e watcher 60 s em zero; Titan PID 32688/SessionId 0, WhatsApp+Telegram connected, bridge Node na sessão 0 e watcher 90 s em zero. As tarefas permanecem `Running`, provando ownership e habilitando restart-on-failure.
-- Revocation histórica preservada: o vídeo das 20:39 e o WindowOriginListener provaram que os 660 s antigos eram falso-verde para a fronteira interativa. Eles justificam a migração de sessão e não são usados como evidência do estado final.
-- Explicit-resume local: suíte integrada revision-bound de checkpoint, restart-resume, hygiene e compaction passou 199/199; o recorte final do cooldown de lock passou 1/1.
-- Provider recovery local: `resets_in_seconds` é convertido em epoch, serializado como `resume_not_before`, o wakeup é único por sessão, a tentativa só é consumida com adapter e autorização válidos e o estado é limpo somente após sucesso.
-- Estado alvo no fechamento local: Project Factory PID 36616 permanece vivo na sessão 0, Telegram conectado e checkpoints continuam sendo atualizados pelo trabalho que o usuário retomou diretamente. Um monitor read-only de 30 minutos nunca observou `active_agents=0`; o turno Telegram e seu subagente continuaram criando workers e avançando checkpoints. Nenhum reload foi disparado durante esse turno ativo.
-- Cutover final de 21/08: nenhum turno estava ativo e nenhum marcador `resume_pending` existia; o worker órfão foi removido somente após validação de PID, PPID, nome e creation time. O novo processo supervisionado iniciou com Telegram `connected`; o recorte pós-start registrou zero auto-resume, zero wake do Kanban, zero erro visual/sintático e watcher de 15 s com `VisibleWindows=0`.
-- Evidência de 20/08 após a regressão: o Titan/default foi drenado com `active_agents=0` e subiu em processo novo; `gateway_state=running`, Telegram/WhatsApp `connected`, `VisibleWindows=0`. O primeiro resultado do helper foi falso-vermelho porque não enxergou o PID S4U; após carregar `psutil` do venv, `--verify-only` retornou `ok=true` para o mesmo processo saudável.
-- Evidência CEOGame: o source atual passa o import de `model_tools`/`CHECK_FN_CACHE_BYPASS`; o gateway foi drenado com `active_agents=0` e recarregado pela tarefa canônica. O resultado final registrou PID novo vivo, `gateway_state=running`, Telegram `connected`, log pronto, `VisibleWindows=0` e nenhum erro de restart. A próxima mensagem natural ainda é necessária para provar o caminho lazy de `model_tools` no alvo.
-- Evidência PF final: duas leituras separadas provaram zero `task_runs` em `running` e `active_agents=0`; somente então o helper executou o cutover. O resultado registrou PID novo vivo, `gateway_state=running`, Telegram `connected`, log pronto, `VisibleWindows=0` e `ok=true`. O processo novo passou a reportar um agente ativo depois da subida, sem intervenção adicional.
-- Evidência DOVCRM: a dependência terminou às 16:58:59 e o hotfix recebeu `claimed` às 16:59:47, sem cobrança necessária para o dispatch. O worker concluiu às 17:30:58; o defeito observado era a ausência da notificação de início. O recorte notifier + restart + checkpoint + activity passou 83/83 após a correção.
+- Contract preflight: validated for this isolated current-base worktree.
+- Implementation: redirect-state initialization/reset and replay gates are ported onto the current integration base; AOF policy semantics remain outside Hermes core.
+- Validation: focused 6/6 suite and disposable real-plugin dispatch are green; current-branch integration and target profile reload remain pending.
+- Completion: pending.
