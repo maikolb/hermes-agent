@@ -157,3 +157,13 @@ Autoridade canônica de regressões operacionais deste checkout.
 - Prevenção vinculada: `tools/vision_tools.py`, `tests/tools/test_video_analyze.py` e compile gate de todo o diretório `tools`.
 - Comando de validação: `python -m compileall -q tools` e `pytest tests/tools/test_vision_tools.py tests/tools/test_vision_native_fast_path.py tests/tools/test_vision_region.py tests/tools/test_video_analyze.py -q`.
 - Evidência: import smoke verde; compileall de `agent`, `gateway`, `hermes_cli`, `tools` e `plugins` verde; 72 testes passaram, 1 foi ignorado por condição de plataforma. O PF foi recarregado depois do reparo com Telegram conectado, PID supervisionado e zero janelas; nenhuma mensagem de teste foi enviada ao grupo.
+
+## REG-2026-08-21-002 — Guard de redirecionamento cai ao registrar a primeira falha estrutural
+
+- Status: validated-local in the current isolated branch; integration and target cutover pending
+- Cenário reproduzível: `ToolCallGuardrailController.after_call()` recebe a primeira falha estrutural de `read_file`, `search_files` ou outra ferramenta e tenta registrar a decisão de redirecionamento. A chamada cai com `AttributeError: 'ToolCallGuardrailController' object has no attribute '_redirected_signatures'`; o redirecionamento por ferramenta também cai em `_redirected_tools`.
+- Causa raiz: o redirecionamento passou a ler e escrever os dois mapas, mas eles não faziam parte do estado criado por `reset_for_turn()`. O caminho de `before_call()` também não consultava os redirecionamentos registrados, portanto apenas inicializar os campos removeria a exceção sem restaurar o comportamento planejado.
+- Correção aplicada: os dois mapas tipados são inicializados e limpos junto do restante do estado por turno; `before_call()` consulta primeiro a assinatura e depois a rota da ferramenta, sem bloquear ferramentas não relacionadas; `reset_for_turn()` volta a permitir a rota no turno seguinte.
+- Prevenção vinculada: `tests/agent/test_tool_guardrail_strategy_redirect.py` executa falha estrutural, bloqueio da mesma assinatura/rota, disponibilidade da alternativa, redirecionamento de falha genérica e limpeza por reset.
+- Comando de validação: `scripts/run_tests.sh tests/agent/test_tool_guardrail_strategy_redirect.py` pelo wrapper obrigatório do repositório.
+- Aceite pendente: integração no branch atual, reload drenado e smoke do runtime real.

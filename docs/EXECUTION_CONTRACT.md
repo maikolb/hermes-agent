@@ -11,6 +11,7 @@
 
 ## In Scope
 - Passive WhatsApp intake addendum (2026-08-21): persist sandbox media encrypted before analysis, prohibit view-once download, expose no egress, and pass only hashes plus sanitized derivatives to the standalone intake hub. Changes are limited to `scripts/whatsapp-bridge/passive_intake.js`, its bridge call site, and focused tests.
+- AOF route-policy addendum (2026-08-21): restore the guard redirect-state lifecycle in `agent/tool_guardrails.py`, keep AOF matching semantics outside Hermes core, install the standalone plugin per profile only after green source tests, and validate pre-dispatch load/health through the existing hidden gateway tasks.
 - `agent/turn_checkpoint.py`: projeção canônica do transcript usada no protocolo write-ahead.
 - `hermes_state.py` e `run_agent.py`: persistência/replay do nome de resultados de ferramenta apenas no ponto necessário para estabilidade do round-trip.
 - Auditoria e, somente se necessário, hardening mínimo do estado operacional persistido pelo checkpoint: fase, próxima ação, transcript before/after, ferramentas incertas, verificação, entrega, paths, artefatos e bloqueios.
@@ -83,6 +84,7 @@
 - Não aumentar artificialmente o context window de 272.000 observado no runtime OAuth com base no limite da API direta; não habilitar chave sem consumidor comprovado.
 
 ## Validation Plan
+- AOF guard/plugin gate: run `scripts/run_tests.sh tests/agent/test_tool_guardrail_strategy_redirect.py` through the repository wrapper; exercise AOF plugin discovery plus real `handle_function_call` dispatch in a disposable home; require per-profile PID/fingerprint/startup-probe evidence after an idle hidden reload.
 - Analyze/lint: `py_compile` nos módulos tocados e `git diff --check`.
 - Unit tests: projeção canônica `name`/`tool_name`, escrita atômica/checksum/CAS, recuperação before/after, ferramenta incerta, deliverable e compactação in-place com SQLite real.
 - Integration/contract tests: suíte focada de turn checkpoint + compaction + anti-thrash + session sync e parse/effective config dos seis perfis, até 3 ciclos bounded, zero falhas.
