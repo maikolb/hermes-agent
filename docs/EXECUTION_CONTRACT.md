@@ -10,7 +10,7 @@
 - Garantir continuidade durável de estado conhecido através de compactação/restart, retomada operacional automática e compactações menos frequentes, sem sacrificar a qualidade do contexto recente nem apagar o transcript original; eliminar também janelas visíveis produzidas por qualquer descendente dos gateways Hermes no Windows.
 
 ## In Scope
-- Passive WhatsApp intake addendum (2026-08-21): persist sandbox media encrypted before analysis, prohibit view-once download, expose no egress, and pass only hashes plus sanitized derivatives to the standalone intake hub. Changes are limited to `scripts/whatsapp-bridge/passive_intake.js`, its bridge call site, and focused tests.
+- Passive WhatsApp intake addendum (2026-08-21): persist sandbox media encrypted before analysis, prohibit view-once download, expose no egress, and pass only hashes plus sanitized derivatives to the standalone intake hub. The downstream hub may close a route-local silence batch before tool-free split/correlation, including project-local continuation matching; transport changes remain limited to `scripts/whatsapp-bridge/passive_intake.js`, its bridge call site, and focused tests.
 - AOF route-policy addendum (2026-08-21): restore the guard redirect-state lifecycle in `agent/tool_guardrails.py`, keep AOF matching semantics outside Hermes core, install the standalone plugin per profile only after green source tests, and validate pre-dispatch load/health through the existing hidden gateway tasks.
 - `agent/turn_checkpoint.py`: projeção canônica do transcript usada no protocolo write-ahead.
 - `hermes_state.py` e `run_agent.py`: persistência/replay do nome de resultados de ferramenta apenas no ponto necessário para estabilidade do round-trip.
