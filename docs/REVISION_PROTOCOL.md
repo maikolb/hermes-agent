@@ -65,7 +65,7 @@ Autoridade canônica de regressões operacionais deste checkout.
 
 ## REG-2026-08-19-003 — Descendentes do Hermes abrem Windows Terminal/CMD na área de trabalho
 
-- Status: mitigated — validated-target; acceptance pending durante uso prolongado real
+- Status: reopened — source mitigation loaded on PF; prolonged real-work target pending
 - Cenário reproduzível: tarefas longas do Project Factory (incluindo DOVCRM/RecuperaCli) criam cadeias `pythonw -> bash/node -> cmd/conhost`; o Windows 11 materializa Windows Terminal repetidamente na área de trabalho do usuário. Parar somente a Scheduled Task deixou workers órfãos ativos.
 - Causa raiz comprovada, revisão 1: a ativação local substituiu a cadeia canônica do upstream por `base uv pythonw.exe`. Como o gateway não possuía console herdável, netos console-subsystem podiam abrir um console delegado ao Windows Terminal.
 - Mitigação anterior: `hermes_cli/gateway_windows.py` voltou à cadeia `wscript.exe //B -> .vbs -> venv console python.exe` em window style 0. Isso protegeu o launcher raiz e passou em 660 s de janelas bounded, mas foi encerrado cedo demais como solução da classe inteira.
@@ -78,26 +78,82 @@ Autoridade canônica de regressões operacionais deste checkout.
 - Prevenção vinculada: `hermes_cli/gateway_windows.py`, launchers `.pyw`, testes focados de task XML/installer, `hermes_cli/windows_process_broker.py`, `hermes_cli/windows_process_runner.py`, WindowOriginListener e watcher com `WindowsTerminal`/`OpenConsole`.
 - Comando de validação: testes focados de Scheduled Task + broker estático; depois reload drenado do PF/default e inspeção de task/PID/SessionId/canais, exigindo `S4U`, tarefa `Running`, toda a árvore na sessão 0 e `VisibleWindows=0`.
 - Evidência alvo: PF PID 36616, Telegram connected, e cadeia real `pythonw -> hidden-run -> cmd -> conhost/node` integralmente na sessão 0; Titan PID 32688 com bridge `pythonw -> node` na sessão 0, WhatsApp e Telegram connected. Watchers simultâneos retornaram zero janelas por 60 s (PF) e 90 s (Titan). Nenhum gateway CEOGame foi iniciado.
+- Recorrência de 20/08: o usuário voltou a observar flashes curtos de CMD atribuídos ao PF durante trabalho DOVCRM. O listener não reteve uma janela longa o suficiente para atribuição por HWND, mas a árvore PF continuou criando `cmd/conhost/node` sob workers. A entrada permanece reaberta até o PF carregar o broker/guard atual e passar observação prolongada durante trabalho real; não será encerrada por polling curto.
 
 ## REG-2026-08-19-004 — Checkpoint é detectado, mas o agente pede ao usuário para recomeçar
 
-- Status: closed — validated-target
+- Status: reopened — wiring regression loaded on Titan/PF; new behavioral target evidence pending
 - Cenário reproduzível: após restart, o bot informa "Sessão restaurada com sucesso", reconhece que o turno anterior foi interrompido e pergunta "O que você quer fazer agora?" em vez de continuar da ação persistida.
 - Causa raiz comprovada: o evento sintético de restart chegava como novo turno vazio e não podia reutilizar o checkpoint original por hash; além disso, a nota de recuperação instruía transportes interativos a narrar o restore e perguntar o próximo passo.
 - Correção aplicada: o evento vazio de auto-resume recebe uma flag one-shot, reutiliza o checkpoint inacabado original independentemente do hash vazio e continua da `next_action`; efeitos incertos exigem readback/reconciliação autoritativa antes de retry. A nota proíbe narrar restore e só permite pergunta quando a autoridade inexiste ou o risco irreversível não pode ser reconciliado.
 - Contrato correto: estado conhecido continua da `next_action`; resultado concluído é consumido; efeito incerto é reconciliado automaticamente no sistema autoritativo; pergunta humana só é permitida quando não existe autoridade consultável ou há risco irreversível que não pode ser reconciliado.
 - Prevenção vinculada: teste de restart em `planning`, teste de ferramenta incerta com reconciliador e asserção negativa contra mensagens genéricas de "o que fazer agora" quando a recuperação é determinística.
 - Evidência alvo: no primeiro restart do PF após o patch, duas sessões `resume_pending` foram agendadas. Ambas atualizaram os checkpoints preexistentes e executaram ferramentas pós-restart (pelo menos 3 e 7 concluídas na primeira janela); o scan das respostas não encontrou a mensagem genérica de restore/pergunta e não houve `unexpected error`.
+- Recorrência de 20/08: a integração feita pelo Titan no checkout vivo manteve os helpers de retomada, mas perdeu o call site que armava as flags one-shot no `TurnRunner`. Testes isolados continuavam verdes e não protegiam o fluxo produtivo. O call site foi restaurado e um teste de wiring agora falha se helpers/flags voltarem a ficar órfãos.
 
 ## REG-2026-08-20-001 — Pedido explícito de continuação produz falsa retomada
 
-- Status: mitigated — repair validated-local; PF reload/target pending
+- Status: mitigated — repair loaded on Titan/PF; behavioral target pending
 - Cenário reproduzível: depois de uma falha `usage_limit_reached`, o usuário envia "Continue de onde parou". O bot responde "Retomado do checkpoint" e depois declara atividades em execução, mas não reativa o turno interrompido.
 - Evidência: o checkpoint escrito após a mensagem tem `recovery.restored=false`, `recovery.resolution=new_turn` e novo `turn_id`; a resposta visível afirma o oposto. Um subagente separado foi criado e expirou, sem converter o turno original em continuidade real.
-- Causa raiz: o gateway só arma `_resume_turn_from_checkpoint` para eventos sintéticos vazios de restart. Mensagens humanas não vazias, inclusive continuação explícita, forçam turno novo e substituem o checkpoint ativo. O sistema também não vinculava alegações de restauração/progresso a estado material verificável.
+- Causa raiz: o gateway só armava `_resume_turn_from_checkpoint` para eventos sintéticos vazios de restart. Mensagens humanas não vazias, inclusive continuação explícita, forçavam turno novo e substituíam o checkpoint ativo. Na regressão posterior, até o wiring do evento sintético desapareceu: o helper e o guard existiam, mas não eram chamados pelo `TurnRunner`.
 - Falha adjacente: `usage_limit_reached` não persiste horário de liberação nem agenda retomada; exige nova mensagem humana e ainda assim abre turno novo.
 - Correção aplicada: classificador estrito de intenção de continuação condicionado a checkpoint inacabado; restore one-shot do checkpoint original; retomada bounded no horário de liberação; gate que rejeita respostas de status como "retomado", "continuidade ativa" e "está em execução". Após três recusas, o bot devolve blocker honesto e mantém o checkpoint recuperável em vez de alegar trabalho inexistente.
 - Recuperação de cota: `resets_in_seconds` vira `resume_not_before`; o estado persiste no índice de sessões, sobrevive restart, agenda um único wakeup e limita a três tentativas automáticas. Adapter offline ou usuário não autorizado não consomem tentativa; sucesso limpa o estado.
 - Prevenção vinculada: testes focados de explicit-resume, provider recovery persistida e falsa confirmação; `docs/EXECUTION_CONTRACT.md`.
 - Comando de validação: pytest focado nos módulos de checkpoint/restart-resume/provider failure, seguido de reload controlado do PF e observação passiva do runtime sem mensagem sintética a terceiros.
-- Evidência local: 121/121 nos testes de explicit-resume + checkpoint; 103/103 no recorte de resume/provider error; gate integrado 199/199; py_compile e diff-check verdes. O gateway PF ainda executa código anterior porque um monitor read-only de 30 minutos confirmou `active_agents=1`, workers em atividade e checkpoints Telegram/subagente avançando; target permanece corretamente pendente.
+- Evidência local: 121/121 nos testes históricos de explicit-resume + checkpoint; recorte revision-bound final com checkpoint/restart/notifier/activity em 83/83, incluindo teste que exige o call site produtivo. Titan/default e PF foram recarregados e estão conectados; ainda falta uma retomada real com avanço material pós-reload para `validated-target`.
+
+## REG-2026-08-20-002 — Agente altera o checkout que sustenta o próprio runtime
+
+- Status: mitigated — guards validated-local; loaded on Titan and PF
+- Cenário reproduzível: durante um turno longo, o Titan executa merge/cherry-pick e edições no checkout do qual o gateway e workers importam módulos. O processo vivo passa a combinar código carregado antes do merge com arquivos novos no disco; call sites ficam sem definições e mensagens subsequentes caem antes do modelo.
+- Evidência: o branch do runtime foi trocado para uma integração local com 22 commits; houve conflito/syntax error transitório. Depois, o fluxo carregado chamou `_resolve_activity_indicator_settings` ausente e o explicit-resume ficou com helper sem call site. Três stashes preservam, separadamente, o dirty state anterior e as automutações tardias; nenhum foi descartado.
+- Causa raiz: as proteções Git existentes não reconheciam corretamente caminhos Windows e as ferramentas de arquivo podiam escrever no próprio checkout quando executadas dentro do gateway.
+- Correção: normalização Windows no self-repo guard; operações Git destrutivas contra o source vivo são bloqueadas; `write_file`/`patch` falham fechado quando `_HERMES_GATEWAY=1` e o alvo pertence ao checkout Hermes. Manutenção deve ocorrer em worktree/clone e entrar apenas por cutover drenado.
+- Prevenção vinculada: `tools/self_repo_guard.py`, `tools/file_tools.py`, `tests/tools/test_self_repo_guard.py`, `tests/tools/test_file_tools.py` e este contrato.
+- Evidência local: self-repo guard 118/118; teste estreito de escrita/patch do gateway 2/2; py_compile e diff-check verdes. Titan e PF carregaram o guard após restart drenado.
+
+## REG-2026-08-20-003 — Kanban executa em segundo plano sem anunciar início material
+
+- Status: mitigated — validated-local and loaded on PF; notifier target pending
+- Cenário reproduzível: um card é enfileirado atrás de uma dependência e o bot promete continuar automaticamente. Quando o dispatcher realmente assume o card, o tópico não recebe mensagem; o usuário precisa cobrar para descobrir se ainda está na fila ou já roda.
+- Evidência DOVCRM: a dependência concluiu às 16:58:59 e o hotfix recebeu `claimed` às 16:59:47, com worker e heartbeat reais; concluiu às 17:30:58. O assinante permaneceu com cursor zero até o evento final porque o watcher consultava somente eventos terminais.
+- Causa raiz: `_kanban_notifier_watcher()` excluía `claimed` do conjunto notificável. Heartbeats e comentários eram persistidos, mas o primeiro sinal visível era conclusão/bloqueio.
+- Correção: `claimed` passa a emitir exatamente um aviso compacto de início; `heartbeat` continua excluído para não gerar spam por minuto. A mensagem só existe após claim real, nunca por mera fila/promessa.
+- Prevenção vinculada: `tests/gateway/test_kanban_notifier.py::test_claimed_task_notifies_only_after_material_start`.
+- Comando de validação: pytest focado de notifier + checkpoint/restart/activity; depois reload drenado do PF e observação de um próximo card real.
+- Evidência local: 83/83 no gate final. O cutover foi adiado enquanto writers DOVCRM estavam ativos e só ocorreu após duas leituras consecutivas com zero writers/zero agentes; PID novo, Telegram conectado e zero janelas foram confirmados. O próximo evento `claimed` real ainda é o aceite do notifier no alvo.
+
+## REG-2026-08-20-004 — CEOGame responde erro por mistura de módulos do runtime vivo
+
+- Status: mitigated — current source validated-local; gateway reload validated-target; natural message pending
+- Cenário reproduzível: uma mensagem nova no tópico CEOGame chega normalmente ao gateway, mas a criação do agente cai antes da primeira chamada ao modelo com `ImportError` para `CHECK_FN_CACHE_BYPASS` e devolve a resposta genérica de erro.
+- Evidência: o PID antigo nasceu antes da integração atual; no disco, `tools.registry` já exporta o símbolo e um processo Python limpo importa `model_tools` com sucesso. Isso exclui falha do provedor de imagem como causa do erro mostrado.
+- Causa raiz: o checkout que sustenta o runtime foi alterado enquanto o gateway permanecia vivo. O processo reteve módulos antigos em `sys.modules` e passou a importar arquivos novos sob demanda, formando uma combinação incompatível.
+- Correção: reload controlado do perfil CEOGame somente depois de `active_agents=0`, pela tarefa S4U/launcher `pythonw` canônico e sob gate zero-UI. O bloqueio de automutação do checkout impede a mesma classe nos runtimes recarregados; manutenção futura deve entrar por cutover drenado.
+- Prevenção vinculada: `tools/self_repo_guard.py`, `tools/file_tools.py`, testes desses guards, import smoke de `model_tools` e `docs/EXECUTION_CONTRACT.md`.
+- Comando de validação: import limpo de `model_tools`/`CHECK_FN_CACHE_BYPASS`; helper `restart-hermes-profile-gateway-zero-ui.py --profile hermes-ceogame --platform telegram`; inspeção passiva do resultado e do PID novo.
+- Evidência alvo: PID novo vivo, task `Running`, `gateway_state=running`, Telegram `connected`, log de subida pronto, `VisibleWindows=0`, resultado `ok=true`. A próxima mensagem natural permanece o aceite comportamental do import lazy no processo alvo; nenhuma mensagem de teste foi enviada pelo agente.
+
+## REG-2026-08-20-005 — Notifier Kanban despeja backlog e retries no tópico
+
+- Status: mitigated — PF recarregado sem replay; próximo evento real pendente
+- Cenário reproduzível: reiniciar o Project Factory com assinaturas antigas faz o watcher publicar, no mesmo minuto, uma bolha por transição de cada card (`claimed`, timeout, retry, crash, desistência e conclusão), seguida depois pelo resumo legítimo do saneamento.
+- Causa raiz comprovada: o notifier misturava duas autoridades distintas. Depois da notificação passiva por `adapter.send()`, eventos terminais chamavam `deliver_wake()` e entravam no pipeline normal como nova mensagem do tópico. No restart de 19:31 isso converteu 33 eventos históricos em turnos; depois do baseline, outros cinco eventos novos ainda acordaram agentes. Em paralelo, o startup aceitava `resume_pending` sem exigir checkpoint durável e retomou duas sessões interrompidas.
+- Invariante: Telegram recebe estado operacional, não event-log nem instrução sintética. Notificação nunca executa agente por padrão; eventos anteriores ao boot são consumidos silenciosamente; restart só executa trabalho respaldado por checkpoint íntegro, inacabado e com `next_action`.
+- Correção: `kanban.agent_wake_on_events=false` por padrão e explicitamente no PF; backlog anterior ao boot/assinatura é suprimido com avanço atômico do cursor; auto-resume exige checkpoint durável; `filelock` virou dependência direta do runtime de checkpoints.
+- Prevenção vinculada: `gateway/kanban_watchers.py`, `gateway/run.py`, `hermes_cli/config_defaults.py`, `pyproject.toml`, `uv.lock`, testes focados e `docs/EXECUTION_CONTRACT.md`.
+- Comando de validação: `pytest` do notifier/restart/reconnect, parse da configuração PF, `py_compile` e `git diff --check`; depois start zero-UI do PF e observação passiva sem mensagem de teste.
+- Evidência: 57/57 no gate notifier+restart e 25/25 no gate notify+reconnect; configuração PF confirmou wake passivo e checkpoint obrigatório. No cutover de 21/08, a tarefa S4U subiu com PID novo, Telegram conectado, zero `Scheduled auto-resume`, zero `resume_pending`, zero `kanban notifier: woke agent` e `VisibleWindows=0`.
+- Aceite pendente: evento real novo produz notificação passiva e zero novo turno sintético; restart futuro com marcador antigo continua agendando zero retomadas.
+
+## REG-2026-08-21-001 — Ferramentas visuais indisponíveis por erro de sintaxe
+
+- Status: mitigated — runtime recarregado; próxima chamada visual natural no PF pendente
+- Cenário reproduzível: uma mensagem com imagens chama o toolset visual e o import de `tools.vision_tools` falha em `line 2276` com `SyntaxError: invalid syntax`.
+- Causa raiz: o commit `8b76dee159` adicionou o fallback storyboard de vídeo com um `except` sem o `try` correspondente. A suíte que deveria detectar a falha também não coletava porque `tests/tools/test_video_analyze.py` usava `sys.platform` sem importar `sys`.
+- Correção: a chamada nativa de vídeo e sua captura de erro voltaram a formar um bloco `try/except` válido; o retry vazio permanece separado e bounded. O teste voltou a coletar com import explícito de `sys`.
+- Prevenção vinculada: `tools/vision_tools.py`, `tests/tools/test_video_analyze.py` e compile gate de todo o diretório `tools`.
+- Comando de validação: `python -m compileall -q tools` e `pytest tests/tools/test_vision_tools.py tests/tools/test_vision_native_fast_path.py tests/tools/test_vision_region.py tests/tools/test_video_analyze.py -q`.
+- Evidência: import smoke verde; compileall de `agent`, `gateway`, `hermes_cli`, `tools` e `plugins` verde; 72 testes passaram, 1 foi ignorado por condição de plataforma. O PF foi recarregado depois do reparo com Telegram conectado, PID supervisionado e zero janelas; nenhuma mensagem de teste foi enviada ao grupo.

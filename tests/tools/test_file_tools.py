@@ -43,6 +43,25 @@ class TestReadFileHandler:
 
 
 class TestWriteFileHandler:
+    def test_gateway_blocks_live_checkout_write(self, tmp_path, monkeypatch):
+        import tools.self_repo_guard as self_repo_guard
+        from tools.file_tools import write_file_tool
+
+        source_root = tmp_path / "hermes-agent"
+        source_root.mkdir()
+        target = source_root / "gateway" / "run.py"
+        monkeypatch.setenv("_HERMES_GATEWAY", "1")
+        monkeypatch.setattr(
+            self_repo_guard,
+            "get_running_source_root",
+            lambda: source_root,
+        )
+
+        result = json.loads(write_file_tool(str(target), "do not write"))
+
+        assert "live source checkout" in result["error"]
+        assert not target.exists()
+
     @patch("tools.file_tools._get_file_ops")
     def test_writes_content(self, mock_get):
         mock_ops = MagicMock()

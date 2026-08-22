@@ -251,6 +251,19 @@ def windows_hide_flags() -> int:
     return _CREATE_NO_WINDOW
 
 
+def windows_hidden_popen_kwargs() -> dict:
+    """Return the canonical no-visible-window arguments for child processes."""
+    if not IS_WINDOWS:
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": windows_hide_flags(),
+        "startupinfo": startupinfo,
+    }
+
+
 def suppress_platform_ver_console() -> None:
     """Stub out ``platform._syscmd_ver`` on Windows so it can never flash a
     console window.  No-op on non-Windows.

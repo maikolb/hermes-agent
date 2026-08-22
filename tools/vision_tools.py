@@ -2266,11 +2266,8 @@ async def video_analyze_tool(
             call_kwargs["model"] = model
 
         _load_auxiliary_client()
-        response = await async_call_llm(**call_kwargs)
-        analysis = extract_content_or_reasoning(response)
-
-        if not analysis:
-            logger.warning("Empty video response, retrying once")
+        native_error = None
+        try:
             response = await async_call_llm(**call_kwargs)
             analysis = extract_content_or_reasoning(response)
         except Exception as exc:

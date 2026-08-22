@@ -3448,6 +3448,8 @@ def compress_context(
                         PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY,
                     )
 
+                    from agent.turn_checkpoint import CheckpointWriteError
+
                     agent._session_db.archive_and_compact(
                         agent.session_id,
                         compressed,
@@ -3455,6 +3457,45 @@ def compress_context(
                             PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None,
                         },
                     )
+                    if _turn_checkpoint_store is None:
+                        raise CheckpointWriteError(
+                            "in-place durable compaction committed without checkpoint store"
+                        )
+                    try:
+                        _checkpoint_live_messages = (
+                            agent._session_db.get_messages_as_conversation(
+                                agent.session_id
+                            )
+                        )
+                        agent._turn_checkpoint_state = (
+                            _turn_checkpoint_store.commit_compaction(
+                                agent.session_id, _checkpoint_live_messages
+                            )
+                        )
+                    except Exception as _checkpoint_commit_error:
+                        try:
+                            agent._session_db.archive_and_compact(
+                                agent.session_id, messages_before_compression
+                            )
+                            _checkpoint_rollback_live = (
+                                agent._session_db.get_messages_as_conversation(
+                                    agent.session_id
+                                )
+                            )
+                            agent._turn_checkpoint_state = (
+                                _turn_checkpoint_store.restore(
+                                    agent.session_id, _checkpoint_rollback_live
+                                )
+                            )
+                        except Exception as _checkpoint_rollback_error:
+                            raise CheckpointWriteError(
+                                "checkpoint commit failed after transcript swap and "
+                                "compensating rollback also failed"
+                            ) from _checkpoint_rollback_error
+                        raise CheckpointWriteError(
+                            "checkpoint commit failed after transcript swap; "
+                            "original transcript restored"
+                        ) from _checkpoint_commit_error
                     split_status = "in_place_committed"
                     # Reset the flush identity set so the next turn's appends are
                     # diffed against the COMPACTED transcript: the compacted dicts
@@ -3546,6 +3587,21 @@ def compress_context(
                         pass
                     agent._session_db_created = True
                     split_status = "rotated_committed"
+                    if _turn_checkpoint_store is None or not old_session_id:
+                        from agent.turn_checkpoint import CheckpointWriteError
+
+                        raise CheckpointWriteError(
+                            "rotation committed without a checkpoint lineage"
+                        )
+                    agent._turn_checkpoint_state = (
+                        _turn_checkpoint_store.migrate_session(
+                            old_session_id,
+                            agent.session_id,
+                            agent._session_db.get_messages_as_conversation(
+                                agent.session_id
+                            ),
+                        )
+                    )
                     # Carry a persistent /goal onto the continuation session.
                     # Compression mints a fresh child id; load_goal does a flat
                     # per-session lookup with no parent walk, so without this an
@@ -3625,6 +3681,52 @@ def compress_context(
                     }
                 _session_commit_succeeded = True
             except Exception as e:
+                from agent.turn_checkpoint import CheckpointError, CheckpointWriteError
+
+                if isinstance(e, CheckpointError):
+                    if not in_place and locals().get("old_session_id"):
+                        _checkpoint_failed_child = agent.session_id
+                        try:
+                            agent._session_db.end_session(
+                                _checkpoint_failed_child,
+                                "checkpoint_rotation_rollback",
+                            )
+                            agent._session_db.reopen_session(old_session_id)
+                            agent.session_id = old_session_id
+                            try:
+                                from gateway.session_context import set_current_session_id
+
+                                set_current_session_id(agent.session_id)
+                            except Exception:
+                                os.environ["HERMES_SESSION_ID"] = agent.session_id
+                            try:
+                                from hermes_logging import set_session_context
+
+                                set_session_context(agent.session_id)
+                            except Exception:
+                                pass
+                            agent._session_db_created = True
+                            agent._turn_checkpoint_state = (
+                                _turn_checkpoint_store.restore(
+                                    old_session_id, messages_before_compression
+                                )
+                            )
+                        except Exception as _rotation_checkpoint_rollback_error:
+                            logger.critical(
+                                "Checkpoint rotation rollback failed child=%s parent=%s",
+                                _checkpoint_failed_child,
+                                old_session_id,
+                                exc_info=True,
+                            )
+                            raise CheckpointWriteError(
+                                "rotation checkpoint failed and parent rollback failed"
+                            ) from _rotation_checkpoint_rollback_error
+                    logger.error(
+                        "Compaction checkpoint failed closed for session=%s: %s",
+                        agent.session_id or "?",
+                        e,
+                    )
+                    raise
                 if (
                     not in_place
                     and locals().get("old_session_id")

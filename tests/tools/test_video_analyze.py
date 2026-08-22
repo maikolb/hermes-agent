@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 

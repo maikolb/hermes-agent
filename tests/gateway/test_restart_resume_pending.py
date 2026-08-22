@@ -26,6 +26,7 @@ PRs #9850, #9934, #7536):
 """
 
 import asyncio
+import inspect
 import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -44,6 +45,8 @@ from gateway.run import (
     _last_transcript_timestamp,
     _should_clear_resume_pending_after_turn,
     _should_explicitly_resume_checkpoint,
+    GatewayRunner,
+    TurnRunner,
     build_resume_recovery_note,
 )
 from gateway.session import SessionEntry, SessionSource, SessionStore
@@ -144,6 +147,16 @@ def test_explicit_checkpoint_resume_requires_unfinished_durable_state(tmp_path):
         terminal,
         "Continue de onde parou",
     )
+
+
+def test_turn_runner_wires_explicit_and_synthetic_checkpoint_resume_flags():
+    """Regression: isolated helpers are useless if a merge drops the call site."""
+    source = inspect.getsource(TurnRunner.run_sync)
+
+    assert "_should_explicitly_resume_checkpoint(" in source
+    assert "agent._gateway_explicit_checkpoint_resume = True" in source
+    assert "agent._resume_turn_from_checkpoint = True" in source
+    assert "agent._resume_turn_from_checkpoint = not bool(" in source
 
 
 def _make_source(platform=Platform.TELEGRAM, chat_id="123", user_id="u1"):
@@ -650,6 +663,71 @@ async def test_drain_timeout_marks_resume_pending():
 # ---------------------------------------------------------------------------
 
 
+def test_restart_checkpoint_probe_requires_intact_unfinished_state(
+    tmp_path, monkeypatch,
+):
+    from agent.turn_checkpoint import TurnCheckpointStore
+
+    monkeypatch.setattr("gateway.run.get_hermes_home", lambda: tmp_path)
+    entry = SimpleNamespace(session_id="checkpoint-session")
+
+    assert GatewayRunner._entry_has_resumable_turn_checkpoint(entry) is False
+
+    store = TurnCheckpointStore(tmp_path / "sessions" / "turn-checkpoints")
+    store.start_turn(
+        "checkpoint-session",
+        "turn-1",
+        "finish the active work",
+        [{"role": "user", "content": "finish the active work"}],
+    )
+    assert GatewayRunner._entry_has_resumable_turn_checkpoint(
+        entry,
+        max_age_seconds=3600,
+    ) is True
+
+    with patch("gateway.run.time.time", return_value=time.time() + 7200):
+        assert GatewayRunner._entry_has_resumable_turn_checkpoint(
+            entry,
+            max_age_seconds=3600,
+        ) is False
+
+    store.transition(
+        "checkpoint-session",
+        phase="delivered",
+        next_action="none",
+    )
+    assert GatewayRunner._entry_has_resumable_turn_checkpoint(entry) is False
+
+
+@pytest.mark.asyncio
+async def test_startup_auto_resume_skips_marker_without_durable_checkpoint():
+    runner, adapter = make_restart_runner()
+    runner._auto_resume_requires_checkpoint = lambda: True
+    runner._entry_has_resumable_turn_checkpoint = lambda _entry, **_kwargs: False
+    source = make_restart_source(chat_id="unbacked-chat")
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:unbacked-chat",
+        session_id="sid-unbacked",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_interrupted",
+        last_resume_marked_at=datetime.now(),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+    await asyncio.sleep(0)
+
+    assert scheduled == 0
+    adapter.handle_message.assert_not_called()
+    assert pending_entry.session_key not in runner._running_agents
+
+
 @pytest.mark.asyncio
 async def test_startup_auto_resume_skips_unauthorized_owner():
     """A resume-pending session whose owner is no longer authorized under the
@@ -1112,5 +1190,3 @@ async def test_startup_restore_gate_releases_when_resume_turn_outlives_timeout(
 
     never_finishes.set()
     await slow_task
-
-

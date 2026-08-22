@@ -37,6 +37,7 @@ import queue
 import re
 import shlex
 import site
+import sqlite3
 import sys
 import signal
 import threading
@@ -66,6 +67,15 @@ from agent.turn_context import (
 )
 from hermes_cli.config import _is_ssh_remote_tilde_cwd, cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
+from gateway.project_router import (
+    AccessDeniedError,
+    ProjectContext,
+    ProjectRouter,
+    UnknownBindingError,
+    UnknownUserError,
+    build_team_resource_namespace,
+    normalize_project_slug,
+)
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -1054,6 +1064,151 @@ def _stamp_hygiene_compression_provenance(
         agent._touch_activity(desc, provenance=provenance)
     except Exception:
         logger.debug(debug_label, exc_info=True)
+
+
+@dataclasses.dataclass(frozen=True)
+class _ActivityIndicatorSettings:
+    """Resolved edit-in-place heartbeat settings for one gateway surface."""
+
+    initial_delay_seconds: float
+    update_interval_seconds: float
+    initial_text: Optional[str] = None
+    elapsed_text: Optional[str] = None
+
+
+def _activity_indicator_seconds(
+    value: Any,
+    fallback: float,
+    *,
+    allow_zero: bool,
+) -> float:
+    """Return a finite activity-indicator delay without trusting YAML types."""
+    if isinstance(value, bool):
+        return float(fallback)
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+    if not math.isfinite(resolved) or resolved < 0 or (resolved == 0 and not allow_zero):
+        return float(fallback)
+    return resolved
+
+
+def _activity_indicator_template(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _resolve_activity_indicator_settings(
+    user_config: dict,
+    platform_key: str,
+    default_interval_seconds: float,
+) -> _ActivityIndicatorSettings:
+    """Resolve global plus per-platform heartbeat timing and text."""
+    display_cfg = user_config.get("display") if isinstance(user_config, dict) else None
+    display_cfg = display_cfg if isinstance(display_cfg, dict) else {}
+    merged: Dict[str, Any] = {}
+    global_cfg = display_cfg.get("activity_indicator")
+    if isinstance(global_cfg, dict):
+        merged.update(global_cfg)
+    platforms_cfg = display_cfg.get("platforms")
+    if isinstance(platforms_cfg, dict):
+        platform_cfg = platforms_cfg.get(platform_key)
+        if isinstance(platform_cfg, dict):
+            indicator_cfg = platform_cfg.get("activity_indicator")
+            if isinstance(indicator_cfg, dict):
+                merged.update(indicator_cfg)
+
+    try:
+        fallback = float(default_interval_seconds)
+    except (TypeError, ValueError):
+        fallback = 180.0
+    if not math.isfinite(fallback) or fallback <= 0:
+        fallback = 180.0
+
+    return _ActivityIndicatorSettings(
+        initial_delay_seconds=_activity_indicator_seconds(
+            merged.get("initial_delay_seconds", fallback),
+            fallback,
+            allow_zero=True,
+        ),
+        update_interval_seconds=_activity_indicator_seconds(
+            merged.get("update_interval_seconds", fallback),
+            fallback,
+            allow_zero=False,
+        ),
+        initial_text=_activity_indicator_template(merged.get("initial_text")),
+        elapsed_text=_activity_indicator_template(merged.get("elapsed_text")),
+    )
+
+
+def _render_activity_indicator_template(
+    settings: _ActivityIndicatorSettings,
+    *,
+    first_update: bool,
+    elapsed_seconds: float,
+) -> Optional[str]:
+    """Render configured text, or return ``None`` for the legacy fallback."""
+    if first_update and settings.initial_text:
+        return settings.initial_text
+    if not settings.elapsed_text:
+        return None
+
+    elapsed_seconds = max(0, int(elapsed_seconds))
+    elapsed_minutes = elapsed_seconds // 60
+    elapsed_human = (
+        f"{elapsed_minutes} min" if elapsed_seconds >= 60 else f"{elapsed_seconds} s"
+    )
+    try:
+        return settings.elapsed_text.format(
+            elapsed_human=elapsed_human,
+            elapsed_minutes=elapsed_minutes,
+            elapsed_seconds=elapsed_seconds,
+        )
+    except (IndexError, KeyError, ValueError):
+        logger.warning(
+            "Invalid activity_indicator.elapsed_text template; using default heartbeat text"
+        )
+        return None
+
+
+async def _upsert_activity_indicator_message(
+    adapter: Any,
+    *,
+    chat_id: str,
+    message_id: Optional[str],
+    content: str,
+    metadata: Optional[dict],
+) -> tuple[Optional[str], Optional[str]]:
+    """Edit one owned heartbeat, replacing it only after a permanent failure."""
+    if message_id:
+        try:
+            edit_result = await adapter.edit_message(chat_id, message_id, content)
+        except Exception as exc:
+            logger.debug("Activity-indicator edit failed transiently: %s", exc)
+            return message_id, None
+        if edit_result and getattr(edit_result, "success", False):
+            return message_id, None
+        if edit_result is None or getattr(edit_result, "retryable", False):
+            logger.debug(
+                "Activity-indicator edit deferred after retryable failure: %s",
+                getattr(edit_result, "error", None),
+            )
+            return message_id, None
+
+    try:
+        send_result = await adapter.send(chat_id, content, metadata=metadata)
+    except Exception as exc:
+        logger.debug("Activity-indicator send failed: %s", exc)
+        return message_id, None
+    if send_result and getattr(send_result, "success", False) and getattr(
+        send_result, "message_id", None
+    ):
+        created_id = str(send_result.message_id)
+        return created_id, created_id
+    return message_id, None
 
 
 def _is_fresh_gateway_interruption(
@@ -5741,7 +5896,40 @@ class TurnRunner:
             and _interruption_is_fresh
         )
 
-        if _is_resume_pending:
+        # These flags are one-shot and belong to the current gateway turn.
+        # A cached agent must never leak a previous continuation decision into
+        # an unrelated user request.
+        agent._resume_turn_from_checkpoint = False
+        agent._gateway_explicit_checkpoint_resume = False
+        _explicit_checkpoint_resume = _should_explicitly_resume_checkpoint(
+            agent,
+            _persist_user_message_override,
+        )
+
+        if _explicit_checkpoint_resume:
+            _reason = (
+                getattr(_resume_entry, "resume_reason", None)
+                if _resume_entry is not None
+                else None
+            ) or "explicit_continue"
+            # Keep the human command in the durable transcript, but feed the
+            # model a control-plane recovery turn.  start_turn() must reuse the
+            # unfinished checkpoint instead of replacing it with a new turn
+            # whose content is merely "continue".
+            ctx.message = build_resume_recovery_note(
+                _reason,
+                "",
+                interactive=True,
+            )
+            ctx.message += (
+                "\n\n[Operator instruction: continue the already-active "
+                "checkpoint. This is not a new task. Do not send a restore "
+                "acknowledgement or a progress-only status; perform the "
+                "checkpoint next_action now.]"
+            )
+            agent._resume_turn_from_checkpoint = True
+            agent._gateway_explicit_checkpoint_resume = True
+        elif _is_resume_pending:
             _reason = getattr(_resume_entry, "resume_reason", None) or "restart_timeout"
             _persist_user_message_override = ctx.message
             # The empty-message case is the auto-resume startup turn
@@ -5758,6 +5946,14 @@ class TurnRunner:
             )
             ctx.message = build_resume_recovery_note(
                 _reason, ctx.message, interactive=_interactive_resume,
+            )
+            # A synthetic startup turn has no new user request. Preserve and
+            # continue the unfinished checkpoint instead of replacing it with
+            # a blank turn. A genuine new message keeps the historical
+            # new-message precedence and does not silently replay old work.
+            agent._resume_turn_from_checkpoint = not bool(
+                isinstance(_persist_user_message_override, str)
+                and _persist_user_message_override.strip()
             )
         elif _has_fresh_tool_tail:
             _persist_user_message_override = ctx.message
@@ -10991,7 +11187,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
 
-    async def _redeliver_pending_obligations(self) -> int:
+    async def _redeliver_pending_obligations(
+        self,
+        *,
+        platform=None,
+        include_live_deferred: bool = False,
+    ) -> int:
         """Redeliver final responses recorded in the delivery ledger by a
         previous (now dead) gateway process.
 
@@ -11132,6 +11333,63 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
         return redelivered
 
+    @staticmethod
+    def _auto_resume_requires_checkpoint() -> bool:
+        """Fail closed unless config explicitly disables checkpoint gating."""
+        try:
+            from hermes_cli.config import load_config
+
+            cfg = load_config()
+            value = cfg_get(
+                cfg,
+                "agent",
+                "gateway_auto_resume_requires_checkpoint",
+                default=True,
+            )
+        except Exception:
+            return True
+        return value is not False
+
+    @staticmethod
+    def _entry_has_resumable_turn_checkpoint(
+        entry,
+        *,
+        max_age_seconds: Optional[float] = None,
+    ) -> bool:
+        """Prove that a marker is backed by fresh unfinished durable work."""
+        session_id = str(getattr(entry, "session_id", "") or "").strip()
+        if not session_id:
+            return False
+        try:
+            from agent.turn_checkpoint import (
+                CheckpointError,
+                TurnCheckpointStore,
+                checkpoint_is_resumable,
+            )
+
+            store = TurnCheckpointStore(
+                Path(get_hermes_home()) / "sessions" / "turn-checkpoints"
+            )
+            state = store.load(session_id)
+        except (FileNotFoundError, CheckpointError, OSError, ValueError):
+            return False
+        except Exception:
+            logger.debug(
+                "startup checkpoint validation failed closed",
+                exc_info=True,
+            )
+            return False
+        if not checkpoint_is_resumable(state):
+            return False
+        if max_age_seconds is not None and float(max_age_seconds) > 0:
+            try:
+                updated_at = float(state.get("updated_at"))
+            except (TypeError, ValueError):
+                return False
+            if updated_at <= 0 or time.time() - updated_at > float(max_age_seconds):
+                return False
+        return True
+
     def _schedule_resume_pending_sessions(self, platform=None) -> int:
         """Auto-continue fresh restart-interrupted sessions after startup.
 
@@ -11170,6 +11428,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as exc:
             logger.warning("Failed to enumerate resume-pending sessions: %s", exc)
             return 0
+
+        if self._auto_resume_requires_checkpoint():
+            checkpoint_backed = []
+            rejected = 0
+            for entry in candidates:
+                if self._entry_has_resumable_turn_checkpoint(
+                    entry,
+                    max_age_seconds=window,
+                ):
+                    checkpoint_backed.append(entry)
+                else:
+                    rejected += 1
+            candidates = checkpoint_backed
+            if rejected:
+                logger.warning(
+                    "Skipped %d resume-pending session(s) without an intact "
+                    "unfinished durable checkpoint",
+                    rejected,
+                )
 
         # Defense-3 (#30719): break the SIGTERM-respawn loop. Only count this
         # boot when there are restart-interrupted sessions to resume — a clean
@@ -13270,12 +13547,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             pass
 
                         # A platform that was offline at gateway startup never
-                        # got its restart-interrupted sessions auto-resumed —
-                        # the startup pass skips sessions whose adapter isn't
-                        # connected yet. Now that it's back, retry the
-                        # auto-resume scoped to this platform so recovery
-                        # doesn't silently wait for a manual user message.
+                        # got its pending deliveries or restart-interrupted
+                        # sessions recovered.  Redeliver completed responses
+                        # first; only then schedule work that genuinely needs
+                        # to run again.  ``include_live_deferred`` is required
+                        # here because the obligation may have been deferred
+                        # by this still-running gateway while the adapter was
+                        # offline.
                         try:
+                            await self._redeliver_pending_obligations(
+                                platform=platform,
+                                include_live_deferred=True,
+                            )
                             self._schedule_resume_pending_sessions(platform=platform)
                         except Exception:
                             logger.debug(
@@ -22880,6 +23163,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ),
             async_delivery=_async_delivery,
             cron_session="",
+            project_id=project_context.project_id if project_context else "",
+            project_board=(
+                ""
+                if project_context is None or is_management
+                else project_context.board_slug
+            ),
+            project_workdir=(
+                ""
+                if project_context is None
+                or is_management
+                or project_context.workdir is None
+                else str(project_context.workdir)
+            ),
+            project_access=(
+                project_context.access if project_context is not None else ""
+            ),
         )
         router_config = getattr(getattr(self, "config", None), "project_router", None)
         if (
