@@ -160,10 +160,10 @@ Autoridade canônica de regressões operacionais deste checkout.
 
 ## REG-2026-08-21-002 — Guard de redirecionamento cai ao registrar a primeira falha estrutural
 
-- Status: validated-local in the current isolated branch; integration and target cutover pending
+- Status: validated-target — integrated into the current branch and loaded on Titan/default and Project Factory
 - Cenário reproduzível: `ToolCallGuardrailController.after_call()` recebe a primeira falha estrutural de `read_file`, `search_files` ou outra ferramenta e tenta registrar a decisão de redirecionamento. A chamada cai com `AttributeError: 'ToolCallGuardrailController' object has no attribute '_redirected_signatures'`; o redirecionamento por ferramenta também cai em `_redirected_tools`.
 - Causa raiz: o redirecionamento passou a ler e escrever os dois mapas, mas eles não faziam parte do estado criado por `reset_for_turn()`. O caminho de `before_call()` também não consultava os redirecionamentos registrados, portanto apenas inicializar os campos removeria a exceção sem restaurar o comportamento planejado.
 - Correção aplicada: os dois mapas tipados são inicializados e limpos junto do restante do estado por turno; `before_call()` consulta primeiro a assinatura e depois a rota da ferramenta, sem bloquear ferramentas não relacionadas; `reset_for_turn()` volta a permitir a rota no turno seguinte.
 - Prevenção vinculada: `tests/agent/test_tool_guardrail_strategy_redirect.py` executa falha estrutural, bloqueio da mesma assinatura/rota, disponibilidade da alternativa, redirecionamento de falha genérica e limpeza por reset.
 - Comando de validação: `scripts/run_tests.sh tests/agent/test_tool_guardrail_strategy_redirect.py` pelo wrapper obrigatório do repositório.
-- Aceite pendente: integração no branch atual, reload drenado e smoke do runtime real.
+- Evidência de prevenção: o wrapper obrigatório passou 6/6 sem retry; o fix isolado `7d245700be` entrou pelo merge `a9c727bfb6`. Após drenagem, Titan/default (PID 14056, Telegram e WhatsApp conectados) e Project Factory (PID 27272, Telegram conectado) recarregaram pela tarefa oculta, registraram o plugin AOF e passaram o probe pré-dispatch ligado ao PID atual. Os dois reloads reportaram `visible_windows=[]`; o verificador global posterior reportou `VisibleWindows=0`.
