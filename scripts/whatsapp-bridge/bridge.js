@@ -31,8 +31,11 @@ import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import { assertOutboundDestination, createDeliveryAckTracker } from './delivery_ack.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
+import { createReconnectCoordinator } from './reconnect_controller.js';
+import { createPassiveIntake } from './passive_intake.js';
 import {
   buildPollPayload,
   createReconnectScheduler,
@@ -124,6 +127,16 @@ const CHUNK_DELAY_MS = parseInt(process.env.WHATSAPP_CHUNK_DELAY_MS || '300', 10
 // which pins the bridge's HTTP handler until the upstream aiohttp timeout
 // fires. Fail fast instead so the gateway can surface a real error and retry.
 const SEND_TIMEOUT_MS = parseInt(process.env.WHATSAPP_SEND_TIMEOUT_MS || '60000', 10);
+const DELIVERY_ACK_TIMEOUT_MS = parseInt(process.env.WHATSAPP_DELIVERY_ACK_TIMEOUT_MS || '10000', 10);
+const PASSIVE_MEDIA_TIMEOUT_MS = Math.min(
+  Math.max(parseInt(process.env.WHATSAPP_PASSIVE_MEDIA_TIMEOUT_MS || '60000', 10), 5000),
+  120000,
+);
+const passiveIntake = createPassiveIntake({
+  rawConfig: process.env.WHATSAPP_PASSIVE_INTAKE_CONFIG || '',
+  rootDir: process.env.HERMES_PASSIVE_INTAKE_ROOT || '',
+});
+const deliveryAcks = createDeliveryAckTracker({ timeoutMs: DELIVERY_ACK_TIMEOUT_MS });
 
 // --- Send queue: serialise all sock.sendMessage() calls across concurrent
 //     HTTP handlers so a single Baileys socket never has overlapping sends.
@@ -143,6 +156,7 @@ function sleep(ms) {
 }
 
 function sendWithTimeout(chatId, payload, options = {}, timeoutMs = SEND_TIMEOUT_MS) {
+  passiveIntake.assertEgressAllowed(chatId, 'send');
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(
@@ -387,6 +401,7 @@ function rememberSentId(id) {
 
 let sock = null;
 let connectionState = 'disconnected';
+const reconnectCoordinator = createReconnectCoordinator();
 
 function emitPairEvent(event) {
   if (!PAIR_JSON) return;
@@ -399,6 +414,7 @@ const scheduleReconnect = createReconnectScheduler(() => startSocket());
 const getWAVersion = createVersionResolver(fetchLatestBaileysVersion);
 
 async function startSocket() {
+  const socketGeneration = reconnectCoordinator.beginAttempt();
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   const version = await getWAVersion();
 
@@ -419,9 +435,57 @@ async function startSocket() {
     },
   });
 
-  sock.ev.on('creds.update', () => { saveCreds(); lidToPhone = buildLidMap(); });
+  let credentialSaveQueue = Promise.resolve();
+  let pairExitStarted = false;
 
-  sock.ev.on('connection.update', (update) => {
+  function queueCredentialSave() {
+    credentialSaveQueue = credentialSaveQueue
+      .catch(() => {})
+      .then(() => saveCreds());
+    return credentialSaveQueue;
+  }
+
+  async function finishPairOnly(exitCode, errorCode = null) {
+    if (!PAIR_ONLY || pairExitStarted) return;
+    pairExitStarted = true;
+    reconnectCoordinator.cancel();
+    try {
+      await credentialSaveQueue;
+      if (exitCode === 0) {
+        if (!hasCompletedPairingCredentials(state.creds)) {
+          throw new Error('pairing credentials are incomplete');
+        }
+        await saveCreds();
+        emitPairEvent({ event: 'connected', user: null });
+        if (!PAIR_JSON) {
+          console.log('✅ WhatsApp registration confirmed and saved.');
+        }
+      } else {
+        emitPairEvent({ event: 'error', error: errorCode || 'pairing_failed' });
+      }
+    } catch (err) {
+      emitPairEvent({ event: 'error', error: 'credential_save_failed' });
+      if (!PAIR_JSON) {
+        console.error(`Failed to persist WhatsApp credentials: ${err?.message || String(err)}`);
+      }
+      exitCode = 1;
+    }
+    process.exit(exitCode);
+  }
+
+  sock.ev.on('creds.update', (update) => {
+    if (update && typeof update === 'object') {
+      Object.assign(state.creds, update);
+    }
+    void queueCredentialSave()
+      .then(() => { lidToPhone = buildLidMap(); })
+      .catch((err) => {
+        console.error(`WhatsApp credential save failed: ${err?.message || String(err)}`);
+      });
+  });
+
+  sock.ev.on('connection.update', async (update) => {
+    if (!reconnectCoordinator.isCurrent(socketGeneration)) return;
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -438,12 +502,39 @@ async function startSocket() {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       connectionState = 'disconnected';
 
+      if (PAIR_ONLY && reason === DisconnectReason.restartRequired) {
+        // A pair-success credential update plus 515 only completes the first
+        // half of QR pairing.  The persisted credentials must authenticate on
+        // a fresh socket before the CLI may report success.  Otherwise the
+        // phone can reject the device while the local process reports a false
+        // positive.
+        try {
+          await credentialSaveQueue;
+          await saveCreds();
+        } catch {
+          await finishPairOnly(1, 'credential_save_failed');
+          return;
+        }
+        emitPairEvent({ event: 'verifying' });
+        reconnectCoordinator.schedule(
+          socketGeneration,
+          1000,
+          startSocketWithRetry,
+        );
+        return;
+      }
+
       if (reason === DisconnectReason.loggedOut) {
-        emitPairEvent({ event: 'error', error: 'logged_out', reason });
+        reconnectCoordinator.cancel();
         if (!PAIR_JSON) {
           console.log('❌ Logged out. Delete session and restart to re-authenticate.');
         }
-        process.exit(1);
+        if (PAIR_ONLY) {
+          await finishPairOnly(1, 'logged_out');
+        } else {
+          emitPairEvent({ event: 'error', error: 'logged_out', reason });
+          process.exit(1);
+        }
       } else {
         // 515 = restart requested (common after pairing). Always reconnect.
         emitPairEvent({ event: 'disconnected', reason });
@@ -457,7 +548,12 @@ async function startSocket() {
         scheduleReconnect(reason === 515 ? 1000 : 3000);
       }
     } else if (connection === 'open') {
+      reconnectCoordinator.cancelPending(socketGeneration);
       connectionState = 'connected';
+      if (PAIR_ONLY && hasCompletedPairingCredentials(state.creds)) {
+        await finishPairOnly(0);
+        return;
+      }
       const connectedUser = sock?.user
         ? {
             id: sock.user.id || null,
@@ -468,18 +564,29 @@ async function startSocket() {
       if (!PAIR_JSON) {
         console.log('✅ WhatsApp connected!');
       }
-      if (PAIR_ONLY) {
-        if (!PAIR_JSON) {
-          console.log('✅ Pairing complete. Credentials saved.');
-        }
-        // Give Baileys a moment to flush creds, then exit cleanly
-        setTimeout(() => process.exit(0), 2000);
-      }
     }
   });
 
   sock.ev.on('messages.update', async (updates) => {
-    for (const { key, update } of updates || []) {
+    // Delivery ACK bookkeeping is process-local and does not create a
+    // conversation, memory entry, tool call, or WhatsApp egress.
+    deliveryAcks.observeUpdates(updates);
+    const ordinaryUpdates = [];
+    for (const entry of updates || []) {
+      const updateChatId = entry?.key?.remoteJid
+        || entry?.update?.pollUpdates?.[0]?.pollUpdateMessageKey?.remoteJid
+        || '';
+      const passiveRoute = passiveIntake.routeFor(updateChatId);
+      if (passiveRoute) {
+        console.log(JSON.stringify({
+          event: 'passive_intake_update_consumed',
+          project: passiveRoute.project,
+        }));
+        continue;
+      }
+      ordinaryUpdates.push(entry);
+    }
+    for (const { key, update } of ordinaryUpdates) {
       if (!update?.pollUpdates) continue;
       const pollCreationId = key?.id || update.pollUpdates?.[0]?.pollCreationMessageKey?.id;
       const pollCreation = messageStore.get(pollCreationId);
@@ -540,12 +647,99 @@ async function startSocket() {
     ].filter(Boolean)));
 
     for (const msg of messages) {
-      if (!msg.message) continue;
-
-      const chatId = msg.key.remoteJid;
+      const chatId = msg?.key?.remoteJid || '';
       const senderId = msg.key.participant || chatId;
       const isGroup = chatId.endsWith('@g.us');
       const senderNumber = senderId.replace(/@.*/, '');
+      const passiveRoute = passiveIntake.routeFor(chatId);
+      if (passiveRoute) {
+        try {
+          const result = msg.message
+            ? passiveIntake.captureMessage({ msg, chatId, senderId })
+            : { persisted: false, reason: 'empty_protocol_message' };
+          let mediaStatus;
+          if (result.hasMedia && result.eventId && passiveIntake.mediaState(result.project, result.eventId) === 'pending') {
+            if (result.privacyRestricted) {
+              mediaStatus = passiveIntake.captureMediaFailure({
+                project: result.project,
+                eventId: result.eventId,
+                spoolPath: result.spoolPath,
+                code: 'media-privacy-restricted',
+              }).status;
+            } else {
+              let lastMediaError = null;
+              for (let attempt = 1; attempt <= 2; attempt += 1) {
+                let timeout;
+                try {
+                  const mediaBytes = await Promise.race([
+                    downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage }),
+                    new Promise((_, reject) => {
+                      timeout = setTimeout(
+                        () => reject(Object.assign(new Error('passive media timeout'), { code: 'MEDIA_TIMEOUT' })),
+                        PASSIVE_MEDIA_TIMEOUT_MS,
+                      );
+                    }),
+                  ]);
+                  const metadata = result.mediaMetadata?.[0] || {};
+                  mediaStatus = passiveIntake.captureMedia({
+                    project: result.project,
+                    eventId: result.eventId,
+                    spoolPath: result.spoolPath,
+                    kind: metadata.kind,
+                    mime: metadata.mime,
+                    bytes: mediaBytes,
+                  }).status;
+                  lastMediaError = null;
+                  break;
+                } catch (mediaError) {
+                  lastMediaError = mediaError;
+                  if (attempt < 2) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                  }
+                } finally {
+                  if (timeout) clearTimeout(timeout);
+                }
+              }
+              if (lastMediaError) {
+                const code = lastMediaError?.code === 'MEDIA_TIMEOUT'
+                  ? 'media-download-timeout'
+                  : 'media-download-failed';
+                mediaStatus = passiveIntake.captureMediaFailure({
+                  project: result.project,
+                  eventId: result.eventId,
+                  spoolPath: result.spoolPath,
+                  code,
+                }).status;
+              }
+            }
+          }
+          console.log(JSON.stringify({
+            event: 'passive_intake_consumed',
+            project: passiveRoute.project,
+            persisted: result.persisted === true,
+            duplicate: result.duplicate === true,
+            reason: result.reason || undefined,
+            media: mediaStatus,
+          }));
+        } catch (error) {
+          // Fail closed: persistence failure must never fall through into the
+          // ordinary Titan queue, session, memory, tools, or model path.
+          console.error(JSON.stringify({
+            event: 'passive_intake_persist_failed',
+            project: passiveRoute.project,
+            code: error?.code || 'PASSIVE_INTAKE_PERSIST_FAILED',
+          }));
+          // A message must never be silently acknowledged after raw
+          // persistence failed.  Fail the bridge so the gateway's existing
+          // retryable-adapter supervisor reconnects and WhatsApp can replay.
+          setImmediate(() => process.exit(70));
+          return;
+        }
+        continue;
+      }
+
+      deliveryAcks.observeMessage(msg);
+      if (!msg.message) continue;
       emitDebugEvent({
         stage: 'upsert',
         type,
@@ -778,9 +972,31 @@ async function startSocket() {
   });
 }
 
+function startSocketWithRetry() {
+  return startSocket().catch((err) => {
+    console.error(`WhatsApp socket start failed: ${err?.message || String(err)}`);
+    const generation = reconnectCoordinator.currentGeneration();
+    reconnectCoordinator.schedule(generation, 3000, startSocketWithRetry);
+  });
+}
+
 // HTTP server
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
+
+function rejectPassiveIntakeEgress(res, chatId, action) {
+  try {
+    passiveIntake.assertEgressAllowed(chatId, action);
+    return false;
+  } catch (error) {
+    if (error?.code !== 'PASSIVE_INTAKE_EGRESS_DENIED') throw error;
+    res.status(403).json({
+      error: 'Passive intake routes are receive-only',
+      code: error.code,
+    });
+    return true;
+  }
+}
 
 // Host-header validation — defends against DNS rebinding.
 // The bridge binds loopback-only (127.0.0.1) but a victim browser on
@@ -829,10 +1045,12 @@ app.post('/send', async (req, res) => {
   if (!chatId || !message) {
     return res.status(400).json({ error: 'chatId and message are required' });
   }
+  if (rejectPassiveIntakeEgress(res, chatId, 'send')) return;
 
   try {
     const chunks = splitLongMessage(formatOutgoingMessage(message));
     const messageIds = [];
+    const ackStatuses = [];
     for (let i = 0; i < chunks.length; i += 1) {
       const { content: payload, options } = buildTextSendPayload(chunks[i], {
         chatId,
@@ -840,9 +1058,12 @@ app.post('/send', async (req, res) => {
         messageStore,
       });
       const sent = await sendWithTimeout(chatId, payload, options);
+      assertOutboundDestination(sent, chatId);
       trackSentMessageId(sent);
       messageStore.remember(sent);
       if (sent?.key?.id) messageIds.push(sent.key.id);
+      const ackStatus = await deliveryAcks.wait(sent.key.id);
+      ackStatuses.push(ackStatus);
       if (chunks.length > 1 && i < chunks.length - 1) {
         await sleep(CHUNK_DELAY_MS);
       }
@@ -852,6 +1073,7 @@ app.post('/send', async (req, res) => {
       success: true,
       messageId: messageIds[messageIds.length - 1],
       messageIds,
+      ackStatuses,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -868,6 +1090,7 @@ app.post('/edit', async (req, res) => {
   if (!chatId || !messageId || !message) {
     return res.status(400).json({ error: 'chatId, messageId, and message are required' });
   }
+  if (rejectPassiveIntakeEgress(res, chatId, 'edit')) return;
 
   try {
     const key = { id: messageId, fromMe: true, remoteJid: chatId };
@@ -902,6 +1125,7 @@ app.post('/send-media', async (req, res) => {
   if (!chatId || !filePath) {
     return res.status(400).json({ error: 'chatId and filePath are required' });
   }
+  if (rejectPassiveIntakeEgress(res, chatId, 'send-media')) return;
 
   try {
     if (!existsSync(filePath)) {
@@ -1003,6 +1227,7 @@ app.post('/send-poll', async (req, res) => {
   if (!chatId || !question || !Array.isArray(options)) {
     return res.status(400).json({ error: 'chatId, question, and options are required' });
   }
+  if (rejectPassiveIntakeEgress(res, chatId, 'send-poll')) return;
 
   try {
     const payload = buildPollPayload({ question, options, selectableCount });
@@ -1025,6 +1250,7 @@ app.post('/send-location', async (req, res) => {
   if (!chatId || latitude === undefined || longitude === undefined) {
     return res.status(400).json({ error: 'chatId, latitude, and longitude are required' });
   }
+  if (rejectPassiveIntakeEgress(res, chatId, 'send-location')) return;
 
   try {
     const payload = buildLocationPayload({ latitude, longitude, name, address });
@@ -1045,6 +1271,7 @@ app.post('/typing', async (req, res) => {
 
   const { chatId } = req.body;
   if (!chatId) return res.status(400).json({ error: 'chatId required' });
+  if (rejectPassiveIntakeEgress(res, chatId, 'typing')) return;
 
   try {
     await sock.sendPresenceUpdate('composing', chatId);
@@ -1060,6 +1287,9 @@ app.post('/read', async (req, res) => {
   if (!sock || connectionState !== 'connected') {
     return res.status(503).json({ error: 'Not connected' });
   }
+
+  const readChatId = req.body?.key?.remoteJid || '';
+  if (rejectPassiveIntakeEgress(res, readChatId, 'read')) return;
 
   const receiptKeys = inboundReadReceiptKeys({
     key: req.body?.key,
@@ -1081,6 +1311,7 @@ app.post('/read', async (req, res) => {
 // Chat info
 app.get('/chat/:id', async (req, res) => {
   const chatId = req.params.id;
+  if (rejectPassiveIntakeEgress(res, chatId, 'metadata')) return;
   const isGroup = chatId.endsWith('@g.us');
 
   if (isGroup && sock) {
@@ -1111,6 +1342,11 @@ app.get('/health', (req, res) => {
     uptime: process.uptime(),
     scriptHash: SCRIPT_HASH,
     sendReadReceipts: SEND_READ_RECEIPTS,
+    passiveIntake: {
+      enabled: passiveIntake.enabled,
+      routeCount: passiveIntake.routeCount,
+      configHash: passiveIntake.configHash,
+    },
   });
 });
 

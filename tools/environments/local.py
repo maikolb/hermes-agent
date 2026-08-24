@@ -16,7 +16,7 @@ from pathlib import Path
 
 from hermes_constants import get_process_hermes_home
 from tools.environments.base import BaseEnvironment, _pipe_stdin
-from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli._subprocess_compat import windows_hidden_popen_kwargs, windows_hide_flags
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -1829,7 +1829,7 @@ class LocalEnvironment(BaseEnvironment):
 
         _popen_cwd = self.cwd
 
-        _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
+        _popen_kwargs = windows_hidden_popen_kwargs()
 
         proc = subprocess.Popen(
             args,
@@ -1840,7 +1840,7 @@ class LocalEnvironment(BaseEnvironment):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-            start_new_session=True,
+            start_new_session=not _IS_WINDOWS,
             cwd=_popen_cwd,
             **_popen_kwargs,
         )

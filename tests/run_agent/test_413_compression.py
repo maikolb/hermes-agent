@@ -16,7 +16,11 @@ from unittest.mock import MagicMock, patch
 
 
 from agent.context_compressor import SUMMARY_PREFIX
-from agent.conversation_compression import COMPACTION_DONE_STATUS, COMPACTION_STATUS
+from agent.conversation_compression import (
+    COMPACTION_DONE_STATUS,
+    COMPACTION_STATUS,
+    COMPRESSION_LOCK_CONTENTION_COOLDOWN_SECONDS,
+)
 from run_agent import AIAgent
 import run_agent
 
@@ -489,8 +493,8 @@ class TestPreflightCompression:
             ("compacted", COMPACTION_DONE_STATUS),
         ]
 
-    def test_compress_context_emits_one_terminal_status_when_lock_is_unavailable(self, agent):
-        """A rejected lock must retire the started desktop compaction phase."""
+    def test_compress_context_does_not_claim_success_when_lock_is_unavailable(self, agent):
+        """A rejected lock is an abort, never a completed compaction."""
         agent.compression_enabled = False
         agent.session_id = "session-with-contended-lock"
         agent._session_db = SimpleNamespace(
@@ -501,12 +505,22 @@ class TestPreflightCompression:
         agent.status_callback = lambda event, message: events.append((event, message))
         messages = [{"role": "user", "content": "hello"}]
 
-        compressed, prompt = agent._compress_context(messages, "system prompt", force=True)
+        with patch.object(
+            agent.context_compressor,
+            "_record_compression_failure_cooldown",
+        ) as recorder:
+            compressed, prompt = agent._compress_context(
+                messages, "system prompt", force=True
+            )
 
         assert compressed is messages
         assert prompt == "You are helpful."
-        assert [event for event, _ in events] == ["lifecycle", "warn", "compacted"]
-        assert events[-1] == ("compacted", COMPACTION_DONE_STATUS)
+        assert [event for event, _ in events] == ["lifecycle", "warn"]
+        assert ("compacted", COMPACTION_DONE_STATUS) not in events
+        recorder.assert_called_once_with(
+            COMPRESSION_LOCK_CONTENTION_COOLDOWN_SECONDS,
+            "compression_lock_contended",
+        )
 
 
     def test_compression_reuses_cached_prompt_when_memory_snapshot_is_unchanged(self, agent):

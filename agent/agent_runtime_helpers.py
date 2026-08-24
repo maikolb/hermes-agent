@@ -4328,6 +4328,12 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
                 context["reset_at"] = time.time() + float(retry_after)
             except (TypeError, ValueError):
                 pass
+        resets_in = payload.get("resets_in_seconds")
+        if resets_in not in {None, ""} and "reset_at" not in context:
+            try:
+                context["reset_at"] = time.time() + float(resets_in)
+            except (TypeError, ValueError):
+                pass
 
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", None)

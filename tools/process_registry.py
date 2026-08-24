@@ -2417,6 +2417,18 @@ class ProcessRegistry:
             return {"status": "already_exited", "error": "Process has already finished"}
 
         if hasattr(session, '_pty') and session._pty:
+            if _IS_WINDOWS:
+                # pywinpty's ``sendeof()`` writes Ctrl-D; it does not close
+                # the ConPTY input pipe.  Reporting success leaves children
+                # blocked in stdin.read() indefinitely.  Fail closed until
+                # the backend exposes a real input half-close primitive.
+                return {
+                    "status": "error",
+                    "error": (
+                        "Closing PTY stdin without terminating the process is not "
+                        "supported by the current pywinpty/ConPTY backend"
+                    ),
+                }
             try:
                 session._pty.sendeof()
                 return {"status": "ok", "message": "EOF sent"}
@@ -3107,6 +3119,11 @@ def format_process_notification(evt: dict) -> "str | None":
     text = (
         f"[IMPORTANT: Background process {_sid} {_status} "
         f"(exit code {_exit}{_signal}).\n"
+        "Control note: this is an auxiliary completion for an earlier tool "
+        "call. It does not supersede the latest real user request or any "
+        "pending final deliverable. Reconcile only this process result; do not "
+        "declare that no actions are pending unless the active turn checkpoint "
+        "and delivery obligation are both terminal.\n"
     )
     if _attribution:
         text += f"{_attribution}\n"

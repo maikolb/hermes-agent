@@ -48,6 +48,66 @@ def test_create_swarm_builds_parallel_workers_verifier_and_synthesizer(tmp_path)
         conn.close()
 
 
+def test_worktree_swarm_keeps_inline_root_non_code_and_workers_required(
+    tmp_path,
+):
+    with kb.connect_closing(tmp_path / "swarm-worktree.db") as conn:
+        created = create_swarm(
+            conn,
+            goal="Parallel code delivery",
+            workers=[
+                SwarmWorkerSpec(
+                    profile="worker",
+                    title="Implement",
+                    body="Implement safely",
+                )
+            ],
+            verifier_assignee="reviewer",
+            synthesizer_assignee="synth",
+            workspace_kind="worktree",
+            workspace_path=str(tmp_path / "repo"),
+        )
+
+        root = kb.get_task(conn, created.root_id)
+        worker = kb.get_task(conn, created.worker_ids[0])
+        assert root is not None
+        assert root.status == "done"
+        assert root.workspace_kind == "dir"
+        assert worker is not None
+        assert worker.workspace_kind == "worktree"
+        obligation = kb.get_git_delivery_contract(conn, worker.id)
+        assert obligation is not None
+        assert obligation["required"] is True
+        assert obligation["receipt_json"] is None
+
+
+def test_inline_activation_refuses_existing_worktree_root(tmp_path):
+    from hermes_cli import kanban_swarm as ks
+
+    with kb.connect_closing(tmp_path / "swarm-root-guard.db") as conn:
+        root_id = kb.create_task(
+            conn,
+            title="Legacy worktree root",
+            initial_status="blocked",
+            workspace_kind="worktree",
+            workspace_path=str(tmp_path / ".worktrees" / "legacy"),
+        )
+        with kb.write_txn(conn):
+            activated = ks._activate_root_inline(
+                conn,
+                root_id,
+                summary="must not complete",
+                metadata={},
+            )
+        assert activated is False
+        root = kb.get_task(conn, root_id)
+        assert root is not None and root.status == "blocked"
+        obligation = kb.get_git_delivery_contract(conn, root_id)
+        assert obligation is not None
+        assert obligation["candidate_digest"] is None
+        assert obligation["receipt_json"] is None
+
+
 def test_create_swarm_graph_is_atomic_and_rolls_back_partial_build(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):

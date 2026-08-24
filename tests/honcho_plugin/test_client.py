@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -21,6 +22,27 @@ from plugins.memory.honcho.client import (
     resolve_config_path,
     resolve_global_config_path,
 )
+
+
+_HONCHO_ENV_VARS = (
+    "HERMES_HONCHO_HOST",
+    "HONCHO_API_KEY",
+    "HONCHO_BASE_URL",
+    "HONCHO_ENVIRONMENT",
+    "HONCHO_TIMEOUT",
+    "HONCHO_URL",
+)
+
+
+@contextmanager
+def _honcho_env(values: dict[str, str] | None = None):
+    """Isolate Honcho settings without deleting home/location variables."""
+    overrides = dict(values or {})
+    with patch.dict(os.environ, overrides, clear=False):
+        for name in _HONCHO_ENV_VARS:
+            if name not in overrides:
+                os.environ.pop(name, None)
+        yield
 
 
 class TestHonchoClientConfigDefaults:
@@ -48,10 +70,7 @@ class TestFromEnv:
 
 
     def test_defaults_without_env(self):
-        with patch.dict(os.environ, {}, clear=True):
-            # Remove HONCHO_API_KEY if it exists
-            os.environ.pop("HONCHO_API_KEY", None)
-            os.environ.pop("HONCHO_ENVIRONMENT", None)
+        with _honcho_env():
             config = HonchoClientConfig.from_env()
         assert config.api_key is None
         assert config.environment == "production"
@@ -92,7 +111,7 @@ class TestFromEnv:
 
 class TestFromGlobalConfig:
     def test_missing_config_falls_back_to_env(self, tmp_path):
-        with patch.dict(os.environ, {}, clear=True):
+        with _honcho_env():
             config = HonchoClientConfig.from_global_config(
                 config_path=tmp_path / "nonexistent.json"
             )
@@ -108,7 +127,7 @@ class TestFromGlobalConfig:
         absent, so a fallback that only from_global_config() understood
         would silently do nothing for users with no ~/.honcho/config.json.
         """
-        with patch.dict(os.environ, {"HONCHO_URL": "http://localhost:8000"}, clear=True):
+        with _honcho_env({"HONCHO_URL": "http://localhost:8000"}):
             config = HonchoClientConfig.from_global_config(
                 config_path=tmp_path / "nonexistent.json"
             )
@@ -124,7 +143,7 @@ class TestFromGlobalConfig:
             "endpoint": {"baseUrl": "http://localhost:8000"},
         }))
 
-        with patch.dict(os.environ, {}, clear=True):
+        with _honcho_env():
             config = HonchoClientConfig.from_global_config(config_path=config_file)
         assert config.base_url == "http://localhost:8000"
 
@@ -137,7 +156,7 @@ class TestFromGlobalConfig:
             "base_url": "http://localhost:9002",
         }))
 
-        with patch.dict(os.environ, {"HONCHO_BASE_URL": "http://localhost:9003"}, clear=True):
+        with _honcho_env({"HONCHO_BASE_URL": "http://localhost:9003"}):
             config = HonchoClientConfig.from_global_config(config_path=config_file)
         assert config.base_url == "http://localhost:8000"
 
@@ -150,7 +169,7 @@ class TestFromGlobalConfig:
             "baseUrl": "http://localhost:9001",
         }))
 
-        with patch.dict(os.environ, {}, clear=True):
+        with _honcho_env():
             config = HonchoClientConfig.from_global_config(config_path=config_file)
         assert config.base_url == "http://localhost:9001"
 
@@ -245,7 +264,7 @@ class TestFromGlobalConfig:
             if i >= 4:
                 env_dict.pop("HONCHO_BASE_URL")
             config_file.write_text(json.dumps(cfg_dict))
-            with patch.dict(os.environ, env_dict, clear=True):
+            with _honcho_env(env_dict):
                 config = HonchoClientConfig.from_global_config(config_path=config_file)
             assert config.base_url == want, f"layer {i}: got {config.base_url!r}, want {want!r}"
 
@@ -521,6 +540,53 @@ class TestGetHonchoClient:
         mock_h3.assert_called_once()
         assert mock_h3.call_args.kwargs["timeout"] == 300.0
 
+    def test_config_yaml_base_url_change_rebuilds_long_lived_client(self):
+        """A gateway config object must not pin the first config.yaml endpoint."""
+        from hermes_constants import get_hermes_home
+
+        cfg_yaml = get_hermes_home() / "config.yaml"
+        cfg_yaml.write_text(
+            "honcho:\n  base_url: https://honcho-one.invalid/v3\n",
+            encoding="utf-8",
+        )
+
+        fake_honcho_1 = MagicMock(name="Honcho_endpoint_one")
+        fake_honcho_2 = MagicMock(name="Honcho_endpoint_two")
+        cfg = HonchoClientConfig(
+            api_key="test-key",
+            workspace_id="hermes",
+            environment="production",
+        )
+
+        mock_honcho = MagicMock(side_effect=[fake_honcho_1, fake_honcho_2])
+        fake_sdk = types.SimpleNamespace(Honcho=mock_honcho)
+        with patch.dict(sys.modules, {"honcho": fake_sdk}):
+            client1 = get_honcho_client(cfg)
+            cached_client = get_honcho_client(cfg)
+
+            cfg_yaml.write_text(
+                "honcho:\n  base_url: https://honcho-second.invalid/v3\n",
+                encoding="utf-8",
+            )
+            st = cfg_yaml.stat()
+            os.utime(
+                cfg_yaml,
+                ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000),
+            )
+
+            client2 = get_honcho_client(cfg)
+
+        assert client1 is fake_honcho_1
+        assert cached_client is fake_honcho_1
+        assert client2 is fake_honcho_2
+        assert mock_honcho.call_count == 2
+        assert mock_honcho.call_args_list[0].kwargs["base_url"] == (
+            "https://honcho-one.invalid"
+        )
+        assert mock_honcho.call_args_list[1].kwargs["base_url"] == (
+            "https://honcho-second.invalid"
+        )
+
     @pytest.mark.skipif(
         not importlib.util.find_spec("honcho"),
         reason="honcho SDK not installed"
@@ -685,7 +751,7 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
         )
 
         with patch("honcho.Honcho", return_value=fake_honcho) as mock_honcho, \
-             patch("hermes_cli.config.load_config", return_value={}):
+             patch("hermes_cli.config.load_config_readonly", return_value={}):
             get_honcho_client(cfg)
 
         mock_honcho.assert_called_once()
@@ -711,7 +777,7 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
             },
         }))
 
-        with patch.dict(os.environ, {}, clear=True), \
+        with _honcho_env(), \
              patch("hermes_cli.profiles.get_active_profile_name", return_value="default"), \
              patch("plugins.memory.honcho.client.resolve_config_path", return_value=config_file):
             cfg = HonchoClientConfig.from_global_config(config_path=config_file)
@@ -726,7 +792,7 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
         mock_honcho = MagicMock(return_value=fake_honcho)
         fake_honcho_module = types.SimpleNamespace(Honcho=mock_honcho)
         with patch.dict(sys.modules, {"honcho": fake_honcho_module}), \
-             patch("hermes_cli.config.load_config", return_value={}):
+             patch("hermes_cli.config.load_config_readonly", return_value={}):
             get_honcho_client(cfg)
 
         mock_honcho.assert_called_once()
@@ -768,7 +834,7 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
         )
 
         with patch("honcho.Honcho", return_value=fake_honcho) as mock_honcho, \
-             patch("hermes_cli.config.load_config", return_value={}):
+             patch("hermes_cli.config.load_config_readonly", return_value={}):
             get_honcho_client(cfg)
 
         mock_honcho.assert_called_once()
@@ -776,4 +842,3 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
         assert passed_base_url == expected, (
             f"Expected {expected!r}, got {passed_base_url!r}"
         )
-

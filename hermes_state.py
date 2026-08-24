@@ -260,6 +260,11 @@ def workspace_key(row: Dict[str, Any]) -> Optional[str]:
     return cwd or None
 
 
+def _system_prompt_hash(system_prompt: str) -> str:
+    """Return the content address used by shared system-prompt snapshots."""
+    return hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+
+
 def _delegate_from_json(col: str = "model_config") -> str:
     return f"json_extract(COALESCE({col}, '{{}}'), '$._delegate_from')"
 
@@ -10065,8 +10070,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     {_sql_session_last_active("s")} AS last_active,
                     COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
                 FROM sessions s
-                LEFT JOIN chain_max cm ON cm.root_id = s.id
                 {prompt_join}
+                LEFT JOIN chain_max cm ON cm.root_id = s.id
                 {outer_where}
                 ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
                 LIMIT ? OFFSET ?
@@ -10591,6 +10596,46 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             _do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S
         )
 
+    def append_delivery_recovery_artifact(
+        self,
+        session_id: str,
+        content: str,
+    ) -> int:
+        """Persist exact outbound bytes without adding them to model history.
+
+        Gateway-only presentation transforms happen after the ordinary
+        assistant row is written.  A checkpoint may hash those transformed
+        bytes, so recovery needs an exact durable copy.  The row is inactive
+        by construction: normal conversation reads exclude it, while
+        checkpoint recovery intentionally reads ``include_inactive=True``.
+        Repeated sealing of the same payload is idempotent.
+        """
+        stored_content = self._encode_content(content)
+        display_kind = "delivery_checkpoint_artifact"
+
+        def _do(conn):
+            existing = conn.execute(
+                """SELECT id FROM messages
+                   WHERE session_id=? AND role='assistant' AND content=?
+                     AND active=0 AND display_kind=?
+                   ORDER BY id DESC LIMIT 1""",
+                (session_id, stored_content, display_kind),
+            ).fetchone()
+            if existing is not None:
+                return int(existing[0])
+            cursor = conn.execute(
+                """INSERT INTO messages
+                   (session_id, role, content, timestamp, observed, active,
+                    display_kind)
+                   VALUES (?, 'assistant', ?, ?, 0, 0, ?)""",
+                (session_id, stored_content, time.time(), display_kind),
+            )
+            return int(cursor.lastrowid)
+
+        return self._execute_write(
+            _do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S
+        )
+
     def append_messages_batch(
         self,
         session_id: str,
@@ -10979,7 +11024,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     self._encode_content(msg.get("content")),
                     msg.get("tool_call_id"),
                     tool_calls_json,
-                    _scrub_surrogates(msg.get("tool_name")),
+                    _scrub_surrogates(msg.get("tool_name") or msg.get("name")),
                     msg.get("effect_disposition"),
                     message_timestamp,
                     msg.get("token_count"),

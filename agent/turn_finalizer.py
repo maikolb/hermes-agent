@@ -691,6 +691,86 @@ def finalize_turn(
     if isinstance(final_response, str):
         final_response = _sanitize_surrogates(final_response)
 
+    # Seal the exact ordinary-final payload after every footer/plugin/Unicode
+    # transform.  Earlier loop checkpoints are provisional: recording them as
+    # the delivery artifact would hash bytes that the gateway never sends.
+    # Reconcile the durable assistant tail first, then write the checkpoint.
+    # A durable gateway turn must fail closed here — sending an answer that
+    # exists only in a Python local recreates the restart-loss boundary this
+    # checkpoint is meant to remove.
+    _checkpoint_fence = None
+    _checkpoint_root = None
+    _storage_home = None
+    _checkpoint_store = getattr(agent, "_turn_checkpoint_store", None)
+    if (
+        isinstance(final_response, str)
+        and final_response
+        and not interrupted
+        and _checkpoint_store is not None
+        and getattr(agent, "session_id", None)
+    ):
+        try:
+            _assistant_tail = None
+            for _candidate in reversed(messages):
+                if not isinstance(_candidate, dict):
+                    continue
+                if _candidate.get("role") == "user":
+                    break
+                if _candidate.get("role") == "assistant":
+                    _assistant_tail = _candidate
+                    break
+            if _assistant_tail is None:
+                _assistant_tail = {
+                    "role": "assistant",
+                    "content": final_response,
+                }
+                append_message(messages, _assistant_tail)
+            elif _assistant_tail.get("content") != final_response:
+                _assistant_tail["content"] = final_response
+                stamp_message_timestamp(_assistant_tail)
+                _assistant_tail.pop(_DB_PERSISTED_MARKER, None)
+                agent._db_flush_scan_prefix = None
+
+            _flush_ok = agent._flush_messages_to_session_db(
+                messages, conversation_history
+            )
+            if _flush_ok is False:
+                raise RuntimeError("exact final assistant row was not persisted")
+
+            agent._turn_checkpoint_state = _checkpoint_store.mark_deliverable(
+                str(agent.session_id),
+                final_response,
+                verification_pending=False,
+                verification_kind="ordinary_final",
+            )
+            from agent.turn_checkpoint import checkpoint_delivery_fence
+
+            _checkpoint_fence = checkpoint_delivery_fence(
+                agent._turn_checkpoint_state
+            )
+            if _checkpoint_fence is None:
+                raise RuntimeError("ordinary-final checkpoint fence is missing")
+            _checkpoint_namespace = _checkpoint_store.delivery_namespace()
+            _checkpoint_root = _checkpoint_namespace["checkpoint_root"]
+            _storage_home = _checkpoint_namespace["storage_home"]
+        except Exception as exc:
+            _checkpoint_fence = None
+            _checkpoint_root = None
+            _storage_home = None
+            logger.error(
+                "ordinary final was withheld because its durable delivery "
+                "checkpoint could not be sealed",
+                exc_info=True,
+            )
+            failed = True
+            completed = False
+            _turn_exit_reason = "delivery_checkpoint_failed"
+            final_response = (
+                "The completed response was withheld because Hermes could not "
+                "seal its durable delivery checkpoint. The session remains "
+                f"recoverable; retry after storage health is restored. ({exc})"
+            )
+
     # Build result with interrupt info if applicable
     result = {
         "final_response": final_response,
@@ -726,6 +806,9 @@ def finalize_turn(
             (getattr(agent, "request_overrides", {}) or {}).get("extra_body") or {}
         ).get("service_tier"),
         "session_id": agent.session_id,
+        "turn_checkpoint_fence": _checkpoint_fence,
+        "turn_checkpoint_root": _checkpoint_root,
+        "storage_home": _storage_home,
     }
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()

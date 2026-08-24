@@ -146,6 +146,23 @@ class MetadataEditProgressCaptureAdapter(ProgressCaptureAdapter):
         return SendResult(success=True, message_id=message_id)
 
 
+class RejectTransformedEditAdapter(MetadataEditProgressCaptureAdapter):
+    async def edit_message(
+        self, chat_id, message_id, content, *, finalize: bool = False, metadata=None
+    ) -> SendResult:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content": content,
+                "metadata": metadata,
+            }
+        )
+        if "[plugin appended this]" in content:
+            return SendResult(success=False, error="edit rejected")
+        return SendResult(success=True, message_id=message_id)
+
+
 class RetryableFirstEditProgressCaptureAdapter(ProgressCaptureAdapter):
     """Fail one progress edit transiently, then accept later edits."""
 
@@ -1240,7 +1257,38 @@ async def test_transformed_response_edits_streamed_message_in_place(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_rejected_transformed_edit_falls_back_to_normal_final_send(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        TransformedStreamAgent,
+        session_id="sess-transformed-edit-rejected",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.MATRIX,
+        chat_id="!room:matrix.example.org",
+        chat_type="group",
+        thread_id="$thread",
+        adapter_cls=RejectTransformedEditAdapter,
+    )
+
+    assert result.get("already_sent") is not True
+    assert any(
+        "[plugin appended this]" in call["content"] for call in adapter.sent
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_agent_queued_message_does_not_treat_commentary_as_final(monkeypatch, tmp_path):
+    # This fixture replaces AIAgent with a minimal double that does not run the
+    # turn finalizer and therefore cannot produce a durable checkpoint fence.
+    # Exercise the historical best-effort queue semantics explicitly; the
+    # fenced/default-on path is covered by test_queued_primary_delivery.py.
+    monkeypatch.setattr("gateway.delivery_ledger.ledger_enabled", lambda: False)
     QueuedCommentaryAgent.calls = 0
     adapter, result = await _run_with_agent(
         monkeypatch,
@@ -1260,6 +1308,7 @@ async def test_run_agent_queued_message_does_not_treat_commentary_as_final(monke
 @pytest.mark.asyncio
 async def test_run_agent_queued_message_delivers_first_response_media(monkeypatch, tmp_path):
     """Queued follow-ups must preserve explicit attachments from the first turn."""
+    monkeypatch.setattr("gateway.delivery_ledger.ledger_enabled", lambda: False)
     media_path = tmp_path / "queued-first-response.png"
     media_path.write_bytes(b"not-a-real-png-but-a-real-file")
     QueuedMediaAgent.calls = 0
@@ -1300,6 +1349,7 @@ async def test_run_agent_queued_message_delivers_streamed_first_response_media(
     monkeypatch, tmp_path,
 ):
     """Streaming first-turn text must not suppress its explicit attachment."""
+    monkeypatch.setattr("gateway.delivery_ledger.ledger_enabled", lambda: False)
     media_path = tmp_path / "queued-streamed-first-response.png"
     media_path.write_bytes(b"not-a-real-png-but-a-real-file")
     QueuedMediaAgent.calls = 0
@@ -1363,6 +1413,7 @@ async def test_run_agent_sends_normalized_failure_before_queued_followup(
     monkeypatch, tmp_path,
 ):
     """Queued delivery uses finalized output, not the raw empty agent result."""
+    monkeypatch.setattr("gateway.delivery_ledger.ledger_enabled", lambda: False)
     QueuedFailedEmptyAgent.calls = 0
     adapter, result = await _run_with_agent(
         monkeypatch,

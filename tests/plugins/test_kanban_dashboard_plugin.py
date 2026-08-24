@@ -876,13 +876,38 @@ def test_dashboard_dependency_selects_use_value_change_handler():
     assert child_select in bundle
 
 
-def test_bulk_archive(client):
+def test_bulk_archive(client, monkeypatch):
     a = client.post("/api/plugins/kanban/tasks", json={"title": "a"}).json()["task"]
     b = client.post("/api/plugins/kanban/tasks", json={"title": "b"}).json()["task"]
+    claim_lock = kb._claimer_id()
+    with kb.connect() as conn:
+        conn.executemany(
+            "UPDATE tasks SET status='running', claim_lock=?, worker_pid=?, "
+            "worker_started_at=? WHERE id=?",
+            [
+                (claim_lock, 515151, 51.0, a["id"]),
+                (claim_lock, 525252, 52.0, b["id"]),
+            ],
+        )
+        conn.commit()
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        kb,
+        "_process_start_time",
+        lambda pid: 51.0 if pid == 515151 else 52.0,
+    )
+    terminated: list[int] = []
+
+    def fake_terminate(pid, _lock, **_kwargs):
+        terminated.append(pid)
+        return {"terminated": True, "termination_attempted": True}
+
+    monkeypatch.setattr(kb, "_terminate_reclaimed_worker", fake_terminate)
     r = client.post("/api/plugins/kanban/tasks/bulk",
                     json={"ids": [a["id"], b["id"]], "archive": True})
     assert r.status_code == 200
     assert all(r["ok"] for r in r.json()["results"])
+    assert terminated == [515151, 525252]
     # Default board (archived hidden) — both gone.
     board = client.get("/api/plugins/kanban/board").json()
     ids = {t["id"] for col in board["columns"] for t in col["tasks"]}
@@ -1228,5 +1253,4 @@ def test_specify_happy_path(client, monkeypatch):
 # ---------------------------------------------------------------------------
 # Final result visibility for Done cards
 # ---------------------------------------------------------------------------
-
 

@@ -218,6 +218,8 @@ class HonchoSessionManager:
         that daemon threads cannot see, migrating every access onto the
         first-built profile's client (#69123, #74065).
         """
+        # Reuse the config that captured this session's digest-only effective
+        # workspace.  Honcho's async writer threads do not inherit ContextVars.
         self._honcho = get_honcho_client(self._config)
         return self._honcho
 

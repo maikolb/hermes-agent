@@ -274,10 +274,24 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
     external dependency), so no platform fake is needed.
     """
     calls = []
-    script_path = tmp_path / "Hermes_Gateway_alice.cmd"
+    project = tmp_path / "project"
+    venv = project / "venv"
+    scripts = venv / "Scripts"
+    base = tmp_path / "base-python"
+    scripts.mkdir(parents=True)
+    base.mkdir()
+    venv_python = scripts / "python.exe"
+    venv_python.write_text("", encoding="utf-8")
+    base_pythonw = base / "pythonw.exe"
+    base_pythonw.write_text("", encoding="utf-8")
+    (venv / "pyvenv.cfg").write_text(f"home = {base}\n", encoding="utf-8")
+    script_path = tmp_path / "gateway-service" / "Hermes_Gateway_alice.cmd"
+    script_path.parent.mkdir()
+    script_path.with_suffix(".pyw").write_text("# generated", encoding="utf-8")
     xml_seen = {}
 
     monkeypatch.setattr(gateway_windows, "_resolve_task_user", lambda: r"DOMAIN\\alice")
+    monkeypatch.setattr(gateway, "get_python_path", lambda: str(venv_python))
 
     def fake_schtasks(args):
         calls.append(tuple(args))
@@ -297,8 +311,13 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
     assert calls[0][:4] == ("/Delete", "/F", "/TN", "Hermes_Gateway_alice")
     assert calls[1][0] == "/Create"
     assert "/XML" in calls[1]
+    assert "/NP" in calls[1]
+    assert "/IT" not in calls[1]
     assert "/SC" not in calls[1]
+    assert "<BootTrigger>" in xml_seen["text"]
     assert "<Delay>PT30S</Delay>" in xml_seen["text"]
+    assert "<LogonType>S4U</LogonType>" in xml_seen["text"]
+    assert "<Hidden>true</Hidden>" in xml_seen["text"]
     assert "<StartWhenAvailable>true</StartWhenAvailable>" in xml_seen["text"]
     assert "<StopOnIdleEnd>false</StopOnIdleEnd>" in xml_seen["text"]
     assert "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>" in xml_seen["text"]
@@ -306,21 +325,20 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
     assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml_seen["text"]
     assert "<RestartOnFailure>" in xml_seen["text"]
     assert "<Count>999</Count>" in xml_seen["text"]
-    # Scheduled Task launches the console-less .vbs via wscript.exe, never cmd.exe
-    # (issue #45599 fix A: no console -> no logon CTRL_CLOSE_EVENT / 0xC000013A).
-    assert "<Command>wscript.exe</Command>" in xml_seen["text"]
-    assert "//B //Nologo" in xml_seen["text"]
-    assert "Hermes_Gateway_alice.vbs" in xml_seen["text"]
+    assert f"<Command>{base_pythonw}</Command>" in xml_seen["text"]
+    assert "Hermes_Gateway_alice.pyw" in xml_seen["text"]
+    assert f"<WorkingDirectory>{tmp_path}</WorkingDirectory>" in xml_seen["text"]
+    assert "wscript.exe" not in xml_seen["text"]
+    assert ".vbs" not in xml_seen["text"]
     assert "cmd.exe" not in xml_seen["text"]
 
 
-def test_gateway_vbs_script_is_console_less(monkeypatch):
-    """The .vbs launcher must avoid cmd.exe entirely and Run pythonw hidden
-    (issue #45599 fix A: no console -> no logon CTRL_CLOSE_EVENT / 0xC000013A)."""
+def test_gateway_vbs_script_uses_hidden_console_python(monkeypatch):
+    """VBS hides console python so descendants inherit one hidden console."""
     monkeypatch.setattr(
         gateway_windows,
         "_resolve_detached_python",
-        lambda exe: (r"C:\venv\Scripts\pythonw.exe", Path(r"C:\venv"), []),
+        lambda exe: (r"C:\venv\Scripts\python.exe", Path(r"C:\venv"), []),
     )
     content = gateway_windows._build_gateway_vbs_script(
         r"C:\venv\Scripts\python.exe",
@@ -330,7 +348,8 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
     )
     assert "cmd.exe" not in content.lower()
     assert 'CreateObject("WScript.Shell")' in content
-    assert "pythonw.exe" in content
+    assert "python.exe" in content
+    assert "pythonw.exe" not in content
     assert "hermes_cli.main" in content
     assert "gateway run" in content
     assert ", 0, False" in content  # hidden window, detached/async

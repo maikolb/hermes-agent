@@ -132,6 +132,283 @@ def test_complete_happy_path(worker_env):
         conn.close()
 
 
+def _required_git_worker(monkeypatch, tmp_path):
+    from pathlib import Path as _Path
+
+    from hermes_cli import kanban_db as kb
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+    kb._INITIALIZED_PATHS.clear()
+    kb.write_board_metadata(
+        "default",
+        git_delivery={
+            "required": True,
+            "head_remote": "origin",
+            "expected_head_remote_url": "https://github.com/acme/widget.git",
+            "base_remote": "upstream",
+            "expected_base_remote_url": "https://github.com/acme/widget.git",
+            "head_repository": "acme/widget",
+            "base_repository": "acme/widget",
+            "base_branch": "main",
+            "required_checks": ["tests"],
+        },
+    )
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="required delivery",
+            assignee="test-worker",
+            workspace_kind="worktree",
+            workspace_path=str(workspace),
+            branch_name="delivery/required",
+        )
+        kb.claim_task(conn, task_id)
+        run_id = kb.get_task(conn, task_id).current_run_id
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    return task_id
+
+
+def test_required_review_manifest_missing_fails_closed(monkeypatch, tmp_path):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    task_id = _required_git_worker(monkeypatch, tmp_path)
+    output = json.loads(kt._handle_request_review({"summary": "ready"}))
+
+    assert "error" in output
+    assert "pull_request" in output["error"]
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, task_id).status == "running"
+    finally:
+        conn.close()
+
+
+def test_board_policy_cannot_weaken_policy_sealed_at_task_creation(
+    monkeypatch, tmp_path
+):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    task_id = _required_git_worker(monkeypatch, tmp_path)
+    conn = kb.connect()
+    try:
+        original = kb.get_git_delivery_contract(conn, task_id)
+        original_fingerprint = original["policy_fingerprint"]
+    finally:
+        conn.close()
+    kb.write_board_metadata(
+        "default",
+        git_delivery={
+            "required": True,
+            "head_remote": "origin",
+            "expected_head_remote_url": "https://github.com/acme/other.git",
+            "base_remote": "upstream",
+            "expected_base_remote_url": "https://github.com/acme/other.git",
+            "head_repository": "acme/other",
+            "base_repository": "acme/other",
+            "base_branch": "main",
+            "required_checks": ["tests"],
+        },
+    )
+
+    output = json.loads(
+        kt._handle_request_review(
+            {
+                "summary": "ready",
+                "pull_request": "https://github.com/acme/other/pull/17",
+                "declared_artifacts": ["app.txt"],
+            }
+        )
+    )
+
+    assert "error" in output
+    # The request is rejected against the repository in the policy already
+    # sealed on the task; the mutable board metadata is never adopted.
+    assert "does not match git_delivery.base_repository" in output["error"]
+    conn = kb.connect()
+    try:
+        current = kb.get_git_delivery_contract(conn, task_id)
+        assert current["policy_fingerprint"] == original_fingerprint
+        assert kb.get_task(conn, task_id).status == "running"
+    finally:
+        conn.close()
+
+
+def test_create_seals_policy_from_explicit_board(monkeypatch, tmp_path):
+    from pathlib import Path as _Path
+
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    workspace = tmp_path / "explicit-board-worktree"
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+    kb._INITIALIZED_PATHS.clear()
+    default_policy = {
+        "required": True,
+        "head_remote": "origin",
+        "expected_head_remote_url": "https://github.com/acme/default.git",
+        "base_remote": "upstream",
+        "expected_base_remote_url": "https://github.com/acme/default.git",
+        "head_repository": "acme/default",
+        "base_repository": "acme/default",
+        "base_branch": "main",
+        "required_checks": ["tests"],
+    }
+    explicit_policy = dict(
+        default_policy,
+        expected_head_remote_url="https://github.com/acme/explicit.git",
+        expected_base_remote_url="https://github.com/acme/explicit.git",
+        head_repository="acme/explicit",
+        base_repository="acme/explicit",
+    )
+    kb.write_board_metadata("default", git_delivery=default_policy)
+    kb.write_board_metadata("explicit", git_delivery=explicit_policy)
+
+    output = json.loads(
+        kt._handle_create(
+            {
+                "board": "explicit",
+                "title": "Explicit board code",
+                "assignee": "worker",
+                "workspace_kind": "worktree",
+                "workspace_path": str(workspace),
+            }
+        )
+    )
+
+    assert output.get("ok") is True
+    with kb.connect_closing(board="explicit") as conn:
+        contract = kb.get_git_delivery_contract(conn, output["task_id"])
+        assert contract["policy"]["base_repository"] == "acme/explicit"
+
+
+def test_complete_entrypoint_verifies_sealed_required_delivery(
+    monkeypatch, tmp_path
+):
+    from hermes_cli import git_delivery
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    task_id = _required_git_worker(monkeypatch, tmp_path)
+    review = json.loads(
+        kt._handle_request_review(
+            {
+                "summary": "ready",
+                "pull_request": "https://github.com/acme/widget/pull/17",
+                "declared_artifacts": ["app.txt"],
+            }
+        )
+    )
+    assert review.get("ok") is True
+    called: list[str] = []
+
+    def _not_merged(_conn, seen_task_id, _config=None, **_kwargs):
+        called.append(seen_task_id)
+        return git_delivery.GitDeliveryResult(
+            ok=False,
+            code=git_delivery.GitDeliveryErrorCode.PR_NOT_MERGED,
+            message="PR is not merged",
+        )
+
+    monkeypatch.setattr(
+        git_delivery, "verify_and_persist_git_delivery", _not_merged
+    )
+    output = json.loads(kt._handle_complete({"summary": "approve"}))
+
+    assert called == [task_id]
+    assert "pr_not_merged" in output["error"]
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, task_id).status == "review"
+        contract = kb.get_git_delivery_contract(conn, task_id)
+        assert contract["request"] == {
+            "pull_request": "https://github.com/acme/widget/pull/17",
+            "declared_artifacts": ["app.txt"],
+        }
+        assert contract["request_fingerprint"]
+    finally:
+        conn.close()
+
+
+def test_complete_requeries_remote_even_when_prior_receipt_exists(
+    monkeypatch, tmp_path
+):
+    from hermes_cli import git_delivery
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    task_id = _required_git_worker(monkeypatch, tmp_path)
+    review = json.loads(
+        kt._handle_request_review(
+            {
+                "summary": "ready",
+                "pull_request": 17,
+                "declared_artifacts": ["app.txt"],
+            }
+        )
+    )
+    assert review.get("ok") is True
+    conn = kb.connect()
+    try:
+        import hashlib
+
+        receipt_json = "{}"
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_git_delivery SET candidate_digest = ?, "
+                "receipt_json = ?, receipt_fingerprint = ?, verified_at = ? "
+                "WHERE task_id = ?",
+                (
+                    "a" * 64,
+                    receipt_json,
+                    hashlib.sha256(receipt_json.encode("utf-8")).hexdigest(),
+                    1,
+                    task_id,
+                ),
+            )
+    finally:
+        conn.close()
+    called: list[str] = []
+
+    def _checks_regressed(_conn, seen_task_id, _config=None, **_kwargs):
+        called.append(seen_task_id)
+        return git_delivery.GitDeliveryResult(
+            ok=False,
+            code=git_delivery.GitDeliveryErrorCode.REQUIRED_CHECK_NOT_GREEN,
+            message="required check regressed",
+        )
+
+    monkeypatch.setattr(
+        git_delivery,
+        "verify_and_persist_git_delivery",
+        _checks_regressed,
+    )
+    output = json.loads(kt._handle_complete({"summary": "retry"}))
+
+    assert called == [task_id]
+    assert "required_check_not_green" in output["error"]
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, task_id).status == "review"
+    finally:
+        conn.close()
+
+
 def test_complete_retry_with_empty_created_cards_succeeds(worker_env):
     """After a phantom rejection, retrying kanban_complete with
     created_cards=[] (the documented escape hatch) must complete the

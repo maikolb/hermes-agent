@@ -925,6 +925,43 @@ def test_build_oauth_auth_preserves_server_url_path():
     assert captured["server_url"] == "https://mcp.notion.com/mcp"
 
 
+def test_build_oauth_auth_uses_cross_task_safe_lock(monkeypatch):
+    """The SDK OAuth generator may be resumed by a different httpx task."""
+    from tools import mcp_oauth
+
+    class _AnyioOwnedLock:
+        __module__ = "anyio._core._synchronization"
+
+    class _Context:
+        lock = _AnyioOwnedLock()
+
+    class _FakeProvider:
+        def __init__(self, **_kwargs):
+            self.context = _Context()
+
+    with patch.object(mcp_oauth, "_OAUTH_AVAILABLE", True), \
+         patch.object(mcp_oauth, "OAuthClientProvider", _FakeProvider), \
+         patch.object(mcp_oauth, "_is_interactive", return_value=True), \
+         patch.object(mcp_oauth, "_maybe_preregister_client"), \
+         patch.object(mcp_oauth, "HermesTokenStorage") as mock_storage_cls:
+        mock_storage_cls.return_value = MagicMock(has_cached_tokens=lambda: True)
+        provider = build_oauth_auth(
+            server_name="atlassian_rovo",
+            server_url="https://mcp.atlassian.com/v1/mcp/authv2",
+            oauth_config={},
+        )
+
+    async def _cross_task_release():
+        await provider.context.lock.acquire()
+        async def _release_from_httpx_task():
+            provider.context.lock.release()
+
+        await asyncio.create_task(_release_from_httpx_task())
+
+    asyncio.run(_cross_task_release())
+    assert isinstance(provider.context.lock, asyncio.Lock)
+
+
 class TestPasteCallbackReader:
     """_paste_callback_reader parses redirect URLs / query strings from stdin."""
 

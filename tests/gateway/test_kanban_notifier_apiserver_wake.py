@@ -104,6 +104,13 @@ def test_apiserver_sub_wakes_subscription_destination_via_self_post(tmp_path, mo
     """An api_server subscription wakes its chat_id destination, not the
     task's worker-session provenance or a build_session_key()-derived session."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "apiserver.db"))
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda: {"kanban": {"agent_wake_on_events": True}},
+    )
     kb.init_db()
     tid = _create_completed_subscription(
         "api_server", "origin-session", session_id="worker-session",
@@ -146,6 +153,13 @@ def test_apiserver_subscriptions_have_independent_wake_destinations(
     tmp_path, monkeypatch,
 ):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "apiserver-multi.db"))
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda: {"kanban": {"agent_wake_on_events": True}},
+    )
     kb.init_db()
     conn = kb.connect()
     try:
@@ -187,6 +201,13 @@ def test_apiserver_wake_failure_rewinds_then_retries_destination(
     tmp_path, monkeypatch,
 ):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "apiserver-retry.db"))
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda: {"kanban": {"agent_wake_on_events": True}},
+    )
     kb.init_db()
     tid = _create_completed_subscription(
         "api_server", "origin-session", session_id="worker-session",
@@ -217,3 +238,29 @@ def test_apiserver_wake_failure_rewinds_then_retries_destination(
     assert "worker-session" not in attempted_sessions
     assert _unseen_terminal_events(tid, "api_server", "origin-session") == []
 
+
+def test_apiserver_sub_is_passive_without_explicit_agent_wake_opt_in(
+    tmp_path, monkeypatch,
+):
+    """Lifecycle notifications must not synthesize agent work by default."""
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "passive.db"))
+    import hermes_cli.config as config_mod
+    import gateway.wake as wake_mod
+
+    monkeypatch.setattr(config_mod, "load_config", lambda: {"kanban": {}})
+    kb.init_db()
+    _create_completed_subscription(
+        "api_server", "raw-sid-passive", session_id="raw-sid-passive",
+    )
+    posts = []
+
+    async def fake_self_post(adapter, *, text, session_id):
+        posts.append({"text": text, "session_id": session_id})
+
+    monkeypatch.setattr(wake_mod, "_self_post_chat_completion", fake_self_post)
+    adapter = ApiServerLikeAdapter()
+    runner = _make_runner({Platform.API_SERVER: adapter})
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert posts == []
+    assert adapter.handle_message_calls == []

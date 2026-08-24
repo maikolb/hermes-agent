@@ -14,6 +14,38 @@ from typing import Any, Iterable
 
 
 _MAX_CHANGED_PATHS_IN_NUDGE = 8
+VERIFICATION_FINAL_DELIVERY_MARKER = "[HERMES_VERIFIED_FINAL_DELIVERY]"
+
+
+def strip_verification_delivery_marker(response: str | None) -> tuple[str, bool]:
+    """Remove the internal verified-delivery marker from a model response."""
+    text = str(response or "")
+    if VERIFICATION_FINAL_DELIVERY_MARKER not in text:
+        return text, False
+    return text.replace(VERIFICATION_FINAL_DELIVERY_MARKER, "", 1).lstrip(), True
+
+
+def reconcile_verification_delivery(
+    pending_deliverable: str | None,
+    latest_response: str | None,
+) -> tuple[str, str]:
+    """Prevent a verification-only response from replacing the held deliverable.
+
+    A marked response is the model's explicit self-contained replacement. If the
+    marker is missing, preserve both the previously composed deliverable and the
+    latest verification outcome. This fallback may be verbose, but it cannot
+    silently discard the requested artifact or report.
+    """
+    latest, marked = strip_verification_delivery_marker(latest_response)
+    pending = str(pending_deliverable or "").strip()
+    latest = latest.strip()
+    if marked or not pending:
+        return latest, "marked" if marked else "latest-only"
+    if not latest:
+        return pending, "pending-fallback"
+    if pending in latest:
+        return latest, "contains-pending"
+    return f"{pending}\n\n---\n\n{latest}", "merged-fallback"
 
 # Non-code file extensions whose edits carry no verifiable runtime behavior:
 # documentation, prose, and data/markup that no test/build exercises. When a
@@ -308,9 +340,22 @@ def build_verify_on_stop_nudge(
         f"Verification status: {_status_detail(status)}\n\n"
         f"Changed paths:\n{_format_changed_paths(paths)}\n\n"
         f"{command_instruction} If verification is not possible, explain the "
-        "concrete blocker instead of claiming the work is fully verified."
+        "concrete blocker instead of claiming the work is fully verified. "
+        "After verification, return one self-contained final answer containing "
+        "the full requested deliverable together with the verification evidence. "
+        "Do not replace the deliverable with only a verification or test summary. "
+        "If the evidence changes or invalidates the pending draft, correct it "
+        "before returning the final answer. Begin that response with the exact "
+        f"internal marker `{VERIFICATION_FINAL_DELIVERY_MARKER}`; the runtime "
+        "removes the marker before displaying the answer."
         f"{addendum}]"
     )
 
 
-__all__ = ["build_verify_on_stop_nudge", "verify_on_stop_enabled"]
+__all__ = [
+    "VERIFICATION_FINAL_DELIVERY_MARKER",
+    "build_verify_on_stop_nudge",
+    "reconcile_verification_delivery",
+    "strip_verification_delivery_marker",
+    "verify_on_stop_enabled",
+]

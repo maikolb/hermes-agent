@@ -1109,6 +1109,27 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
 
 # Environment classes now live in tools/environments/
 from tools.environments.base import EnvironmentConnectionError
+
+
+# Windows must establish the process-wide zero-visible-UI boundary before the
+# local backend is imported.  LocalEnvironment owns the native shell spawn
+# path, so importing it first can retain an unbrokered subprocess reference.
+def _install_windows_terminal_zero_ui_boundary() -> None:
+    if platform.system() != "Windows":
+        return
+
+    from hermes_cli.windows_process_broker import (
+        broker_installed,
+        install_windows_process_broker,
+    )
+
+    install_windows_process_broker()
+    if not broker_installed():
+        raise RuntimeError("Hermes Windows zero-UI broker is not active for terminal")
+
+
+_install_windows_terminal_zero_ui_boundary()
+
 from tools.environments.local import LocalEnvironment as _LocalEnvironment
 from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment

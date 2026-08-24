@@ -238,7 +238,7 @@ To selectively load context in bare mode:
 
 ### Fallback Model for Overload
 ```
-terminal(command="claude -p 'task' --fallback-model haiku --max-turns 5", timeout=90)
+terminal(command="claude -p 'task' --model fable --effort xhigh --max-turns 5", timeout=90)
 ```
 Automatically falls back to the specified model when the default is overloaded (print mode only).
 
@@ -706,13 +706,13 @@ Use `/context` in interactive mode to see a colored grid of context usage. Key t
 
 1. **Use `--max-turns`** in print mode to prevent runaway loops. Start with 5-10 for most tasks.
 2. **Use `--max-budget-usd`** for cost caps. Note: minimum ~$0.05 for system prompt cache creation.
-3. **Use `--effort low`** for simple tasks (faster, cheaper). `high` or `max` for complex reasoning.
+3. **Calibrate effort by quality evals, never by cost.** Until a class-specific benchmark proves equivalence, preserve `xhigh`; use `max` for high-risk or long-horizon work. Speed is only a tie-break after the quality gate.
 4. **Use `--bare`** for CI/scripting to skip plugin/hook discovery overhead.
 5. **Use `--allowedTools`** to restrict to only what's needed (e.g., `Read` only for reviews).
 6. **Use `/compact`** in interactive sessions when context gets large.
 7. **Pipe input** instead of having Claude read files when you just need analysis of known content.
-8. **Use `--model haiku`** for simple tasks (cheaper) and `--model opus` for complex multi-step work.
-9. **Use `--fallback-model haiku`** in print mode to gracefully handle model overload.
+8. **Resolve the Claude route before invocation:** pipe the request to `scripts/resolve_claude_model_route.py`. The current fail-safe is Fable/XHigh, or Fable/Max for high-risk/long-horizon work. Haiku, Sonnet, Opus, and lower efforts require a revision-bound, class-specific benchmark that proves equal quality; explicit user model/effort wins.
+9. **Do not configure a hidden lower-model fallback.** On overload, fail observably unless the user explicitly authorized a fallback that passed the same quality gate.
 10. **Start new sessions for distinct tasks** — sessions last 5 hours; fresh context is more efficient.
 11. **Use `--no-session-persistence`** in CI to avoid accumulating saved sessions on disk.
 

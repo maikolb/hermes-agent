@@ -529,6 +529,97 @@ def _managed_values(
     )
 
 
+def _tool_checkpoint_context(agent) -> tuple[Any | None, str, str]:
+    store = getattr(agent, "_turn_checkpoint_store", None)
+    session_id = str(getattr(agent, "session_id", None) or "")
+    state = getattr(agent, "_turn_checkpoint_state", None)
+    turn_id = (
+        str(state.get("turn_id") or "") if isinstance(state, dict) else ""
+    )
+    if store is None or not session_id or not turn_id:
+        return None, "", ""
+    return store, session_id, turn_id
+
+
+def _checkpoint_tool_attempt(
+    agent,
+    *,
+    function_name: str,
+    function_args: dict[str, Any],
+    tool_call_id: str,
+) -> str | None:
+    """Persist the exact post-middleware call before any external effect."""
+    store, session_id, turn_id = _tool_checkpoint_context(agent)
+    if store is None:
+        return None
+    try:
+        blocked = store.guard_unknown_replay(
+            session_id, function_name, function_args
+        )
+        if blocked:
+            return blocked
+        agent._turn_checkpoint_state = store.mark_tool_attempt(
+            session_id,
+            call_id=tool_call_id,
+            name=function_name,
+            arguments=function_args,
+            expected_turn_id=turn_id,
+        )
+        return None
+    except Exception as exc:
+        logger.error(
+            "tool execution blocked because its write-ahead checkpoint failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return (
+            "Tool was not executed because its durable pre-effect checkpoint "
+            f"could not be committed: {exc}"
+        )
+
+
+def _checkpoint_tool_result(
+    agent,
+    *,
+    tool_call_id: str,
+    result_summary: Any,
+    disposition: str,
+) -> bool:
+    """Acknowledge a tool only after its canonical result row was flushed."""
+    store, session_id, turn_id = _tool_checkpoint_context(agent)
+    if store is None:
+        return True
+    try:
+        current = store.load(session_id)
+        pending_ids = {
+            str(item.get("call_id") or "")
+            for item in (current.get("pending_tools") or [])
+            if isinstance(item, dict)
+        }
+        pending = current.get("pending_tool")
+        if isinstance(pending, dict):
+            pending_ids.add(str(pending.get("call_id") or ""))
+        # Parse errors, policy blocks, and calls abandoned before the
+        # middleware's dispatch boundary never acquire a reservation.
+        if str(tool_call_id) not in pending_ids:
+            return True
+        agent._turn_checkpoint_state = store.mark_tool_result(
+            session_id,
+            call_id=tool_call_id,
+            result_summary=result_summary,
+            disposition=disposition,
+            expected_turn_id=turn_id,
+        )
+        return True
+    except Exception:
+        logger.error(
+            "canonical tool result could not be acknowledged in the turn checkpoint",
+            exc_info=True,
+        )
+        agent._incremental_persistence_failed = True
+        return False
+
+
 # Cadence for the in-flight tool activity heartbeat. Must stay far below the
 # gateway turn-inactivity timeout (default 1800s) so a silent-but-healthy
 # tool call never looks idle to the watchdog.
@@ -700,6 +791,33 @@ def _run_agent_tool_execution_middleware(
             )
             return result
 
+        checkpoint_block = _checkpoint_tool_attempt(
+            agent,
+            function_name=function_name,
+            function_args=final_args,
+            tool_call_id=tool_call_id,
+        )
+        if checkpoint_block is not None:
+            _advance_start_order()
+            state["blocked"] = True
+            result = json.dumps(
+                {"error": checkpoint_block, "checkpoint_blocked": True},
+                ensure_ascii=False,
+            )
+            _emit_terminal_post_tool_call(
+                agent,
+                function_name=function_name,
+                function_args=final_args,
+                result=result,
+                effective_task_id=effective_task_id,
+                tool_call_id=tool_call_id,
+                status="blocked",
+                error_type="turn_checkpoint_block",
+                error_message=checkpoint_block,
+                middleware_trace=list(state["middleware_trace"]),
+            )
+            return result
+
         if function_name == "memory":
             agent._turns_since_memory = 0
         elif function_name == "skill_manage":
@@ -724,6 +842,17 @@ def _run_agent_tool_execution_middleware(
         _hb_thread.start()
         try:
             return execute(final_args)
+        except BaseException:
+            # The handler may have committed an external effect before
+            # raising.  Persist uncertainty immediately; a hard process exit
+            # leaves the pre-effect reservation for fresh-process restore.
+            _checkpoint_tool_result(
+                agent,
+                tool_call_id=tool_call_id,
+                result_summary="tool raised before canonical result persistence",
+                disposition="unknown_outcome",
+            )
+            raise
         finally:
             _hb_stop.set()
             _hb_thread.join(timeout=2.0)
@@ -1851,6 +1980,18 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         ):
             return
 
+        if not _checkpoint_tool_result(
+            agent,
+            tool_call_id=tool_call_id,
+            result_summary=_multimodal_text_summary(display_function_result),
+            disposition=(
+                "unknown_outcome"
+                if effect_disposition == "unknown" and not blocked
+                else "completed"
+            ),
+        ):
+            return
+
         # Every completion surface is downstream of the canonical append. If
         # the UI bridge or process dies while projecting one of these events,
         # resume can reconstruct the tool result that was already visible.
@@ -2763,6 +2904,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             agent,
             messages,
             stage=f"tool result {function_name}",
+        ):
+            return
+
+        if not _checkpoint_tool_result(
+            agent,
+            tool_call_id=tool_call_id,
+            result_summary=_multimodal_text_summary(display_function_result),
+            disposition=(
+                "unknown_outcome"
+                if _execution_timed_out and not _execution_blocked
+                else "completed"
+            ),
         ):
             return
 

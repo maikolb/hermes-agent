@@ -105,6 +105,18 @@ def is_stall_guard_repeatable(tool_name: str) -> bool:
         return True
     return tool_name.endswith(_STALL_GUARD_REPEATABLE_SUFFIXES)
 
+STRUCTURAL_FAILURE_MARKERS = (
+    "file not found",
+    "no such file or directory",
+    "regex parse error",
+    "unclosed group",
+    "missing expected root",
+    "path rewrite",
+    "not configured",
+    "auto-launch failed",
+    "exited early",
+)
+
 
 @dataclass(frozen=True)
 class ToolCallGuardrailConfig:
@@ -255,7 +267,7 @@ class ToolCallSignature:
 class ToolGuardrailDecision:
     """Decision returned by the tool-call guardrail controller."""
 
-    action: str = "allow"  # allow | warn | block | halt
+    action: str = "allow"  # allow | warn | redirect | block | halt
     code: str = "allow"
     message: str = ""
     tool_name: str = ""
@@ -269,6 +281,10 @@ class ToolGuardrailDecision:
     @property
     def should_halt(self) -> bool:
         return self.action in {"block", "halt"}
+
+    @property
+    def should_redirect(self) -> bool:
+        return self.action == "redirect"
 
     def to_metadata(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -363,6 +379,10 @@ class ToolCallGuardrailController:
         # carry the file path so the reference can't dangle when the first
         # occurrence entered context as a preview.
         self._persisted_result_paths: dict[str, str] = {}
+        self._redirected_signatures: dict[
+            ToolCallSignature, ToolGuardrailDecision
+        ] = {}
+        self._redirected_tools: dict[str, ToolGuardrailDecision] = {}
         # Per-turn runaway-loop cap counters. Reset every turn (this method
         # runs at the start of each run_conversation), so the caps bound a
         # single agent loop rather than accumulating across the session.
@@ -375,6 +395,35 @@ class ToolCallGuardrailController:
 
     def before_call(self, tool_name: str, args: Mapping[str, Any] | None) -> ToolGuardrailDecision:
         signature = ToolCallSignature.from_call(tool_name, _coerce_args(args))
+        prior_signature_redirect = self._redirected_signatures.get(signature)
+        if prior_signature_redirect is not None:
+            return ToolGuardrailDecision(
+                action="redirect",
+                code="tool_signature_redirected",
+                message=(
+                    f"Do not repeat this {tool_name} route with equivalent arguments in this "
+                    "turn. Keep working through a changed route, canonical source, or different tool."
+                ),
+                tool_name=tool_name,
+                count=prior_signature_redirect.count,
+                signature=signature,
+            )
+
+        prior_tool_redirect = self._redirected_tools.get(tool_name)
+        if prior_tool_redirect is not None:
+            return ToolGuardrailDecision(
+                action="redirect",
+                code="tool_route_redirected",
+                message=(
+                    f"Do not call {tool_name} again in this turn: its current route already "
+                    "failed or stopped making progress. Keep the turn running and use a "
+                    "different tool, canonical source, or in-process surface. Retry only "
+                    "after a relevant condition changes."
+                ),
+                tool_name=tool_name,
+                count=prior_tool_redirect.count,
+                signature=signature,
+            )
 
         # ── Per-turn runaway-loop caps ──────────────────────────────────
         # These are hard ceilings on how many times a runaway-prone tool may
@@ -392,18 +441,21 @@ class ToolCallGuardrailController:
         exact_count = self._exact_failure_counts.get(signature, 0)
         if exact_count >= self.config.exact_failure_block_after:
             decision = ToolGuardrailDecision(
-                action="block",
-                code="repeated_exact_failure_block",
+                action="redirect",
+                code="repeated_exact_failure_redirect",
                 message=(
-                    f"Blocked {tool_name}: the same tool call failed {exact_count} "
-                    "times with identical arguments. Stop retrying it unchanged; "
-                    "change strategy or explain the blocker."
+                    f"Redirected {tool_name}: the same tool call failed {exact_count} "
+                    "times with identical arguments. Keep the turn running and change "
+                    "tool or source instead of retrying it."
                 ),
                 tool_name=tool_name,
                 count=exact_count,
                 signature=signature,
             )
-            self._halt_decision = decision
+            # This threshold is scoped to the exact canonical call.  Keep a
+            # changed route through the same tool available; tool-wide failure
+            # escalation is handled separately by same_tool_failure_halt_after.
+            self._redirected_signatures[signature] = decision
             return decision
 
         if self._is_idempotent(tool_name):
@@ -412,18 +464,21 @@ class ToolCallGuardrailController:
                 _result_hash, repeat_count = record
                 if repeat_count >= self.config.no_progress_block_after:
                     decision = ToolGuardrailDecision(
-                        action="block",
-                        code="idempotent_no_progress_block",
+                        action="redirect",
+                        code="idempotent_no_progress_redirect",
                         message=(
-                            f"Blocked {tool_name}: this read-only call returned the same "
-                            f"result {repeat_count} times. Stop repeating it unchanged; "
-                            "use the result already provided or try a different query."
+                            f"Redirected {tool_name}: this read-only call returned the same "
+                            f"result {repeat_count} times. Keep the turn running and use a "
+                            "different tool or source."
                         ),
                         tool_name=tool_name,
                         count=repeat_count,
                         signature=signature,
                     )
-                    self._halt_decision = decision
+                    # Unchanged output only proves that this exact idempotent
+                    # call stopped making progress.  A different query/path may
+                    # still be the correct recovery route.
+                    self._redirected_signatures[signature] = decision
                     return decision
 
         return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
@@ -449,19 +504,37 @@ class ToolCallGuardrailController:
             same_count = self._same_tool_failure_counts.get(tool_name, 0) + 1
             self._same_tool_failure_counts[tool_name] = same_count
 
-            if self.config.hard_stop_enabled and same_count >= self.config.same_tool_failure_halt_after:
+            if _is_structural_failure(result):
                 decision = ToolGuardrailDecision(
-                    action="halt",
-                    code="same_tool_failure_halt",
+                    action="redirect",
+                    code="structural_failure_redirect",
                     message=(
-                        f"Stopped {tool_name}: it failed {same_count} times this turn. "
-                        "Stop retrying the same failing tool path and choose a different approach."
+                        f"{tool_name} hit a structural failure. Do not retry this tool route "
+                        "in the current turn. Keep working through a different tool, canonical "
+                        "path/source, or in-process API; retry only after a relevant condition changes."
                     ),
                     tool_name=tool_name,
                     count=same_count,
                     signature=signature,
                 )
-                self._halt_decision = decision
+                self._redirected_signatures[signature] = decision
+                if tool_name == "search_files" or same_count >= 2:
+                    self._redirected_tools[tool_name] = decision
+                return decision
+
+            if self.config.hard_stop_enabled and same_count >= self.config.same_tool_failure_halt_after:
+                decision = ToolGuardrailDecision(
+                    action="redirect",
+                    code="same_tool_failure_redirect",
+                    message=(
+                        f"{tool_name} failed {same_count} times this turn. Do not call it again "
+                        "in this turn; keep working through a different tool or source."
+                    ),
+                    tool_name=tool_name,
+                    count=same_count,
+                    signature=signature,
+                )
+                self._redirected_tools[tool_name] = decision
                 return decision
 
             if self.config.warnings_enabled and exact_count >= self.config.exact_failure_warn_after:
@@ -738,9 +811,12 @@ def toolguard_synthetic_result(decision: ToolGuardrailDecision) -> str:
 
 def append_toolguard_guidance(result: str, decision: ToolGuardrailDecision) -> str:
     """Append runtime guidance to the current tool result content."""
-    if decision.action not in {"warn", "halt"} or not decision.message:
+    if decision.action not in {"warn", "redirect", "halt"} or not decision.message:
         return result
-    label = "Tool loop hard stop" if decision.action == "halt" else "Tool loop warning"
+    label = {
+        "halt": "Tool loop hard stop",
+        "redirect": "Tool route redirect",
+    }.get(decision.action, "Tool loop warning")
     suffix = (
         f"\n\n[{label}: "
         f"{decision.code}; count={decision.count}; {decision.message}]"
@@ -770,6 +846,11 @@ def _tool_failure_recovery_hint(tool_name: str, count: int) -> str:
 
 def _coerce_args(args: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return args if isinstance(args, Mapping) else {}
+
+
+def _is_structural_failure(result: str | None) -> bool:
+    lower = str(result or "").lower()
+    return any(marker in lower for marker in STRUCTURAL_FAILURE_MARKERS)
 
 
 def _result_hash(result: str | None) -> str:

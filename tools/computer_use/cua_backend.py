@@ -393,6 +393,13 @@ def cua_driver_child_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str,
     doctor, install) so the policy is applied consistently.
     """
     env = dict(base_env if base_env is not None else os.environ)
+    if sys.platform == "win32":
+        # cua-driver is the one subprocess capability that must inspect and
+        # drive the user's interactive desktop. The process broker consumes
+        # this internal marker at spawn time; no-window flags and tree
+        # containment remain enforced.
+        from hermes_cli.windows_process_broker import interactive_desktop_child_env
+        env = interactive_desktop_child_env(env)
     if _cua_telemetry_disabled():
         env[_CUA_TELEMETRY_ENV_VAR] = "0"
     return env

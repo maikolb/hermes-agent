@@ -25,6 +25,7 @@ class _StubAdapter(BasePlatformAdapter):
         super().__init__(cfg, Platform.TELEGRAM)
         self._send_results = []   # queue of SendResult to return per call
         self._send_calls = []     # record of (chat_id, content) sent
+        self._send_metadata = []
 
     def _next_result(self) -> SendResult:
         if self._send_results:
@@ -33,6 +34,7 @@ class _StubAdapter(BasePlatformAdapter):
 
     async def send(self, chat_id, content, reply_to=None, metadata=None, **kwargs) -> SendResult:
         self._send_calls.append((chat_id, content))
+        self._send_metadata.append(metadata)
         return self._next_result()
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -145,6 +147,35 @@ class TestSendWithRetryExhausted:
         notice_content = adapter._send_calls[-1][1]
         assert "delivery failed" in notice_content.lower() or "Message delivery failed" in notice_content
 
+    @pytest.mark.asyncio
+    async def test_exact_delivery_never_sends_mutating_notice_after_exhaustion(self):
+        adapter = _StubAdapter()
+        network_err = SendResult(
+            success=False,
+            error="httpx.ConnectError: host unreachable",
+        )
+        adapter._send_results = [network_err, network_err, network_err]
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await adapter._send_with_retry(
+                "chat1",
+                "sealed exact response",
+                max_retries=2,
+                base_delay=0,
+                allow_content_fallback=False,
+            )
+
+        assert result is network_err
+        assert adapter._send_calls == [
+            ("chat1", "sealed exact response"),
+            ("chat1", "sealed exact response"),
+            ("chat1", "sealed exact response"),
+        ]
+        assert all(
+            metadata == {"_hermes_exact_text_delivery": True}
+            for metadata in adapter._send_metadata
+        )
+
 
 # ---------------------------------------------------------------------------
 # _send_with_retry — non-network failure → plain-text fallback (no retry)
@@ -166,6 +197,29 @@ class TestSendWithRetryFallback:
         assert len(adapter._send_calls) == 2
         # Fallback content should be plain-text notice
         assert "plain text" in adapter._send_calls[1][1].lower()
+
+    @pytest.mark.asyncio
+    async def test_content_fallback_can_be_disabled_for_exact_delivery(self):
+        original_failure = SendResult(
+            success=False,
+            error="Bad Request: can't parse entities",
+        )
+        adapter = _StubAdapter()
+        adapter._send_results = [original_failure]
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await adapter._send_with_retry(
+                "chat1",
+                "**bold**",
+                max_retries=2,
+                base_delay=0,
+                allow_content_fallback=False,
+            )
+
+        mock_sleep.assert_not_called()
+        assert result is original_failure
+        assert not result.success
+        assert adapter._send_calls == [("chat1", "**bold**")]
 
 
 # ---------------------------------------------------------------------------
@@ -205,4 +259,3 @@ class TestSendWithRetryAfter:
         # Second sleep should use the retry_after from the second result
         second_sleep = mock_sleep.call_args_list[1][0][0]
         assert second_sleep >= 29.0  # 30 - 1 (max jitter)
-

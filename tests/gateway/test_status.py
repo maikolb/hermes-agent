@@ -269,6 +269,30 @@ class TestGatewayRuntimeStatus:
         payload = status.read_runtime_status()
         assert payload["pid"] == os.getpid(), "PID should be overwritten, not preserved via setdefault"
         assert payload["start_time"] != 1000.0, "start_time should be overwritten on restart"
+        assert payload["hermes_home"] == str(tmp_path.resolve())
+
+    def test_write_runtime_status_backfills_home_on_legacy_snapshot(self, tmp_path, monkeypatch):
+        """A live legacy snapshot must become independently attributable.
+
+        Without the persisted home, read-only multi-profile health checks can
+        prove the PID but cannot prove which profile owns it.
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        state_path = tmp_path / "gateway_state.json"
+        state_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "start_time": status._get_process_start_time(os.getpid()),
+            "kind": "hermes-gateway",
+            "argv": ["hermes", "gateway", "run"],
+            "gateway_state": "running",
+            "platforms": {},
+            "updated_at": "2025-01-01T00:00:00Z",
+        }))
+
+        status.write_runtime_status(active_agents=0)
+
+        payload = status.read_runtime_status()
+        assert payload["hermes_home"] == str(tmp_path.resolve())
 
 
     def test_runtime_status_running_pid_rejects_pid_reused_by_other_profile(self, monkeypatch):
@@ -1386,4 +1410,3 @@ class TestResolveGatewayLiveness:
         # expected_home is what stops a recycled PID belonging to another
         # profile's live gateway from being reported as this profile's.
         assert seen["expected_home"] == profile_dir
-

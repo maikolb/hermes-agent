@@ -31,6 +31,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
+import shutil
+import subprocess
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
@@ -39,6 +42,134 @@ from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 
 logger = logging.getLogger(__name__)
+
+
+def _run_project_git(workdir: Path, args: list[str]) -> subprocess.CompletedProcess:
+    """Run one bounded Git command without a shell or visible Windows console."""
+    git = shutil.which("git")
+    if not git:
+        raise RuntimeError("git executable is unavailable")
+    from hermes_cli._subprocess_compat import windows_hidden_popen_kwargs
+
+    try:
+        return subprocess.run(
+            [git, *args],
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            **windows_hidden_popen_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"git invocation failed ({type(exc).__name__})") from exc
+
+
+def _ensure_bound_project_repo(
+    project_id: str,
+    board_slug: str,
+    workdir_raw: str,
+) -> str:
+    """Idempotently create/register a local repo for the bound Topic project.
+
+    Remote creation is deliberately outside this primitive: choosing an
+    external host/owner/visibility is a separate, explicitly authorized action.
+    The returned value is the first-class per-profile Project id used by Kanban.
+    """
+    raw = Path(workdir_raw).expanduser()
+    if not raw.is_absolute():
+        raise ValueError("bound project workdir is not absolute")
+    if raw.is_symlink():
+        raise ValueError("bound project workdir must not be a symlink")
+    workdir = raw.resolve(strict=True)
+    if not workdir.is_dir():
+        raise ValueError("bound project workdir is not a directory")
+
+    dot_git = workdir / ".git"
+    probe = _run_project_git(workdir, ["rev-parse", "--show-toplevel"])
+    repo_ready = False
+    if probe.returncode == 0 and probe.stdout.strip():
+        try:
+            repo_ready = Path(probe.stdout.strip()).resolve(strict=True) == workdir
+        except (OSError, RuntimeError):
+            repo_ready = False
+    if not repo_ready:
+        if dot_git.exists() or dot_git.is_symlink():
+            raise RuntimeError("existing .git metadata is not a healthy project repo")
+        initialized = _run_project_git(workdir, ["init", "-b", "main"])
+        if initialized.returncode != 0:
+            raise RuntimeError("git init failed for the bound project")
+
+    head = _run_project_git(workdir, ["rev-parse", "--verify", "HEAD"])
+    if head.returncode != 0:
+        initial = _run_project_git(
+            workdir,
+            [
+                "-c",
+                "user.email=hermes@localhost",
+                "-c",
+                "user.name=Hermes",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Initialize project",
+            ],
+        )
+        if initial.returncode != 0:
+            raise RuntimeError("initial local commit failed for the bound project")
+
+    verified = _run_project_git(workdir, ["rev-parse", "--show-toplevel"])
+    if verified.returncode != 0 or not verified.stdout.strip():
+        raise RuntimeError("project repo did not pass post-create verification")
+    try:
+        if Path(verified.stdout.strip()).resolve(strict=True) != workdir:
+            raise RuntimeError("project repo root does not match the bound workdir")
+    except OSError as exc:
+        raise RuntimeError("project repo root could not be resolved") from exc
+
+    from hermes_cli import projects_db as pdb
+
+    with pdb.connect_closing() as project_conn:
+        project = pdb.get_project(project_conn, project_id)
+        if project is None and board_slug:
+            matches = [
+                candidate
+                for candidate in pdb.list_projects(project_conn, include_archived=True)
+                if candidate.board_slug == board_slug
+            ]
+            if len(matches) > 1:
+                raise RuntimeError("multiple first-class projects claim the bound board")
+            project = matches[0] if matches else None
+
+        if project is None:
+            created_id = pdb.create_project(
+                project_conn,
+                name=project_id,
+                slug=project_id,
+                folders=[str(workdir)],
+                primary_path=str(workdir),
+                board_slug=board_slug or None,
+            )
+            project = pdb.get_project(project_conn, created_id)
+        else:
+            if project.primary_path:
+                existing = Path(project.primary_path).expanduser().resolve(strict=False)
+                if existing != workdir:
+                    raise RuntimeError(
+                        "first-class project points at a different primary workspace"
+                    )
+            else:
+                pdb.add_folder(project_conn, project.id, str(workdir), is_primary=True)
+            if project.board_slug and board_slug and project.board_slug != board_slug:
+                raise RuntimeError("first-class project points at a different board")
+            if not project.board_slug and board_slug:
+                pdb.update_project(project_conn, project.id, board_slug=board_slug)
+            project = pdb.get_project(project_conn, project.id)
+
+    if project is None or not project.primary_path:
+        raise RuntimeError("first-class project registration did not persist")
+    return project.id
 
 
 # ---------------------------------------------------------------------------
@@ -50,14 +181,34 @@ KANBAN_LIST_MAX_LIMIT = 200
 
 
 def _profile_has_kanban_toolset() -> bool:
-    # Uses load_config() which has mtime-based caching, so this adds
-    # negligible overhead. The check_fn results are further TTL-cached
-    # (~30s) by the tool registry.
+    """Return whether Kanban is enabled for the current session surface.
+
+    Gateway tool selection is platform-scoped, so checking only the legacy
+    top-level ``toolsets`` list can remove Kanban from a platform that
+    explicitly enabled it in ``platform_toolsets``.  Keep CLI compatibility by
+    falling back to the global list when no session platform is bound.
+    """
     try:
         from hermes_cli.config import load_config
+
         cfg = load_config()
-        toolsets = cfg.get("toolsets", [])
-        return "kanban" in toolsets
+        if "kanban" in (cfg.get("toolsets") or []):
+            return True
+
+        from gateway.session_context import get_session_env
+
+        platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
+        if not platform:
+            return False
+
+        platform_toolsets = cfg.get("platform_toolsets") or {}
+        configured = platform_toolsets.get(platform)
+        if isinstance(configured, list):
+            return "kanban" in {str(name) for name in configured}
+
+        from hermes_cli.tools_config import _get_platform_tools
+
+        return "kanban" in _get_platform_tools(cfg, platform)
     except Exception:
         return False
 
@@ -223,6 +374,18 @@ def _connect(board: Optional[str] = None):
     → ``default``). Per-tool ``board`` lets a Telegram-side agent override
     the env-pinned active board without restarting Hermes.
     """
+    from gateway.session_context import get_session_env
+
+    bound_board = get_session_env("HERMES_PROJECT_BOARD", "")
+    if bound_board:
+        if board is None:
+            board = bound_board
+        elif str(board).strip().lower() != str(bound_board).strip().lower():
+            raise ValueError(
+                f"project context is bound to board {bound_board!r}; "
+                f"refusing explicit board {board!r}"
+            )
+
     from hermes_cli import kanban_db as kb
     return kb, kb.connect(board=board)
 
@@ -765,6 +928,7 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and keep this task alive."
                 )
 
+            delivery = kb.get_git_delivery_contract(conn, tid)
             try:
                 ok = kb.complete_task(
                     conn, tid,
@@ -800,6 +964,33 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
             if not ok:
+                if delivery is not None and delivery["required"]:
+                    blocked = conn.execute(
+                        "SELECT payload FROM task_events WHERE task_id = ? "
+                        "AND kind = 'completion_blocked_delivery' "
+                        "ORDER BY id DESC LIMIT 1",
+                        (tid,),
+                    ).fetchone()
+                    try:
+                        blocked_payload = (
+                            json.loads(blocked["payload"])
+                            if blocked is not None and blocked["payload"]
+                            else {}
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        blocked_payload = {}
+                    code = blocked_payload.get("code")
+                    reason = blocked_payload.get("reason")
+                    detail = (
+                        f" ({code}): {reason}"
+                        if code and reason
+                        else "."
+                    )
+                    return tool_error(
+                        "kanban_complete blocked by the sealed Git delivery "
+                        f"gate{detail} The card remains retryable; restore the "
+                        "exact worktree/branch/PR evidence and retry."
+                    )
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
@@ -927,6 +1118,24 @@ def _handle_request_review(args: dict, **kw) -> str:
         except json.JSONDecodeError:
             return tool_error("metadata could not be safely serialized")
     metadata = _stamp_worker_session_metadata(tid, metadata)
+    pull_request = args.get("pull_request")
+    declared_artifacts = args.get("declared_artifacts")
+    git_delivery_request = None
+    if pull_request is not None or declared_artifacts is not None:
+        if isinstance(declared_artifacts, str):
+            declared_artifacts = [declared_artifacts]
+        if not isinstance(declared_artifacts, (list, tuple)):
+            return tool_error(
+                "declared_artifacts must be a list of repository-relative paths"
+            )
+        git_delivery_request = {
+            "pull_request": pull_request,
+            "declared_artifacts": [
+                str(path).strip()
+                for path in declared_artifacts
+                if str(path).strip()
+            ],
+        }
     reviewer = args.get("reviewer") or None
     if reviewer:
         # Model-supplied free text stored durably on the event payload —
@@ -949,6 +1158,7 @@ def _handle_request_review(args: dict, **kw) -> str:
                 summary=summary,
                 metadata=metadata,
                 reviewer=reviewer,
+                git_delivery_request=git_delivery_request,
                 expected_run_id=_worker_run_id(tid),
                 with_reason=True,
             )
@@ -1389,12 +1599,145 @@ def _handle_create(args: dict, **kw) -> str:
     project_id = args.get("project") or args.get("project_id")
     project_source_task_id = None
     _inherit_project = workspace_kind is None and workspace_path is None
+
+    # A Telegram project Topic is a hard filesystem/project boundary.  The
+    # board guard in _connect() prevents cross-board access; enforce the same
+    # boundary before an explicit workspace or project link reaches the DB.
+    from gateway.session_context import get_session_env
+
+    bound_project_id = get_session_env("HERMES_PROJECT_ID", "").strip()
+    bound_board_slug = get_session_env("HERMES_PROJECT_BOARD", "").strip()
+    bound_workdir_raw = get_session_env("HERMES_PROJECT_WORKDIR", "").strip()
+    if bound_project_id and project_id is not None:
+        if str(project_id).strip() != bound_project_id:
+            return tool_error(
+                "kanban_create: project context is bound to a different project; "
+                "refusing explicit project override"
+            )
+    if bound_workdir_raw:
+        try:
+            bound_workdir = Path(bound_workdir_raw).expanduser().resolve(strict=False)
+            if workspace_path is None and workspace_kind == "dir":
+                workspace_path = str(bound_workdir)
+            elif workspace_path is not None:
+                requested_path = Path(str(workspace_path)).expanduser()
+                if not requested_path.is_absolute():
+                    return tool_error(
+                        "kanban_create: workspace_path must be absolute and remain "
+                        "inside the bound project workspace"
+                    )
+                requested_path = requested_path.resolve(strict=False)
+                if (
+                    requested_path != bound_workdir
+                    and bound_workdir not in requested_path.parents
+                ):
+                    return tool_error(
+                        "kanban_create: workspace_path escapes the bound project "
+                        "workspace"
+                    )
+                workspace_path = str(requested_path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return tool_error(
+                "kanban_create: could not validate the bound project workspace "
+                f"({type(exc).__name__})"
+            )
     if workspace_kind is None:
         workspace_kind = "scratch"
+    # ``worktree`` is itself an explicit, machine-readable declaration that
+    # this task needs source control. Inside a bound Topic, do not depend on
+    # the model remembering a second redundant boolean: provision/register
+    # the local repo idempotently unless the caller explicitly opted out.
+    derived_repo_requirement = bool(
+        workspace_kind == "worktree"
+        and bound_project_id
+        and bound_workdir_raw
+    )
+    requires_repo, repo_bool_error = _parse_bool_arg(
+        args,
+        "requires_repo",
+        default=derived_repo_requirement,
+    )
+    if repo_bool_error:
+        return tool_error(repo_bool_error)
+    if requires_repo:
+        if not bound_project_id or not bound_workdir_raw:
+            return tool_error(
+                "kanban_create: requires_repo is available only inside a bound "
+                "project Topic with a canonical workspace"
+            )
+        try:
+            project_id = _ensure_bound_project_repo(
+                bound_project_id,
+                bound_board_slug,
+                bound_workdir_raw,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.warning(
+                "kanban_create could not prepare the bound project repo: %s",
+                type(exc).__name__,
+            )
+            return tool_error(
+                "kanban_create: could not prepare the bound project repo "
+                f"({type(exc).__name__})"
+            )
     triage, bool_error = _parse_bool_arg(args, "triage")
     if bool_error:
         return tool_error(bool_error)
     idempotency_key = args.get("idempotency_key")
+    if idempotency_key is None or not str(idempotency_key).strip():
+        from gateway.session_context import get_session_env
+
+        message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "").strip()
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip()
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+        if message_id and platform and chat_id:
+            import hashlib
+            import re
+            import unicodedata
+
+            def _component(
+                value: object,
+                *,
+                fallback: str = "",
+                preserve_leading_hyphen: bool = False,
+            ) -> str:
+                raw = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
+                ascii_value = "".join(
+                    char
+                    for char in unicodedata.normalize("NFKD", raw)
+                    if not unicodedata.combining(char) and ord(char) < 128
+                )
+                normalized = re.sub(r"[^a-z0-9._-]+", "-", ascii_value)
+                normalized = (
+                    normalized.rstrip("-")
+                    if preserve_leading_hyphen
+                    else normalized.strip("-")
+                )
+                normalized = normalized or (
+                    f"u-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:12]}"
+                    if raw
+                    else fallback
+                )
+                if len(normalized) <= 48:
+                    return normalized
+                digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+                return f"{normalized[:35].rstrip('-')}-{digest}"
+
+            profile = _component(
+                get_session_env("HERMES_SESSION_PROFILE", ""), fallback="default"
+            )
+            thread = _component(
+                get_session_env("HERMES_SESSION_THREAD_ID", ""), fallback="root"
+            )
+            title_key = _component(title)
+            idempotency_key = (
+                f"project-os:{profile}:{_component(platform)}:"
+                f"{_component(chat_id, preserve_leading_hyphen=True)}:"
+                f"{thread}:{_component(message_id)}:kanban-create:{title_key}"
+            )
+            if len(idempotency_key) > 255:
+                digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:16]
+                idempotency_key = f"{idempotency_key[:238].rstrip('-:')}-{digest}"
     max_runtime_seconds = args.get("max_runtime_seconds")
     initial_status = args.get("initial_status") or "running"
     skills = args.get("skills")
@@ -1461,6 +1804,7 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
+                board=board,
             )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
@@ -1779,6 +2123,9 @@ KANBAN_COMPLETE_SCHEMA = {
         "native attachments to the human who subscribed to the task, "
         "so the deliverable lands in their chat alongside the summary "
         "instead of being a path they have to fetch by hand."
+        " For a worktree on a board with git_delivery.required=true, this "
+        "tool first verifies the sealed PR manifest, required checks, merge, "
+        "and base ancestry. Failure leaves the same card retryable in review."
     ),
     "parameters": {
         "type": "object",
@@ -1910,7 +2257,10 @@ KANBAN_REQUEST_REVIEW_SCHEMA = {
         "NOT a blocker — it never counts toward unblock-loop detection, so a "
         "task can cycle through review across follow-ups without ever being "
         "falsely escalated to triage. Use this instead of blocking with a "
-        "free-form 'review-required:' reason."
+        "free-form 'review-required:' reason. On boards whose sealed "
+        "git_delivery policy has required=true, also pass pull_request and "
+        "declared_artifacts; they are stored structurally and later verified "
+        "before kanban_complete can mark the same card done."
     ),
     "parameters": {
         "type": "object",
@@ -1941,6 +2291,23 @@ KANBAN_REQUEST_REVIEW_SCHEMA = {
                     "as changed_files, tests_run, commit, or decisions."
                 ),
                 "additionalProperties": True,
+            },
+            "pull_request": {
+                "oneOf": [{"type": "integer"}, {"type": "string"}],
+                "description": (
+                    "PR number or canonical PR URL. Required only when this "
+                    "board has git_delivery.required=true; never put it only "
+                    "in summary or metadata."
+                ),
+            },
+            "declared_artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Exact repository-relative paths changed by the PR. "
+                    "Required with pull_request on boards that enforce Git "
+                    "delivery; renames include both old and new paths."
+                ),
             },
             "board": _board_schema_prop(),
         },
@@ -2201,7 +2568,9 @@ KANBAN_CREATE_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Absolute path for 'dir' or 'worktree' workspace. "
-                    "Relative paths are rejected at dispatch."
+                    "Relative paths are rejected at dispatch. In a bound "
+                    "project Topic, the path must remain inside that project's "
+                    "canonical workspace."
                 ),
             },
             "project": {
@@ -2211,6 +2580,17 @@ KANBAN_CREATE_SCHEMA = {
                     "set, the task becomes a git worktree under the project's "
                     "primary repo with a deterministic branch (project slug + "
                     "task id), instead of a random branch."
+                ),
+            },
+            "requires_repo": {
+                "type": "boolean",
+                "description": (
+                    "Set true only when this task needs source control. Inside a "
+                    "bound project Topic, Hermes idempotently creates a local Git "
+                    "repo when absent, registers it as the project's primary repo, "
+                    "and gives the task an isolated worktree. This never creates a "
+                    "remote repository. Defaults to true when workspace_kind is "
+                    "worktree inside a bound project Topic; otherwise false."
                 ),
             },
             "triage": {

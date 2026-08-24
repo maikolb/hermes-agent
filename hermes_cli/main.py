@@ -3310,6 +3310,80 @@ def cmd_proxy(args):
         raise SystemExit(rc)
 
 
+def _whatsapp_credentials_complete(session_dir: Path) -> bool:
+    """Return true for a completed pairing-code or QR registration."""
+    creds_path = session_dir / "creds.json"
+    try:
+        payload = json.loads(creds_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("registered") is True:
+        return True
+    me = payload.get("me")
+    return bool(
+        isinstance(me, dict)
+        and me.get("id")
+        and payload.get("account")
+        and isinstance(payload.get("signalIdentities"), list)
+        and payload["signalIdentities"]
+    )
+
+
+def _print_whatsapp_pair_qr(payload: str) -> None:
+    """Render a pairing QR in the parent Hermes terminal."""
+    import qrcode
+
+    qr = qrcode.QRCode(border=2)
+    qr.add_data(payload)
+    qr.make(fit=True)
+    qr.print_ascii(tty=False, invert=True)
+    print("\nWaiting for the WhatsApp registration confirmation...\n", flush=True)
+
+
+def _run_whatsapp_pairing(node: str, bridge_script: Path, session_dir: Path, bridge_dir: Path) -> tuple[int, bool]:
+    """Run the brokered bridge while keeping QR rendering in this terminal."""
+    from hermes_constants import with_hermes_node_path
+
+    process = subprocess.Popen(
+        [
+            node,
+            str(bridge_script),
+            "--pair-only",
+            "--pair-json",
+            "--session",
+            str(session_dir),
+        ],
+        cwd=str(bridge_dir),
+        env=with_hermes_node_path(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    connected = False
+    assert process.stdout is not None
+    for raw_line in process.stdout:
+        try:
+            event = json.loads(raw_line)
+        except (TypeError, ValueError):
+            continue
+        event_name = str(event.get("event") or "")
+        if event_name == "qr" and isinstance(event.get("qr"), str):
+            _print_whatsapp_pair_qr(event["qr"])
+        elif event_name == "verifying":
+            print("\n✓ QR accepted; validating the saved WhatsApp session...", flush=True)
+        elif event_name == "connected":
+            connected = True
+            print("✓ WhatsApp registration confirmed and saved.", flush=True)
+        elif event_name == "error":
+            error_code = str(event.get("error") or "pairing_failed")
+            print(f"✗ WhatsApp pairing failed: {error_code}", flush=True)
+    return process.wait(), connected
+
+
 def cmd_whatsapp(args):
     """Set up WhatsApp: choose mode, configure, install bridge, pair via QR."""
     _require_tty("whatsapp")
@@ -3461,7 +3535,7 @@ def cmd_whatsapp(args):
     session_dir = get_hermes_home() / "whatsapp" / "session"
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    if (session_dir / "creds.json").exists():
+    if _whatsapp_credentials_complete(session_dir):
         print("✓ Existing WhatsApp session found")
         try:
             response = input(
@@ -3483,6 +3557,16 @@ def cmd_whatsapp(args):
             print("\n✓ WhatsApp is configured and paired!")
             print("  Start the gateway with: hermes gateway")
             return
+    elif any(session_dir.iterdir()):
+        # A creds file can exist before Baileys receives and persists the
+        # definitive registration event. Never reuse that half-session.
+        print("⚠ Incomplete WhatsApp session found; clearing it before pairing")
+        shutil.rmtree(session_dir, ignore_errors=True)
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+    # The gateway must not race the exclusive pairing socket or keep retrying
+    # an unregistered session while the wizard is active.
+    save_env_value("WHATSAPP_ENABLED", "false")
 
     # ── Step 6: QR code pairing ──────────────────────────────────────────
     print()
@@ -3497,24 +3581,20 @@ def cmd_whatsapp(args):
     print("─" * 50)
     print()
 
+    pairing_connected = False
     try:
-        subprocess.run(
-            [
-                find_node_executable("node") or "node",
-                str(bridge_script),
-                "--pair-only",
-                "--session",
-                str(session_dir),
-            ],
-            cwd=str(bridge_dir),
-            env=with_hermes_node_path(),
+        _pair_exit, pairing_connected = _run_whatsapp_pairing(
+            find_node_executable("node") or "node",
+            bridge_script,
+            session_dir,
+            bridge_dir,
         )
     except KeyboardInterrupt:
         pass
 
     # ── Step 7: Post-pairing ─────────────────────────────────────────────
     print()
-    if (session_dir / "creds.json").exists():
+    if pairing_connected and _whatsapp_credentials_complete(session_dir):
         # Only enable WhatsApp now that pairing actually succeeded.  If the
         # user Ctrl+C'd at any earlier step, WHATSAPP_ENABLED stays unset
         # and `hermes gateway` skips it cleanly instead of paying a 30s

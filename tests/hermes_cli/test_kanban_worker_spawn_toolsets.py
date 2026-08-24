@@ -24,6 +24,27 @@ def _make_task(kb, *, assignee: str):
     )
 
 
+def test_windows_worker_resolves_real_base_python_without_console_shims(monkeypatch):
+    """Windows Kanban workers must bypass hermes.exe and venv python shims."""
+    from hermes_cli import kanban_db as kb
+
+    base_python = r"C:\Users\tester\uv\python\python.exe"
+    monkeypatch.setattr(kb, "_IS_WINDOWS", True)
+    monkeypatch.setattr(kb.sys, "_base_executable", base_python)
+    monkeypatch.setenv("HERMES_BIN", r"C:\unsafe\hermes.exe")
+    monkeypatch.setattr(
+        kb,
+        "_safe_which_no_cwd",
+        lambda _name: (_ for _ in ()).throw(AssertionError("PATH resolution must not run")),
+    )
+
+    assert kb._resolve_hermes_argv() == [
+        base_python,
+        "-m",
+        "hermes_cli.main",
+    ]
+
+
 def test_default_spawn_pins_assignee_profile_cli_toolsets(monkeypatch, tmp_path):
     """Manual profile assignment should keep that profile's CLI tools.
 

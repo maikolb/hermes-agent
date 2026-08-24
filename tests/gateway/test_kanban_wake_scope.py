@@ -62,6 +62,13 @@ def _runner(adapter, platform=Platform.SLACK):
 
 
 async def _one_notifier_tick(monkeypatch, runner):
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda: {"kanban": {"agent_wake_on_events": True}},
+    )
     real_sleep = asyncio.sleep
 
     async def fake_sleep(delay):

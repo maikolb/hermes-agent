@@ -923,6 +923,124 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
 
 
 @dataclass
+class ProjectRouterConfig:
+    """Opt-in Telegram Topic routing backed by a profile-scoped database."""
+
+    enabled: bool = False
+    db_path: Optional[Path] = None
+    managed_chat_ids: List[str] = field(default_factory=list)
+    auto_register_topics: bool = False
+    default_project_id: Optional[str] = None
+    implicit_managed_chat_members: bool = False
+    namespace_team_resources: bool = False
+    management_topic_names: List[str] = field(default_factory=lambda: ["🧭 Gestão"])
+    workspace_root: Optional[Path] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "db_path": str(self.db_path) if self.db_path is not None else None,
+            "managed_chat_ids": list(self.managed_chat_ids),
+            "auto_register_topics": self.auto_register_topics,
+            "default_project_id": self.default_project_id,
+            "implicit_managed_chat_members": self.implicit_managed_chat_members,
+            "namespace_team_resources": self.namespace_team_resources,
+            "management_topic_names": list(self.management_topic_names),
+            "workspace_root": (
+                str(self.workspace_root) if self.workspace_root is not None else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ProjectRouterConfig":
+        if not isinstance(data, dict):
+            return cls()
+
+        raw_db_path = data.get("db_path")
+        if raw_db_path is None:
+            db_path = None
+        elif isinstance(raw_db_path, (str, os.PathLike)):
+            try:
+                db_path = Path(raw_db_path)
+            except (TypeError, ValueError, OSError):
+                return cls()
+        else:
+            return cls()
+
+        raw_workspace_root = data.get("workspace_root")
+        if raw_workspace_root is None:
+            workspace_root = None
+        elif isinstance(raw_workspace_root, (str, os.PathLike)):
+            try:
+                workspace_root = Path(raw_workspace_root)
+            except (TypeError, ValueError, OSError):
+                return cls()
+        else:
+            return cls()
+
+        raw_default_project_id = data.get("default_project_id")
+        if raw_default_project_id is None:
+            default_project_id = None
+        elif isinstance(raw_default_project_id, str):
+            default_project_id = raw_default_project_id.strip() or None
+            if default_project_id is None:
+                return cls()
+        else:
+            return cls()
+
+        raw_chat_ids = data.get("managed_chat_ids", [])
+        if not isinstance(raw_chat_ids, list):
+            return cls()
+        managed_chat_ids: List[str] = []
+        for chat_id in raw_chat_ids:
+            if not isinstance(chat_id, (str, int)) or isinstance(chat_id, bool):
+                return cls()
+            normalized = str(chat_id).strip()
+            if not normalized:
+                return cls()
+            managed_chat_ids.append(normalized)
+
+        raw_management_names = data.get("management_topic_names", ["🧭 Gestão"])
+        if not isinstance(raw_management_names, list):
+            return cls()
+        management_topic_names: List[str] = []
+        for name in raw_management_names:
+            if not isinstance(name, str):
+                return cls()
+            normalized = name.strip()
+            if not normalized:
+                return cls()
+            management_topic_names.append(normalized)
+
+        enabled = _coerce_bool(data.get("enabled"), False)
+        auto_register_topics = _coerce_bool(data.get("auto_register_topics"), False)
+        implicit_managed_chat_members = _coerce_bool(
+            data.get("implicit_managed_chat_members"), False
+        )
+        namespace_team_resources = _coerce_bool(
+            data.get("namespace_team_resources"), False
+        )
+        if enabled and auto_register_topics and workspace_root is None:
+            logger.warning(
+                "project_router auto_register_topics is enabled without workspace_root; "
+                "new Telegram Topics can be bound and receive boards, but workspace "
+                "provisioning will remain disabled"
+            )
+
+        return cls(
+            enabled=enabled,
+            db_path=db_path,
+            managed_chat_ids=managed_chat_ids,
+            auto_register_topics=auto_register_topics,
+            default_project_id=default_project_id,
+            implicit_managed_chat_members=implicit_managed_chat_members,
+            namespace_team_resources=namespace_team_resources,
+            management_topic_names=management_topic_names,
+            workspace_root=workspace_root,
+        )
+
+
+@dataclass
 class GatewayConfig:
     """
     Main gateway configuration.
@@ -1028,6 +1146,10 @@ class GatewayConfig:
     # different profiles. See gateway/profile_routing.py. Each entry is a
     # dict with: name, platform, profile, and optional guild_id/chat_id/thread_id.
     profile_routes: list = field(default_factory=list)
+
+    # Opt-in Telegram Topic -> project/board routing. Default disabled keeps
+    # every existing gateway profile on the ordinary session path.
+    project_router: ProjectRouterConfig = field(default_factory=ProjectRouterConfig)
 
     def __post_init__(self) -> None:
         self.multiplex_profile_allowlist = _normalize_multiplex_profile_allowlist(
@@ -1160,6 +1282,7 @@ class GatewayConfig:
                 asdict(r) if is_dataclass(r) and not isinstance(r, type) else r
                 for r in self.profile_routes
             ],
+            "project_router": self.project_router.to_dict(),
         }
     
     @classmethod
@@ -1222,6 +1345,47 @@ class GatewayConfig:
             multiplex_profile_allowlist = nested_gateway.get(
                 "multiplex_profile_allowlist"
             )
+        raw_project_router = (
+            data.get("project_router")
+            if "project_router" in data
+            else nested_gateway.get("project_router")
+        )
+        project_router = ProjectRouterConfig.from_dict(raw_project_router)
+        # A managed Telegram team is already an explicit chat-scope authority.
+        # When implicit membership is opted in, reuse that same scope for the
+        # adapter/authz group gate in memory so operators cannot accidentally
+        # configure a routable team that the Telegram ingress drops first.
+        # This does not authorize arbitrary chats or users: project routing
+        # still requires an exact managed chat and a verified sender, and an
+        # explicit router deny continues to win.
+        if (
+            project_router.enabled
+            and project_router.implicit_managed_chat_members
+            and project_router.managed_chat_ids
+        ):
+            telegram_config = platforms.get(Platform.TELEGRAM)
+            if telegram_config is not None:
+                raw_group_allowed = telegram_config.extra.get("group_allowed_chats")
+                if isinstance(raw_group_allowed, (list, tuple, set)):
+                    existing_group_allowed = [
+                        str(value).strip()
+                        for value in raw_group_allowed
+                        if str(value).strip()
+                    ]
+                elif isinstance(raw_group_allowed, str):
+                    existing_group_allowed = [
+                        value.strip()
+                        for value in raw_group_allowed.split(",")
+                        if value.strip()
+                    ]
+                else:
+                    existing_group_allowed = []
+                telegram_config.extra = dict(telegram_config.extra)
+                telegram_config.extra["group_allowed_chats"] = list(
+                    dict.fromkeys(
+                        [*existing_group_allowed, *project_router.managed_chat_ids]
+                    )
+                )
         if "systemd_watchdog_seconds" in data:
             systemd_watchdog_raw = data.get("systemd_watchdog_seconds")
             systemd_watchdog_key = "systemd_watchdog_seconds"
@@ -1338,6 +1502,7 @@ class GatewayConfig:
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
             profile_routes=profile_routes,
+            project_router=project_router,
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -1420,6 +1585,11 @@ def load_gateway_config() -> GatewayConfig:
             # already established for gateway.multiplex_profiles/streaming/
             # write_sessions_json: top-level wins, nested gateway.* falls back.
             gateway_section = yaml_cfg.get("gateway")
+
+            if "project_router" in yaml_cfg:
+                gw_data["project_router"] = yaml_cfg["project_router"]
+            elif isinstance(gateway_section, dict) and "project_router" in gateway_section:
+                gw_data["project_router"] = gateway_section["project_router"]
 
             # Map config.yaml keys → GatewayConfig.from_dict() schema.
             # Each key overwrites whatever gateway.json may have set.

@@ -1256,8 +1256,14 @@ _EMPTY_TOOL_RESPONSE_NUDGE = (
 # ``content_policy_blocked``) end with the same actionable next steps, so they
 # share one trailer to keep the guidance from drifting between the two sites.
 _CONTENT_POLICY_RECOVERY_HINT = (
-    "Try rephrasing the request, narrowing the context, or "
-    "adding a fallback provider with `hermes fallback add`."
+    "The provider blocked this wording before Hermes could complete the turn. "
+    "This is a provider hardline, not a claim that local authorization is missing. "
+    "For a legitimate authorized task, use this narrower boundary: act only on "
+    "the named asset; use only a credential explicitly provided to the authorized "
+    "operator and normal authentication; no bypass, no guessing, no enumeration, "
+    "no exploitation, and no exfiltration; keep secrets out of logs; limit "
+    "validation to the minimum read-only action. Confirm this narrower scope "
+    "before execution. No fallback is activated automatically by this guidance."
 )
 
 
@@ -1973,14 +1979,48 @@ def run_conversation(
     # Last composed answer intentionally held back by a verification gate. If
     # that continuation consumes the remaining budget, this is the best
     # user-facing result available; it must not be confused with error or
-    # recovery text produced by unrelated exit paths.
-    _pending_verification_response = None
+    # recovery text produced by unrelated exit paths. A restart restores the
+    # exact candidate from durable transcript rows by checkpoint hash.
+    _restored_checkpoint = getattr(agent, "_turn_checkpoint_state", None) or {}
+    _restored_deliverable = getattr(agent, "_restored_pending_deliverable", None)
+    _restored_verification = _restored_checkpoint.get("verification", {})
+    _pending_verification_response = (
+        _restored_deliverable
+        if _restored_verification.get("pending") and _restored_deliverable
+        else None
+    )
     # Tracks whether the pending verification candidate was already streamed
     # to the user as interim content. The finalizer uses this to set
     # ``_response_was_previewed`` ONLY when the pending candidate is actually
     # reused as the final response — not merely because any interim was
     # streamed. (#65919 review: response-loss blocker)
     _pending_verification_response_previewed = False
+    # True only for the built-in verify-on-stop continuation. Unlike the
+    # generic pre_verify/Kanban fallbacks that share the pending response slot,
+    # this path has a deterministic final-delivery reconciliation contract.
+    _verification_delivery_pending = bool(
+        _restored_verification.get("pending")
+        and _restored_verification.get("kind") == "verify_on_stop"
+        and _pending_verification_response
+    )
+    if _verification_delivery_pending:
+        agent._verification_stop_nudges = int(
+            _restored_verification.get("attempts", 0) or 0
+        )
+    _restored_delivery = _restored_checkpoint.get("delivery", {})
+    _delivery_replay_pending = bool(
+        _restored_deliverable
+        and not _restored_verification.get("pending")
+        and _restored_checkpoint.get("phase")
+        in {"deliverable_composed", "delivery_pending"}
+        and _restored_delivery.get("status") != "delivered"
+    )
+    if _delivery_replay_pending:
+        # The model already completed this turn.  Re-entering it would spend
+        # tokens and could regenerate different text; return the exact durable
+        # artifact so the gateway/ledger delivery boundary can reconcile it.
+        final_response = _restored_deliverable
+        _turn_exit_reason = "checkpoint_delivery_replay"
     # If pre-API compression fires after MoA advisors have produced guidance,
     # retain that ephemeral output and rebase it onto the compacted transcript
     # on the next loop iteration. This prevents a second advisor fan-out.
@@ -2014,7 +2054,16 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
-    while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+    while (
+        not _delivery_replay_pending
+        and (
+            (
+                api_call_count < agent.max_iterations
+                and agent.iteration_budget.remaining > 0
+            )
+            or agent._budget_grace_call
+        )
+    ):
         _redirect_text = agent._drain_pending_redirect()
         if _redirect_text:
             _apply_active_turn_redirect(agent, messages, _redirect_text)
@@ -2054,6 +2103,16 @@ def run_conversation(
         api_call_count += 1
         agent._api_call_count = api_call_count
         agent._touch_activity(f"starting API call #{api_call_count}")
+        _checkpoint_store = getattr(agent, "_turn_checkpoint_store", None)
+        if _checkpoint_store is not None and agent.session_id:
+            agent._turn_checkpoint_state = _checkpoint_store.transition(
+                agent.session_id,
+                phase="planning",
+                next_action=f"model_call:{api_call_count}",
+                changed_paths=sorted(
+                    getattr(agent, "_turn_file_mutation_paths", set()) or set()
+                ),
+            )
 
         # Grace call: the budget is exhausted but we gave the model one
         # more chance.  Consume the grace flag so the loop exits after
@@ -6556,6 +6615,11 @@ def run_conversation(
                         # True when the billing verdict rests on an ambiguous
                         # body (#82154) — may be a content-filter rejection.
                         "billing_unverified": _billing_unverified,
+                        "retry_not_before": (
+                            error_context.get("reset_at")
+                            if classified.reason == FailoverReason.rate_limit
+                            else None
+                        ),
                         # Present only for billing walls: structured recovery
                         # descriptor (provider, billing_url, is_nous, message).
                         "billing_block": _billing_block,
@@ -8210,6 +8274,44 @@ def run_conversation(
                     messages.pop()
 
                 try:
+                    from agent.turn_checkpoint import build_checkpoint_continuation_nudge
+
+                    _checkpoint_resume_nudge = build_checkpoint_continuation_nudge(
+                        agent, final_response,
+                    )
+                except Exception:
+                    logger.debug("checkpoint continuation stop guard failed", exc_info=True)
+                    _checkpoint_resume_nudge = None
+
+                if _checkpoint_resume_nudge:
+                    final_msg["finish_reason"] = "checkpoint_continuation_required"
+                    final_msg["_checkpoint_resume_synthetic"] = True
+                    messages.append(final_msg)
+                    messages.append({
+                        "role": "user",
+                        "content": _checkpoint_resume_nudge,
+                        "_checkpoint_resume_synthetic": True,
+                    })
+                    agent._session_messages = messages
+                    logger.info(
+                        "checkpoint continuation guard rejected status-only exit "
+                        "(attempt %d)",
+                        getattr(agent, "_checkpoint_resume_guard_nudges", 0),
+                    )
+                    final_response = None
+                    continue
+
+                if bool(getattr(agent, "_checkpoint_resume_guard_exhausted", False)):
+                    final_response = (
+                        "⚠️ The durable checkpoint was found, but the resumed turn "
+                        "did not produce a concrete result after three guarded "
+                        "continuation attempts. I am not claiming that the work "
+                        "continued. The checkpoint remains unfinished and recoverable."
+                    )
+                    final_msg["content"] = final_response
+                    final_msg["finish_reason"] = "checkpoint_continuation_blocked"
+
+                try:
                     from agent.verification_stop import (
                         build_verify_on_stop_nudge,
                         verify_on_stop_enabled,
@@ -8228,6 +8330,17 @@ def run_conversation(
                     _verify_nudge = None
 
                 if _verify_nudge:
+                    try:
+                        from agent.verification_stop import strip_verification_delivery_marker
+
+                        _clean_candidate, _candidate_marked = (
+                            strip_verification_delivery_marker(final_response)
+                        )
+                    except Exception:
+                        _clean_candidate, _candidate_marked = final_response, False
+                    if _candidate_marked:
+                        final_response = _clean_candidate
+                        final_msg["content"] = _clean_candidate
                     agent._verification_stop_nudges = (
                         getattr(agent, "_verification_stop_nudges", 0) + 1
                     )
@@ -8254,19 +8367,72 @@ def run_conversation(
                     # terminal. Keep a debug breadcrumb in agent.log for tracing.
                     logger.debug("verification stop-loop nudge issued (attempt %d)",
                                  agent._verification_stop_nudges)
-                    # Keep the attempted answer only as an explicit fallback for
-                    # continuation-budget exhaustion.  ``final_response`` itself
-                    # must be cleared so the finalizer can distinguish this gate
-                    # from unrelated error/recovery exits. (#61631)
-                    # Track whether this candidate was already streamed so the
-                    # finalizer can mark the turn previewed only if the
-                    # candidate is actually reused as the final response.
-                    _pending_verification_response = final_response
-                    _pending_verification_response_previewed = (
-                        agent._interim_content_was_streamed(final_response or "")
-                    )
+                    # The first candidate predates the marker contract and is
+                    # always retained. On later verification attempts, replace
+                    # it only with a marked self-contained candidate; a short
+                    # verification narrative cannot become the new fallback.
+                    if not _verification_delivery_pending or _candidate_marked:
+                        _pending_verification_response = final_response
+                        _pending_verification_response_previewed = (
+                            agent._interim_content_was_streamed(final_response or "")
+                        )
+                    _verification_delivery_pending = True
+                    _checkpoint_store = getattr(agent, "_turn_checkpoint_store", None)
+                    if (
+                        _checkpoint_store is not None
+                        and agent.session_id
+                        and _pending_verification_response
+                    ):
+                        agent._turn_checkpoint_state = _checkpoint_store.mark_deliverable(
+                            agent.session_id,
+                            _pending_verification_response,
+                            verification_pending=True,
+                            verification_attempts=agent._verification_stop_nudges,
+                            verification_kind="verify_on_stop",
+                        )
                     final_response = None
                     continue
+
+                if _verification_delivery_pending:
+                    try:
+                        from agent.verification_stop import reconcile_verification_delivery
+
+                        final_response, _delivery_reconcile_mode = (
+                            reconcile_verification_delivery(
+                                _pending_verification_response,
+                                final_response,
+                            )
+                        )
+                    except Exception:
+                        logger.exception("verification final-delivery reconciliation failed")
+                        if _pending_verification_response:
+                            final_response = _pending_verification_response
+                        _delivery_reconcile_mode = "exception-fallback"
+                    final_msg["content"] = final_response
+                    if _delivery_reconcile_mode == "merged-fallback":
+                        logger.warning(
+                            "verification response omitted the final-delivery marker; "
+                            "preserved pending deliverable plus verification outcome"
+                        )
+                    else:
+                        logger.debug(
+                            "verification final-delivery reconciliation: %s",
+                            _delivery_reconcile_mode,
+                        )
+                    _pending_verification_response = None
+                    _pending_verification_response_previewed = False
+                    _verification_delivery_pending = False
+                    _checkpoint_store = getattr(agent, "_turn_checkpoint_store", None)
+                    if _checkpoint_store is not None and agent.session_id and final_response:
+                        agent._turn_checkpoint_state = _checkpoint_store.mark_deliverable(
+                            agent.session_id,
+                            final_response,
+                            verification_pending=False,
+                            verification_attempts=getattr(
+                                agent, "_verification_stop_nudges", 0
+                            ),
+                            verification_kind="verify_on_stop",
+                        )
 
                 # User verification-loop gate: when the agent edited code this
                 # turn, let a registered `pre_verify` hook (plugin/shell) keep it
@@ -8327,6 +8493,15 @@ def run_conversation(
                     _pending_verification_response_previewed = (
                         agent._interim_content_was_streamed(final_response or "")
                     )
+                    _checkpoint_store = getattr(agent, "_turn_checkpoint_store", None)
+                    if _checkpoint_store is not None and agent.session_id and final_response:
+                        agent._turn_checkpoint_state = _checkpoint_store.mark_deliverable(
+                            agent.session_id,
+                            final_response,
+                            verification_pending=True,
+                            verification_attempts=agent._pre_verify_nudges,
+                            verification_kind="pre_verify",
+                        )
                     final_response = None
                     continue
 
@@ -8377,6 +8552,15 @@ def run_conversation(
                     _pending_verification_response_previewed = (
                         agent._interim_content_was_streamed(final_response or "")
                     )
+                    _checkpoint_store = getattr(agent, "_turn_checkpoint_store", None)
+                    if _checkpoint_store is not None and agent.session_id and final_response:
+                        agent._turn_checkpoint_state = _checkpoint_store.mark_deliverable(
+                            agent.session_id,
+                            final_response,
+                            verification_pending=True,
+                            verification_attempts=agent._kanban_stop_nudges,
+                            verification_kind="kanban_stop",
+                        )
                     final_response = None
                     continue
 

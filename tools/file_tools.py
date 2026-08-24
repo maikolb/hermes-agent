@@ -2267,6 +2267,16 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
         except Exception:
             _resolved = None
 
+        if _resolved is not None and os.environ.get("_HERMES_GATEWAY") == "1":
+            from tools.self_repo_guard import detect_self_repo_file_mutation
+
+            _self_repo_hit, _self_repo_msg = detect_self_repo_file_mutation(
+                _resolved,
+                operation="write_file",
+            )
+            if _self_repo_hit:
+                return tool_error(_self_repo_msg or "Live Hermes source write blocked")
+
         if _resolved is None:
             stale_warning = _check_file_staleness(path, task_id)
             file_ops = _get_file_ops(task_id)
@@ -2414,6 +2424,17 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 _resolved_paths.append(_r)
                 _seen.add(_r)
         _resolved_paths.sort()
+
+        if os.environ.get("_HERMES_GATEWAY") == "1":
+            from tools.self_repo_guard import detect_self_repo_file_mutation
+
+            for _r in _resolved_paths:
+                _self_repo_hit, _self_repo_msg = detect_self_repo_file_mutation(
+                    _r,
+                    operation="patch",
+                )
+                if _self_repo_hit:
+                    return tool_error(_self_repo_msg or "Live Hermes source patch blocked")
 
         # Acquire per-path locks in sorted order via ExitStack.  On single
         # path this degenerates to one lock; on empty list (unresolvable)

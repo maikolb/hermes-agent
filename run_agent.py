@@ -8307,10 +8307,8 @@ class AIAgent:
     def _toolguard_controlled_halt_response(self, decision: ToolGuardrailDecision) -> str:
         tool = decision.tool_name or "a tool"
         return (
-            f"I stopped retrying {tool} because it hit the tool-call guardrail "
-            f"({decision.code}) after {decision.count} repeated non-progressing "
-            "attempts. The last tool result explains the blocker; the next step is "
-            "to change strategy instead of repeating the same call."
+            f"A safety policy blocked {tool} ({decision.code}). "
+            f"{decision.message or 'The requested operation cannot continue safely in this turn.'}"
         )
 
     def _append_guardrail_observation(
@@ -8358,7 +8356,7 @@ class AIAgent:
         # tool_call_id — only the content is replaced.
         if result_stub and isinstance(function_result, str):
             function_result = result_stub
-        if decision.action in {"warn", "halt"}:
+        if decision.action in {"warn", "redirect", "halt"}:
             function_result = append_toolguard_guidance(function_result, decision)
         if decision.should_halt:
             self._set_tool_guardrail_halt(decision)

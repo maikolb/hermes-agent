@@ -1,6 +1,7 @@
 """Runtime tests for tool-call loop guardrails."""
 
 import json
+import os
 import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -112,7 +113,7 @@ def test_default_sequential_path_warns_repeated_exact_failure_without_blocking_e
     assert agent._tool_guardrail_halt_decision is None
 
 
-def test_config_enabled_hard_stop_blocks_repeated_exact_failure_before_execution():
+def test_config_enabled_hard_stop_redirects_repeated_exact_failure_before_execution():
     agent = _make_agent("web_search", config=_hard_stop_config())
     args = {"query": "same"}
     _seed_exact_failures(agent, "web_search", args)
@@ -133,7 +134,8 @@ def test_config_enabled_hard_stop_blocks_repeated_exact_failure_before_execution
     assert len(messages) == 1
     assert messages[0]["role"] == "tool"
     assert messages[0]["tool_call_id"] == "c-block"
-    assert "repeated_exact_failure_block" in messages[0]["content"]
+    assert "repeated_exact_failure_redirect" in messages[0]["content"]
+    assert agent._tool_guardrail_halt_decision is None
 
 
 def test_sequential_after_call_appends_guidance_to_tool_result_without_extra_messages():
@@ -184,7 +186,7 @@ def test_same_tool_failure_warning_tells_model_to_recover_with_tools():
     assert "different tool" in content
 
 
-def test_config_enabled_hard_stop_concurrent_path_does_not_submit_blocked_calls_and_preserves_result_order():
+def test_config_enabled_hard_stop_concurrent_path_redirects_exact_call_and_preserves_result_order():
     agent = _make_agent("web_search", config=_hard_stop_config())
     blocked_args = {"query": "blocked"}
     allowed_args = {"query": "allowed"}
@@ -210,7 +212,7 @@ def test_config_enabled_hard_stop_concurrent_path_does_not_submit_blocked_calls_
 
     assert executed == [("web_search", allowed_args, "c-allow")]
     assert [m["tool_call_id"] for m in messages] == ["c-block", "c-allow"]
-    assert "repeated_exact_failure_block" in messages[0]["content"]
+    assert "repeated_exact_failure_redirect" in messages[0]["content"]
     assert json.loads(messages[1]["content"]) == {"ok": "allowed"}
     assert starts == [("c-allow", "web_search", allowed_args)]
     started_events = [event for event in progress_events if event[0] == "tool.started"]
@@ -293,7 +295,7 @@ def test_relay_rewrite_precedes_sequential_policy_approval_checkpoint_and_dispat
     assert observed["start"] == expected
     assert observed["dispatch"] == expected
     assert observed["checkpoint"] == [
-        ("/approved/path", "before write_file")
+        (os.path.normpath("/approved/path"), "before write_file")
     ]
 
 
@@ -320,7 +322,7 @@ def test_relay_rewrite_is_guarded_before_dispatch_in_concurrent_path():
 
     dispatch.assert_not_called()
     assert starts == []
-    assert "repeated_exact_failure_block" in messages[0]["content"]
+    assert "repeated_exact_failure_redirect" in messages[0]["content"]
 
 
 def test_plugin_pre_tool_block_wins_without_counting_as_toolguard_block():
@@ -384,15 +386,28 @@ def test_guardrail_halt_emits_final_response_through_stream_delta_callback():
     queue and emits a finish chunk with zero content (indistinguishable
     from a crash for Open WebUI and similar clients).
     """
-    agent = _make_agent("web_search", max_iterations=10, config=_hard_stop_config())
-    same_args = {"query": "same"}
+    agent = _make_agent(
+        "web_search",
+        max_iterations=10,
+        config={
+            "tool_loop_guardrails": {
+                "loop_caps": {"max_web_searches": 2},
+            }
+        },
+    )
     responses = [
         _mock_response(
             content="",
             finish_reason="tool_calls",
-            tool_calls=[_mock_tool_call("web_search", json.dumps(same_args), f"c{i}")],
+            tool_calls=[
+                _mock_tool_call(
+                    "web_search",
+                    json.dumps({"query": f"distinct-{i}"}),
+                    f"c{i}",
+                )
+            ],
         )
-        for i in range(1, 10)
+        for i in range(1, 4)
     ]
     agent.client.chat.completions.create.side_effect = responses
 
@@ -414,7 +429,7 @@ def test_guardrail_halt_emits_final_response_through_stream_delta_callback():
 
     assert result["turn_exit_reason"] == "guardrail_halt"
     halt_text = result["final_response"]
-    assert "stopped retrying" in halt_text
+    assert "loop_web_search_cap" in halt_text
 
     # The halt message must have been pushed through the callback at least
     # once.  Empty-queue SSE writers were the bug — clients saw no content

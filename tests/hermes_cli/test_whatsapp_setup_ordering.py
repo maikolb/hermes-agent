@@ -14,7 +14,9 @@ succeeds (creds.json exists).  Aborted setup leaves no enabled state.
 from __future__ import annotations
 
 import io
+import json
 import os
+import subprocess
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -95,7 +97,7 @@ def test_existing_pairing_skip_branch_enables_whatsapp(isolated_home, monkeypatc
     # Pre-create a paired session WITHOUT WHATSAPP_ENABLED in .env.
     session = isolated_home / "whatsapp" / "session"
     session.mkdir(parents=True)
-    (session / "creds.json").write_text("{}")
+    (session / "creds.json").write_text('{"registered": true}')
     monkeypatch.setenv("WHATSAPP_MODE", "bot")
     monkeypatch.setenv("WHATSAPP_ALLOWED_USERS", "15551234567")
 
@@ -138,3 +140,58 @@ def test_existing_pairing_skip_branch_enables_whatsapp(isolated_home, monkeypatc
 
     # The skip-rebar branch should have set the env var on its way out.
     assert _env_value(isolated_home, "WHATSAPP_ENABLED") == "true"
+
+
+def test_credentials_require_completed_registration(tmp_path):
+    from hermes_cli.main import _whatsapp_credentials_complete
+
+    session = tmp_path / "session"
+    session.mkdir()
+    assert _whatsapp_credentials_complete(session) is False
+    (session / "creds.json").write_text('{"registered": false}')
+    assert _whatsapp_credentials_complete(session) is False
+    (session / "creds.json").write_text('{"registered": true}')
+    assert _whatsapp_credentials_complete(session) is True
+    (session / "creds.json").write_text(json.dumps({
+        "registered": False,
+        "me": {"id": "device"},
+        "account": {"details": "present"},
+        "signalIdentities": [{"identifier": "present"}],
+    }))
+    assert _whatsapp_credentials_complete(session) is True
+
+
+def test_pairing_uses_json_pipe_and_parent_qr_renderer(tmp_path, monkeypatch):
+    from hermes_cli import main
+
+    events = [
+        json.dumps({"event": "qr", "qr": "sensitive-payload"}) + "\n",
+        json.dumps({"event": "connected"}) + "\n",
+    ]
+    rendered = []
+
+    class FakeProcess:
+        stdout = events
+
+        def wait(self):
+            return 0
+
+    def fake_popen(argv, **kwargs):
+        assert "--pair-json" in argv
+        assert kwargs["stdout"] is subprocess.PIPE
+        assert kwargs["stderr"] is subprocess.STDOUT
+        return FakeProcess()
+
+    monkeypatch.setattr(main.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(main, "_print_whatsapp_pair_qr", rendered.append)
+
+    exit_code, connected = main._run_whatsapp_pairing(
+        "node.exe",
+        tmp_path / "bridge.js",
+        tmp_path / "session",
+        tmp_path,
+    )
+
+    assert exit_code == 0
+    assert connected is True
+    assert rendered == ["sensitive-payload"]

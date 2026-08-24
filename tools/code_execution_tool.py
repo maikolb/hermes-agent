@@ -44,6 +44,8 @@ import threading
 import time
 import uuid
 
+from hermes_cli._subprocess_compat import windows_hidden_popen_kwargs
+
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -75,6 +77,30 @@ DEFAULT_TIMEOUT = 300        # 5 minutes
 DEFAULT_MAX_TOOL_CALLS = 50
 MAX_STDOUT_BYTES = 50_000    # 50 KB
 MAX_STDERR_BYTES = 10_000    # 10 KB
+
+
+_WINDOWS_SANDBOX_ZERO_UI_BOOTSTRAP = '''\
+# Hermes Windows sandbox bootstrap: install the process-wide private-desktop
+# broker before model-authored code can import or call subprocess.  The parent
+# gateway normally installs this boundary too, but execute_code is a fresh
+# interpreter and must fail closed independently (#recuperacli-console-flash).
+from hermes_cli.windows_process_broker import (
+    broker_installed as _hermes_zero_ui_ready,
+    install_windows_process_broker as _install_hermes_zero_ui,
+)
+_install_hermes_zero_ui()
+if not _hermes_zero_ui_ready():
+    raise RuntimeError("Hermes Windows zero-UI broker is not active in execute_code")
+del _hermes_zero_ui_ready, _install_hermes_zero_ui
+'''
+
+
+def _prepare_local_sandbox_source(code: str, *, is_windows: bool | None = None) -> str:
+    """Return sandbox source with a fail-closed Windows subprocess boundary."""
+    windows = _IS_WINDOWS if is_windows is None else bool(is_windows)
+    if not windows:
+        return code
+    return _WINDOWS_SANDBOX_ZERO_UI_BOOTSTRAP + "\n" + code
 
 
 def _assemble_stdout_result(
@@ -1411,9 +1437,12 @@ def execute_code(
         with open(os.path.join(tmpdir, "hermes_tools.py"), "w", encoding="utf-8") as f:
             f.write(tools_src)
 
-        # Write the user's script
+        # Write the user's script. On Windows the sandbox is a fresh Python
+        # interpreter, so the gateway's process-wide Popen broker is not
+        # inherited. Install + verify it before any model-authored import or
+        # statement can launch a console descendant.
         with open(os.path.join(tmpdir, "script.py"), "w", encoding="utf-8") as f:
-            f.write(code)
+            f.write(_prepare_local_sandbox_source(code))
 
         # --- Start RPC server ---
         rpc_token = secrets.token_urlsafe(32)
@@ -1546,8 +1575,8 @@ def execute_code(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+            start_new_session=not _IS_WINDOWS,
+            **windows_hidden_popen_kwargs(),
         )
 
         # --- Poll loop: watch for exit, timeout, and interrupt ---
@@ -1933,9 +1962,9 @@ def _probe_python(python_path: str, code: str, *, text: bool = False):
             timeout=5,
             capture_output=True,
             text=text,
-            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
             stdin=subprocess.DEVNULL,
             env=delegated_child_subprocess_env(),
+            **windows_hidden_popen_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):
         return None

@@ -58,6 +58,56 @@ def _resolve_auto_decompose_settings(
     return enabled, per_tick
 
 
+def _resolve_agent_wake_on_events(load_config: Callable[[], Any]) -> bool:
+    """Return whether Kanban lifecycle events may synthesize agent turns.
+
+    User-facing notification and agent execution are separate authorities.
+    The safe default is passive notification only; a config read failure or
+    any value other than the literal boolean ``True`` therefore fails closed.
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        return False
+    kcfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    return kcfg.get("agent_wake_on_events") is True
+
+
+def _resolve_worker_focus_handoff(load_config: Callable[[], Any]) -> bool:
+    """Opt-in, local-only focus handoff; false on missing or invalid config."""
+    try:
+        cfg = load_config()
+    except Exception:
+        return False
+    kcfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    return kcfg.get("worker_focus_handoff") is True
+
+
+def _kanban_worker_focus_key(board: str, sub: dict) -> tuple[str, str, str, str, str]:
+    return (
+        str(board or ""),
+        str(sub.get("platform") or "").lower(),
+        str(sub.get("chat_id") or ""),
+        str(sub.get("thread_id") or ""),
+        str(sub.get("notifier_profile") or ""),
+    )
+
+
+def _render_kanban_worker_focus(task: Any, *, board: str, active_count: int) -> str:
+    count = f" 1/{active_count}" if active_count > 1 else ""
+    title = str(getattr(task, "title", "") or getattr(task, "id", "worker"))[:120]
+    assignee = str(getattr(task, "assignee", "") or "").strip()
+    owner = f"@{assignee} — " if assignee else ""
+    board_tag = f"[{board}] " if board else ""
+    run_id = getattr(task, "current_run_id", None)
+    run = f" · run {run_id}" if run_id is not None else ""
+    return (
+        f"▶ Now following worker{count}\n"
+        f"{board_tag}{owner}{title}\n"
+        f"Kanban {getattr(task, 'id', '')}{run}"
+    )
+
+
 def _kanban_dispatch_allowed() -> bool:
     """Return False while the global emergency stop (`hermes pause`) is engaged.
 
@@ -198,14 +248,156 @@ class GatewayKanbanWatchersMixin:
         self._kanban_dispatcher_lock_handle = None
         _release_singleton_lock(handle)
 
+    def _kanban_focus_apply_rows(self, rows: list[dict]) -> None:
+        """Apply one-time bootstrap rows and lifecycle deltas to local counters."""
+        active: dict[tuple, dict[str, dict]] = getattr(
+            self, "_kanban_worker_focus_active", {}
+        )
+        self._kanban_worker_focus_active = active
+        terminal_kinds = {
+            "completed", "blocked", "gave_up", "review_requested",
+            "changes_requested", "archived", "timed_out", "crashed",
+            "rate_limited", "stale", "reclaimed", "block_loop_detected",
+        }
+        rows = sorted(
+            rows,
+            key=lambda row: (
+                0 if row.get("bootstrap") else 1,
+                int(getattr(row.get("task"), "started_at", 0) or 0),
+            ),
+        )
+        for row in rows:
+            task = row.get("task")
+            sub = row.get("sub") or {}
+            if task is None:
+                continue
+            key = _kanban_worker_focus_key(row.get("board") or "", sub)
+            bucket = active.setdefault(key, {})
+            if row.get("bootstrap") and task.status == "running":
+                bucket[task.id] = row
+            for event in row.get("events") or []:
+                if event.kind == "claimed":
+                    bucket[task.id] = row
+                elif event.kind in terminal_kinds:
+                    bucket.pop(task.id, None)
+            if not bucket:
+                active.pop(key, None)
+
+    async def _kanban_refresh_worker_focus(self) -> None:
+        """Render local counter state; with count zero this is an immediate no-op."""
+        from gateway.config import Platform as _Platform
+        from gateway.platforms.base import BasePlatformAdapter
+        from gateway.session import SessionSource, build_session_key
+
+        active: dict[tuple, dict[str, dict]] = getattr(
+            self, "_kanban_worker_focus_active", {}
+        )
+        states: dict[tuple, dict] = getattr(self, "_kanban_worker_focus_states", {})
+        self._kanban_worker_focus_states = states
+        if not active and not states:
+            return
+
+        for key, bucket in list(active.items()):
+            if not bucket:
+                active.pop(key, None)
+                continue
+            chosen = next(iter(bucket.values()))
+            task = chosen["task"]
+            sub = chosen["sub"]
+            board = chosen.get("board") or ""
+            try:
+                platform = _Platform(str(sub.get("platform") or "").lower())
+            except ValueError:
+                continue
+            profile = str(sub.get("notifier_profile") or "").strip() or None
+            adapter = self._authorization_adapter(platform, profile)
+            if adapter is None:
+                continue
+            adapter_edit = getattr(type(adapter), "edit_message", None)
+            if adapter_edit is None or adapter_edit is BasePlatformAdapter.edit_message:
+                continue
+            metadata = (
+                dict(sub.get("delivery_metadata"))
+                if isinstance(sub.get("delivery_metadata"), dict)
+                else {}
+            )
+            if sub.get("thread_id") and not metadata.get("thread_id"):
+                metadata["thread_id"] = sub["thread_id"]
+            source = SessionSource(
+                platform=platform,
+                chat_id=sub["chat_id"],
+                chat_type=str(sub.get("chat_type") or metadata.get("chat_type") or "group"),
+                thread_id=sub.get("thread_id") or None,
+                user_id=sub.get("user_id"),
+                profile=profile,
+            )
+            try:
+                if self._is_session_running(build_session_key(source)):
+                    continue
+            except Exception:
+                logger.debug("kanban worker focus session probe failed", exc_info=True)
+                continue
+
+            content = _render_kanban_worker_focus(
+                task, board=board, active_count=len(bucket)
+            )
+            state = states.get(key)
+            if state and state.get("content") == content:
+                continue
+            message_id = state.get("message_id") if state else None
+            if message_id:
+                try:
+                    result = await adapter.edit_message(
+                        sub["chat_id"], str(message_id), content
+                    )
+                except Exception:
+                    logger.debug("kanban worker focus edit failed", exc_info=True)
+                    continue
+                if getattr(result, "success", False):
+                    state.update(content=content, task_id=task.id)
+                    continue
+                if result is None or getattr(result, "retryable", False):
+                    continue
+            try:
+                result = await adapter.send(sub["chat_id"], content, metadata=metadata)
+            except Exception:
+                logger.debug("kanban worker focus send failed", exc_info=True)
+                continue
+            if getattr(result, "success", False) and getattr(result, "message_id", None):
+                states[key] = {
+                    "message_id": str(result.message_id),
+                    "content": content,
+                    "task_id": task.id,
+                    "sub": sub,
+                }
+
+        for key in list(states):
+            if key in active:
+                continue
+            state = states.pop(key)
+            sub = state.get("sub") or {}
+            try:
+                platform = _Platform(str(sub.get("platform") or "").lower())
+            except ValueError:
+                continue
+            profile = str(sub.get("notifier_profile") or "").strip() or None
+            adapter = self._authorization_adapter(platform, profile)
+            if adapter is None or not state.get("message_id"):
+                continue
+            try:
+                await adapter.delete_message(sub["chat_id"], str(state["message_id"]))
+            except Exception:
+                logger.debug("kanban worker focus cleanup failed", exc_info=True)
+
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
-        """Poll ``kanban_notify_subs`` and deliver terminal events to users.
+        """Poll ``kanban_notify_subs`` and deliver material lifecycle events.
 
         For each subscription row, fetches ``task_events`` newer than the
-        stored cursor with kind in the terminal set (``completed``,
-        ``blocked``, ``gave_up``, ``crashed``, ``timed_out``,
-        ``review_requested``, ``block_loop_detected``). Sends one
-        message per new event to ``(platform, chat_id, thread_id)``,
+        stored cursor with kind in the user-facing notification set. Multiple
+        internal transitions for the same task are converged to the latest
+        material state before delivery; retries/timeouts/crashes remain in the
+        event log but are not chat notifications. Sends at most one message per
+        task per poll to ``(platform, chat_id, thread_id)``,
         then advances the cursor. The subscription is removed only when the
         task is ``archived``. A ``done`` task can be reopened for review or
         continuation, so its subscription and origin-session ownership must
@@ -229,8 +421,9 @@ class GatewayKanbanWatchersMixin:
         from gateway.config import Platform as _Platform
         try:
             from hermes_cli import kanban_db as _kb
+            from hermes_cli.config import load_config as _load_config
         except Exception:
-            logger.warning("kanban notifier: kanban_db not importable; notifier disabled")
+            logger.warning("kanban notifier: dependencies not importable; notifier disabled")
             return
 
         # "status" covers dashboard drag-drop and `_set_status_direct()`
@@ -239,11 +432,28 @@ class GatewayKanbanWatchersMixin:
         # but is not a block (see kanban_db.request_review); the task is not
         # archived, so the subscription stays alive and later review
         # cycles keep notifying.
-        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested")
+        # ``claimed`` is the proof boundary between "queued" and material
+        # execution.  Without it a long-running headless worker stays silent
+        # until completion, which makes an automatically started task look
+        # stalled and forces the operator to ask for status.  Heartbeats remain
+        # intentionally excluded to avoid one notification per minute.
+        NOTIFY_KINDS = (
+            "claimed", "completed", "blocked", "gave_up", "status",
+            "block_loop_detected", "review_requested",
+        )
+        # Focus accounting consumes worker-run boundaries too, but these
+        # internal retry/recovery events must never become chat messages.
+        FOCUS_KINDS = (
+            "claimed", "completed", "blocked", "gave_up",
+            "block_loop_detected", "review_requested", "changes_requested",
+            "archived", "unblocked", "timed_out", "crashed", "rate_limited",
+            "stale", "reclaimed", "status",
+        )
+        CLAIM_KINDS = tuple(dict.fromkeys((*NOTIFY_KINDS, *FOCUS_KINDS)))
         # Subscriptions are removed only when the task reaches the irreversible
         # archived status. ``done`` is reversible in review/controller flows,
         # so removing its subscription would silence a later reopen. We used
-        # to also unsub on any terminal
+        # to also unsubscribe on any terminal
         # event kind (gave_up / crashed / timed_out / blocked), but that
         # silently dropped the user out of the loop whenever the dispatcher
         # respawned the task: a worker that crashes, gets reclaimed, runs
@@ -295,9 +505,7 @@ class GatewayKanbanWatchersMixin:
                 if _gc_due:
                     _gc_next_at = time.monotonic() + _GC_INTERVAL_SECONDS
                     try:
-                        from hermes_cli.config import load_config as _load_cfg
-
-                        _kanban_cfg = (_load_cfg() or {}).get("kanban") or {}
+                        _kanban_cfg = (_load_config() or {}).get("kanban") or {}
                         _gc_retention_days = int(
                             _kanban_cfg.get("done_sub_retention_days", 30)
                         )
@@ -305,9 +513,19 @@ class GatewayKanbanWatchersMixin:
                         # Fail safe on the shipped default; the sweep itself
                         # treats <= 0 as disabled.
                         _gc_retention_days = 30
+                agent_wake_on_events = _resolve_agent_wake_on_events(_load_config)
+                worker_focus_handoff = _resolve_worker_focus_handoff(_load_config)
+                rehydrate_worker_focus = worker_focus_handoff and not bool(
+                    getattr(self, "_kanban_worker_focus_rehydrated", False)
+                )
+                gateway_started_at = float(
+                    getattr(self, "_gateway_started_at", 0.0) or 0.0
+                )
 
                 def _collect():
                     deliveries: list[dict] = []
+                    focus_rows: list[dict] = []
+                    rehydrate_complete = True
                     include_unowned = self._owns_kanban_dispatcher_lock()
                     notifier_profiles = {notifier_profile}
                     notifier_profiles.update(
@@ -339,7 +557,7 @@ class GatewayKanbanWatchersMixin:
                         )
                     if not active_platforms:
                         logger.debug("kanban notifier: no connected adapters; skipping tick")
-                        return deliveries
+                        return deliveries, focus_rows, False
 
                     # Enumerate every board on disk, but poll each resolved DB
                     # path once. Multiple slugs can point at the same DB when
@@ -349,6 +567,8 @@ class GatewayKanbanWatchersMixin:
                     try:
                         boards = _kb.list_boards(include_archived=False)
                     except Exception:
+                        if rehydrate_worker_focus:
+                            rehydrate_complete = False
                         boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
                     seen_db_paths: set[str] = set()
                     for board_meta in boards:
@@ -392,6 +612,8 @@ class GatewayKanbanWatchersMixin:
                         try:
                             conn = _kb.connect(board=slug)
                         except Exception as exc:
+                            if rehydrate_worker_focus:
+                                rehydrate_complete = False
                             logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
                             continue
                         try:
@@ -454,17 +676,104 @@ class GatewayKanbanWatchersMixin:
                                             sub.get("task_id"), platform or "<missing>",
                                         )
                                         continue
+                                    task = None
+                                    if rehydrate_worker_focus:
+                                        task = _kb.get_task(conn, sub["task_id"])
+                                        if task and task.status == "running":
+                                            focus_rows.append({
+                                                "sub": sub,
+                                                "task": task,
+                                                "board": slug,
+                                                "bootstrap": True,
+                                                "events": [],
+                                            })
                                     old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
                                         conn,
                                         task_id=sub["task_id"],
                                         platform=sub["platform"],
                                         chat_id=sub["chat_id"],
                                         thread_id=sub.get("thread_id") or "",
-                                        kinds=TERMINAL_KINDS,
+                                        kinds=CLAIM_KINDS,
                                     )
                                     if not events:
                                         continue
-                                    task = _kb.get_task(conn, sub["task_id"])
+                                    # A gateway boot must never replay historical
+                                    # lifecycle events into chat.  The atomic claim
+                                    # above already advances the cursor, so filtering
+                                    # the claimed range here safely converges stale
+                                    # subscriptions without sending or waking.
+                                    subscription_created_at = float(
+                                        sub.get("created_at") or 0.0
+                                    )
+                                    delivery_cutoff = max(
+                                        gateway_started_at,
+                                        subscription_created_at,
+                                    )
+                                    current_events = [
+                                        ev for ev in events
+                                        if float(ev.created_at or 0.0) >= delivery_cutoff
+                                    ]
+                                    if not current_events:
+                                        logger.info(
+                                            "kanban notifier: suppressed %d pre-start "
+                                            "event(s) for one subscription on board %s",
+                                            len(events), slug,
+                                        )
+                                        continue
+                                    events = current_events
+                                    if task is None:
+                                        task = _kb.get_task(conn, sub["task_id"])
+                                    focus_events = [
+                                        ev for ev in events if ev.kind in FOCUS_KINDS
+                                    ]
+                                    if worker_focus_handoff and focus_events:
+                                        focus_rows.append({
+                                            "sub": sub,
+                                            "task": task,
+                                            "board": slug,
+                                            "bootstrap": False,
+                                            "events": focus_events,
+                                        })
+
+                                    # Chat notification is a state convergence,
+                                    # never an event-log replay. Counter-only retry
+                                    # boundaries above stay invisible to the user.
+                                    notify_events = [
+                                        ev for ev in events if ev.kind in NOTIFY_KINDS
+                                    ]
+                                    archived_events = [
+                                        ev for ev in events if ev.kind == "archived"
+                                    ]
+                                    # Archive is silent but authoritative for
+                                    # subscription cleanup. When it is the only
+                                    # material event, pass it through the
+                                    # delivery pipeline so the cursor advances
+                                    # and the subscription is removed. If a
+                                    # completion and archive share one claim,
+                                    # preserve the completion notification and
+                                    # let the task's archived state drive the
+                                    # cleanup after delivery.
+                                    if not notify_events and archived_events:
+                                        notify_events = archived_events[-1:]
+                                    if not notify_events:
+                                        continue
+                                    first_claim_row = conn.execute(
+                                        "SELECT MIN(id) AS id FROM task_events "
+                                        "WHERE task_id = ? AND kind = 'claimed'",
+                                        (sub["task_id"],),
+                                    ).fetchone()
+                                    first_claim_id = (
+                                        int(first_claim_row["id"])
+                                        if first_claim_row and first_claim_row["id"] is not None
+                                        else None
+                                    )
+                                    material_events = [
+                                        ev for ev in notify_events
+                                        if ev.kind != "claimed" or ev.id == first_claim_id
+                                    ]
+                                    events = material_events[-1:]
+                                    if not events:
+                                        continue
                                     logger.debug(
                                         "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                                         len(events), sub["task_id"], slug, old_cursor, cursor,
@@ -481,15 +790,23 @@ class GatewayKanbanWatchersMixin:
                                     # Isolate per-subscription failures so one
                                     # bad subscription cannot block delivery for
                                     # all other subscriptions in this tick.
+                                    if rehydrate_worker_focus:
+                                        rehydrate_complete = False
                                     logger.warning(
                                         "kanban notifier: subscription for %s on board %s failed: %s",
                                         sub.get("task_id"), slug, sub_exc,
                                     )
                         finally:
                             conn.close()
-                    return deliveries
+                    return deliveries, focus_rows, rehydrate_complete
 
-                deliveries = await asyncio.to_thread(_collect)
+                deliveries, focus_rows, rehydrate_complete = await asyncio.to_thread(
+                    _collect
+                )
+                if worker_focus_handoff:
+                    if rehydrate_worker_focus and rehydrate_complete:
+                        self._kanban_worker_focus_rehydrated = True
+                    self._kanban_focus_apply_rows(focus_rows)
                 for d in deliveries:
                     sub = d["sub"]
                     task = d["task"]
@@ -553,7 +870,12 @@ class GatewayKanbanWatchersMixin:
                         # chat subscribes to many tasks) legible at a glance.
                         who = (task.assignee if task and task.assignee else None)
                         tag = f"@{who} " if who else ""
-                        if kind == "completed":
+                        if kind == "claimed":
+                            msg = (
+                                f"▶ {board_tag}{tag}Kanban {sub['task_id']} started"
+                                f" — {title}"
+                            )
+                        elif kind == "completed":
                             # Prefer the run's summary (the worker's
                             # intentional human-facing handoff, carried
                             # in the event payload), then fall back to
@@ -784,7 +1106,7 @@ class GatewayKanbanWatchersMixin:
                         _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked")
                         _wake_kinds = (
                             {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
-                            if wake_agent
+                            if wake_agent and agent_wake_on_events
                             else set()
                         )
                         from gateway.wake import adapter_supports_push as _adapter_push_ok
@@ -1025,6 +1347,8 @@ class GatewayKanbanWatchersMixin:
                             await _to_thread_process_service(
                                 self._kanban_unsub, sub, board_slug,
                             )
+                if worker_focus_handoff:
+                    await self._kanban_refresh_worker_focus()
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
             # Sleep with cancellation checks.

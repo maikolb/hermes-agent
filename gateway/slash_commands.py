@@ -475,6 +475,31 @@ class GatewaySlashCommandsMixin:
         import shlex
         from hermes_cli.kanban import run_slash
 
+        # Slash commands are dispatched before the ordinary agent turn sets
+        # the project ContextVars.  Resolve the Telegram Topic explicitly so
+        # the CLI cannot fall back to the process-wide current board and cross
+        # a project boundary.
+        project_context = None
+        source = getattr(event, "source", None)
+        if source is not None:
+            project_context, project_denial = await asyncio.to_thread(
+                self._resolve_project_context_for_message,
+                event,
+                source,
+            )
+            if project_denial is not None:
+                return project_denial
+        if project_context is not None and bool(project_context.is_management):
+            return (
+                "Kanban is not available in the management Topic. "
+                "Run the command inside the project Topic it belongs to."
+            )
+        bound_board = (
+            str(project_context.board_slug).strip()
+            if project_context is not None
+            else ""
+        )
+
         text = (event.text or "").strip()
         # Strip the leading "/kanban" (with or without slash), leaving args.
         if text.startswith("/"):
@@ -503,8 +528,78 @@ class GatewaySlashCommandsMixin:
 
         is_create = action == "create"
 
+        if bound_board:
+            from hermes_cli import kanban_db as _kb
+
+            try:
+                canonical_bound = _kb._normalize_board_slug(bound_board)
+                canonical_requested = (
+                    _kb._normalize_board_slug(requested_board)
+                    if requested_board is not None
+                    else canonical_bound
+                )
+            except ValueError as exc:
+                return t("gateway.kanban.error_prefix", error=exc)
+            if canonical_requested != canonical_bound:
+                return (
+                    f"This Topic is bound to board {canonical_bound!r}; "
+                    f"refusing explicit board {canonical_requested!r}."
+                )
+            if action == "boards":
+                return (
+                    "Board administration is not available from a project Topic. "
+                    "This Topic can operate only on its bound board."
+                )
+            requested_board = canonical_bound
+
+        # Make repeated delivery of the same Telegram create event idempotent.
+        # Store only a digest; chat/user/message identifiers never become
+        # durable Kanban metadata in plaintext through this derived key.
+        has_idempotency_key = any(
+            token == "--idempotency-key" or token.startswith("--idempotency-key=")
+            for token in tokens
+        )
+        if is_create and not has_idempotency_key:
+            message_id = str(
+                getattr(event, "message_id", None)
+                or getattr(source, "message_id", None)
+                or ""
+            ).strip()
+            if message_id:
+                platform = getattr(source, "platform", "")
+                platform_name = (
+                    platform.value if hasattr(platform, "value") else str(platform or "")
+                )
+                material = "\x1f".join(
+                    (
+                        str(getattr(source, "profile", "") or "default"),
+                        platform_name,
+                        str(getattr(source, "chat_id", "") or ""),
+                        str(getattr(source, "thread_id", "") or ""),
+                        message_id,
+                        str(
+                            tokens[tokens.index(action) + 1]
+                            if action in tokens
+                            and tokens.index(action) + 1 < len(tokens)
+                            else ""
+                        ),
+                    )
+                )
+                digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+                tokens.extend(("--idempotency-key", f"gateway-event:v1:{digest}"))
+                text = shlex.join(tokens)
+
         try:
-            output = await asyncio.to_thread(run_slash, text)
+            if bound_board:
+                from hermes_cli import kanban_db as _kb
+
+                def _run_bound_slash() -> str:
+                    with _kb.scoped_current_board(requested_board):
+                        return run_slash(text)
+
+                output = await asyncio.to_thread(_run_bound_slash)
+            else:
+                output = await asyncio.to_thread(run_slash, text)
         except Exception as exc:  # pragma: no cover - defensive
             return t("gateway.kanban.error_prefix", error=exc)
 
@@ -541,7 +636,7 @@ class GatewaySlashCommandsMixin:
                     if platform_str and chat_id:
                         def _sub():
                             from hermes_cli import kanban_db as _kb
-                            conn = _kb.connect(board=requested_board)
+                            conn = _kb.connect(board=(bound_board or requested_board))
                             try:
                                 _kb.add_notify_sub(
                                     conn, task_id=task_id,

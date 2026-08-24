@@ -31,6 +31,30 @@ def _contents(db, session_id=SESSION_ID):
 
 
 class TestIdentityFlush:
+    def test_flush_persists_live_tool_result_name(self):
+        """Normal turn flush must preserve the loop's ``name`` field."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "t.db")
+            try:
+                agent = _make_agent(db)
+                agent._flush_messages_to_session_db(
+                    [
+                        {
+                            "role": "tool",
+                            "name": "read_file",
+                            "tool_call_id": "call-1",
+                            "content": "ok",
+                        }
+                    ],
+                    [],
+                )
+
+                assert db.get_messages_as_conversation(SESSION_ID)[0]["tool_name"] == "read_file"
+            finally:
+                db.close()
+
     def test_repair_shrunk_messages_below_history_length_still_persists_assistant(self):
         """When repair shortens messages below conversation_history, don't slice empty."""
         from hermes_state import SessionDB

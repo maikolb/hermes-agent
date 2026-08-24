@@ -1136,7 +1136,7 @@ def _set_status_direct(
     with kanban_db.write_txn(conn):
         # Snapshot current state so we know whether to close a run.
         prev = conn.execute(
-            "SELECT status, current_run_id, worker_pid, claim_lock "
+            "SELECT status, current_run_id, worker_pid, claim_lock, workspace_kind "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -1174,6 +1174,12 @@ def _set_status_direct(
             prev["status"] in {"done", "archived"}
             and effective_status not in {"done", "archived"}
         )
+
+        if reopening_satisfied_parent and prev["workspace_kind"] == "worktree":
+            try:
+                kanban_db._invalidate_worktree_for_terminal_reopen(conn, task_id)
+            except RuntimeError:
+                return False
 
         cur = conn.execute(
             "UPDATE tasks SET status = ?, "

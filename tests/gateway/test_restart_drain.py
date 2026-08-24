@@ -308,6 +308,39 @@ async def test_windows_detached_restart_watcher_keeps_console_python(monkeypatch
     assert kwargs["creationflags"] == 0x08000200
 
 
+@pytest.mark.asyncio
+async def test_windows_detached_restart_watcher_replaces_pythonw_with_console_sibling(monkeypatch, tmp_path):
+    """A gateway launched in base pythonw must still use hidden console Python
+    for the watcher, otherwise the watcher descendants can allocate a visible
+    conhost when they restart the gateway."""
+    runner, _adapter = make_restart_runner()
+    popen_calls = []
+    venv_dir = tmp_path / "venv"
+    (venv_dir / "Lib" / "site-packages").mkdir(parents=True)
+
+    monkeypatch.setattr(gateway_run.sys, "platform", "win32")
+    monkeypatch.setattr(gateway_run.sys, "executable", r"C:\base\pythonw.exe")
+    monkeypatch.setattr(gateway_run, "_resolve_hermes_bin", lambda: ["hermes"])
+    monkeypatch.setattr(gateway_run.os, "getpid", lambda: 321)
+    monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
+
+    import hermes_cli._subprocess_compat as subprocess_compat
+
+    monkeypatch.setattr(
+        subprocess_compat,
+        "windows_detach_popen_kwargs",
+        lambda: {"creationflags": 0x08000200},
+    )
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: popen_calls.append((cmd, kwargs)) or MagicMock())
+
+    await runner._launch_detached_restart_command()
+
+    assert len(popen_calls) == 1
+    cmd, kwargs = popen_calls[0]
+    assert cmd[0] == r"C:\base\python.exe"
+    assert kwargs["creationflags"] == 0x08000200
+
+
 # ── Shutdown notification tests ──────────────────────────────────────
 
 

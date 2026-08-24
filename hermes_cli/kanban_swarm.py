@@ -103,6 +103,11 @@ def _activate_root_inline(
                worker_pid   = NULL
          WHERE id = ?
            AND status = 'blocked'
+           AND workspace_kind != 'worktree'
+           AND NOT EXISTS (
+               SELECT 1 FROM task_git_delivery d
+                WHERE d.task_id = tasks.id AND d.required = 1
+           )
         """,
         (now, root_id),
     )
@@ -245,8 +250,12 @@ def _create_swarm_uncommitted(
         priority=priority,
         idempotency_key=idempotency_key,
         initial_status="blocked",
-        workspace_kind=workspace_kind,
-        workspace_path=workspace_path,
+        # The root is control-plane state (topology + blackboard), never an
+        # implementation checkout. Keeping it non-worktree is what makes its
+        # atomic inline activation safe; worker/verifier/synthesizer cards below
+        # retain the caller's requested workspace policy.
+        workspace_kind="dir",
+        workspace_path=None,
     )
 
     # If idempotency returned an existing non-archived root, do not duplicate the

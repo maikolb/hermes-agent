@@ -31,6 +31,27 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+
+# Tool modules can be imported by lightweight workers that do not execute the
+# full ``hermes_bootstrap`` entrypoint first.  Enforce the process-wide Windows
+# boundary here as well because this is the shared subprocess compatibility
+# seam used by terminal, execute_code, browser, validators and launchers.
+# Installation is idempotent; Windows fails closed if the private desktop is
+# unavailable, rather than allowing Git/CMD/Node/Playwright onto Default.
+from hermes_cli.windows_process_broker import (
+    IS_WINDOWS as _BROKER_IS_WINDOWS,
+    broker_installed as _broker_installed,
+    hidden_desktop_ready as _hidden_desktop_ready,
+    install_windows_process_broker as _install_windows_process_broker,
+)
+
+_install_windows_process_broker()
+if _BROKER_IS_WINDOWS and not (
+    _broker_installed() and _hidden_desktop_ready()
+):
+    raise RuntimeError(
+        "Hermes Windows zero-UI subprocess broker/private desktop is unavailable"
+    )
 import sys
 from typing import Mapping, Sequence
 
@@ -42,6 +63,7 @@ __all__ = [
     "windows_detach_flags",
     "windows_detach_flags_without_breakaway",
     "windows_hide_flags",
+    "windows_hidden_popen_kwargs",
     "windows_detach_popen_kwargs",
     "bounded_git_probe",
     "bounded_probe_run",
@@ -265,6 +287,19 @@ def windows_hide_flags() -> int:
     if not IS_WINDOWS:
         return 0
     return _CREATE_NO_WINDOW
+
+
+def windows_hidden_popen_kwargs() -> dict:
+    """Return the canonical no-visible-window arguments for child processes."""
+    if not IS_WINDOWS:
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": windows_hide_flags(),
+        "startupinfo": startupinfo,
+    }
 
 
 def suppress_platform_ver_console() -> None:

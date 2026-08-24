@@ -103,6 +103,12 @@ COMPACTION_STATUS = (
 
 COMPACTION_DONE_STATUS = "✓ Context compaction complete — continuing turn..."
 
+# A contended compressor lock means another compaction worker is still active.
+# Keep automatic callers out for the same five-minute window used by gateway
+# hygiene failures; a shorter retry simply re-enters the live worker and causes
+# the repeated compaction/status loop seen on long-running Telegram turns.
+COMPRESSION_LOCK_CONTENTION_COOLDOWN_SECONDS = 300.0
+
 
 def _strip_marker_for_comparison(msgs: Any) -> Any:
     """Copy ``msgs`` with the ``_db_persisted`` persistence marker removed.
@@ -2144,31 +2150,109 @@ def _insert_real_user_anchor(messages: list, anchor: dict) -> None:
     _merge_anchor_into_user_message(messages[-1], anchor)
 
 
-def _ensure_compressed_has_user_turn(original_messages: list, compressed: list) -> None:
-    """Preserve human intent, not merely a synthetic user-role placeholder."""
-    if any(_is_real_user_message(message) for message in compressed):
-        return
+def _user_turn_signature(message: Any) -> str:
+    """Return a stable content signature for one real user turn."""
+    if not isinstance(message, dict):
+        return ""
+    content = _strip_stale_todo_snapshot(message.get("content"))
+    try:
+        return json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(content)
+
+
+def _ensure_compressed_has_user_turn(
+    original_messages: list,
+    compressed: list,
+    *,
+    current_user_anchor: Optional[dict] = None,
+) -> None:
+    """Keep an active human turn live *after* the compaction summary.
+
+    ``current_user_anchor`` is supplied only by an in-flight conversation turn.
+    Merely retaining any old real-user row is insufficient there: when the
+    current turn lands on the protected-head boundary, the compressor may
+    summarize it as a complete pair while preserving an older user row.  The
+    handoff then says to respond only to messages after the summary, but no such
+    live request exists — the model can resume stale historical work instead.
+
+    Manual/background compression has no active-turn anchor and keeps the legacy
+    behavior: any surviving real user row is sufficient, otherwise restore the
+    latest historical human turn (or the synthetic continuation marker when no
+    human turn exists).
+    """
     from agent.context_compressor import (
         COMPRESSION_CONTINUATION_USER_CONTENT,
+        ContextCompressor,
         _fresh_compaction_message_copy,
     )
 
-    for message in reversed(original_messages):
-        if _is_real_user_message(message):
-            _insert_real_user_anchor(
+    if current_user_anchor is None:
+        if any(_is_real_user_message(message) for message in compressed):
+            return
+        latest_anchor = next(
+            (
+                _fresh_compaction_message_copy(message)
+                for message in reversed(original_messages)
+                if _is_real_user_message(message)
+            ),
+            None,
+        )
+        if latest_anchor is None:
+            from agent.message_metadata import append_message
+
+            append_message(
                 compressed,
-                _fresh_compaction_message_copy(message),
+                {
+                    "role": "user",
+                    "content": COMPRESSION_CONTINUATION_USER_CONTENT,
+                },
             )
             return
-    from agent.message_metadata import append_message
+        _insert_real_user_anchor(compressed, latest_anchor)
+        return
 
-    append_message(
-        compressed,
-        {
-            "role": "user",
-            "content": COMPRESSION_CONTINUATION_USER_CONTENT,
-        },
+    if not _is_real_user_message(current_user_anchor):
+        return
+    latest_anchor = _fresh_compaction_message_copy(current_user_anchor)
+
+    anchor_signature = _user_turn_signature(latest_anchor)
+    summary_indices = [
+        index
+        for index, message in enumerate(compressed)
+        if ContextCompressor._is_context_summary_message(message)
+    ]
+    if not summary_indices:
+        if any(
+            _is_real_user_message(message)
+            and _user_turn_signature(message) == anchor_signature
+            for message in compressed
+        ):
+            return
+        _insert_real_user_anchor(compressed, latest_anchor)
+        return
+
+    summary_idx = summary_indices[-1]
+    summary_message = compressed[summary_idx]
+    recovered = ContextCompressor._strip_context_summary_handoff_message(
+        _fresh_compaction_message_copy(summary_message)
     )
+    candidates = ([recovered] if recovered is not None else []) + compressed[
+        summary_idx + 1:
+    ]
+    if any(
+        _is_real_user_message(message)
+        and _user_turn_signature(message) == anchor_signature
+        for message in candidates
+    ):
+        return
+
+    # Preserve a distinct verbatim row even when the summary itself has role=user
+    # or a synthetic todo snapshot follows it.  ``repair_message_sequence`` owns
+    # provider-role alternation later; keeping this row exact here lets
+    # ``reanchor_current_turn_user_idx`` and SessionDB persistence identify the
+    # real current turn instead of falling back to scaffolding.
+    compressed.insert(summary_idx + 1, latest_anchor)
 
 
 _PENDING_CONTEXT_ENGINE_NOTIFICATION = (
@@ -2398,6 +2482,49 @@ def compress_context(
         # is set normally on the next successful pass.
         check_compression_model_feasibility(agent)
         agent._compression_feasibility_checked = True
+
+    # Write-ahead control checkpoint before any summarizer can replace context.
+    # Durable sessions must never cross a compaction boundary on transcript
+    # state alone. Manual/legacy compression entrypoints that did not pass
+    # through turn_context get a bounded synthetic turn identity here.
+    _turn_checkpoint_store = None
+    _checkpoint_db = getattr(agent, "_session_db", None)
+    _checkpoint_db_path = getattr(_checkpoint_db, "db_path", None)
+    if (
+        _checkpoint_db is not None
+        and isinstance(agent.session_id, str)
+        and bool(agent.session_id)
+        and isinstance(_checkpoint_db_path, (str, os.PathLike))
+    ):
+        from agent.turn_checkpoint import checkpoint_store_for_agent
+
+        _turn_checkpoint_store = checkpoint_store_for_agent(agent)
+        if _turn_checkpoint_store is None:
+            raise RuntimeError("durable compaction requires a turn checkpoint store")
+        try:
+            _turn_checkpoint_store.load(agent.session_id)
+        except FileNotFoundError:
+            _last_user_content = ""
+            for _checkpoint_message in reversed(messages):
+                if (
+                    isinstance(_checkpoint_message, dict)
+                    and _checkpoint_message.get("role") == "user"
+                ):
+                    _last_user_content = _checkpoint_message.get("content", "")
+                    break
+            _turn_checkpoint_store.start_turn(
+                agent.session_id,
+                str(getattr(agent, "_current_turn_id", None) or f"manual-compress:{_attempt_id}"),
+                _last_user_content,
+                messages,
+                routing={"platform": str(getattr(agent, "platform", None) or "")},
+            )
+        _turn_checkpoint_store.transition(
+            agent.session_id,
+            phase="compaction_summarizing",
+            next_action="prepare_and_commit_compacted_transcript",
+            changed_paths=sorted(getattr(agent, "_turn_file_mutation_paths", set()) or set()),
+        )
 
     _pre_msg_count = len(messages)
     # In-place compaction (config: compression.in_place, see #38763). When True,
@@ -2658,6 +2785,19 @@ def compress_context(
                     agent.context_compressor._begin_compression_telemetry(current_tokens=approx_tokens)
             except Exception:
                 pass
+            try:
+                recorder = getattr(
+                    agent.context_compressor,
+                    "_record_compression_failure_cooldown",
+                    None,
+                )
+                if callable(recorder):
+                    recorder(
+                        COMPRESSION_LOCK_CONTENTION_COOLDOWN_SECONDS,
+                        "compression_lock_contended",
+                    )
+            except Exception:
+                logger.debug("compression lock cooldown record failed", exc_info=True)
             _emit_compression_attempt_telemetry(
                 agent,
                 started_at=_attempt_started_at,
@@ -2665,7 +2805,6 @@ def compress_context(
                 split_status="aborted",
                 failure_class="lock_contended",
             )
-            _complete_compaction_lifecycle()
             return messages, _existing_sp
     _lock_released = False
     _lock_release_guard = threading.Lock()
@@ -2988,6 +3127,15 @@ def compress_context(
                     "without provider-supplied summary context",
                     engine_name,
                 )
+
+        _current_user_anchor = None
+        _current_user_idx = getattr(agent, "_persist_user_message_idx", None)
+        if (
+            isinstance(_current_user_idx, int)
+            and 0 <= _current_user_idx < len(messages)
+            and _is_real_user_message(messages[_current_user_idx])
+        ):
+            _current_user_anchor = copy.deepcopy(messages[_current_user_idx])
 
         messages_before_compression = copy.deepcopy(messages)
         _activity_heartbeat = _CompressionActivityHeartbeat(
@@ -3350,7 +3498,18 @@ def compress_context(
                     "content": todo_snapshot,
                     "_todo_snapshot_synthetic": True,
                 })
-        _ensure_compressed_has_user_turn(messages, compressed)
+        _ensure_compressed_has_user_turn(
+            messages,
+            compressed,
+            current_user_anchor=_current_user_anchor,
+        )
+        if _current_user_anchor is not None:
+            from agent.turn_context import reanchor_current_turn_user_idx
+
+            agent._persist_user_message_idx = reanchor_current_turn_user_idx(
+                compressed,
+                _current_user_anchor.get("content"),
+            )
 
         cached_system_prompt = agent._cached_system_prompt
         agent._invalidate_system_prompt()
@@ -3509,6 +3668,19 @@ def compress_context(
                     _release_lock()
                     return messages, _existing_sp
 
+                if _turn_checkpoint_store is not None:
+                    # Phase 2 of the write-ahead protocol must seal the exact
+                    # transcript that will cross the durable boundary.  The
+                    # anti-growth salvage above may replace ``compressed``;
+                    # preparing earlier left the checkpoint bound to the
+                    # pre-salvage hash and made a valid compacted transcript
+                    # fail its commit fence after the SQLite swap.
+                    _turn_checkpoint_store.prepare_compaction(
+                        agent.session_id,
+                        messages_before_compression,
+                        compressed,
+                    )
+
                 if in_place:
                     # ── In-place compaction: keep the same session_id ──────────
                     # No end_session, no new row, no parent_session_id, no title
@@ -3532,6 +3704,8 @@ def compress_context(
                         PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY,
                     )
 
+                    from agent.turn_checkpoint import CheckpointWriteError
+
                     agent._session_db.archive_and_compact(
                         agent.session_id,
                         compressed,
@@ -3541,6 +3715,45 @@ def compress_context(
                         watermark=_commit_watermark,
                         lock_holder=_lock_holder,
                     )
+                    if _turn_checkpoint_store is None:
+                        raise CheckpointWriteError(
+                            "in-place durable compaction committed without checkpoint store"
+                        )
+                    try:
+                        _checkpoint_live_messages = (
+                            agent._session_db.get_messages_as_conversation(
+                                agent.session_id
+                            )
+                        )
+                        agent._turn_checkpoint_state = (
+                            _turn_checkpoint_store.commit_compaction(
+                                agent.session_id, _checkpoint_live_messages
+                            )
+                        )
+                    except Exception as _checkpoint_commit_error:
+                        try:
+                            agent._session_db.archive_and_compact(
+                                agent.session_id, messages_before_compression
+                            )
+                            _checkpoint_rollback_live = (
+                                agent._session_db.get_messages_as_conversation(
+                                    agent.session_id
+                                )
+                            )
+                            agent._turn_checkpoint_state = (
+                                _turn_checkpoint_store.restore(
+                                    agent.session_id, _checkpoint_rollback_live
+                                )
+                            )
+                        except Exception as _checkpoint_rollback_error:
+                            raise CheckpointWriteError(
+                                "checkpoint commit failed after transcript swap and "
+                                "compensating rollback also failed"
+                            ) from _checkpoint_rollback_error
+                        raise CheckpointWriteError(
+                            "checkpoint commit failed after transcript swap; "
+                            "original transcript restored"
+                        ) from _checkpoint_commit_error
                     split_status = "in_place_committed"
                     # Reset the flush identity set so the next turn's appends are
                     # diffed against the COMPACTED transcript: the compacted dicts
@@ -3699,6 +3912,21 @@ def compress_context(
                         pass
                     agent._session_db_created = True
                     split_status = "rotated_committed"
+                    if _turn_checkpoint_store is None or not old_session_id:
+                        from agent.turn_checkpoint import CheckpointWriteError
+
+                        raise CheckpointWriteError(
+                            "rotation committed without a checkpoint lineage"
+                        )
+                    agent._turn_checkpoint_state = (
+                        _turn_checkpoint_store.migrate_session(
+                            old_session_id,
+                            agent.session_id,
+                            agent._session_db.get_messages_as_conversation(
+                                agent.session_id
+                            ),
+                        )
+                    )
                     # Carry a persistent /goal onto the continuation session.
                     # Compression mints a fresh child id; load_goal does a flat
                     # per-session lookup with no parent walk, so without this an
@@ -3786,6 +4014,52 @@ def compress_context(
                     }
                 _session_commit_succeeded = True
             except Exception as e:
+                from agent.turn_checkpoint import CheckpointError, CheckpointWriteError
+
+                if isinstance(e, CheckpointError):
+                    if not in_place and locals().get("old_session_id"):
+                        _checkpoint_failed_child = agent.session_id
+                        try:
+                            agent._session_db.end_session(
+                                _checkpoint_failed_child,
+                                "checkpoint_rotation_rollback",
+                            )
+                            agent._session_db.reopen_session(old_session_id)
+                            agent.session_id = old_session_id
+                            try:
+                                from gateway.session_context import set_current_session_id
+
+                                set_current_session_id(agent.session_id)
+                            except Exception:
+                                os.environ["HERMES_SESSION_ID"] = agent.session_id
+                            try:
+                                from hermes_logging import set_session_context
+
+                                set_session_context(agent.session_id)
+                            except Exception:
+                                pass
+                            agent._session_db_created = True
+                            agent._turn_checkpoint_state = (
+                                _turn_checkpoint_store.restore(
+                                    old_session_id, messages_before_compression
+                                )
+                            )
+                        except Exception as _rotation_checkpoint_rollback_error:
+                            logger.critical(
+                                "Checkpoint rotation rollback failed child=%s parent=%s",
+                                _checkpoint_failed_child,
+                                old_session_id,
+                                exc_info=True,
+                            )
+                            raise CheckpointWriteError(
+                                "rotation checkpoint failed and parent rollback failed"
+                            ) from _rotation_checkpoint_rollback_error
+                    logger.error(
+                        "Compaction checkpoint failed closed for session=%s: %s",
+                        agent.session_id or "?",
+                        e,
+                    )
+                    raise
                 if (
                     not in_place
                     and locals().get("old_session_id")
@@ -4008,8 +4282,31 @@ def compress_context(
                 else None
             ),
         )
+        _complete_compaction_lifecycle()
         return compressed, new_system_prompt
     finally:
+        # A summarizer no-op/abort never crossed the transcript boundary. Reset
+        # the captured control phase so a later restart does not resume a
+        # compaction that was already abandoned.
+        try:
+            if _turn_checkpoint_store is not None and agent.session_id:
+                _checkpoint_final_state = _turn_checkpoint_store.load(agent.session_id)
+                if (
+                    _checkpoint_final_state.get("phase") == "compaction_summarizing"
+                    and _checkpoint_final_state.get("compaction", {}).get("state")
+                    == "captured"
+                ):
+                    _turn_checkpoint_store.transition(
+                        agent.session_id,
+                        phase="turn_active",
+                        next_action="continue_current_turn",
+                    )
+        except Exception:
+            logger.error(
+                "Could not finalize compaction checkpoint phase for session=%s",
+                agent.session_id or "?",
+                exc_info=True,
+            )
         # Release the lock on the OLD session_id only AFTER rotation completed
         # and all post-rotation bookkeeping (memory manager, context engine,
         # file dedup) ran. A concurrent path that wakes up the moment we
@@ -4098,7 +4395,6 @@ def _compress_context_via_codex_app_server(
     except BaseException:
         if _activity_heartbeat is not None:
             _activity_heartbeat.stop("context compression failed")
-        _complete_compaction_lifecycle()
         raise
 
     if getattr(result, "interrupted", False) or getattr(result, "error", None):
@@ -4123,7 +4419,6 @@ def _compress_context_via_codex_app_server(
         existing_prompt = getattr(agent, "_cached_system_prompt", None)
         if not existing_prompt:
             existing_prompt = agent._build_system_prompt(system_message)
-        _complete_compaction_lifecycle()
         return messages, existing_prompt
 
     try:

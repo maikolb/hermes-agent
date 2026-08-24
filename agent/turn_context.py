@@ -810,6 +810,20 @@ def build_turn_context(
         if not isinstance(pending_cli_message, dict) or pending_cli_message.get("_db_persisted"):
             agent._pending_cli_user_message = None
 
+    # Durable control-plane checkpoint. This happens after the canonical
+    # session row exists but before any idle/preflight compaction can replace
+    # the active transcript. A journal failure is intentionally fatal here:
+    # continuing would re-introduce the exact lossy-resume boundary the
+    # checkpoint exists to remove.
+    from agent.turn_checkpoint import initialize_agent_turn_checkpoint
+
+    _turn_checkpoint = initialize_agent_turn_checkpoint(
+        agent,
+        turn_id=turn_id,
+        user_content=original_user_message,
+        messages=messages,
+    )
+
     # ── Idle-triggered compaction (opt-in; ``idle_compact_after_seconds``) ──
     # When a session resumes after a long idle gap, compact the accumulated
     # history up front so the rest of the conversation does not keep re-reading
@@ -1339,6 +1353,18 @@ def build_turn_context(
                 if plugin_user_context
                 else _gateway_notes
             )
+
+    if _turn_checkpoint and bool(
+        _turn_checkpoint.get("recovery", {}).get("restored")
+    ):
+        from agent.turn_checkpoint import build_checkpoint_resume_note
+
+        _resume_note = build_checkpoint_resume_note(_turn_checkpoint)
+        plugin_user_context = (
+            plugin_user_context + "\n\n" + _resume_note
+            if plugin_user_context
+            else _resume_note
+        )
 
     # Per-turn file-mutation verifier state.
     agent._turn_failed_file_mutations = {}

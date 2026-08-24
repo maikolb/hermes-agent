@@ -1,12 +1,16 @@
 import asyncio
 import sqlite3
+import time
 from pathlib import Path
 
 
 from gateway.config import Platform
 from gateway.kanban_watchers import (
     _acquire_singleton_lock,
+    _render_kanban_worker_focus,
     _release_singleton_lock,
+    _resolve_agent_wake_on_events,
+    _resolve_worker_focus_handoff,
 )
 from gateway.run import GatewayRunner
 from hermes_cli import kanban_db as kb
@@ -22,6 +26,43 @@ class RecordingAdapter:
 
     async def handle_message(self, event):
         self.handled.append(event)
+
+
+class EditableRecordingAdapter(RecordingAdapter):
+    def __init__(self):
+        super().__init__()
+        self.edited = []
+        self.deleted = []
+        self._message_seq = 0
+
+    async def send(self, chat_id, text, metadata=None):
+        from gateway.platforms.base import SendResult
+
+        self._message_seq += 1
+        message_id = str(self._message_seq)
+        self.sent.append({
+            "chat_id": chat_id,
+            "text": text,
+            "metadata": metadata or {},
+            "message_id": message_id,
+        })
+        return SendResult(success=True, message_id=message_id)
+
+    async def edit_message(self, chat_id, message_id, content, **kwargs):
+        from gateway.platforms.base import SendResult
+
+        self.edited.append({
+            "chat_id": chat_id,
+            "message_id": str(message_id),
+            "content": content,
+        })
+        return SendResult(success=True, message_id=str(message_id))
+
+    async def delete_message(self, chat_id, message_id, **kwargs):
+        from gateway.platforms.base import SendResult
+
+        self.deleted.append({"chat_id": chat_id, "message_id": str(message_id)})
+        return SendResult(success=True, message_id=str(message_id))
 
 
 class DisconnectedAdapters(dict):
@@ -52,6 +93,9 @@ def _make_runner(adapter):
     # Most tests model the default gateway after its dispatcher acquired the
     # singleton lock. Tests for startup or non-owner gateways clear this.
     runner._kanban_dispatcher_lock_handle = object()
+    # Existing tests create events after a logical boot at epoch zero. Tests
+    # for startup backlog suppression override this explicitly.
+    runner._gateway_started_at = 0.0
     return runner
 
 
@@ -64,6 +108,58 @@ def _create_completed_subscription(summary="done once"):
         return tid
     finally:
         conn.close()
+
+
+def test_claimed_task_notifies_only_after_material_start(tmp_path, monkeypatch):
+    db_path = tmp_path / "claimed-start.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="material start", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat-1",
+        )
+        assert kb.claim_task(conn, tid, claimer="worker:1") is not None
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    assert tid in adapter.sent[0]["text"]
+    assert "started" in adapter.sent[0]["text"].lower()
+
+
+def test_retry_chain_converges_to_one_final_notification(tmp_path, monkeypatch):
+    db_path = tmp_path / "retry-chain.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="retry chain", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kb._append_event(conn, tid, kind="claimed")
+        kb._append_event(conn, tid, kind="timed_out")
+        kb._append_event(conn, tid, kind="claimed")
+        kb._append_event(conn, tid, kind="gave_up")
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    assert "gave up" in adapter.sent[0]["text"].lower()
+    assert "started" not in adapter.sent[0]["text"].lower()
 
 
 def _unseen_terminal_events(tid):
@@ -81,7 +177,7 @@ def _unseen_terminal_events(tid):
         conn.close()
 
 
-def test_kanban_notifier_replays_telegram_dm_topic_delivery_metadata(tmp_path, monkeypatch):
+def test_kanban_notifier_delivers_dm_metadata_without_waking_agent(tmp_path, monkeypatch):
     db_path = tmp_path / "dm-topic-metadata.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
@@ -125,9 +221,266 @@ def test_kanban_notifier_replays_telegram_dm_topic_delivery_metadata(tmp_path, m
         "telegram_reply_to_message_id": "462",
         "thread_id": "20197",
     }
-    assert len(adapter.handled) == 1
-    assert adapter.handled[0].source.chat_type == "dm"
-    assert adapter.handled[0].source.thread_id == "20197"
+    assert adapter.handled == []
+
+
+def test_notifier_suppresses_pre_start_backlog_and_advances_cursor(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / "pre-start-backlog.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="historical completion", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kb.complete_task(conn, tid, summary="historical result")
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    runner._gateway_started_at = time.time() + 60
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert adapter.sent == []
+    assert adapter.handled == []
+    assert _unseen_terminal_events(tid) == []
+
+
+def test_agent_wake_config_requires_literal_true():
+    assert _resolve_agent_wake_on_events(lambda: {}) is False
+    assert _resolve_agent_wake_on_events(
+        lambda: {"kanban": {"agent_wake_on_events": "true"}}
+    ) is False
+    assert _resolve_agent_wake_on_events(
+        lambda: {"kanban": {"agent_wake_on_events": True}}
+    ) is True
+
+    def _broken_config():
+        raise RuntimeError("unavailable")
+
+    assert _resolve_agent_wake_on_events(_broken_config) is False
+
+
+def test_worker_focus_handoff_config_requires_literal_true():
+    assert _resolve_worker_focus_handoff(lambda: {}) is False
+    assert _resolve_worker_focus_handoff(
+        lambda: {"kanban": {"worker_focus_handoff": "true"}}
+    ) is False
+    assert _resolve_worker_focus_handoff(
+        lambda: {"kanban": {"worker_focus_handoff": True}}
+    ) is True
+
+
+def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypatch):
+    db_path = tmp_path / "worker-focus-counter.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"kanban": {"worker_focus_handoff": True}},
+    )
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        first = kb.create_task(conn, title="first worker", assignee="worker-a")
+        second = kb.create_task(conn, title="second worker", assignee="worker-b")
+        for task_id in (first, second):
+            kb.add_notify_sub(
+                conn,
+                task_id=task_id,
+                platform="telegram",
+                chat_id="chat-1",
+                thread_id="topic-7",
+                chat_type="group",
+            )
+            assert kb.claim_task(
+                conn, task_id, claimer=f"worker:{task_id}"
+            ) is not None
+        now = int(time.time())
+        conn.execute(
+            "UPDATE tasks SET started_at = ? WHERE id = ?", (now - 120, first)
+        )
+        conn.execute(
+            "UPDATE tasks SET started_at = ? WHERE id = ?", (now - 60, second)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    adapter = EditableRecordingAdapter()
+    runner = _make_runner(adapter)
+    runner._is_session_running = lambda _key: True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 2
+    assert not any("Now following worker" in item["text"] for item in adapter.sent)
+
+    runner._running = True
+    runner._is_session_running = lambda _key: False
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    focus_messages = [
+        item for item in adapter.sent if "Now following worker" in item["text"]
+    ]
+    assert len(focus_messages) == 1
+    assert "worker 1/2" in focus_messages[0]["text"]
+    assert "first worker" in focus_messages[0]["text"]
+    focus_message_id = focus_messages[0]["message_id"]
+
+    conn = kb.connect()
+    try:
+        kb.complete_task(conn, first, summary="first done")
+    finally:
+        conn.close()
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 1
+    assert adapter.edited[-1]["message_id"] == focus_message_id
+    assert "second worker" in adapter.edited[-1]["content"]
+
+    conn = kb.connect()
+    try:
+        kb.complete_task(conn, second, summary="second done")
+    finally:
+        conn.close()
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert runner._kanban_worker_focus_active == {}
+    assert adapter.deleted[-1] == {
+        "chat_id": "chat-1",
+        "message_id": focus_message_id,
+    }
+
+    original_get_task = kb.get_task
+    get_task_calls = 0
+
+    def _counted_get_task(*args, **kwargs):
+        nonlocal get_task_calls
+        get_task_calls += 1
+        return original_get_task(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "get_task", _counted_get_task)
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert get_task_calls == 0
+    assert runner._kanban_worker_focus_active == {}
+
+
+def test_worker_focus_retry_boundary_decrements_without_chat_noise(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / "worker-focus-retry.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"kanban": {"worker_focus_handoff": True}},
+    )
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="retry worker", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform="telegram",
+            chat_id="chat-1",
+            thread_id="topic-7",
+            chat_type="group",
+        )
+        assert kb.claim_task(conn, task_id, claimer="worker:first") is not None
+    finally:
+        conn.close()
+
+    adapter = EditableRecordingAdapter()
+    runner = _make_runner(adapter)
+    runner._is_session_running = lambda _key: False
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 1
+
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+            "claim_expires = NULL WHERE id = ?",
+            (task_id,),
+        )
+        kb._append_event(conn, task_id, kind="crashed")
+        conn.commit()
+    finally:
+        conn.close()
+    sent_before_crash = len(adapter.sent)
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert runner._kanban_worker_focus_active == {}
+    assert len(adapter.sent) == sent_before_crash
+    assert adapter.deleted
+
+    conn = kb.connect()
+    try:
+        assert kb.claim_task(conn, task_id, claimer="worker:retry") is not None
+    finally:
+        conn.close()
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 1
+    assert not any(
+        "started" in item["text"].lower()
+        for item in adapter.sent[sent_before_crash:]
+    )
+
+
+def test_worker_focus_rehydrates_once_after_gateway_restart(tmp_path, monkeypatch):
+    db_path = tmp_path / "worker-focus-rehydrate.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"kanban": {"worker_focus_handoff": True}},
+    )
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="survives restart", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform="telegram",
+            chat_id="chat-1",
+            thread_id="topic-7",
+            chat_type="group",
+        )
+        assert kb.claim_task(conn, task_id, claimer="worker:restart") is not None
+        latest = conn.execute(
+            "SELECT MAX(id) AS id FROM task_events WHERE task_id = ?", (task_id,)
+        ).fetchone()["id"]
+        conn.execute(
+            "UPDATE kanban_notify_subs SET last_event_id = ? WHERE task_id = ?",
+            (latest, task_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    adapter = EditableRecordingAdapter()
+    runner = _make_runner(adapter)
+    runner._is_session_running = lambda _key: False
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert runner._kanban_worker_focus_rehydrated is True
+    assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 1
+    assert any("survives restart" in item["text"] for item in adapter.sent)
+
+
+def test_worker_focus_text_contains_only_event_owned_state():
+    class Task:
+        id = "t_focus"
+        title = "focus task"
+        assignee = "worker"
+        current_run_id = 7
+
+    rendered = _render_kanban_worker_focus(
+        Task(), board="board-a", active_count=2,
+    )
+    assert "worker 1/2" in rendered
+    assert "run 7" in rendered
+    assert "Heartbeat" not in rendered
 
 
 def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):
@@ -292,18 +645,8 @@ class ReportedFailureAdapter:
         return SendResult(success=False, error="Not connected")
 
 
-def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
-    """A retry cycle (crashed → reclaimed → crashed) notifies the user twice.
-
-    Before #21398 the notifier auto-unsubscribed on any terminal event kind
-    (gave_up / crashed / timed_out), so the second crash in a respawn cycle
-    silently dropped — the subscription was already gone. This test pins the
-    new contract: subscription survives non-final terminal events; the
-    cursor handles dedup.
-
-    Two crashes ten seconds apart on the same task — both should land on
-    the adapter.
-    """
+def test_notifier_silences_retry_crashes_until_final_give_up(tmp_path, monkeypatch):
+    """Retry telemetry stays in the DB and only the final give-up is visible."""
     db_path = tmp_path / "redeliver-cycle.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
@@ -321,9 +664,7 @@ def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
     runner = _make_runner(adapter)
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
-    # First crash delivered.
-    assert len(adapter.sent) == 1
-    assert "crashed" in adapter.sent[0]["text"].lower()
+    assert adapter.sent == []
 
     # Subscription survives — the cursor advanced past event #1, but the
     # row is still there.
@@ -335,10 +676,9 @@ def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
             "second crash also notifies the user (issue #21398)."
         )
 
-        # Second crash — same task, same dispatcher (or a respawn). Append
-        # another event to simulate the dispatcher firing crashed a second
-        # time during retry.
+        # More internal retry telemetry followed by the actionable final state.
         kb._append_event(conn, tid, kind="crashed")
+        kb._append_event(conn, tid, kind="gave_up")
     finally:
         conn.close()
 
@@ -347,11 +687,8 @@ def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
     runner = _make_runner(adapter)
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
-    assert len(adapter.sent) == 2, (
-        f"Second crashed event should also notify; got {len(adapter.sent)} "
-        f"deliveries (texts: {[d['text'] for d in adapter.sent]})"
-    )
-    assert "crashed" in adapter.sent[1]["text"].lower()
+    assert len(adapter.sent) == 1
+    assert "gave up" in adapter.sent[0]["text"].lower()
 
 
 def test_notifier_subscription_survives_done_reopen_until_archive(
@@ -360,6 +697,13 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
     """Done is reversible; archive alone ends notification ownership."""
     db_path = tmp_path / "done-reopen-archive.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda: {"kanban": {"agent_wake_on_events": True}},
+    )
     kb.init_db()
 
     conn = kb.connect()
@@ -426,9 +770,11 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
     runner._active_profile_name = lambda: "reviewer"
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
-    # The reopen status and second completion each deliver once, while only
-    # completion wakes the exact original session/thread.
-    assert len(adapter.sent) == 3
+    # Chat converges to the latest material state in the tick instead of
+    # replaying its event log. The intermediate ready status is consumed by
+    # the cursor; only the corrected completion is sent and wakes the exact
+    # original session/thread.
+    assert len(adapter.sent) == 2
     assert len(adapter.handled) == 2
     assert all(item["chat_id"] == "origin-chat" for item in adapter.sent)
     assert adapter.handled[-1].source.thread_id == "origin-thread"
@@ -449,8 +795,43 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
 
     # Archive itself is intentionally silent, but consumes its event and
     # removes the subscription so no later historical event can replay.
-    assert len(adapter.sent) == 3
+    assert len(adapter.sent) == 2
     assert len(adapter.handled) == 2
+    conn = kb.connect()
+    try:
+        assert kb.list_notify_subs(conn, tid) == []
+    finally:
+        conn.close()
+
+
+def test_completed_then_archived_same_tick_delivers_completion_and_unsubscribes(
+    tmp_path, monkeypatch,
+):
+    """Archive is silent control state, not a reason to lose completion."""
+    db_path = tmp_path / "completed-archive-same-tick.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="deliver before archive", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="origin-chat",
+        )
+        assert kb.complete_task(conn, tid, summary="delivered result")
+        assert kb.archive_task(conn, tid)
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
+
+    assert len(adapter.sent) == 1
+    assert "done" in adapter.sent[0]["text"]
+    assert "delivered result" in adapter.sent[0]["text"]
     conn = kb.connect()
     try:
         assert kb.list_notify_subs(conn, tid) == []
@@ -484,6 +865,10 @@ def test_notifier_wakeup_uses_subscription_chat_type(tmp_path, monkeypatch):
         conn.close()
 
     adapter = RecordingAdapter()
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"kanban": {"agent_wake_on_events": True}},
+    )
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
 
     assert len(adapter.sent) == 1

@@ -47,6 +47,7 @@ from tools.code_execution_tool import (
     _TOOL_DOC_LINES,
     _execute_remote,
     _format_interrupted_output,
+    _prepare_local_sandbox_source,
 )
 from tools.registry import registry
 
@@ -80,6 +81,19 @@ class TestSandboxRequirements(unittest.TestCase):
         self.assertEqual(EXECUTE_CODE_SCHEMA["name"], "execute_code")
         self.assertIn("code", EXECUTE_CODE_SCHEMA["parameters"]["properties"])
         self.assertIn("code", EXECUTE_CODE_SCHEMA["parameters"]["required"])
+
+    def test_windows_sandbox_installs_zero_ui_broker_before_user_code(self):
+        marker = "USER_CODE_MUST_RUN_AFTER_BROKER = True"
+        source = _prepare_local_sandbox_source(marker, is_windows=True)
+
+        assert "install_windows_process_broker" in source
+        assert "broker_installed" in source
+        assert "raise RuntimeError" in source
+        assert source.index("install_windows_process_broker") < source.index(marker)
+
+    def test_non_windows_sandbox_source_is_unchanged(self):
+        source = "print('unchanged')"
+        assert _prepare_local_sandbox_source(source, is_windows=False) == source
 
 
 class TestInterruptedOutput(unittest.TestCase):
@@ -810,7 +824,8 @@ class TestRpcTokenAuthorization(unittest.TestCase):
 
         # socketpair gives us a connected client end and a "server" end we
         # can hand to accept() by wrapping it in a tiny listener shim.
-        srv, cli = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        family = socket.AF_INET if sys.platform == "win32" else socket.AF_UNIX
+        srv, cli = socket.socketpair(family, socket.SOCK_STREAM)
 
         class _OneShotListener:
             """Minimal object exposing the .accept()/.settimeout() the loop uses."""

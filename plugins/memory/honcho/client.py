@@ -18,6 +18,7 @@ import os
 import logging
 import hashlib
 import ipaddress
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -377,6 +378,55 @@ def _resolve_observation(
 
 
 
+def _bound_session_value(name: str) -> str | None:
+    """Read only a value explicitly bound in this task's session ContextVars."""
+    try:
+        from gateway import session_context
+
+        var = session_context._VAR_MAP.get(name)
+        if var is None:
+            return None
+        value = var.get()
+        if value is session_context._UNSET:
+            return None
+        return str(value)
+    except Exception:
+        return None
+
+
+def _telegram_project_workspace_id(
+    base_workspace: str,
+) -> tuple[bool, str | None]:
+    """Return task-binding state and a digest-only Telegram project workspace."""
+    platform = _bound_session_value("HERMES_SESSION_PLATFORM")
+    if platform is None:
+        return False, None
+
+    profile = _bound_session_value("HERMES_SESSION_PROFILE")
+    chat_id = _bound_session_value("HERMES_SESSION_CHAT_ID")
+    project_id = _bound_session_value("HERMES_PROJECT_ID")
+    if (
+        platform.strip().lower() != "telegram"
+        or profile is None
+        or not (chat_id or "").strip()
+        or not (project_id or "").strip()
+    ):
+        return True, None
+
+    digest = hashlib.sha256(b"honcho-telegram-project-workspace-v1")
+    for component in (base_workspace, profile, chat_id, project_id):
+        encoded = component.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return True, digest.hexdigest()
+
+
+def _capture_bound_workspace_id(base_workspace: str) -> str | None:
+    """Capture only the derived digest for non-context-propagating threads."""
+    _, scoped_workspace = _telegram_project_workspace_id(base_workspace)
+    return scoped_workspace
+
+
 @dataclass
 class HonchoClientConfig:
     """Configuration for Honcho client, resolved for a specific host."""
@@ -481,6 +531,12 @@ class HonchoClientConfig:
     # block exists or enabled was set explicitly), vs auto-enabled from a
     # stray HONCHO_API_KEY env var.
     explicitly_configured: bool = False
+    # Digest-only effective workspace captured while gateway ContextVars are
+    # bound. Honcho owns background threads that do not inherit ContextVars;
+    # retaining this non-sensitive value keeps those calls in the same scope.
+    _bound_workspace_id: str | None = field(
+        default=None, repr=False, compare=False
+    )
     # Provenance: WHERE this config was resolved from, captured at resolution
     # time (inside the caller's profile scope). Bound consumers (session
     # manager, OAuth refresh paths) use these instead of re-resolving
@@ -524,6 +580,7 @@ class HonchoClientConfig:
         return cls(
             host=resolved_host,
             workspace_id=workspace_id,
+            _bound_workspace_id=_capture_bound_workspace_id(workspace_id),
             api_key=api_key,
             environment=os.environ.get("HONCHO_ENVIRONMENT", "production"),
             base_url=base_url,
@@ -671,6 +728,7 @@ class HonchoClientConfig:
         return cls(
             host=resolved_host,
             workspace_id=workspace,
+            _bound_workspace_id=_capture_bound_workspace_id(str(workspace)),
             api_key=api_key,
             environment=environment,
             base_url=base_url,
@@ -1020,7 +1078,21 @@ def _credential_fingerprint(config: HonchoClientConfig | None) -> str:
     return ""
 
 
-def _client_cache_key(config: HonchoClientConfig | None) -> tuple:
+def _effective_workspace_id(config: HonchoClientConfig) -> str:
+    """Resolve the project-scoped workspace before client cache lookup."""
+    context_bound, scoped_workspace = _telegram_project_workspace_id(
+        str(config.workspace_id)
+    )
+    if context_bound:
+        return scoped_workspace or config.workspace_id
+    return config._bound_workspace_id or config.workspace_id
+
+
+def _client_cache_key(
+    config: HonchoClientConfig | None,
+    *,
+    effective_settings: tuple[str | None, float] | None = None,
+) -> tuple:
     """Cache identity for a Honcho client build.
 
     Explicit configs key on the connection identity ``_build`` embeds in the
@@ -1036,15 +1108,18 @@ def _client_cache_key(config: HonchoClientConfig | None) -> tuple:
     bound configs are the supported path everywhere else.
     """
     if config is not None:
+        if effective_settings is None:
+            effective_settings = _resolve_effective_client_settings(config)
+        effective_base_url, effective_timeout = effective_settings
         return (
             "explicit",
             config.host,
-            config.workspace_id,
-            config.base_url or "",
+            _effective_workspace_id(config),
+            effective_base_url or "",
             config.environment,
             str(config.config_path) if config.config_path is not None else "",
             str(config.hermes_home) if config.hermes_home is not None else "",
-            _resolve_timeout_from_sources(config),
+            effective_timeout,
             _credential_fingerprint(config),
         )
     return (
@@ -1066,14 +1141,22 @@ def _slot_for(key: tuple) -> SingletonSlot:
     pinned client per change — the gap that made #81401's retirement
     machinery inert.
     """
-    identity = key[:3] if key[0] == "ambient" else (key[0], key[1], key[5], key[6])
+    identity = (
+        key[:3]
+        if key[0] == "ambient"
+        else (key[0], key[1], key[2], key[5], key[6])
+    )
     with _client_slots_lock:
         slot = _client_slots.get(key)
         if slot is None:
             stale = [
                 k for k in _client_slots
                 if k != key and (
-                    (k[:3] if k[0] == "ambient" else (k[0], k[1], k[5], k[6])) == identity
+                    (
+                        k[:3]
+                        if k[0] == "ambient"
+                        else (k[0], k[1], k[2], k[5], k[6])
+                    ) == identity
                 )
             ]
             for k in stale:
@@ -1093,20 +1176,32 @@ def _slot_for(key: tuple) -> SingletonSlot:
 _honcho_json_timeout_memo: dict[str, tuple[int, float | None]] = {}
 
 
-def _config_yaml_timeout() -> float | None:
-    """Read honcho.timeout / honcho.request_timeout via the cached config loader."""
+def _config_yaml_honcho_settings() -> tuple[str | None, float | None]:
+    """Read the connection settings inherited from config.yaml once."""
     try:
         from hermes_cli.config import load_config_readonly
 
         honcho_cfg = load_config_readonly().get("honcho", {})
         if isinstance(honcho_cfg, dict):
-            return _resolve_optional_float(
+            raw_base_url = honcho_cfg.get("base_url")
+            base_url = (
+                _normalize_sdk_base_url(raw_base_url)
+                if isinstance(raw_base_url, str)
+                else None
+            )
+            timeout = _resolve_optional_float(
                 honcho_cfg.get("timeout"),
                 honcho_cfg.get("request_timeout"),
             )
-        return None
+            return base_url, timeout
     except Exception:
-        return None
+        pass
+    return None, None
+
+
+def _config_yaml_timeout() -> float | None:
+    """Read honcho.timeout / honcho.request_timeout via the cached config loader."""
+    return _config_yaml_honcho_settings()[1]
 
 
 def _honcho_json_timeout() -> float | None:
@@ -1157,6 +1252,35 @@ def _resolve_timeout_from_sources(config: HonchoClientConfig | None) -> float:
     if timeout is None:
         timeout = _config_yaml_timeout()
     return timeout if timeout is not None else _DEFAULT_HTTP_TIMEOUT
+
+
+def _normalize_sdk_base_url(base_url: str | None) -> str | None:
+    """Normalize a configured URL to the exact destination passed to the SDK."""
+    if base_url is None:
+        return None
+    sanitized = _sanitize_url(base_url.strip() or None)
+    if not sanitized:
+        return None
+    return re.sub(r"/v\d+/*$", "", sanitized).rstrip("/")
+
+
+def _resolve_effective_client_settings(
+    config: HonchoClientConfig,
+) -> tuple[str | None, float]:
+    """Resolve the URL and timeout that both cache identity and SDK build use."""
+    resolved_base_url = _normalize_sdk_base_url(config.base_url)
+    resolved_timeout = config.timeout
+
+    if resolved_base_url is None or resolved_timeout is None:
+        yaml_base_url, yaml_timeout = _config_yaml_honcho_settings()
+        if resolved_base_url is None:
+            resolved_base_url = yaml_base_url
+        if resolved_timeout is None:
+            resolved_timeout = yaml_timeout
+
+    if resolved_timeout is None:
+        resolved_timeout = _DEFAULT_HTTP_TIMEOUT
+    return resolved_base_url, resolved_timeout
 
 
 def _apply_fresh_oauth_token(config: HonchoClientConfig) -> None:
@@ -1226,7 +1350,12 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
     racing threads can't each construct a client and leak the loser's
     connection.
     """
-    key = _client_cache_key(config)
+    if config is None:
+        config = HonchoClientConfig.from_global_config()
+
+    effective_settings = _resolve_effective_client_settings(config)
+    resolved_base_url, resolved_timeout = effective_settings
+    key = _client_cache_key(config, effective_settings=effective_settings)
     slot = _slot_for(key)
     cached = slot.peek()
     if cached is not None:
@@ -1236,14 +1365,12 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
             return refreshed
         # Slot was reset by a failed in-place rotation — rebuild below.
 
-    if config is None:
-        config = HonchoClientConfig.from_global_config()
-
     # Refresh a near-expiry OAuth grant before the first build so the client
     # starts with a live access token rather than 401ing an hour in.
     _apply_fresh_oauth_token(config)
+    resolved_workspace = _effective_workspace_id(config)
 
-    if not config.api_key and not config.base_url:
+    if not config.api_key and not resolved_base_url:
         raise ValueError(
             "Honcho API key not found. "
             "Get your API key at https://app.honcho.dev, "
@@ -1274,34 +1401,12 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
                 "(or run `hermes honcho setup` to configure)."
             )
 
-        # Allow config.yaml honcho.base_url to override the SDK's environment
-        # mapping, enabling remote self-hosted Honcho deployments without
-        # requiring the server to live on localhost.
-        resolved_base_url = config.base_url
-        resolved_timeout = config.timeout
-        if not resolved_base_url or resolved_timeout is None:
-            try:
-                from hermes_cli.config import load_config
-                hermes_cfg = load_config()
-                honcho_cfg = hermes_cfg.get("honcho", {})
-                if isinstance(honcho_cfg, dict):
-                    if not resolved_base_url:
-                        resolved_base_url = _sanitize_url(honcho_cfg.get("base_url", "").strip() or None)
-                    if resolved_timeout is None:
-                        resolved_timeout = _resolve_optional_float(
-                            honcho_cfg.get("timeout"),
-                            honcho_cfg.get("request_timeout"),
-                        )
-            except Exception:
-                pass
-
-        # Fall back to the default so an unconfigured install cannot hang
-        # indefinitely on a stalled Honcho request.
-        if resolved_timeout is None:
-            resolved_timeout = _DEFAULT_HTTP_TIMEOUT
-
         if resolved_base_url:
-            logger.info("Initializing Honcho client (base_url: %s, workspace: %s)", resolved_base_url, config.workspace_id)
+            logger.info(
+                "Initializing Honcho client (base_url: %s, workspace: %s)",
+                resolved_base_url,
+                resolved_workspace,
+            )
         else:
             # No base_url resolved, so the SDK falls back to its own
             # ENVIRONMENTS map (honcho.client: local -> http://localhost:8000,
@@ -1311,7 +1416,7 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
             logger.info(
                 "Initializing Honcho client (host: %s, workspace: %s, "
                 "base_url unset — SDK will resolve from environment=%s)",
-                config.host, config.workspace_id, config.environment,
+                config.host, resolved_workspace, config.environment,
             )
 
         # Local Honcho instances don't require an API key, but the SDK
@@ -1332,20 +1437,8 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         else:
             effective_api_key = config.api_key
 
-        # The Honcho SDK's route builders (e.g. routes.workspaces()) already
-        # include the version prefix (e.g. "/v3/workspaces").  When a user-supplied
-        # base_url already ends in a version segment (e.g.
-        # "http://localhost:38000/v3", "https://honcho.my.ts.net/v3"), concatenating
-        # the two produces "/v3/v3/workspaces" → 404 on every call.  This is a pure
-        # routing concern independent of host, so strip a trailing version segment
-        # from ANY base_url — loopback, LAN, custom domain, or cloud alike.  The
-        # SDK then appends its own versioned paths correctly.
-        if resolved_base_url:
-            import re as _re
-            resolved_base_url = _re.sub(r"/v\d+/*$", "", resolved_base_url).rstrip("/")
-
         kwargs: dict = {
-            "workspace_id": config.workspace_id,
+            "workspace_id": resolved_workspace,
             "api_key": effective_api_key,
             "environment": config.environment,
         }

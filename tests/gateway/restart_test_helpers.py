@@ -159,6 +159,9 @@ def make_restart_runner(
     runner.session_store = MagicMock()
     runner.session_store._entries = {}
     runner.delivery_router = MagicMock()
+    # Legacy restart tests exercise scheduling mechanics independent of the
+    # durable checkpoint gate. Gate-specific tests override this to True.
+    runner._auto_resume_requires_checkpoint = lambda: False
 
     platform_adapter = adapter or RestartTestAdapter()
     platform_adapter.set_message_handler(AsyncMock(return_value=None))

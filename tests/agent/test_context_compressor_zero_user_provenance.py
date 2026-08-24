@@ -15,9 +15,12 @@ from agent.context_compressor import (
     SUMMARY_PREFIX,
     ContextCompressor,
     _NO_USER_TASK_SENTINEL,
+    _SUMMARY_END_MARKER,
 )
 from agent.conversation_compression import (
     _ensure_compressed_has_user_turn,
+    _is_real_user_message,
+    _message_text,
     compress_context,
 )
 from hermes_state import SessionDB

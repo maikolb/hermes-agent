@@ -854,6 +854,8 @@ class SessionEntry:
     resume_pending: bool = False
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
     last_resume_marked_at: Optional[datetime] = None
+    resume_not_before: Optional[datetime] = None
+    automatic_resume_attempts: int = 0
 
     # Durable ownership marker for the agent turn currently executing on this
     # routing entry.  A normal unwind clears it with compare-and-swap semantics;
@@ -2749,6 +2751,14 @@ class SessionStore:
             _is_stale = self._is_session_ended_in_db(_stale_session_id)
             if _entry_for_checks.suspended:
                 _reset_reason = "suspended"
+            elif (
+                _entry_for_checks.resume_pending
+                and _entry_for_checks.resume_reason == "provider_rate_limit"
+            ):
+                # A provider quota reset can be hours away.  Preserve the
+                # exact session/checkpoint until its persisted not-before
+                # boundary instead of converting it into an idle/daily reset.
+                _reset_reason = None
             elif _entry_for_checks.resume_pending:
                 _reset_reason = self._should_reset(_entry_for_checks, source)
                 if not _reset_reason:
@@ -3267,6 +3277,8 @@ class SessionStore:
         self,
         session_key: str,
         reason: str = "restart_timeout",
+        *,
+        not_before: Optional[datetime] = None,
     ) -> bool:
         """Mark a session as resumable after a restart interruption.
 
@@ -3288,9 +3300,29 @@ class SessionStore:
                 entry.resume_pending = True
                 entry.resume_reason = reason
                 entry.last_resume_marked_at = _now()
+                entry.resume_not_before = not_before
                 self._save()
                 return True
         return False
+
+    def claim_automatic_resume_attempt(
+        self,
+        session_key: str,
+        *,
+        max_attempts: int = 3,
+    ) -> bool:
+        """Atomically claim one bounded automatic continuation attempt."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None or not entry.resume_pending or entry.suspended:
+                return False
+            attempts = max(0, int(entry.automatic_resume_attempts or 0))
+            if attempts >= max(1, int(max_attempts)):
+                return False
+            entry.automatic_resume_attempts = attempts + 1
+            self._save()
+            return True
 
     def clear_resume_pending(self, session_key: str) -> bool:
         """Clear the resume-pending flag after a successful resumed turn.
@@ -3309,6 +3341,8 @@ class SessionStore:
             entry.resume_pending = False
             entry.resume_reason = None
             entry.last_resume_marked_at = None
+            entry.resume_not_before = None
+            entry.automatic_resume_attempts = 0
             self._save()
             return True
 

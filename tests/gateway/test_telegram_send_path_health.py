@@ -20,6 +20,42 @@ def _make_adapter() -> TelegramAdapter:
     return adapter
 
 
+def test_exact_text_capability_excludes_chunked_telegram_payloads():
+    adapter = _make_adapter()
+
+    assert adapter.can_deliver_exact_text("short exact response") is True
+    assert adapter.can_deliver_exact_text("x" * 5000) is False
+
+
+@pytest.mark.asyncio
+async def test_disconnected_send_is_explicitly_pre_network():
+    adapter = _make_adapter()
+    adapter._bot = None
+
+    result = await adapter.send("123", "hello")
+
+    assert result.success is False
+    assert result.error == "Not connected"
+    assert result.raw_response == {"send_attempted": False}
+
+
+@pytest.mark.asyncio
+async def test_exact_delivery_bypasses_unaudited_rich_fast_path():
+    adapter = _make_adapter()
+    adapter._should_attempt_rich = MagicMock(return_value=True)
+    adapter._try_send_rich = AsyncMock()
+
+    result = await adapter.send(
+        "123",
+        "| A | B |\n|---|---|\n| 1 | 2 |",
+        metadata={"_hermes_exact_text_delivery": True},
+    )
+
+    assert result.success is True
+    adapter._try_send_rich.assert_not_awaited()
+    adapter._bot.send_message.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_send_short_circuits_when_path_degraded():
     """Degraded adapter returns failure WITHOUT calling send_message,
@@ -32,6 +68,7 @@ async def test_send_short_circuits_when_path_degraded():
     assert result.success is False
     assert result.error == "send_path_degraded"
     assert result.retryable is True
+    assert result.raw_response == {"send_attempted": False}
     adapter._bot.send_message.assert_not_awaited()
 
 
@@ -76,3 +113,35 @@ async def test_send_short_flood_still_retries_inline(monkeypatch):
     sleep.assert_awaited_once_with(2.0)
 
 
+@pytest.mark.asyncio
+async def test_exact_delivery_does_not_substitute_plain_text_on_parse_error():
+    adapter = _make_adapter()
+    adapter._rich_send_disabled = True
+    adapter._bot.send_message = AsyncMock(
+        side_effect=RuntimeError("Markdown parse error")
+    )
+
+    result = await adapter.send(
+        "123",
+        r"literal \\*markers\\* must survive",
+        metadata={"_hermes_exact_text_delivery": True},
+    )
+
+    assert result.success is False
+    assert adapter._bot.send_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_best_effort_delivery_retains_plain_text_parse_fallback():
+    adapter = _make_adapter()
+    adapter._rich_send_disabled = True
+    ok = MagicMock(message_id=9)
+    adapter._bot.send_message = AsyncMock(
+        side_effect=[RuntimeError("Markdown parse error"), ok]
+    )
+
+    result = await adapter.send("123", "**bold**")
+
+    assert result.success is True
+    assert adapter._bot.send_message.await_count == 2
+    assert adapter._bot.send_message.await_args_list[1].kwargs["parse_mode"] is None

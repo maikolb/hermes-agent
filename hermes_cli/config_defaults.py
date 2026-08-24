@@ -315,6 +315,9 @@ DEFAULT_CONFIG = {
         # default is 1800s) plus runtime slack.  Set to 0 to disable the
         # gate and restore pre-fix behaviour (always inject).
         "gateway_auto_continue_freshness": 3600,
+        # A restart marker alone is not authority to execute old work. Startup
+        # continuation requires an intact unfinished operational checkpoint.
+        "gateway_auto_resume_requires_checkpoint": True,
         # Max seconds the gateway waits for boot auto-resume turns to finish
         # before it releases the startup-restore inbound gate.  While startup
         # restore is in progress the gateway QUEUES every inbound message
@@ -2672,6 +2675,10 @@ DEFAULT_CONFIG = {
         # behaviour — e.g. for a profile that prefers explicit
         # ``kanban_notify-subscribe`` calls per task.
         "auto_subscribe_on_create": True,
+        # Notifications are passive by default. A completed/blocked card must
+        # not become a synthetic inbound user turn unless a profile explicitly
+        # opts into autonomous orchestration for that channel.
+        "agent_wake_on_events": False,
         # Run the dispatcher inside the gateway process. On by default —
         # the cost is ~300µs every `dispatch_interval_seconds` when idle,
         # and gateway is the supervisor users already have. Set to false

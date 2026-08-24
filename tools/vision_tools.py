@@ -35,6 +35,9 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
@@ -63,6 +66,7 @@ def _load_auxiliary_client() -> None:
 
 
 from hermes_constants import get_hermes_dir
+from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
 import sys
@@ -1835,6 +1839,188 @@ _VIDEO_MIME_TYPES = {
 
 _MAX_VIDEO_BASE64_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
 _VIDEO_SIZE_WARN_BYTES = 20 * 1024 * 1024
+_VIDEO_STORYBOARD_MAX_SHEETS = 8
+_VIDEO_STORYBOARD_CELLS_PER_SHEET = 25
+
+_VIDEO_UNAVAILABLE_RESPONSE_MARKERS = (
+    "não recebi nenhum vídeo",
+    "não recebi o vídeo",
+    "nenhum vídeo foi enviado",
+    "não consigo acessar o vídeo",
+    "i did not receive a video",
+    "i didn't receive a video",
+    "no video was provided",
+    "no video is attached",
+    "i cannot access the video",
+    "i can't access the video",
+    "unable to access the video",
+)
+
+
+def _analysis_indicates_unseen_video(analysis: str) -> bool:
+    """Return True when a model accepted the call but did not see the video."""
+    normalized = " ".join((analysis or "").casefold().split())
+    return any(marker in normalized for marker in _VIDEO_UNAVAILABLE_RESPONSE_MARKERS)
+
+
+def _video_error_supports_storyboard_fallback(error: Exception) -> bool:
+    """Classify provider errors that a visual storyboard can safely bypass."""
+    normalized = str(error).casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "does not support video",
+            "not support video",
+            "video input",
+            "video_url",
+            "multimodal",
+            "unrecognized request argument",
+        )
+    )
+
+
+def _extract_video_storyboards(
+    video_path: Path,
+    output_dir: Path,
+    *,
+    max_sheets: int = _VIDEO_STORYBOARD_MAX_SHEETS,
+) -> tuple[list[Path], float]:
+    """Extract chronological 5x5 contact sheets with ffmpeg.
+
+    Sampling covers the full duration while capping the visual payload. The
+    returned interval is the approximate seconds represented by each cell.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        raise RuntimeError(
+            "Storyboard fallback requires ffmpeg and ffprobe on PATH"
+        )
+
+    probe = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        stdin=subprocess.DEVNULL,
+        creationflags=windows_hide_flags(),
+    )
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or "ffprobe failed").strip()
+        raise RuntimeError(f"Could not inspect video duration: {detail[:300]}")
+    try:
+        duration = float(probe.stdout.strip())
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("ffprobe returned an invalid video duration") from exc
+    if duration <= 0:
+        raise RuntimeError("ffprobe returned a non-positive video duration")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    max_cells = max_sheets * _VIDEO_STORYBOARD_CELLS_PER_SHEET
+    sample_fps = min(2.0, max_cells / duration)
+    sample_interval = 1.0 / sample_fps
+    output_pattern = output_dir / "storyboard-%02d.jpg"
+    extraction = subprocess.run(
+        [
+            ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"fps={sample_fps:.8f},scale=360:-2,tile=5x5",
+            "-frames:v",
+            str(max_sheets),
+            "-q:v",
+            "3",
+            str(output_pattern),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        stdin=subprocess.DEVNULL,
+        creationflags=windows_hide_flags(),
+    )
+    if extraction.returncode != 0:
+        detail = (extraction.stderr or extraction.stdout or "ffmpeg failed").strip()
+        raise RuntimeError(f"Could not extract video storyboard: {detail[:300]}")
+
+    sheets = sorted(output_dir.glob("storyboard-*.jpg"))
+    if not sheets:
+        raise RuntimeError("ffmpeg produced no storyboard images")
+    return sheets, sample_interval
+
+
+async def _analyze_video_storyboard(
+    video_path: Path,
+    user_prompt: str,
+    *,
+    model: Optional[str],
+    timeout: float,
+    temperature: float,
+) -> str:
+    """Analyze a video as chronological contact sheets (visual-only fallback)."""
+    cache_root = get_hermes_dir("cache/video", "storyboard_fallback")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="storyboard-", dir=cache_root) as temp:
+        sheets, sample_interval = await asyncio.to_thread(
+            _extract_video_storyboards,
+            video_path,
+            Path(temp),
+        )
+        content = [
+            {
+                "type": "text",
+                "text": (
+                    f"{user_prompt}\n\n"
+                    "Native video input was unavailable. Analyze the attached "
+                    "chronological contact sheets from left to right and top to "
+                    "bottom. Each cell is approximately "
+                    f"{sample_interval:.2f} seconds apart. Separate observed "
+                    "visual facts from inference. Do not claim to have heard or "
+                    "transcribed audio in this fallback mode."
+                ),
+            }
+        ]
+        for sheet in sheets:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": _image_to_base64_data_url(
+                            sheet, mime_type="image/jpeg"
+                        )
+                    },
+                }
+            )
+
+        call_kwargs = {
+            "task": "vision",
+            "messages": [{"role": "user", "content": content}],
+            "temperature": temperature,
+            "max_tokens": 4000,
+            "timeout": timeout,
+        }
+        if model:
+            call_kwargs["model"] = model
+        response = await async_call_llm(**call_kwargs)
+        analysis = extract_content_or_reasoning(response)
+        if not analysis or _analysis_indicates_unseen_video(analysis):
+            raise RuntimeError("Vision provider did not analyze the storyboard")
+        return analysis
 
 
 def _detect_video_mime_type(video_path: Path) -> Optional[str]:
@@ -2091,21 +2277,71 @@ async def video_analyze_tool(
             call_kwargs["model"] = model
 
         _load_auxiliary_client()
-        response = await async_call_llm(**call_kwargs)
-        analysis = extract_content_or_reasoning(response)
-
-        if not analysis:
-            logger.warning("Empty video response, retrying once")
+        native_error = None
+        try:
             response = await async_call_llm(**call_kwargs)
             analysis = extract_content_or_reasoning(response)
+        except Exception as exc:
+            if not _video_error_supports_storyboard_fallback(exc):
+                raise
+            native_error = exc
+            analysis = ""
+
+        if not analysis and native_error is None:
+            logger.warning("Empty video response, retrying once")
+            try:
+                response = await async_call_llm(**call_kwargs)
+                analysis = extract_content_or_reasoning(response)
+            except Exception as exc:
+                if not _video_error_supports_storyboard_fallback(exc):
+                    raise
+                native_error = exc
+                analysis = ""
+
+        fallback_reason = None
+        if native_error is not None:
+            fallback_reason = f"native provider rejected video input: {native_error}"
+        elif not analysis:
+            fallback_reason = "native provider returned an empty video response"
+        elif _analysis_indicates_unseen_video(analysis):
+            fallback_reason = "native provider returned text indicating it did not see the video"
+
+        mode = "native_video"
+        warning = None
+        if fallback_reason:
+            logger.warning("%s; using storyboard fallback", fallback_reason)
+            try:
+                analysis = await _analyze_video_storyboard(
+                    temp_video_path,
+                    user_prompt,
+                    model=model,
+                    timeout=vision_timeout,
+                    temperature=vision_temperature,
+                )
+            except Exception as fallback_error:
+                raise RuntimeError(
+                    f"{fallback_reason}; storyboard fallback failed: {fallback_error}"
+                ) from fallback_error
+            mode = "storyboard_fallback"
+            warning = (
+                "Visual-only storyboard fallback was used because the configured "
+                "provider did not process native video. Audio was not analyzed."
+            )
 
         analysis_length = len(analysis) if analysis else 0
-        logger.info("Video analysis completed (%s characters)", analysis_length)
+        logger.info(
+            "Video analysis completed (%s characters, mode=%s)",
+            analysis_length,
+            mode,
+        )
 
         result = {
             "success": True,
-            "analysis": analysis or "There was a problem with the request and the video could not be analyzed.",
+            "analysis": analysis,
+            "mode": mode,
         }
+        if warning:
+            result["warning"] = warning
 
         debug_call_data["success"] = True
         debug_call_data["analysis_length"] = analysis_length
@@ -2181,6 +2417,8 @@ VIDEO_ANALYZE_SCHEMA = {
         "Sends the video to a video-capable model (e.g. Gemini) for understanding. "
         "Use this for video files — for images, use vision_analyze instead. "
         "Supports mp4, webm, mov, avi, mkv, mpeg formats. "
+        "If the configured provider cannot process native video, Hermes uses "
+        "an ffmpeg storyboard fallback for visual analysis only (no audio). "
         "Note: large videos (>20 MB) may be slow; max ~50 MB."
     ),
     "parameters": {

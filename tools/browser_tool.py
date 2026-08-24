@@ -125,6 +125,84 @@ _BROWSER_PASSTHROUGH_KEYS: tuple[str, ...] = (
 )
 
 
+def _resolve_windows_gui_browser_executable() -> Optional[str]:
+    """Return a GUI-subsystem Chromium executable for local Windows sessions.
+
+    Playwright's ``chrome-headless-shell.exe`` is a console-subsystem binary.
+    When Windows Terminal is the default console host, launching that binary
+    from the agent-browser daemon can materialize a visible terminal even
+    though Hermes hid the daemon's immediate parent.  Force agent-browser to
+    use a normal GUI-subsystem Chromium executable instead.  The browser still
+    runs headless; only its Windows PE subsystem changes.
+
+    An explicit ``AGENT_BROWSER_EXECUTABLE_PATH`` is honored only when it is
+    not the known console-only headless-shell binary.  Returning ``None`` makes
+    the caller fail closed before agent-browser can launch a visible console.
+    """
+    if os.name != "nt":
+        return None
+
+    explicit = os.environ.get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
+    if explicit:
+        explicit_path = Path(explicit).expanduser()
+        if explicit_path.name.lower() == "chrome-headless-shell.exe":
+            raise RuntimeError(
+                "AGENT_BROWSER_EXECUTABLE_PATH points to chrome-headless-shell.exe, "
+                "which can open Windows Terminal. Configure a GUI Chromium executable."
+            )
+        if not explicit_path.is_file():
+            raise RuntimeError(
+                f"AGENT_BROWSER_EXECUTABLE_PATH does not exist: {explicit_path}"
+            )
+        return str(explicit_path)
+
+    candidates: list[Path] = []
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        playwright_root = Path(local_app_data) / "ms-playwright"
+        try:
+            chromium_roots = sorted(
+                playwright_root.glob("chromium-[0-9]*"),
+                key=lambda item: item.name,
+                reverse=True,
+            )
+        except OSError:
+            chromium_roots = []
+        for root in chromium_roots:
+            candidates.extend(
+                (
+                    root / "chrome-win64" / "chrome.exe",
+                    root / "chrome-win" / "chrome.exe",
+                )
+            )
+        candidates.extend(
+            (
+                Path(local_app_data) / "Google" / "Chrome" / "Application" / "chrome.exe",
+                Path(local_app_data) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+            )
+        )
+
+    for program_files_var in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
+        program_files = os.environ.get(program_files_var, "").strip()
+        if not program_files:
+            continue
+        base = Path(program_files)
+        candidates.extend(
+            (
+                base / "Google" / "Chrome" / "Application" / "chrome.exe",
+                base / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+            )
+        )
+
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
 def _build_browser_env() -> dict:
     """Credential-scrubbed env for an agent-browser subprocess.
 
@@ -133,6 +211,10 @@ def _build_browser_env() -> dict:
     The ``hermes_subprocess_env`` import is deferred to keep ``browser_tool``
     importable under test harnesses that load it against a stubbed ``tools``
     package (tests/tools/test_managed_browserbase_and_modal.py).
+
+    On Windows, force a GUI-subsystem Chromium executable. Hiding the immediate
+    agent-browser process does not hide Playwright's later console-subsystem
+    ``chrome-headless-shell.exe`` child.
     """
     from tools.environments.local import hermes_subprocess_env
 
@@ -140,6 +222,16 @@ def _build_browser_env() -> dict:
     for _key in _BROWSER_PASSTHROUGH_KEYS:
         if _key in os.environ:
             env[_key] = os.environ[_key]
+    if os.name == "nt":
+        browser_executable = _resolve_windows_gui_browser_executable()
+        if not browser_executable:
+            raise RuntimeError(
+                "Local browser automation was blocked before launch because no "
+                "GUI-subsystem Chromium executable was found. Install full Chromium, "
+                "Chrome, or Edge; chrome-headless-shell.exe is prohibited because it "
+                "can open Windows Terminal."
+            )
+        env["AGENT_BROWSER_EXECUTABLE_PATH"] = browser_executable
     return env
 
 try:

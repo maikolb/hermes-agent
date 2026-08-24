@@ -473,6 +473,137 @@ def test_delete_archived_task_removes_related_rows(kanban_home):
         assert conn.execute("SELECT COUNT(*) FROM kanban_notify_subs WHERE task_id = ?", (tid,)).fetchone()[0] == 0
 
 
+def test_archive_running_worker_commits_audit_before_termination(
+    kanban_home, monkeypatch
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="archive running")
+        claim_lock = kb._claimer_id()
+        conn.execute(
+            "UPDATE tasks SET status='running', claim_lock=?, worker_pid=?, "
+            "worker_started_at=? WHERE id=?",
+            (claim_lock, 424242, 123.5, tid),
+        )
+        conn.commit()
+
+        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+        monkeypatch.setattr(kb, "_process_start_time", lambda _pid: 123.5)
+        calls: list[tuple[int, str]] = []
+
+        def fake_terminate(pid, lock, **_kwargs):
+            # The worker is signalled only after the archive transaction and
+            # its audit event are durable.
+            assert conn.in_transaction is False
+            row = conn.execute(
+                "SELECT status, worker_pid, claim_lock FROM tasks WHERE id=?",
+                (tid,),
+            ).fetchone()
+            assert dict(row) == {
+                "status": "archived",
+                "worker_pid": 424242,
+                "claim_lock": claim_lock,
+            }
+            assert any(e.kind == "archived" for e in kb.list_events(conn, tid))
+            calls.append((pid, lock))
+            return {"terminated": True, "termination_attempted": True}
+
+        monkeypatch.setattr(kb, "_terminate_reclaimed_worker", fake_terminate)
+        assert kb.archive_task(conn, tid)
+
+        assert calls == [(424242, claim_lock)]
+        row = conn.execute(
+            "SELECT status, worker_pid, worker_started_at, claim_lock "
+            "FROM tasks WHERE id=?",
+            (tid,),
+        ).fetchone()
+        assert dict(row) == {
+            "status": "archived",
+            "worker_pid": None,
+            "worker_started_at": None,
+            "claim_lock": None,
+        }
+
+
+def test_archive_termination_failure_is_retryable_after_restart(
+    kanban_home, monkeypatch
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="archive retry")
+        claim_lock = kb._claimer_id()
+        conn.execute(
+            "UPDATE tasks SET status='running', claim_lock=?, worker_pid=?, "
+            "worker_started_at=? WHERE id=?",
+            (claim_lock, 434343, 321.0, tid),
+        )
+        conn.commit()
+
+        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+        monkeypatch.setattr(kb, "_process_start_time", lambda _pid: 321.0)
+        outcomes = iter(
+            [
+                {"terminated": False, "termination_attempted": True},
+                {"terminated": True, "termination_attempted": True},
+            ]
+        )
+        monkeypatch.setattr(
+            kb,
+            "_terminate_reclaimed_worker",
+            lambda *_args, **_kwargs: next(outcomes),
+        )
+
+        assert kb.archive_task(conn, tid)
+        pending = conn.execute(
+            "SELECT worker_pid, worker_started_at, claim_lock "
+            "FROM tasks WHERE id=?",
+            (tid,),
+        ).fetchone()
+        assert dict(pending) == {
+            "worker_pid": 434343,
+            "worker_started_at": 321.0,
+            "claim_lock": claim_lock,
+        }
+        assert kb._retry_archived_worker_terminations(conn) == 1
+        cleared = conn.execute(
+            "SELECT worker_pid, worker_started_at, claim_lock "
+            "FROM tasks WHERE id=?",
+            (tid,),
+        ).fetchone()
+        assert dict(cleared) == {
+            "worker_pid": None,
+            "worker_started_at": None,
+            "claim_lock": None,
+        }
+
+
+def test_archive_retry_does_not_signal_reused_pid(kanban_home, monkeypatch):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="archive pid reuse")
+        claim_lock = kb._claimer_id()
+        conn.execute(
+            "UPDATE tasks SET status='archived', claim_lock=?, worker_pid=?, "
+            "worker_started_at=? WHERE id=?",
+            (claim_lock, 444444, 100.0, tid),
+        )
+        conn.commit()
+        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+        monkeypatch.setattr(kb, "_process_start_time", lambda _pid: 200.0)
+        signalled: list[int] = []
+
+        assert kb._terminate_archived_worker(
+            conn,
+            tid,
+            444444,
+            claim_lock,
+            100.0,
+            signal_fn=lambda pid, _sig: signalled.append(pid),
+        )
+        assert signalled == []
+        row = conn.execute(
+            "SELECT worker_pid, claim_lock FROM tasks WHERE id=?", (tid,)
+        ).fetchone()
+        assert dict(row) == {"worker_pid": None, "claim_lock": None}
+
+
 def test_delete_task_removes_task_and_cascades(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="to-delete", assignee="alice")
