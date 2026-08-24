@@ -444,6 +444,69 @@ def test_bound_project_requires_repo_initializes_and_registers_project(
     assert project.board_slug == "team-alpha"
 
 
+def test_bound_project_worktree_deterministically_requires_local_repo(
+    monkeypatch, tmp_path
+):
+    from hermes_cli import projects_db
+
+    project_root = (tmp_path / "team" / "worktree-project").resolve()
+    project_root.mkdir(parents=True)
+    project_db = tmp_path / "profile" / "projects.db"
+    captured = {}
+
+    class Connection:
+        def close(self):
+            pass
+
+    class Kanban:
+        @staticmethod
+        def create_task(conn, **kwargs):
+            captured.update(kwargs)
+            return "task-worktree"
+
+        @staticmethod
+        def get_task(conn, task_id):
+            return SimpleNamespace(
+                id=task_id,
+                status="running",
+                workspace_kind="worktree",
+                workspace_path=str(project_root / ".worktrees" / task_id),
+                project_id=captured["project_id"],
+            )
+
+    original_connect_closing = projects_db.connect_closing
+    monkeypatch.setattr(
+        projects_db,
+        "connect_closing",
+        lambda: original_connect_closing(db_path=project_db),
+    )
+    monkeypatch.setattr(kanban_tools, "_connect", lambda board=None: (Kanban, Connection()))
+    monkeypatch.setattr(kanban_tools, "_maybe_auto_subscribe", lambda *args: False)
+    tokens = set_session_vars(
+        project_id="worktree-alpha",
+        project_board="team-worktree-alpha",
+        project_workdir=str(project_root),
+    )
+    try:
+        result = json.loads(
+            kanban_tools._handle_create(
+                {
+                    "title": "Implement in isolated checkout",
+                    "assignee": "worker",
+                    "workspace_kind": "worktree",
+                }
+            )
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert result["ok"] is True
+    assert captured["workspace_kind"] == "worktree"
+    assert captured["project_id"].startswith("p_")
+    head = kanban_tools._run_project_git(project_root, ["rev-parse", "--verify", "HEAD"])
+    assert head.returncode == 0
+
+
 def test_requires_repo_is_idempotent_and_does_not_create_remote(monkeypatch, tmp_path):
     from hermes_cli import projects_db
 

@@ -1596,7 +1596,20 @@ def _handle_create(args: dict, **kw) -> str:
             )
     if workspace_kind is None:
         workspace_kind = "scratch"
-    requires_repo, repo_bool_error = _parse_bool_arg(args, "requires_repo")
+    # ``worktree`` is itself an explicit, machine-readable declaration that
+    # this task needs source control. Inside a bound Topic, do not depend on
+    # the model remembering a second redundant boolean: provision/register
+    # the local repo idempotently unless the caller explicitly opted out.
+    derived_repo_requirement = bool(
+        workspace_kind == "worktree"
+        and bound_project_id
+        and bound_workdir_raw
+    )
+    requires_repo, repo_bool_error = _parse_bool_arg(
+        args,
+        "requires_repo",
+        default=derived_repo_requirement,
+    )
     if repo_bool_error:
         return tool_error(repo_bool_error)
     if requires_repo:
@@ -2501,7 +2514,8 @@ KANBAN_CREATE_SCHEMA = {
                     "bound project Topic, Hermes idempotently creates a local Git "
                     "repo when absent, registers it as the project's primary repo, "
                     "and gives the task an isolated worktree. This never creates a "
-                    "remote repository. Defaults to false."
+                    "remote repository. Defaults to true when workspace_kind is "
+                    "worktree inside a bound project Topic; otherwise false."
                 ),
             },
             "triage": {
