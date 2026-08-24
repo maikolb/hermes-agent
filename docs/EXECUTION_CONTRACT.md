@@ -5,7 +5,7 @@
 - Mode: RELEASE
 - Risk Level: HIGH
 - Workspace: `C:\Users\maiko\Projetos\hermes-main-consolidation-20260824`
-- Updated At: 2026-08-24T01:15:00-03:00
+- Updated At: 2026-08-24T09:25:00-03:00
 - Machine Runtime Authority: none: the installed Hermes runtime and all external systems remain read-only
 
 ## Requested Outcome
@@ -58,10 +58,10 @@
 - Chosen fix point: audit and reconcile behavior at the Git integration boundary, add semantic replay evidence, publish only through the personal fork, and make PR/merge/reachability/worktree cleanup a fail-closed completion contract.
 
 ## Claim Discipline
-- Facts already established: local clone began from upstream on 2026-06-16; the GitHub fork was created on 2026-08-10; the fork was 3,251 upstream commits behind at audit time; the local integration range contains 42 commits; merge conflicts are present in central runtime files; the live runtime has not been changed by this consolidation.
-- Inferences that still require validation: the historical reason for creating the fork; exact correspondence between unnamed Kanban work and commits; which integration changes are superseded; whether the fully reconciled candidate preserves every user-observed behavior.
-- Highest readiness state allowed by current evidence: implemented-in-progress.
-- Target readiness checklist or equivalent: commit/conflict ledger complete; boundary audit complete; traceability matrix complete; tests/replays green; rollback refs remote; PR checks green; merge hash confirmed; runtime unchanged; worktrees clean/recoverable.
+- Facts already established: the 42-commit local range was consolidated; official upstream `057dcdf236f8` was merged in full; the bounded final floor matrix passed 618 Python tests with 47 declared conditional skips and zero remaining failures; PR #2 merged as `c4daea6b51`; rollback refs are remote; the live runtime remains unchanged and clean at `66c2257b9f`.
+- Inferences that still require validation: whether the Git candidate preserves every user-observed behavior in the live target and whether the separately configured external integrations remain healthy after a future deployment.
+- Highest readiness state allowed by current evidence: validated-local.
+- Target readiness checklist or equivalent: a separately authorized canary must deploy the pinned release, observe the natural Telegram/intake behaviors and earn `validated-target`, `released` and `accepted`; no such claim is made here.
 
 ## Forbidden Actions
 - No scope expansion beyond the requested outcome.
@@ -93,7 +93,8 @@
 - Manual smoke checks: user acceptance is required later for live Telegram/intake behavior; this contract cannot claim it. Windows verifier must report `VisibleWindows=0` now.
 
 ## Status
-- Contract preflight: validated on 2026-08-24 with the canonical global validator (phase `Preflight`)
-- Implementation: merge conflicts resolved in working tree but not yet staged or accepted
-- Validation: subsystem suites and process-boundary replays are in progress; whole-candidate, post-upstream and remote CI gates remain pending
-- Completion: pending
+- Contract preflight: validated on 2026-08-24 with the canonical global validator (phase `Preflight`).
+- Implementation: completed on the isolated release branch; official upstream merged with one resolved test-only conflict and one evidence-backed recovery fallback.
+- Validation: 618 Python tests passed, 47 conditional skips, Node bridge command exit 0, PR mergeability clean; the fork exposes no GitHub checks, so no remote CI result exists to claim.
+- Publication: PR #2 merged into `maikolb/main` as `c4daea6b51`; candidate and official upstream are both proven ancestors; rollback/release tags are remote.
+- Completion: completed for Git consolidation at `validated-local`; installation, runtime reload and target acceptance remain explicitly out of scope.
