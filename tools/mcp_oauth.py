@@ -1359,7 +1359,7 @@ def build_oauth_auth(
     )
     callback_handler = _make_callback_waiter(resolved_port)
 
-    return OAuthClientProvider(
+    provider = OAuthClientProvider(
         server_url=server_url,
         client_metadata=client_metadata,
         storage=storage,
@@ -1367,3 +1367,14 @@ def build_oauth_auth(
         callback_handler=callback_handler,
         timeout=float(cfg.get("timeout", 300)),
     )
+    # mcp<=1.28.1 stores an anyio.Lock on OAuthContext and holds it across
+    # httpx async-auth generator yields. httpx can resume/close that generator
+    # from another task, at which point AnyIO refuses the cross-task release
+    # (modelcontextprotocol/python-sdk#2847). Hermes drives MCP exclusively on
+    # its dedicated asyncio loop, so use asyncio's task-agnostic lock until the
+    # SDK narrows its lock scope upstream. Leave future/non-AnyIO locks intact.
+    context = getattr(provider, "context", None)
+    oauth_lock = getattr(context, "lock", None)
+    if type(oauth_lock).__module__.startswith("anyio."):
+        context.lock = asyncio.Lock()
+    return provider
