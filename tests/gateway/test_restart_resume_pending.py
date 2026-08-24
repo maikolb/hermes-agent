@@ -26,8 +26,10 @@ PRs #9850, #9934, #7536):
 """
 
 import asyncio
+import inspect
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -39,8 +41,13 @@ from gateway.run import (
     _auto_continue_freshness_window,
     _coerce_gateway_timestamp,
     _is_fresh_gateway_interruption,
+    _is_explicit_checkpoint_continue_request,
     _last_transcript_timestamp,
+    _prepare_resume_pending_message,
     _should_clear_resume_pending_after_turn,
+    _should_explicitly_resume_checkpoint,
+    GatewayRunner,
+    TurnRunner,
     build_resume_recovery_note,
 )
 from gateway.session import SessionEntry, SessionSource, SessionStore
@@ -70,6 +77,87 @@ def test_resume_pending_is_cleared_only_after_successful_turn():
     assert _should_clear_resume_pending_after_turn({"failed": True}) is False
     assert _should_clear_resume_pending_after_turn({"partial": True}) is False
     assert _should_clear_resume_pending_after_turn({"error": "boom"}) is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Continue",
+        "Continue de onde parou",
+        "A cota tinha acabado. Continue de onde parou",
+        "Pode retomar o trabalho agora, por favor",
+        "Resume from where you left off",
+    ],
+)
+def test_explicit_checkpoint_continue_request_is_bounded_but_practical(message):
+    assert _is_explicit_checkpoint_continue_request(message) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Não continue de onde parou",
+        "Se der, continue de onde parou",
+        "Continue e mude toda a arquitetura para Rust",
+        "O processo continua rodando?",
+        "Comece uma tarefa nova",
+    ],
+)
+def test_explicit_checkpoint_continue_request_rejects_new_or_negated_work(message):
+    assert _is_explicit_checkpoint_continue_request(message) is False
+
+
+def test_explicit_checkpoint_resume_requires_unfinished_durable_state(tmp_path):
+    from agent.turn_checkpoint import TurnCheckpointStore
+
+    store = TurnCheckpointStore(tmp_path / "checkpoints")
+    store.start_turn(
+        "sid-resumable",
+        "turn-1",
+        "do work",
+        [{"role": "user", "content": "do work"}],
+    )
+    store.transition(
+        "sid-resumable",
+        phase="tool_completed",
+        next_action="continue_original_operation",
+    )
+    store.start_turn(
+        "sid-terminal",
+        "turn-2",
+        "done work",
+        [{"role": "user", "content": "done work"}],
+    )
+    store.transition("sid-terminal", phase="delivered", next_action="none")
+    resumable = SimpleNamespace(
+        session_id="sid-resumable",
+        _session_db=SimpleNamespace(db_path=tmp_path / "state.db"),
+        _turn_checkpoint_store=store,
+    )
+    terminal = SimpleNamespace(
+        session_id="sid-terminal",
+        _session_db=SimpleNamespace(db_path=tmp_path / "state.db"),
+        _turn_checkpoint_store=store,
+    )
+
+    assert _should_explicitly_resume_checkpoint(
+        resumable,
+        "A cota voltou. Continue de onde parou",
+    )
+    assert not _should_explicitly_resume_checkpoint(
+        terminal,
+        "Continue de onde parou",
+    )
+
+
+def test_turn_runner_wires_explicit_and_synthetic_checkpoint_resume_flags():
+    """Regression: isolated helpers are useless if a merge drops the call site."""
+    source = inspect.getsource(TurnRunner.run_sync)
+
+    assert "_should_explicitly_resume_checkpoint(" in source
+    assert "agent._gateway_explicit_checkpoint_resume = True" in source
+    assert "agent._resume_turn_from_checkpoint = True" in source
+    assert "agent._resume_turn_from_checkpoint = not bool(" in source
 
 
 def _make_source(platform=Platform.TELEGRAM, chat_id="123", user_id="u1"):
@@ -312,6 +400,42 @@ class TestResumePendingSystemNote:
         assert "skip any unfinished work" not in note
         # But still guards against re-running already-recorded tool calls.
         assert "already appear in the history" in note
+
+
+    def test_resume_note_is_persisted_instead_of_original_empty_message(self):
+        """The auto-resume note must not leave an empty row in state.db."""
+        message, persisted = _prepare_resume_pending_message(
+            "restart_timeout", "", interactive=False
+        )
+
+        assert message
+        assert "CONTINUE the interrupted task" in message
+        assert persisted == message
+        assert persisted != ""
+
+    def test_whitespace_only_message_also_persists_the_note(self):
+        """A whitespace-only startup event is as blank as an empty one —
+        persisting it verbatim would recreate the sanitizer loop (#86580)."""
+        message, persisted = _prepare_resume_pending_message(
+            "shutdown_timeout", "   ", interactive=True
+        )
+
+        assert persisted == message
+        assert persisted.strip()
+
+    def test_real_user_text_persists_clean_not_the_scaffolded_note(self):
+        """When the user typed real text while resume was pending, the durable
+        transcript keeps their clean words; only the MODEL sees the wrapped
+        recovery note (transcript stays scaffold-free)."""
+        message, persisted = _prepare_resume_pending_message(
+            "restart_timeout", "what were we doing?", interactive=True
+        )
+
+        assert persisted == "what were we doing?"
+        assert "[System note:" not in persisted
+        assert message != persisted
+        assert "what were we doing?" in message
+        assert "[System note:" in message
 
 
     def test_resume_pending_fires_without_tool_tail(self):
@@ -574,6 +698,143 @@ async def test_drain_timeout_marks_resume_pending():
 # ---------------------------------------------------------------------------
 # Gateway startup auto-resume
 # ---------------------------------------------------------------------------
+
+
+def test_restart_checkpoint_probe_requires_intact_unfinished_state(
+    tmp_path, monkeypatch,
+):
+    from agent.turn_checkpoint import TurnCheckpointStore
+
+    monkeypatch.setattr("gateway.run.get_hermes_home", lambda: tmp_path)
+    entry = SimpleNamespace(session_id="checkpoint-session")
+
+    assert GatewayRunner._entry_has_resumable_turn_checkpoint(entry) is False
+
+    store = TurnCheckpointStore(tmp_path / "sessions" / "turn-checkpoints")
+    store.start_turn(
+        "checkpoint-session",
+        "turn-1",
+        "finish the active work",
+        [{"role": "user", "content": "finish the active work"}],
+    )
+    assert GatewayRunner._entry_has_resumable_turn_checkpoint(
+        entry,
+        max_age_seconds=3600,
+    ) is True
+
+    with patch("gateway.run.time.time", return_value=time.time() + 7200):
+        assert GatewayRunner._entry_has_resumable_turn_checkpoint(
+            entry,
+            max_age_seconds=3600,
+        ) is False
+
+    store.transition(
+        "checkpoint-session",
+        phase="delivered",
+        next_action="none",
+    )
+    assert GatewayRunner._entry_has_resumable_turn_checkpoint(entry) is False
+
+
+@pytest.mark.asyncio
+async def test_startup_auto_resume_skips_marker_without_durable_checkpoint():
+    runner, adapter = make_restart_runner()
+    runner._auto_resume_requires_checkpoint = lambda: True
+    runner._entry_has_resumable_turn_checkpoint = lambda _entry, **_kwargs: False
+    source = make_restart_source(chat_id="unbacked-chat")
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:unbacked-chat",
+        session_id="sid-unbacked",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_interrupted",
+        last_resume_marked_at=datetime.now(),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    def clear_resume_pending(session_key):
+        entry = runner.session_store._entries[session_key]
+        entry.resume_pending = False
+        entry.resume_reason = None
+        return True
+
+    runner.session_store.clear_resume_pending.side_effect = clear_resume_pending
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+    await asyncio.sleep(0)
+
+    assert scheduled == 0
+    adapter.handle_message.assert_not_called()
+    assert pending_entry.session_key not in runner._running_agents
+    assert pending_entry.resume_pending is False
+    assert pending_entry.resume_reason is None
+
+
+def test_missing_profile_namespace_preserves_only_its_resume_marker(tmp_path):
+    """An unavailable profile is not evidence that its checkpoint is stale.
+
+    The duplicated session id is deliberate: profile namespaces, not the bare
+    session id, decide which marker may be cleared.
+    """
+    runner, _adapter = make_restart_runner()
+    runner.config.multiplex_profiles = True
+    runner._auto_resume_requires_checkpoint = lambda: True
+    shared_session_id = "same-session-id"
+    default_source = make_restart_source(chat_id="default-chat")
+    default_source.profile = "default"
+    worker_source = make_restart_source(chat_id="worker-chat")
+    worker_source.profile = "worker"
+    default_entry = SessionEntry(
+        session_key="agent:default:telegram:dm:default-chat",
+        session_id=shared_session_id,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=default_source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_interrupted",
+        last_resume_marked_at=datetime.now(),
+    )
+    worker_entry = SessionEntry(
+        session_key="agent:worker:telegram:dm:worker-chat",
+        session_id=shared_session_id,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=worker_source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_interrupted",
+        last_resume_marked_at=datetime.now(),
+    )
+    runner.session_store._entries = {
+        default_entry.session_key: default_entry,
+        worker_entry.session_key: worker_entry,
+    }
+    runner._checkpoint_root_for_session_entry = lambda entry: (
+        tmp_path / "default" / "sessions" / "turn-checkpoints"
+        if entry.origin.profile == "default"
+        else None
+    )
+    runner._entry_has_resumable_turn_checkpoint = lambda _entry, **_kwargs: False
+
+    def clear_resume_pending(session_key):
+        runner.session_store._entries[session_key].resume_pending = False
+        return True
+
+    runner.session_store.clear_resume_pending.side_effect = clear_resume_pending
+
+    assert runner._schedule_resume_pending_sessions() == 0
+    assert default_entry.resume_pending is False
+    assert worker_entry.resume_pending is True
+    runner.session_store.clear_resume_pending.assert_called_once_with(
+        default_entry.session_key
+    )
 
 
 @pytest.mark.asyncio
@@ -1040,3 +1301,90 @@ async def test_startup_restore_gate_releases_when_resume_turn_outlives_timeout(
     await slow_task
 
 
+@pytest.mark.asyncio
+async def test_startup_restore_gate_releases_when_boot_path_send_hangs(
+    monkeypatch,
+):
+    """A hung restart notification / obligation redelivery must not freeze inbound.
+
+    Those sends used to run *before* ``_finish_startup_restore`` released the
+    gate. A Telegram flood-control sleep on either call queued inbound on
+    every platform for the full ``retry_after``.
+    """
+    monkeypatch.setenv("HERMES_STARTUP_RESTORE_DRAIN_TIMEOUT", "0.05")
+
+    runner, adapter = make_restart_runner()
+    runner._startup_restore_in_progress = True
+    runner._startup_restore_queue = []
+    runner._startup_restore_tasks = []
+    runner._background_tasks = set()
+
+    hung = asyncio.Event()
+
+    async def never_returns(*_args, **_kwargs):
+        await hung.wait()
+        return None
+
+    runner._send_restart_notification = never_returns
+    runner._clear_delivery_obligation_resume_markers = AsyncMock(return_value=0)
+    runner._redeliver_pending_obligations = AsyncMock(return_value=0)
+
+    seen: list[str] = []
+
+    async def fake_handle_message(event: MessageEvent) -> None:
+        seen.append(f"inbound:{event.text}")
+
+    adapter.handle_message = fake_handle_message
+
+    inbound = MessageEvent(
+        text="hello",
+        message_type=MessageType.TEXT,
+        source=make_restart_source(chat_id="restore-chat"),
+    )
+    assert await runner._handle_message(inbound) is None
+    assert runner._startup_restore_queue == [inbound]
+
+    await asyncio.wait_for(
+        runner._await_startup_boot_sends(
+            planned_restart_notification_pending=False,
+        ),
+        timeout=5,
+    )
+    await asyncio.wait_for(runner._finish_startup_restore(), timeout=5)
+
+    assert seen == ["inbound:hello"], (
+        "startup-restore gate never released: queued inbound was not drained "
+        "while a boot-path send was still sleeping"
+    )
+    assert runner._startup_restore_queue == []
+    assert runner._startup_restore_in_progress is False
+    # The read-only marker clear runs inline BEFORE the abandonable
+    # send task, so it must have completed even though the boot send hung;
+    # the network half never ran because the hung notification precedes it.
+    runner._clear_delivery_obligation_resume_markers.assert_awaited_once()
+    runner._redeliver_pending_obligations.assert_not_awaited()
+
+    hung.set()
+    leftover = [t for t in list(runner._background_tasks) if not t.done()]
+    if leftover:
+        await asyncio.wait(leftover)
+
+
+@pytest.mark.asyncio
+async def test_startup_boot_sends_still_run_when_they_finish_quickly(monkeypatch):
+    """The bound must not skip restart notification or redelivery on a fast path."""
+    monkeypatch.setenv("HERMES_STARTUP_RESTORE_DRAIN_TIMEOUT", "2")
+
+    runner, _adapter = make_restart_runner()
+    runner._background_tasks = set()
+    runner._send_restart_notification = AsyncMock(return_value=None)
+    runner._clear_delivery_obligation_resume_markers = AsyncMock(return_value=0)
+    runner._redeliver_pending_obligations = AsyncMock(return_value=0)
+
+    await runner._await_startup_boot_sends(
+        planned_restart_notification_pending=False,
+    )
+
+    runner._send_restart_notification.assert_awaited_once()
+    runner._clear_delivery_obligation_resume_markers.assert_awaited_once()
+    runner._redeliver_pending_obligations.assert_awaited_once()

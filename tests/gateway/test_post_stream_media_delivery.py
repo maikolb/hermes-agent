@@ -108,6 +108,8 @@ async def test_explicit_media_tag_still_delivers_post_stream(tmp_path, monkeypat
     adapter.send_multiple_images.assert_awaited_once()
     images_kwargs = adapter.send_multiple_images.await_args.kwargs
     assert images_kwargs["chat_id"] == "C123CHAN"
-    assert str(media_file) in images_kwargs["images"][0][0]
-
+    # The delivery boundary normalizes local paths to RFC 8089 file URIs.
+    # Comparing against ``str(Path)`` only worked accidentally on POSIX;
+    # Windows uses backslashes while the URI correctly uses forward slashes.
+    assert images_kwargs["images"][0][0] == media_file.as_uri()
 

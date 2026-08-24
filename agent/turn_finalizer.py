@@ -22,10 +22,13 @@ keep the exact logger name (``"agent.conversation_loop"``).
 
 from __future__ import annotations
 
+import logging
 import os
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
+from agent.context_compressor import _DB_PERSISTED_MARKER
 from agent.message_content import flatten_message_text
+from agent.message_metadata import append_message, stamp_message_timestamp
 from agent.message_sanitization import _sanitize_surrogates
 
 
@@ -52,6 +55,54 @@ _VERIFICATION_CONTINUATION_FLAGS = (
     "_verification_stop_synthetic",
     "_pre_verify_synthetic",
 )
+
+
+def _record_kanban_budget_exhausted(
+    kanban_task: str,
+    api_call_count: int,
+    max_iterations: int,
+    logger: logging.Logger,
+) -> None:
+    """Record a terminal ``timed_out`` outcome for a kanban worker that
+    exhausted its iteration budget.
+
+    This is a bounded fallback (#87096): the CAS invariant in ``_end_run``
+    (``WHERE ended_at IS NULL``) guarantees idempotence — if another path
+    already closed the run this is a no-op — so it is safe to call from
+    multiple exit paths.
+    """
+    try:
+        from hermes_cli import kanban_db as _kb
+        _conn = _kb.connect()
+        try:
+            _kb._record_task_failure(
+                _conn,
+                kanban_task,
+                error=(
+                    f"Iteration budget exhausted "
+                    f"({api_call_count}/{max_iterations}) — "
+                    "task could not complete within the allowed "
+                    "iterations"
+                ),
+                outcome="timed_out",
+                release_claim=True,
+                end_run=True,
+                event_payload_extra={
+                    "budget_used": api_call_count,
+                    "budget_max": max_iterations,
+                },
+            )
+        finally:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+    except Exception:
+        logger.warning(
+            "Failed to record budget-exhausted failure for task %s",
+            kanban_task,
+            exc_info=True,
+        )
 
 
 def _drop_verification_continuation_scaffolding(messages) -> None:
@@ -154,42 +205,23 @@ def finalize_turn(
         # consecutive-failure circuit breaker (#29747 gap 2).
         _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
         if _kanban_task:
-            try:
-                from hermes_cli import kanban_db as _kb
-                _conn = _kb.connect()
-                try:
-                    _kb._record_task_failure(
-                        _conn,
-                        _kanban_task,
-                        error=(
-                            f"Iteration budget exhausted "
-                            f"({api_call_count}/{agent.max_iterations}) — "
-                            "task could not complete within the allowed "
-                            "iterations"
-                        ),
-                        outcome="timed_out",
-                        release_claim=True,
-                        end_run=True,
-                        event_payload_extra={
-                            "budget_used": api_call_count,
-                            "budget_max": agent.max_iterations,
-                        },
-                    )
-                    logger.info(
-                        "recorded budget-exhausted failure for task %s (%d/%d)",
-                        _kanban_task, api_call_count, agent.max_iterations,
-                    )
-                finally:
-                    try:
-                        _conn.close()
-                    except Exception:
-                        pass
-            except Exception:
-                logger.warning(
-                    "Failed to record budget-exhausted failure for task %s",
-                    _kanban_task,
-                    exc_info=True,
-                )
+            _record_kanban_budget_exhausted(
+                _kanban_task, api_call_count, agent.max_iterations, logger,
+            )
+    elif budget_exhausted:
+        # Bounded fallback (#87096): budget was exhausted but none of the
+        # normal fallback paths were eligible (interrupted / failed /
+        # anomalous exit_reason). If running as a kanban worker we must
+        # still record a terminal outcome so the task does not remain in
+        # an ambiguous lifecycle state. The worker's run is closed via
+        # ``_record_task_failure`` (compare-and-swap receipt path) which
+        # is a no-op if another path closed it — the CAS invariant in
+        # ``_end_run`` (``WHERE ended_at IS NULL``) guarantees idempotence.
+        _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
+        if _kanban_task:
+            _record_kanban_budget_exhausted(
+                _kanban_task, api_call_count, agent.max_iterations, logger,
+            )
 
     # Determine if conversation completed successfully
     normal_text_response = str(_turn_exit_reason).startswith("text_response(")
@@ -315,7 +347,10 @@ def finalize_turn(
             if _tail_role != "assistant":
                 # Tail is not an assistant row — append the final response
                 # so the durable turn closes with the answer (#43849/#44100).
-                messages.append({"role": "assistant", "content": final_response})
+                append_message(
+                    messages,
+                    {"role": "assistant", "content": final_response},
+                )
             elif isinstance(_tail, dict) and _tail.get("content") != final_response and _is_pure_tool_call_tail(_tail):
                 # The tail IS an assistant row, but a *pure tool-call turn*:
                 # tool_calls with no text of its own. The role check alone
@@ -332,6 +367,10 @@ def finalize_turn(
                 # candidate collapse — the provisional answer was persisted and
                 # reused as the terminal response, #65919 §7).
                 _tail["content"] = final_response
+                # The normal assistant builder already stamps this row. Cover
+                # legacy/exceptional pure-tool tails before they become a
+                # delivered final response.
+                stamp_message_timestamp(_tail)
                 # The row may have already been flushed to SQLite by the
                 # incremental tool-call persist (conversation_loop.py:4990),
                 # which stamps ``_DB_PERSISTED_MARKER`` so subsequent flushes
@@ -339,7 +378,7 @@ def finalize_turn(
                 # re-writes the filled content to the durable store —
                 # otherwise ``/resume`` reloads ``content=""`` and the bug
                 # resurfaces cross-session.
-                _tail.pop("_db_persisted", None)
+                _tail.pop(_DB_PERSISTED_MARKER, None)
                 # The bounded flush-scan cursor (run_agent.py) skips the
                 # identity-matched prefix of its previous snapshot on the
                 # assumption that no live dict loses the marker in place —
@@ -652,6 +691,86 @@ def finalize_turn(
     if isinstance(final_response, str):
         final_response = _sanitize_surrogates(final_response)
 
+    # Seal the exact ordinary-final payload after every footer/plugin/Unicode
+    # transform.  Earlier loop checkpoints are provisional: recording them as
+    # the delivery artifact would hash bytes that the gateway never sends.
+    # Reconcile the durable assistant tail first, then write the checkpoint.
+    # A durable gateway turn must fail closed here — sending an answer that
+    # exists only in a Python local recreates the restart-loss boundary this
+    # checkpoint is meant to remove.
+    _checkpoint_fence = None
+    _checkpoint_root = None
+    _storage_home = None
+    _checkpoint_store = getattr(agent, "_turn_checkpoint_store", None)
+    if (
+        isinstance(final_response, str)
+        and final_response
+        and not interrupted
+        and _checkpoint_store is not None
+        and getattr(agent, "session_id", None)
+    ):
+        try:
+            _assistant_tail = None
+            for _candidate in reversed(messages):
+                if not isinstance(_candidate, dict):
+                    continue
+                if _candidate.get("role") == "user":
+                    break
+                if _candidate.get("role") == "assistant":
+                    _assistant_tail = _candidate
+                    break
+            if _assistant_tail is None:
+                _assistant_tail = {
+                    "role": "assistant",
+                    "content": final_response,
+                }
+                append_message(messages, _assistant_tail)
+            elif _assistant_tail.get("content") != final_response:
+                _assistant_tail["content"] = final_response
+                stamp_message_timestamp(_assistant_tail)
+                _assistant_tail.pop(_DB_PERSISTED_MARKER, None)
+                agent._db_flush_scan_prefix = None
+
+            _flush_ok = agent._flush_messages_to_session_db(
+                messages, conversation_history
+            )
+            if _flush_ok is False:
+                raise RuntimeError("exact final assistant row was not persisted")
+
+            agent._turn_checkpoint_state = _checkpoint_store.mark_deliverable(
+                str(agent.session_id),
+                final_response,
+                verification_pending=False,
+                verification_kind="ordinary_final",
+            )
+            from agent.turn_checkpoint import checkpoint_delivery_fence
+
+            _checkpoint_fence = checkpoint_delivery_fence(
+                agent._turn_checkpoint_state
+            )
+            if _checkpoint_fence is None:
+                raise RuntimeError("ordinary-final checkpoint fence is missing")
+            _checkpoint_namespace = _checkpoint_store.delivery_namespace()
+            _checkpoint_root = _checkpoint_namespace["checkpoint_root"]
+            _storage_home = _checkpoint_namespace["storage_home"]
+        except Exception as exc:
+            _checkpoint_fence = None
+            _checkpoint_root = None
+            _storage_home = None
+            logger.error(
+                "ordinary final was withheld because its durable delivery "
+                "checkpoint could not be sealed",
+                exc_info=True,
+            )
+            failed = True
+            completed = False
+            _turn_exit_reason = "delivery_checkpoint_failed"
+            final_response = (
+                "The completed response was withheld because Hermes could not "
+                "seal its durable delivery checkpoint. The session remains "
+                f"recoverable; retry after storage health is restored. ({exc})"
+            )
+
     # Build result with interrupt info if applicable
     result = {
         "final_response": final_response,
@@ -687,6 +806,9 @@ def finalize_turn(
             (getattr(agent, "request_overrides", {}) or {}).get("extra_body") or {}
         ).get("service_tier"),
         "session_id": agent.session_id,
+        "turn_checkpoint_fence": _checkpoint_fence,
+        "turn_checkpoint_root": _checkpoint_root,
+        "storage_home": _storage_home,
     }
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
@@ -699,8 +821,8 @@ def finalize_turn(
             "health (`hermes doctor`), then send your message again"
         )
         # Machine-readable cause for the gateway/desktop: exactly
-        # 'session_persistence_failed:<locked|disk|unknown>'. Never clobber a
-        # failure_reason another path already stamped on this result.
+        # 'session_persistence_failed:<locked|compression|turn_lease|corrupt|disk|unknown>'.
+        # Never clobber a failure_reason another path already stamped.
         if "failure_reason" not in result:
             _cause = getattr(agent, "_last_persistence_error_cause", None)
             result["failure_reason"] = (

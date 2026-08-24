@@ -346,6 +346,30 @@ class TestSourceRootResolution:
         assert mod.get_running_source_root() == root.resolve()
 
 
+class TestDirectFileMutation:
+    def test_blocks_file_inside_live_checkout(self, repo):
+        from tools.self_repo_guard import detect_self_repo_file_mutation
+
+        hit, message = detect_self_repo_file_mutation(
+            str(repo / "gateway" / "run.py"),
+            source_root=repo,
+            operation="patch",
+        )
+        assert hit is True
+        assert "live source checkout" in message
+
+    def test_allows_file_outside_live_checkout(self, repo, tmp_path):
+        from tools.self_repo_guard import detect_self_repo_file_mutation
+
+        hit, message = detect_self_repo_file_mutation(
+            str(tmp_path / "project" / "app.py"),
+            source_root=repo,
+            operation="write_file",
+        )
+        assert hit is False
+        assert message is None
+
+
 class TestUnparseableCommands:
     def test_unbalanced_quotes_fall_back(self, repo):
         hit, _ = _detect('git checkout "unterminated', repo, repo)
@@ -354,3 +378,28 @@ class TestUnparseableCommands:
     def test_subshell_syntax_does_not_crash(self, repo):
         hit, _ = _detect("VAL=$(git rev-parse HEAD) git checkout main", repo, repo)
         assert hit is True
+
+
+class TestBlockMessageGuidance:
+    """The block message must steer agents to a disk-backed scratch clone,
+    not a bare "temporary clone" (agents defaulted to /tmp, which is tmpfs
+    on most distros — parallel salvage clones running npm ci filled a 32GB
+    tmpfs to 97% in one campaign)."""
+
+    def test_message_recommends_shared_clone_on_disk(self, repo):
+        hit, msg = _detect("git rebase origin/main", repo, repo)
+        assert hit is True
+        assert "git clone --shared" in msg
+        assert "scratch" in msg
+
+    def test_message_warns_against_tmp_for_dep_installs(self, repo):
+        hit, msg = _detect("git rebase origin/main", repo, repo)
+        assert hit is True
+        assert "tmpfs" in msg
+        assert "Delete the clone" in msg
+
+    def test_scratch_hint_honors_hermes_home(self, repo, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", "/custom/hermes-home")
+        hit, msg = _detect("git rebase origin/main", repo, repo)
+        assert hit is True
+        assert str(Path("/custom/hermes-home") / "scratch") in msg

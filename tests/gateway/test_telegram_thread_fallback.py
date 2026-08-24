@@ -388,6 +388,33 @@ async def test_created_private_topic_thread_not_found_fails_without_root_fallbac
 
 
 @pytest.mark.asyncio
+async def test_exact_forum_delivery_never_falls_back_outside_sealed_topic():
+    adapter = _make_adapter()
+    adapter._rich_send_disabled = True
+    call_log = []
+
+    async def mock_send_message(**kwargs):
+        call_log.append(dict(kwargs))
+        if kwargs.get("message_thread_id") is not None:
+            raise FakeBadRequest("Message thread not found")
+        return SimpleNamespace(message_id=42)
+
+    adapter._bot = SimpleNamespace(send_message=mock_send_message)
+    result = await adapter.send(
+        chat_id="-100123",
+        content="sealed topic answer",
+        metadata={
+            "thread_id": "99999",
+            "_hermes_exact_text_delivery": True,
+        },
+    )
+
+    assert result.success is False
+    assert len(call_log) == 1
+    assert call_log[0]["message_thread_id"] == 99999
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method_name", "bot_method_name", "path_kw", "filename", "payload"),
     [
@@ -722,5 +749,4 @@ async def test_thread_fallback_only_fires_once():
     # Second chunk: should use thread_id=None directly (effective_thread_id
     # was cleared per-chunk but the metadata doesn't change between chunks)
     # The key point: the message was delivered despite the invalid thread
-
 

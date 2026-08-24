@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.restart import (
+    DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
     DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT,
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
 )
@@ -77,6 +78,7 @@ def make_restart_runner(
     runner._restart_command_source = None
     runner._restart_drain_timeout = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     runner._restart_after_turn_timeout = DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT
+    runner._cron_drain_timeout = DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT
     runner._stop_task = None
     runner._busy_input_mode = "interrupt"
     runner._update_prompt_pending = {}
@@ -157,6 +159,9 @@ def make_restart_runner(
     runner.session_store = MagicMock()
     runner.session_store._entries = {}
     runner.delivery_router = MagicMock()
+    # Legacy restart tests exercise scheduling mechanics independent of the
+    # durable checkpoint gate. Gate-specific tests override this to True.
+    runner._auto_resume_requires_checkpoint = lambda: False
 
     platform_adapter = adapter or RestartTestAdapter()
     platform_adapter.set_message_handler(AsyncMock(return_value=None))

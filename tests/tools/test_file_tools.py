@@ -43,6 +43,25 @@ class TestReadFileHandler:
 
 
 class TestWriteFileHandler:
+    def test_gateway_blocks_live_checkout_write(self, tmp_path, monkeypatch):
+        import tools.self_repo_guard as self_repo_guard
+        from tools.file_tools import write_file_tool
+
+        source_root = tmp_path / "hermes-agent"
+        source_root.mkdir()
+        target = source_root / "gateway" / "run.py"
+        monkeypatch.setenv("_HERMES_GATEWAY", "1")
+        monkeypatch.setattr(
+            self_repo_guard,
+            "get_running_source_root",
+            lambda: source_root,
+        )
+
+        result = json.loads(write_file_tool(str(target), "do not write"))
+
+        assert "live source checkout" in result["error"]
+        assert not target.exists()
+
     @patch("tools.file_tools._get_file_ops")
     def test_writes_content(self, mock_get):
         mock_ops = MagicMock()
@@ -506,6 +525,7 @@ class TestPatchSchemaShape:
         for name in ("path", "old_string", "new_string"):
             assert "REQUIRED when mode='replace'" in props[name]["description"]
         assert "REQUIRED when mode='patch'" in props["patch"]["description"]
+        assert "must differ from old_string" in props["new_string"]["description"]
 
     def test_no_anyof_required_stays_mode_only(self):
         # anyOf/oneOf at parameters level break Anthropic, Fireworks, and the
@@ -998,4 +1018,37 @@ class TestNotFoundCache:
 
         assert _check_not_found_cache("read", "/tmp/never-exists-notify", tid) is None, (
             "notify_other_tool_call must clear cached misses"
+        )
+
+
+class TestSSHConfigWriteGateSingleQuery:
+    """Regression: the ssh-config write guard must pass
+    single_query_deny_message to _run_approval_gate (required kwarg since
+    1596148ff). Missing it raises TypeError instead of routing through the
+    approval flow — see issue #93201."""
+
+    def test_gate_call_passes_single_query_deny_message(self):
+        import inspect as _inspect
+        import re as _re
+        import tools.file_tools as ft
+
+        src = _inspect.getsource(ft)
+        idx = src.find("_approval._run_approval_gate(")
+        assert idx != -1, "ssh_config_write gate call not found"
+        block = src[idx:idx + 900]
+        assert "pattern_key=\"ssh_config_write\"" in block
+
+        from tools.approval import _run_approval_gate
+        required = [
+            name for name, param in _inspect.signature(
+                _run_approval_gate).parameters.items()
+            if param.kind == _inspect.Parameter.KEYWORD_ONLY
+            and param.default is _inspect.Parameter.empty
+        ]
+        missing = [k for k in required if not _re.search(
+            rf"\b{k}\s*=", block)]
+        assert missing == [], (
+            f"_run_approval_gate call at ssh_config_write gate is missing "
+            f"required kwargs {missing}; it would raise TypeError instead "
+            f"of showing an approval prompt"
         )

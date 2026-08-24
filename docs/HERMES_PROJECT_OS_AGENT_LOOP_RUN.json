@@ -1,0 +1,334 @@
+{
+  "schemaVersion": "2.0",
+  "contractRef": {
+    "path": "C:/Users/maiko/AppData/Local/hermes/hermes-agent/docs/HERMES_PROJECT_OS_EXECUTION_CONTRACT.md",
+    "sha256": "de997f57ccc51b75052fd710e15791bb5b0ee5d2932aab315cdfa59a46ae8124"
+  },
+  "identity": {
+    "loopId": "hermes-project-os-2026-08-13",
+    "runId": "1fa981f5-a13a-44bf-963e-e5e54f5855ec",
+    "attemptId": "94ea76ba-3510-4bd8-9610-ef9c405c461d",
+    "traceId": "trace-hermes-project-os-2026-08-13"
+  },
+  "qualification": {
+    "reasons": [
+      "concurrent",
+      "high-risk"
+    ]
+  },
+  "trigger": {
+    "type": "manual",
+    "provenance": "user:codex-writer-brief",
+    "deduplicationKey": "hermes-project-os:2026-08-13",
+    "deduplicationWindowSeconds": 0,
+    "overlapPolicy": "reject"
+  },
+  "authorities": {
+    "stateSourceIds": [
+      "canonical-git-checkout",
+      "execution-contract",
+      "agent-loop-run"
+    ],
+    "gateRefs": [
+      "gate:contract",
+      "gate:focused-tests",
+      "gate:diff-check",
+      "gate:compile"
+    ],
+    "approvalAuthorityRefs": [
+      "authority:user-brief"
+    ]
+  },
+  "budgets": {
+    "maxIterations": 20,
+    "maxWallClockSeconds": 28800,
+    "maxToolCalls": 400,
+    "maxRetries": 6,
+    "maxStagnantIterations": 3,
+    "maxOutputBytes": 8388608,
+    "maxConcurrency": 1,
+    "sideEffectCeiling": {
+      "enabled": false,
+      "maxConsequentialActions": 0
+    }
+  },
+  "checkpoint": {
+    "stateSchemaRef": "C:/Users/maiko/Projetos/AgentOperatingFramework/framework/runtime/schemas/agent-loop-run.schema.json",
+    "stateSchemaVersion": "2.0",
+    "expectedStateVersion": 1,
+    "iteration": 20,
+    "atomicWritePolicy": "atomic-replace",
+    "lastEventSequence": 3,
+    "lastKnownGoodRef": "git:54ee38e4a1feab1b75d5b8c0f628cf248c3d0c40",
+    "priorCheckpointRef": "checkpoint:validated-local-target-blocked",
+    "resumePolicy": "reconcile-then-resume",
+    "replayPolicy": "reconcile-before-replay",
+    "digest": "6ee6977450a7aa1de1168ea7b17a1a7b8b697e7eaba5df86ef518fd2d3e51b57"
+  },
+  "concurrency": {
+    "mode": "single-writer",
+    "casEnabled": false,
+    "partitions": []
+  },
+  "failurePolicies": [
+    {
+      "class": "transient",
+      "retryable": true,
+      "limit": 3,
+      "backoff": {
+        "type": "exponential",
+        "baseSeconds": 1,
+        "maxSeconds": 30
+      },
+      "requireReobservation": true,
+      "safetyMechanism": "idempotency-key",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "invalid-input",
+      "retryable": false,
+      "limit": 0,
+      "backoff": {
+        "type": "none",
+        "baseSeconds": 0,
+        "maxSeconds": 0
+      },
+      "requireReobservation": false,
+      "safetyMechanism": "no-retry",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "precondition-failed",
+      "retryable": true,
+      "limit": 1,
+      "backoff": {
+        "type": "fixed",
+        "baseSeconds": 1,
+        "maxSeconds": 1
+      },
+      "requireReobservation": true,
+      "safetyMechanism": "reconciliation",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "validation-failed",
+      "retryable": true,
+      "limit": 6,
+      "backoff": {
+        "type": "fixed",
+        "baseSeconds": 1,
+        "maxSeconds": 1
+      },
+      "requireReobservation": true,
+      "safetyMechanism": "reconciliation",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "policy-blocked",
+      "retryable": false,
+      "limit": 0,
+      "backoff": {
+        "type": "none",
+        "baseSeconds": 0,
+        "maxSeconds": 0
+      },
+      "requireReobservation": false,
+      "safetyMechanism": "no-retry",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "ambiguous-side-effect",
+      "retryable": false,
+      "limit": 0,
+      "backoff": {
+        "type": "none",
+        "baseSeconds": 0,
+        "maxSeconds": 0
+      },
+      "requireReobservation": true,
+      "safetyMechanism": "reconciliation",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "unsafe-to-retry",
+      "retryable": false,
+      "limit": 0,
+      "backoff": {
+        "type": "none",
+        "baseSeconds": 0,
+        "maxSeconds": 0
+      },
+      "requireReobservation": false,
+      "safetyMechanism": "no-retry",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "environment-unavailable",
+      "retryable": true,
+      "limit": 2,
+      "backoff": {
+        "type": "exponential",
+        "baseSeconds": 2,
+        "maxSeconds": 60
+      },
+      "requireReobservation": true,
+      "safetyMechanism": "idempotency-key",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "stagnated",
+      "retryable": false,
+      "limit": 0,
+      "backoff": {
+        "type": "none",
+        "baseSeconds": 0,
+        "maxSeconds": 0
+      },
+      "requireReobservation": false,
+      "safetyMechanism": "no-retry",
+      "escalationRef": "contract:Loop Control"
+    }
+  ],
+  "verificationPolicy": {
+    "oracleRef": "deterministic:scripts/run_tests.sh",
+    "executorIdentity": "agent:codex-writer-reviewer",
+    "checkerRef": "C:/Users/maiko/AppData/Local/hermes/hermes-agent/scripts/run_tests.sh",
+    "checkerIdentity": "process:scripts-run-tests",
+    "checkerIndependent": true,
+    "checkerDigest": "a3f598846f919c58220a3a83aa4d9eb652d166a5b4045978e86214717eff717a",
+    "immutableFixtureRefs": [
+      "C:/Users/maiko/AppData/Local/hermes/hermes-agent/docs/HERMES_PROJECT_OS_EXECUTION_CONTRACT.md"
+    ],
+    "immutableFixtureDigests": [
+      "de997f57ccc51b75052fd710e15791bb5b0ee5d2932aab315cdfa59a46ae8124"
+    ],
+    "feedbackRef": "docs/HERMES_PROJECT_OS_AGENT_LOOP_EVIDENCE.jsonl",
+    "requiredAttemptDelta": "changed source or test artifact plus fresh observation",
+    "highRisk": true
+  },
+  "approvalPolicy": {
+    "requiredForConsequentialActions": true,
+    "authorityRefs": [
+      "authority:user-brief"
+    ],
+    "bindingFields": [
+      "actionDigest",
+      "argumentDigest",
+      "preconditions",
+      "stateVersion"
+    ],
+    "maxAgeSeconds": 28800,
+    "reapprovalOnStateChange": true
+  },
+  "tracePolicy": {
+    "allowedEventFields": [
+      "sequence",
+      "timestamp",
+      "eventType",
+      "traceId",
+      "loopId",
+      "runId",
+      "attemptId",
+      "iteration",
+      "stateVersion",
+      "observationSequence",
+      "intentSequence",
+      "observationRef",
+      "observationDigest",
+      "decisionRef",
+      "decisionDigest",
+      "actionFingerprint",
+      "actionDigest",
+      "argumentDigest",
+      "preconditionDigest",
+      "idempotencyKeyDigest",
+      "approval",
+      "resultRef",
+      "resultDigest",
+      "checkerDigest",
+      "verificationPassed",
+      "postconditionsPassed",
+      "failureClass",
+      "transition",
+      "checkpointDigest",
+      "retryAfterSeconds",
+      "reconciled",
+      "childrenPending",
+      "redactedFields"
+    ],
+    "redactedFields": [
+      "arguments",
+      "toolPayload",
+      "credentials",
+      "tokens"
+    ],
+    "prohibitedContent": [
+      "raw-chain-of-thought",
+      "secrets",
+      "credentials",
+      "unrestricted-payloads"
+    ],
+    "retentionDays": 30,
+    "accessPolicyRef": "policy:workspace-maintainers"
+  },
+  "eventsRef": {
+    "path": "C:/Users/maiko/AppData/Local/hermes/hermes-agent/docs/HERMES_PROJECT_OS_AGENT_LOOP_EVIDENCE.jsonl",
+    "schemaRef": "C:/Users/maiko/Projetos/AgentOperatingFramework/framework/runtime/schemas/agent-loop-event.schema.json"
+  },
+  "current": {
+    "status": "blocked",
+    "iteration": 20,
+    "stagnantIterations": 0,
+    "retryCount": 0,
+    "toolCallCount": 0,
+    "outputBytes": 0,
+    "startedAt": "2026-08-13T13:28:46.0652431-03:00",
+    "observation": {
+      "ref": "target:telegram-preconditions",
+      "digest": "2d9d44b0eac977e90a9e65e387642a0c616243f5c6a15d88fd37f973831ec353",
+      "observedAt": "2026-08-13T18:50:00-03:00",
+      "freshnessCeilingSeconds": 3600,
+      "stateVersion": 1
+    },
+    "decision": {
+      "ref": "contract:stop-before-target",
+      "digest": "467cb28a67134678cf9999e84b02b7e08bdd9ed9b198b347b2429df81ddd2504"
+    },
+    "action": {
+      "id": "closeout-target-blocked",
+      "capabilityClass": "workspace-write",
+      "consequential": false,
+      "fingerprint": "46a743fb3247cda0ac445181c3ba404bca84e55b590212e77a3b3889b0a9b6c9",
+      "actionDigest": "25cf633d8bac5ae5d96030fdcdb596206ce23874dcf8ec5cf39119118dba4ad3",
+      "argumentDigest": "140bedbf9c3f6d56a9846d2ba7088798683f4da0c248231336e6a05679e4fdfe",
+      "idempotencyKey": "project-os-closeout-blocked-v1",
+      "reconciliationRef": "tests+bootstrap-report+bot-api+process-tree",
+      "preconditions": [
+        "focused suites pass",
+        "bootstrap drift empty"
+      ],
+      "postconditions": [
+        "local implementation validated",
+        "target blocker recorded"
+      ],
+      "noRetry": true
+    },
+    "verification": {
+      "evidenceRef": "docs/HERMES_PROJECT_OS_AGENT_LOOP_EVIDENCE.jsonl#3",
+      "passed": true,
+      "postconditionsPassed": false,
+      "checkerDigest": "a3f598846f919c58220a3a83aa4d9eb652d166a5b4045978e86214717eff717a"
+    },
+    "transition": {
+      "from": "running",
+      "to": "blocked"
+    },
+    "cancellation": {
+      "requested": false,
+      "propagateToChildren": true,
+      "childrenPending": 0
+    },
+    "ambiguityResolved": true,
+    "budgetExhausted": false
+  }
+}

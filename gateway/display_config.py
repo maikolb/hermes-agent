@@ -46,6 +46,9 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # back-compat, but mobile platforms can opt down to final-answer-first.
     "interim_assistant_messages": True,
     "long_running_notifications": True,
+    # Optional global/per-platform heartbeat tuning. An empty mapping keeps the
+    # legacy gateway_notify_interval cadence and English elapsed text.
+    "activity_indicator": {},
     "busy_ack_detail": True,
     # Whether busy_input_mode=steer sends a visible "Steered into current run"
     # acknowledgment after successfully injecting the user's mid-turn message.

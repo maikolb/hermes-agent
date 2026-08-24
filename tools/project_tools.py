@@ -101,9 +101,17 @@ def project_create(name: str, path: Optional[str] = None, task_id: Optional[str]
 
     try:
         with pdb.connect_closing() as conn:
-            pid = pdb.create_project(conn, name=name, folders=[folder] if folder else [], primary_path=folder or None)
-            pdb.set_active(conn, pid)
-            proj = pdb.get_project(conn, pid)
+            existing = pdb.find_by_primary_path(conn, folder) if folder else None
+            if existing is not None:
+                # Idempotent create: the folder already belongs to a project.
+                # Re-activating it beats minting a duplicate — duplicated
+                # projects render N identical sidebar subtrees (#75820).
+                pdb.set_active(conn, existing.id)
+                proj = existing
+            else:
+                pid = pdb.create_project(conn, name=name, folders=[folder] if folder else [], primary_path=folder or None)
+                pdb.set_active(conn, pid)
+                proj = pdb.get_project(conn, pid)
     except ValueError as exc:
         return json.dumps({"success": False, "error": str(exc)})
 
@@ -129,6 +137,35 @@ def project_switch(project: str, task_id: Optional[str] = None) -> str:
     _apply_workspace(task_id, primary, proj.name)
 
     return json.dumps({"success": True, "id": proj.id, "slug": proj.slug, "name": proj.name, "primary_path": primary})
+
+
+async def project_topic_create(
+    name: str,
+    workdir: Optional[str] = None,
+    status: str = "active",
+) -> str:
+    """Delegate management-topic creation to the current gateway turn."""
+    normalized_name = (name or "").strip()
+    if not normalized_name:
+        return json.dumps({"success": False, "error": "name is required"})
+
+    from gateway.session_context import get_project_topic_creator
+
+    creator = get_project_topic_creator()
+    if creator is None:
+        return json.dumps({
+            "success": False,
+            "error": (
+                "project_topic_create is available only from an authorized Telegram "
+                "management Topic with project routing enabled"
+            ),
+        })
+    result = await creator(
+        name=normalized_name,
+        workdir=(workdir or "").strip() or None,
+        status=(status or "active").strip() or "active",
+    )
+    return json.dumps(result, ensure_ascii=False)
 
 
 registry.register(
@@ -186,4 +223,35 @@ registry.register(
         },
     },
     handler=lambda args, **kw: project_switch(project=args.get("project", ""), task_id=kw.get("task_id")),
+)
+
+registry.register(
+    name="project_topic_create",
+    toolset="kanban",
+    schema={
+        "name": "project_topic_create",
+        "description": (
+            "Use only from the authorized Telegram management Topic to create a "
+            "Telegram Topic, project, and Kanban board. Do not use for ordinary tasks."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Project and Topic name"},
+                "workdir": {"type": "string", "description": "Optional project workspace"},
+                "status": {
+                    "type": "string",
+                    "description": "Project status (defaults to active)",
+                    "default": "active",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    handler=lambda args, **kw: project_topic_create(
+        name=args.get("name", ""),
+        workdir=args.get("workdir"),
+        status=args.get("status", "active"),
+    ),
+    is_async=True,
 )

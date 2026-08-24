@@ -214,6 +214,7 @@ def test_observed_group_context_uses_shared_source_and_prompt_for_later_mentions
         assert event.source.chat_type == "group"
         assert event.source.user_id is None
         assert event.source.user_name is None
+        assert event.metadata["telegram_sender_user_id"] == "222"
         assert event.text == "[Bob Example|222]\nwhat did Alice say?"
         assert "Existing topic prompt" in event.channel_prompt
         assert "observed Telegram group context" in event.channel_prompt

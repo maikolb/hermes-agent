@@ -226,12 +226,40 @@ def activate_durable_lazy_target() -> None:
         pass
 
 
+def activate_windows_process_broker() -> bool:
+    """Install and verify the process-wide zero-UI boundary on Windows.
+
+    Every Hermes entrypoint/profile must either have the broker and private
+    desktop ready before tool discovery or fail closed.  Returning after a
+    best-effort install allowed lightweight workers to reach Git/CMD/Node on
+    the interactive desktop when adoption drifted.
+    """
+    if not _IS_WINDOWS:
+        return False
+    from hermes_cli.windows_process_broker import (
+        broker_installed,
+        hidden_desktop_ready,
+        install_windows_process_broker,
+    )
+
+    installed_now = install_windows_process_broker()
+    if not broker_installed() or not hidden_desktop_ready():
+        raise RuntimeError(
+            "Hermes Windows zero-UI broker/private desktop failed to initialize"
+        )
+    return installed_now
+
+
 # Apply on import — entry points just need ``import hermes_bootstrap``
 # (or ``from hermes_bootstrap import apply_windows_utf8_bootstrap``) at
 # the very top of their module, before importing anything else.  The
 # import side effect does the right thing.
 apply_windows_utf8_bootstrap()
 suppress_platform_ver_console()
+
+# Enforce invisible, contained subprocess creation before any later bootstrap
+# step can import a package manager, validator, or capability probe.
+activate_windows_process_broker()
 
 # Activate the durable lazy-install target (immutable Docker images) so
 # packages installed into the data volume on a previous run are importable

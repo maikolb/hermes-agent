@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ctypes
 import locale
+import logging
 import os
 import re
 import shlex
@@ -40,10 +41,13 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from hermes_cli._subprocess_compat import (
+    _WINDOWS_GATEWAY_BREAKAWAY_ENV,
     windows_detach_flags,
     windows_detach_flags_without_breakaway,
     windows_hide_flags,
 )
+
+logger = logging.getLogger(__name__)
 
 # Short timeouts: schtasks occasionally wedges and we don't want to hang forever.
 _SCHTASKS_TIMEOUT_S = 15
@@ -445,6 +449,72 @@ def _quote_vbs_string(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
+def _resolve_base_pythonw(python_path: str) -> tuple[Path, Path]:
+    """Return the real base pythonw.exe and venv root for a managed venv."""
+    venv_dir = Path(python_path).parent.parent
+    config_path = venv_dir / "pyvenv.cfg"
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read managed venv config: {config_path}") from exc
+    home = ""
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep and key.strip().lower() == "home":
+            home = value.strip()
+            break
+    if not home:
+        raise RuntimeError(f"Managed venv config has no base home: {config_path}")
+    base_pythonw = Path(home) / "pythonw.exe"
+    if not base_pythonw.is_file():
+        raise RuntimeError(f"Real base pythonw.exe not found: {base_pythonw}")
+    return base_pythonw, venv_dir
+
+
+def _build_gateway_pyw_script(
+    python_path: str,
+    working_dir: str,
+    hermes_home: str,
+    profile_arg: str,
+) -> tuple[str, Path]:
+    """Build the native no-console gateway entrypoint used by Task Scheduler."""
+    base_pythonw, venv_dir = _resolve_base_pythonw(python_path)
+    repo_root = Path(__file__).resolve().parent.parent
+    argv = [str(repo_root / "hermes_cli" / "main.py")]
+    if profile_arg:
+        argv.extend(shlex.split(profile_arg))
+    argv.extend(["gateway", "run"])
+    lines = [
+        '\"\"\"Generated native hidden launcher for Hermes Gateway.\"\"\"',
+        "import os",
+        "import runpy",
+        "import site",
+        "import sys",
+        "from pathlib import Path",
+        f"EXPECTED_BASE = Path({str(base_pythonw.parent)!r})",
+        f"VENV = Path({str(venv_dir)!r})",
+        f"REPO = Path({str(repo_root)!r})",
+        f"HERMES_HOME = Path({hermes_home!r})",
+        "if Path(sys.executable).resolve().parent != EXPECTED_BASE.resolve():",
+        "    raise RuntimeError(f'Expected base pythonw under {EXPECTED_BASE}, got {sys.executable}')",
+        "site.addsitedir(str(VENV / 'Lib' / 'site-packages'))",
+        "sys.path.insert(0, str(REPO))",
+        f"os.chdir({working_dir!r})",
+        "os.environ['HERMES_HOME'] = str(HERMES_HOME)",
+        "os.environ['PYTHONIOENCODING'] = 'utf-8'",
+        "os.environ['HERMES_GATEWAY_DETACHED'] = '1'",
+        "os.environ['VIRTUAL_ENV'] = str(VENV)",
+        "log_dir = HERMES_HOME / 'logs'",
+        "log_dir.mkdir(parents=True, exist_ok=True)",
+        "log = open(log_dir / 'gateway-hidden-launch.log', 'a', encoding='utf-8', buffering=1)",
+        "sys.stdout = log",
+        "sys.stderr = log",
+        f"sys.argv = {argv!r}",
+        "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=False)",
+    ]
+    return "\n".join(lines) + "\n", base_pythonw
+
+
 def _build_gateway_vbs_script(
     python_path: str,
     working_dir: str,
@@ -560,14 +630,23 @@ def _write_task_script() -> Path:
     tmp.write_text(content, encoding="utf-8", newline="")
     tmp.replace(script_path)
 
-    # Also render the console-less .vbs launcher used by Scheduled Task and the
-    # Startup-folder fallback via wscript.exe (issue #45599 fix A). The .cmd
-    # wrapper stays as a generated helper/compatibility artifact.
+    # Keep the VBS artifact only for the Startup-folder fallback. The Scheduled
+    # Task uses the synchronous base-pythonw -> pyw entrypoint below so Task
+    # Scheduler owns the real gateway lifetime and can restart it after a crash.
     vbs_content = _build_gateway_vbs_script(python_path, working_dir, hermes_home, profile_arg)
     vbs_path = script_path.with_suffix(".vbs")
     vbs_tmp = vbs_path.with_name(vbs_path.name + ".tmp")
     vbs_tmp.write_text(vbs_content, encoding="utf-8", newline="")
     vbs_tmp.replace(vbs_path)
+
+    pyw_content, _base_pythonw = _build_gateway_pyw_script(
+        python_path, working_dir, hermes_home, profile_arg,
+    )
+    pyw_path = script_path.with_suffix(".pyw")
+    pyw_tmp = pyw_path.with_name(pyw_path.name + ".tmp")
+    pyw_tmp.write_text(pyw_content, encoding="utf-8", newline="")
+    pyw_tmp.replace(pyw_path)
+
     return script_path
 
 
@@ -586,13 +665,15 @@ def _resolve_task_user() -> str | None:
     return f"{domain}\\{username}" if domain else username
 
 
-def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | None) -> str:
-    """Render a Task Scheduler XML definition with safe long-running defaults.
-
-    ``launcher_path`` is the console-less ``.vbs`` the task runs via
-    ``wscript.exe`` — not the ``.cmd`` (see ``_build_gateway_vbs_script`` /
-    issue #45599 root cause #1).
-    """
+def _build_scheduled_task_xml(
+    task_name: str,
+    launcher_path: Path,
+    user: str | None,
+    pythonw_path: Path,
+) -> str:
+    """Render a tracked gateway task on a non-interactive Windows desktop."""
+    if not user:
+        raise RuntimeError("Hermes S4U gateway task requires an explicit user")
     user_principal = f"\n      <UserId>{escape(user)}</UserId>" if user else ""
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -600,6 +681,10 @@ def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | N
     <Description>{escape(_TASK_DESCRIPTION)}</Description>
   </RegistrationInfo>
   <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT1M</Delay>
+    </BootTrigger>
     <LogonTrigger>
       <Enabled>true</Enabled>
       <Delay>{_TASK_LOGON_DELAY}</Delay>
@@ -607,7 +692,7 @@ def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | N
   </Triggers>
   <Principals>
     <Principal id="Author">{user_principal}
-      <LogonType>InteractiveToken</LogonType>
+      <LogonType>S4U</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
@@ -624,7 +709,7 @@ def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | N
     </IdleSettings>
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
+    <Hidden>true</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
@@ -636,18 +721,24 @@ def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | N
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>wscript.exe</Command>
-      <Arguments>//B //Nologo "{escape(str(launcher_path))}"</Arguments>
+      <Command>{escape(str(pythonw_path))}</Command>
+      <Arguments>"{escape(str(launcher_path))}"</Arguments>
+      <WorkingDirectory>{escape(str(launcher_path.parent.parent))}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
 """
 
 
-def _write_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | None) -> Path:
+def _write_scheduled_task_xml(
+    task_name: str,
+    launcher_path: Path,
+    user: str | None,
+    pythonw_path: Path,
+) -> Path:
     xml_path = launcher_path.with_suffix(".task.xml")
     xml_path.write_text(
-        _build_scheduled_task_xml(task_name, launcher_path, user),
+        _build_scheduled_task_xml(task_name, launcher_path, user, pythonw_path),
         encoding="utf-16",
         newline="",
     )
@@ -660,7 +751,7 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
     Always recreate instead of ``/Change``. Older Hermes builds and failed
     experiments may have left repeat/restart settings on the task; ``/Change``
     preserves those stale triggers and can make the gateway relaunch every
-    minute. Delete+create gives us a clean ONLOGON task every install.
+    minute. Delete+create gives us a clean boot+logon task every install.
     """
     delete_code, delete_out, delete_err = _exec_schtasks(["/Delete", "/F", "/TN", task_name])
     delete_detail = (delete_err or delete_out or "").strip()
@@ -670,12 +761,19 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
         # Non-fatal: /Create /F below may still replace it. Keep the detail in
         # the final error if creation also fails.
     user = _resolve_task_user()
-    # The Scheduled Task launches the console-less .vbs (issue #45599 fix A), not
-    # the .cmd. Immediate manual starts use _spawn_detached().
-    launcher_path = script_path.with_suffix(".vbs")
-    xml_path = _write_scheduled_task_xml(task_name, launcher_path, user)
+    if not user:
+        return (False, "Cannot install a non-interactive gateway task without a user")
+    launcher_path = script_path.with_suffix(".pyw")
+    from hermes_cli.gateway import get_python_path
+
+    pythonw_path, _venv_dir = _resolve_base_pythonw(get_python_path())
+    xml_path = _write_scheduled_task_xml(
+        task_name, launcher_path, user, pythonw_path,
+    )
     base = ["/Create", "/F", "/TN", task_name, "/XML", str(xml_path)]
-    variants = [[*base, "/RU", user, "/NP", "/IT"]] if user else []
+    # /NP is the documented non-interactive, no-stored-password mode. Never
+    # add /IT: it forces the entire descendant tree back onto the user's desktop.
+    variants = [[*base, "/RU", user, "/NP"]]
     variants.append(base)
 
     last_code = 1
@@ -913,6 +1011,7 @@ def _spawn_detached(script_path: Path | None = None) -> int:
 
     # Inherit PATH etc. from the current env, overlay our required vars.
     env = {**os.environ, **env_overlay}
+    primary_env = {**env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1"}
 
     # CREATE_NEW_PROCESS_GROUP 0x00000200 — child gets its own group, won't
     #                                       receive Ctrl+C from our group
@@ -942,25 +1041,34 @@ def _spawn_detached(script_path: Path | None = None) -> int:
             proc = subprocess.Popen(
                 argv,
                 cwd=working_dir,
-                env=env,
+                env=primary_env,
                 creationflags=flags,
                 close_fds=True,
                 stdin=subprocess.DEVNULL,
                 stdout=log_fh,
                 stderr=log_fh,
             )
-    except OSError:
+    except OSError as exc:
         # CREATE_BREAKAWAY_FROM_JOB can fail with "access denied" when the
         # parent's job object doesn't permit breakaway (some Windows
         # Terminal configs). Retry without the breakaway flag — in most
         # setups the hidden-console CREATE_NO_WINDOW spawn is enough on
         # its own.
+        error_code = getattr(exc, "winerror", None)
+        if error_code is None:
+            error_code = exc.errno
+        logger.warning(
+            "Gateway breakaway spawn failed (error=%s); retrying without "
+            "CREATE_BREAKAWAY_FROM_JOB",
+            error_code,
+        )
         flags_no_breakaway = windows_detach_flags_without_breakaway()
+        fallback_env = {**env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"}
         with open(stray_log, "ab", buffering=0) as log_fh:
             proc = subprocess.Popen(
                 argv,
                 cwd=working_dir,
-                env=env,
+                env=fallback_env,
                 creationflags=flags_no_breakaway,
                 close_fds=True,
                 stdin=subprocess.DEVNULL,

@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.config import GatewayConfig, Platform, PlatformConfig, ProjectRouterConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
@@ -108,6 +108,80 @@ def _make_runner(*, platform_extra: dict | None = None,
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
     return runner
+
+
+def test_managed_team_implicit_member_gets_project_safe_slash_only(tmp_path):
+    from gateway.project_router import ProjectRouter
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                enabled=True,
+                token="***",
+                extra={"group_allow_admin_from": ["operator"]},
+            )
+        },
+        project_router=ProjectRouterConfig(
+            enabled=True,
+            managed_chat_ids=["team"],
+            implicit_managed_chat_members=True,
+        ),
+    )
+    router_db = tmp_path / "router.db"
+    with ProjectRouter(router_db, "default"):
+        pass
+    runner._project_router_db_path = lambda _source: router_db
+    runner._effective_project_router_profile = lambda _source: "default"
+    source = _make_source(
+        platform=Platform.TELEGRAM,
+        user_id="member",
+        chat_type="group",
+        chat_id="team",
+    )
+
+    assert runner._check_slash_access(source, "status") is None
+    kanban_denial = runner._check_slash_access(source, "kanban")
+    assert kanban_denial is not None and "admin-only" in kanban_denial
+    denial = runner._check_slash_access(source, "restart")
+    assert denial is not None and "admin-only" in denial
+
+
+def test_managed_team_explicit_allow_is_admin_and_deny_wins(tmp_path):
+    from gateway.project_router import ProjectRouter
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")},
+        project_router=ProjectRouterConfig(
+            enabled=True,
+            managed_chat_ids=["team"],
+            implicit_managed_chat_members=True,
+        ),
+    )
+    router_db = tmp_path / "router.db"
+    with ProjectRouter(router_db, "default") as router:
+        router.set_acl("team", "admin", "allow")
+        router.set_acl("team", "blocked", "deny")
+    runner._project_router_db_path = lambda _source: router_db
+    runner._effective_project_router_profile = lambda _source: "default"
+
+    admin = _make_source(
+        platform=Platform.TELEGRAM,
+        user_id="admin",
+        chat_type="group",
+        chat_id="team",
+    )
+    blocked = _make_source(
+        platform=Platform.TELEGRAM,
+        user_id="blocked",
+        chat_type="group",
+        chat_id="team",
+    )
+    assert runner._check_slash_access(admin, "restart") is None
+    assert "not authorized" in runner._check_slash_access(blocked, "kanban")
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +298,10 @@ async def test_admin_runs_quick_command_when_gating_enabled():
         }
     )
     runner.config.quick_commands = {
-        "limits": {"type": "exec", "command": "printf quick-command-admin"}
+        # ``echo`` is a shell builtin on both Windows and POSIX.  ``printf``
+        # made this access-control test fail before reaching its assertion on
+        # Windows even though the admin gate itself was correct.
+        "limits": {"type": "exec", "command": "echo quick-command-admin"}
     }
 
     result = await runner._handle_message(

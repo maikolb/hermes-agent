@@ -81,7 +81,7 @@ def test_default_repeated_identical_failed_call_warns_without_blocking():
     assert controller.halt_decision is None
 
 
-def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution():
+def test_hard_stop_enabled_redirects_repeated_exact_failure_before_next_execution():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(
             hard_stop_enabled=True,
@@ -101,10 +101,11 @@ def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution()
     assert second.action == "warn"
     assert second.code == "repeated_exact_failure_warning"
 
-    blocked = controller.before_call("web_search", args)
-    assert blocked.action == "block"
-    assert blocked.code == "repeated_exact_failure_block"
-    assert blocked.count == 2
+    redirected = controller.before_call("web_search", args)
+    assert redirected.action == "redirect"
+    assert redirected.code == "repeated_exact_failure_redirect"
+    assert redirected.count == 2
+    assert not redirected.should_halt
 
 
 

@@ -69,6 +69,39 @@ def _make_adapter():
     return adapter
 
 
+def test_exact_text_capability_excludes_chunked_whatsapp_payloads():
+    adapter = _make_adapter()
+
+    assert adapter.can_deliver_exact_text("short exact response") is True
+    assert adapter.can_deliver_exact_text("x" * 5000) is False
+
+
+def test_exact_text_capability_counts_javascript_utf16_units_and_prefix():
+    adapter = _make_adapter()
+    adapter._reply_prefix = ""
+
+    # Python len() sees 3,000 code points, while the bridge's JavaScript
+    # String.length sees 6,000 UTF-16 code units and would split this payload.
+    assert len("😀" * 3000) < adapter._outgoing_chunk_limit()
+    assert adapter.can_deliver_exact_text("😀" * 3000) is False
+
+    adapter._reply_prefix = "prefix: "
+    remaining = adapter._outgoing_chunk_limit()
+    assert adapter.can_deliver_exact_text("x" * remaining) is True
+    assert adapter.can_deliver_exact_text("x" * (remaining + 1)) is False
+
+
+@pytest.mark.asyncio
+async def test_disconnected_send_is_explicitly_pre_network():
+    adapter = _make_adapter()
+
+    result = await adapter.send("chat-123", "hello")
+
+    assert result.success is False
+    assert result.error == "Not connected"
+    assert result.raw_response == {"send_attempted": False}
+
+
 def _mock_aiohttp(status=200, json_data=None, json_side_effect=None):
     """Build a mock ``aiohttp.ClientSession`` returning a fixed response."""
     mock_resp = MagicMock()
@@ -85,11 +118,16 @@ def _mock_aiohttp(status=200, json_data=None, json_side_effect=None):
 
 
 def _connect_patches(mock_proc, mock_fh, mock_client_cls=None):
-    """Return a dict of common patches needed to reach the health-check loop."""
-    patches = {
-        "plugins.platforms.whatsapp.adapter.check_whatsapp_requirements": True,
-        "plugins.platforms.whatsapp.adapter.asyncio.create_task": MagicMock(),
-    }
+    """Return common patches needed to reach the health-check loop."""
+    def _discard_background_coroutine(coro):
+        """Close mocked background work instead of leaking an unawaited coroutine."""
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        task = MagicMock()
+        task.done.return_value = True
+        return task
+
     base = [
         patch("plugins.platforms.whatsapp.adapter.check_whatsapp_requirements", return_value=True),
         patch.object(Path, "exists", return_value=True),
@@ -98,7 +136,10 @@ def _connect_patches(mock_proc, mock_fh, mock_client_cls=None):
         patch("subprocess.Popen", return_value=mock_proc),
         patch("builtins.open", return_value=mock_fh),
         patch("plugins.platforms.whatsapp.adapter.asyncio.sleep", new_callable=AsyncMock),
-        patch("plugins.platforms.whatsapp.adapter.asyncio.create_task"),
+        patch(
+            "plugins.platforms.whatsapp.adapter.asyncio.create_task",
+            side_effect=_discard_background_coroutine,
+        ),
     ]
     if mock_client_cls is not None:
         base.append(patch("aiohttp.ClientSession", mock_client_cls))
@@ -168,6 +209,33 @@ class TestDataInitialized:
         assert adapter._running is True
 
 
+class TestWindowsBridgeLifecycle:
+    """The gateway must own the actual Node bridge process on Windows."""
+
+    @pytest.mark.asyncio
+    async def test_connect_marks_bridge_for_direct_hidden_lifecycle(self):
+        adapter = _make_adapter()
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 12345
+        mock_fh = MagicMock()
+        mock_client_cls = _mock_aiohttp(
+            status=200, json_data={"status": "connected"},
+        )
+        patches = _connect_patches(mock_proc, mock_fh, mock_client_cls)
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4] as popen, \
+             patches[5], patches[6], patches[7], patches[8], \
+             patch("plugins.platforms.whatsapp.adapter._IS_WINDOWS", True), \
+             patch("plugins.platforms.whatsapp.adapter._write_bridge_pidfile"), \
+             patch.object(type(adapter), "_poll_messages", return_value=MagicMock()):
+            result = await adapter.connect()
+
+        assert result is True
+        child_env = popen.call_args.kwargs["env"]
+        assert child_env["HERMES_INTERNAL_DIRECT_HIDDEN_CHILD"] == "1"
+
+
 # ---------------------------------------------------------------------------
 # File handle cleanup on error paths
 # ---------------------------------------------------------------------------
@@ -216,6 +284,9 @@ class TestConnectCleanup:
             result = await adapter.connect()
 
         assert result is False
+        assert adapter.fatal_error_code == "whatsapp_npm_install_failed"
+        assert adapter.fatal_error_retryable is False
+        assert "npm install failed" in (adapter.fatal_error_message or "")
         mock_release.assert_called_once_with("whatsapp-session", str(adapter._session_path))
         assert adapter._platform_lock_identity is None
 
@@ -241,6 +312,7 @@ class TestBridgeRuntimeFailure:
 
         assert result.success is False
         assert "exited unexpectedly" in result.error
+        assert result.raw_response == {"send_attempted": False}
         assert adapter.fatal_error_code == "whatsapp_bridge_exited"
         assert adapter.fatal_error_retryable is True
         fatal_handler.assert_awaited_once()
@@ -261,7 +333,13 @@ class TestBridgeRuntimeFailure:
 
         mock_resp = MagicMock()
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={"messageId": "msg-1"})
+        mock_resp.json = AsyncMock(
+            return_value={
+                "success": True,
+                "messageId": "msg-1",
+                "ackStatuses": [2],
+            }
+        )
         mock_session = MagicMock()
         mock_session.post = MagicMock(return_value=_AsyncCM(mock_resp))
         adapter._http_session = mock_session

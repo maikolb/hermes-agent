@@ -27,30 +27,12 @@ client-level limits when a custom transport is supplied.
 
 import asyncio
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
 from gateway.config import PlatformConfig
-
-
-def _ensure_telegram_mock():
-    if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
-        return
-    telegram_mod = MagicMock()
-    telegram_mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
-    telegram_mod.constants.ParseMode.MARKDOWN_V2 = "MarkdownV2"
-    telegram_mod.constants.ChatType.GROUP = "group"
-    telegram_mod.constants.ChatType.SUPERGROUP = "supergroup"
-    telegram_mod.constants.ChatType.CHANNEL = "channel"
-    telegram_mod.constants.ChatType.PRIVATE = "private"
-    for name in ("telegram", "telegram.ext", "telegram.constants", "telegram.request"):
-        sys.modules.setdefault(name, telegram_mod)
-
-
-_ensure_telegram_mock()
-
 from plugins.platforms.telegram import adapter as tg_adapter  # noqa: E402
 from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: E402
 
@@ -74,7 +56,7 @@ def _make_adapter() -> TelegramAdapter:
     return TelegramAdapter(PlatformConfig(enabled=True, token="test-token"))
 
 
-def _drive_connect(monkeypatch, *, proxy_url, fallback_ips=None):
+def _drive_connect(monkeypatch, *, proxy_url, fallback_ips=None, direct=False):
     """Run connect() far enough to build the HTTPXRequests, then abort.
 
     Returns the list of recorded _RecordingHTTPXRequest instances.
@@ -85,7 +67,21 @@ def _drive_connect(monkeypatch, *, proxy_url, fallback_ips=None):
     async def _no_fallback():
         return list(fallback_ips or [])
 
-    monkeypatch.setattr(tg_adapter, "discover_fallback_ips", _no_fallback)
+    if direct:
+        async def _unexpected_discovery():
+            raise AssertionError("direct mode must not discover fallback IPs")
+
+        monkeypatch.setattr(tg_adapter, "discover_fallback_ips", _unexpected_discovery)
+        monkeypatch.setenv("HERMES_TELEGRAM_DISABLE_FALLBACK_IPS", "1")
+        import types
+
+        monkeypatch.setitem(
+            sys.modules,
+            "plugins.platforms.telegram.telegram_sync_request",
+            types.SimpleNamespace(ThreadedUrllibRequest=_RecordingHTTPXRequest),
+        )
+    else:
+        monkeypatch.setattr(tg_adapter, "discover_fallback_ips", _no_fallback)
     monkeypatch.setattr(
         tg_adapter, "resolve_proxy_url", lambda *a, **k: proxy_url
     )
@@ -185,3 +181,16 @@ def test_fallback_branch_forwards_tuned_limits_to_inner_transports(monkeypatch):
 
     for instance in instances:
         asyncio.run(instance.kwargs["httpx_kwargs"]["transport"].aclose())
+
+
+def test_disable_fallback_uses_threaded_direct_transport(monkeypatch):
+    instances = _drive_connect(
+        monkeypatch,
+        proxy_url=None,
+        direct=True,
+    )
+
+    assert len(instances) >= 2
+    for instance in instances:
+        assert "httpx_kwargs" not in instance.kwargs
+        assert "media_write_timeout" not in instance.kwargs

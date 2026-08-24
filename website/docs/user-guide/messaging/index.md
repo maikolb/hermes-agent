@@ -238,18 +238,36 @@ between producing a response and the platform confirming receipt, the next
 boot redelivers the stored response instead of losing it — or re-running the
 whole turn.
 
-Semantics are honest at-least-once:
+Recovery distinguishes work that is safe to replay from an uncertain network
+handoff:
 
-- A response whose send **never started** is redelivered as-is.
-- A response that was **mid-send** when the gateway died (the platform may or
-  may not have received it) is redelivered with a visible
-  "♻️ Recovered reply — … may be a duplicate" prefix. Ambiguity is labeled,
-  never silently resent.
+- A response whose network send **never started** is redelivered as-is.
+- Once a send has been handed to the platform, a crash can leave receipt
+  uncertain. That row becomes `delivery_ambiguous` and is **not** retried
+  automatically, avoiding an unprovable duplicate.
 - Redelivery is bounded: 3 attempts, 24-hour freshness, then the row is
-  abandoned. Delivered rows are pruned after 7 days.
+  abandoned. Terminal rows are pruned after 7 days.
 
-Disable with `gateway.delivery_ledger: false` in `config.yaml` (restores the
-old behavior: in-flight responses are lost on crash).
+The local `claimed → attempting` transition is placed immediately before the
+platform call, but it cannot be atomic with a remote service. Without a
+platform idempotency key there is an unavoidable physical interval between
+those two operations, so even the covered text path does **not** claim
+exactly-once delivery; an interrupted `attempting` row is surfaced as
+ambiguous instead of being silently replayed.
+
+This durable recovery boundary currently covers the **text part of ordinary
+non-streaming gateway finals on adapters that prove full-text acceptance**.
+Telegram and the Baileys WhatsApp bridge currently opt into that audited
+capability. Other adapters are recorded explicitly as `best_effort` rather
+than acknowledging a full checkpoint when their transport may truncate or
+substitute content.
+Progressive streaming, remote-proxy responses, and attachment/pure-media sends
+retain their existing best-effort semantics; they are not presented as
+exactly-once delivery. A text+attachment response can therefore have confirmed
+text while a later attachment remains unconfirmed.
+
+Disable with `gateway.delivery_ledger: false` in `config.yaml` to restore the
+legacy best-effort send path, which has no durable crash recovery.
 
 ### Reset Policies
 
@@ -520,14 +538,15 @@ When the agent running a background session uses `terminal(background=true)` to 
 
 ```yaml
 display:
-  background_process_notifications: all    # all | result | error | off
+  background_process_notifications: concise    # concise | all | result | error | off
 ```
 
 | Mode | What you receive |
 |------|-----------------|
-| `all` | Running-output updates **and** the final completion message (default) |
-| `result` | Only the final completion message (regardless of exit code) |
-| `error` | Only the final message when the exit code is non-zero |
+| `concise` | One-line status message on completion; failures append a short output tail (default) |
+| `all` | Running-output updates **and** the final raw-output message |
+| `result` | Only the final raw-output completion message (regardless of exit code) |
+| `error` | Only the final raw-output message when the exit code is non-zero |
 | `off` | No process watcher messages at all |
 
 You can also set this via environment variable:
@@ -754,6 +773,43 @@ display:
       interim_assistant_messages: false
       long_running_notifications: false
 ```
+
+### Quiet edit-in-place activity indicator
+
+Long-running notifications can use one temporary message instead of tool or
+stage updates. The first delay and later edit cadence are independently
+configurable under `display.activity_indicator` or per platform under
+`display.platforms.<platform>.activity_indicator`:
+
+```yaml
+display:
+  platforms:
+    telegram:
+      tool_progress: off
+      interim_assistant_messages: false
+      busy_ack_detail: false
+      long_running_notifications: true
+      cleanup_progress: true
+      activity_indicator:
+        initial_delay_seconds: 10
+        update_interval_seconds: 60
+        initial_text: "⏳ Trabalhando…"
+        elapsed_text: "⏳ Trabalhando há {elapsed_human}…"
+```
+
+A turn that finishes before `initial_delay_seconds` creates no status message.
+After the first message, Hermes edits only that owned message at
+`update_interval_seconds`; retryable edit failures do not create replacement
+bubbles. Supported placeholders in `elapsed_text` are `{elapsed_human}`,
+`{elapsed_minutes}`, and `{elapsed_seconds}`. If the block is omitted, the
+existing `agent.gateway_notify_interval` controls both delays and the legacy
+heartbeat text remains unchanged. Setting `agent.gateway_notify_interval: 0`
+still disables long-running notifications.
+
+Custom text owns the complete heartbeat content, so tool and iteration details
+are not appended. The final answer is delivered through the normal path;
+`cleanup_progress: true` deletes the temporary indicator only after successful
+final delivery. Failed runs keep it as a breadcrumb.
 
 ### Progress bubble cleanup (opt-in)
 

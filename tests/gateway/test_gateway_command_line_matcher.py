@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from gateway.status import (
+    _looks_like_hidden_profile_gateway_launcher as matches_hidden_launcher,
     looks_like_gateway_command_line as matches,
     looks_like_gateway_runtime_command_line as matches_runtime,
 )

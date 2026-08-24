@@ -294,6 +294,7 @@ from gateway.platforms.base import (
     SUPPORTED_DOCUMENT_TYPES,
     cache_image_from_url,
     cache_audio_from_url,
+    utf16_len,
 )
 from utils import env_int
 
@@ -355,6 +356,34 @@ def _file_content_hash(path: Path) -> str:
         return ""
 
 
+def _passive_intake_bridge_values(value: Any, root: Optional[Path]) -> tuple[str, str]:
+    """Return canonical bridge JSON and its restart-handshake fingerprint.
+
+    The Node bridge performs the authoritative schema validation and exits
+    before connecting when an enabled route is malformed.  Canonical JSON
+    here makes configuration changes observable to the stale-bridge check.
+    """
+    import hashlib
+    import json
+
+    if value is None:
+        value = {"enabled": False, "routes": []}
+    try:
+        serialized = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("WhatsApp passive_intake must be JSON-serializable") from exc
+    fingerprint = hashlib.sha256(
+        f"{serialized}\0{root or ''}".encode("utf-8")
+    ).hexdigest()[:16]
+    return serialized, fingerprint
+
+
 def check_whatsapp_requirements() -> bool:
     """
     Check if WhatsApp dependencies are available.
@@ -410,6 +439,28 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
     # Default bridge location resolved via shared helper
     _DEFAULT_BRIDGE_DIR = None  # resolved in __init__
     splits_long_messages = True  # send() chunks via truncate_message()
+    supports_exact_text_delivery = True
+
+    def can_deliver_exact_text(self, content: str, metadata=None) -> bool:
+        """Exact ACK is limited to one formatted WhatsApp text message."""
+
+        del metadata
+        try:
+            formatted = self.format_message(content)
+            # The Baileys bridge chunks with JavaScript ``String.length``
+            # (UTF-16 code units), not Python code points.  It can also prepend
+            # the self-chat identity banner after the Python adapter has
+            # already decided whether this is a single exact message.  Count
+            # that default banner conservatively even in bot mode: a false
+            # negative merely uses best-effort delivery, while a false positive
+            # could split/trim a payload that was already sealed as exact.
+            prefix = self._effective_reply_prefix()
+            return (
+                len(formatted) <= self._outgoing_chunk_limit()
+                and utf16_len(f"{prefix}{formatted}") <= self.MAX_MESSAGE_LENGTH
+            )
+        except Exception:
+            return False
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WHATSAPP)
@@ -454,6 +505,29 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         self._send_read_receipts = (
             read_receipts if isinstance(read_receipts, bool)
             else str(read_receipts or "").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        configured_intake_root = config.extra.get("passive_intake_root")
+        self._passive_intake_root: Optional[Path] = None
+        if configured_intake_root:
+            intake_root = Path(str(configured_intake_root)).expanduser()
+            if not intake_root.is_absolute():
+                raise ValueError("WhatsApp passive_intake_root must be absolute")
+            self._passive_intake_root = intake_root.resolve()
+        passive_intake_config = config.extra.get("passive_intake")
+        if (
+            isinstance(passive_intake_config, dict)
+            and passive_intake_config.get("enabled") is True
+            and self._passive_intake_root is None
+        ):
+            raise ValueError(
+                "WhatsApp passive_intake_root is required when passive_intake is enabled"
+            )
+        (
+            self._passive_intake_config,
+            self._passive_intake_config_hash,
+        ) = _passive_intake_bridge_values(
+            passive_intake_config,
+            self._passive_intake_root,
         )
         self._mention_patterns = self._compile_mention_patterns()
         self._message_queue: asyncio.Queue = asyncio.Queue()
@@ -531,6 +605,17 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             )
             return False
 
+        # A few focused tests construct the adapter with ``__new__`` to avoid
+        # unrelated base initialization. Keep their disabled-route behavior
+        # explicit without inventing a legacy spool root.
+        if not hasattr(self, "_passive_intake_root"):
+            self._passive_intake_root = None
+        if not hasattr(self, "_passive_intake_config"):
+            (
+                self._passive_intake_config,
+                self._passive_intake_config_hash,
+            ) = _passive_intake_bridge_values(None, self._passive_intake_root)
+
         # Pre-flight: skip the 30s bridge bootstrap entirely if the user
         # never finished pairing.  Without creds.json the bridge prints
         # QR codes to its log file and never reaches status:connected,
@@ -600,6 +685,11 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     )
                     if install_result.returncode != 0:
                         print(f"[{self.name}] npm install failed: {install_result.stderr}")
+                        self._set_fatal_error(
+                            "whatsapp_npm_install_failed",
+                            f"WhatsApp bridge npm install failed. Run `cd {bridge_dir} && {_npm_bin} install` manually, then restart `hermes gateway`.",
+                            retryable=False,
+                        )
                         return False
                     print(f"[{self.name}] Dependencies installed")
                     if _pkg_hash:
@@ -609,6 +699,11 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                             pass  # Stamp is an optimization; install still succeeded
                 except Exception as e:
                     print(f"[{self.name}] Failed to install dependencies: {e}")
+                    self._set_fatal_error(
+                        "whatsapp_npm_install_failed",
+                        f"WhatsApp bridge npm install failed ({e}). Run `cd {bridge_dir} && {_npm_bin} install` manually, then restart `hermes gateway`.",
+                        retryable=False,
+                    )
                     return False
 
             # Ensure session directory exists
@@ -638,7 +733,18 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                                 running_hash = data.get("scriptHash", "")
                                 disk_hash = _file_content_hash(bridge_path)
                                 running_read_receipts = bool(data.get("sendReadReceipts", False))
-                                config_matches = running_read_receipts == self._send_read_receipts
+                                passive_health = data.get("passiveIntake") or {}
+                                running_passive_hash = passive_health.get("configHash", "")
+                                expected_passive_hash = getattr(
+                                    self,
+                                    "_passive_intake_config_hash",
+                                    "",
+                                )
+                                config_matches = (
+                                    running_read_receipts == self._send_read_receipts
+                                    and bool(expected_passive_hash)
+                                    and running_passive_hash == expected_passive_hash
+                                )
                                 if (
                                     running_hash
                                     and disk_hash
@@ -654,7 +760,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                                 stale_reason = (
                                     f"running={running_hash or 'unversioned'}, disk={disk_hash}"
                                     if running_hash != disk_hash
-                                    else "send_read_receipts config changed"
+                                    else "WhatsApp bridge configuration changed"
                                 )
                                 print(f"[{self.name}] Running bridge is stale ({stale_reason}), restarting")
                             else:
@@ -684,6 +790,10 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 bridge_env["WHATSAPP_REPLY_PREFIX"] = self._reply_prefix
             bridge_env["WHATSAPP_SEND_READ_RECEIPTS"] = (
                 "true" if self._send_read_receipts else "false"
+            )
+            bridge_env["WHATSAPP_PASSIVE_INTAKE_CONFIG"] = self._passive_intake_config
+            bridge_env["HERMES_PASSIVE_INTAKE_ROOT"] = str(
+                self._passive_intake_root or ""
             )
             # Under multiplexing, the bridge subprocess runs with a copy of
             # os.environ that does NOT contain the secondary profile's .env
@@ -721,6 +831,15 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             bridge_env["HERMES_IMAGE_CACHE_DIR"] = str(_get_img_dir())
             bridge_env["HERMES_AUDIO_CACHE_DIR"] = str(_get_audio_dir())
             bridge_env["HERMES_DOCUMENT_CACHE_DIR"] = str(_get_doc_dir())
+            if _IS_WINDOWS:
+                # The bridge is a long-lived service: its Popen PID, poll(),
+                # stdio and teardown must refer to the real Node process, not
+                # the broker's short-lived pythonw runner. The broker still
+                # starts it suspended on the private desktop, assigns a
+                # kill-on-close Job Object, and keeps all windows invisible.
+                from hermes_cli.windows_process_broker import direct_hidden_child_env
+
+                bridge_env = direct_hidden_child_env(bridge_env)
 
             self._bridge_process = subprocess.Popen(
                 [
@@ -926,10 +1045,18 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         that preserve code block boundaries, and sends each chunk sequentially.
         """
         if not self._running or not self._http_session:
-            return SendResult(success=False, error="Not connected")
+            return SendResult(
+                success=False,
+                error="Not connected",
+                raw_response={"send_attempted": False},
+            )
         bridge_exit = await self._check_managed_bridge_exit()
         if bridge_exit:
-            return SendResult(success=False, error=bridge_exit)
+            return SendResult(
+                success=False,
+                error=bridge_exit,
+                raw_response={"send_attempted": False},
+            )
 
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
@@ -963,8 +1090,26 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     if resp.status == 200:
                         data = await resp.json()
                         last_message_id = data.get("messageId")
-                        if last_message_id:
-                            sent_message_ids.append(str(last_message_id))
+                        ack_statuses = data.get("ackStatuses")
+                        ack_confirmed = (
+                            data.get("success") is True
+                            and bool(last_message_id)
+                            and isinstance(ack_statuses, list)
+                            and bool(ack_statuses)
+                            and all(
+                                isinstance(status, (int, float)) and status >= 2
+                                for status in ack_statuses
+                            )
+                        )
+                        if not ack_confirmed:
+                            return SendResult(
+                                success=False,
+                                error=(
+                                    "WhatsApp delivery acknowledgement missing or incomplete; "
+                                    "send outcome is uncertain"
+                                ),
+                            )
+                        sent_message_ids.append(str(last_message_id))
                     else:
                         error = await resp.text()
                         return SendResult(success=False, error=error)
@@ -1389,7 +1534,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             event.source,
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-            profile=event.source.profile,
+            profile=self._session_key_profile(event.source),
         )
 
     def _enqueue_text_event(self, event: MessageEvent) -> None:

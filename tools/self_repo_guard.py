@@ -150,7 +150,19 @@ def get_running_source_root() -> Path | None:
 
 
 def _resolve(path_str: str, base: Path) -> Path:
-    path = Path(os.path.expanduser(path_str))
+    # On Windows ``os.path.expanduser`` prefers USERPROFILE and can ignore a
+    # task-scoped HOME override.  The guard must resolve the same explicit
+    # home that the shell command will use, otherwise ``git -C ~/...`` can
+    # escape the live-checkout boundary.
+    if path_str == "~" or path_str.startswith(("~/", "~\\")):
+        home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+        if home:
+            suffix = path_str[2:] if len(path_str) > 1 else ""
+            path = Path(home) / suffix
+        else:
+            path = Path(os.path.expanduser(path_str))
+    else:
+        path = Path(os.path.expanduser(path_str))
     if not path.is_absolute():
         path = base / path
     try:
@@ -179,7 +191,25 @@ def _shell_words_at(command: str, start: int) -> list[str]:
             break
         if words and "\n" in command[cursor:word_start]:
             break
-        words.append(_deobfuscate_shell_word_for_detection(raw_word))
+        decoded = _deobfuscate_shell_word_for_detection(raw_word)
+        if os.name == "nt":
+            candidate = raw_word
+            if (
+                len(candidate) >= 2
+                and candidate[0] == candidate[-1]
+                and candidate[0] in {"'", '"'}
+            ):
+                candidate = candidate[1:-1]
+            # The generic shell deobfuscator treats every backslash as a POSIX
+            # escape and turns ``C:\\Users\\...`` into ``C:Users...``.  Keep
+            # native absolute paths literal so -C, --work-tree, cd and
+            # GIT_WORK_TREE target the directory the Windows shell will use.
+            path_candidate = candidate.split("=", 1)[-1]
+            if re.match(
+                r"^[A-Za-z]:[\\/]", path_candidate
+            ) or path_candidate.startswith("\\\\"):
+                decoded = candidate
+        words.append(decoded)
         cursor = word_end
     return words
 
@@ -695,6 +725,19 @@ def _find_mutation(command: str, cwd: Path, root: Path, depth: int = 0) -> str |
     return None
 
 
+def guard_active() -> bool:
+    """Whether the self-repo git guard applies on this platform.
+
+    Windows-only: NTFS locks loaded .py/.pyd files and an in-place overwrite
+    of the live checkout can corrupt the running process. On POSIX, open file
+    handles keep the old inode alive, so a checkout swap under a running
+    process is safe — already-imported modules keep executing the old code
+    and the mixed-module hazard is limited to later lazy imports, which is
+    not worth blocking every git workflow for.
+    """
+    return os.name == "nt"
+
+
 def detect_self_repo_git_mutation(
     command: str,
     cwd: str | None,
@@ -713,10 +756,50 @@ def detect_self_repo_git_mutation(
     return True, _block_message(operation, root)
 
 
+def detect_self_repo_file_mutation(
+    path: str,
+    cwd: str | None = None,
+    source_root: Path | None = None,
+    *,
+    operation: str = "file write",
+) -> tuple[bool, str | None]:
+    """Return whether a file-tool target lands in the live source checkout.
+
+    Git-command protection alone is insufficient: an agent can rewrite the
+    same checkout through ``write_file`` or ``patch`` and leave the running
+    gateway with a mixture of old and new modules.  File tools resolve their
+    target before calling this helper, but ``cwd`` remains supported for
+    direct callers and tests.
+    """
+    root = source_root if source_root is not None else get_running_source_root()
+    if root is None or not path:
+        return False, None
+
+    root = _resolve(str(root), Path("/"))
+    base = _resolve(cwd, Path("/")) if cwd else Path("/")
+    target = _resolve(path, base)
+    if not _is_within(target, root):
+        return False, None
+    return True, _block_message(operation, root)
+
+
 def _block_message(operation: str, root: Path) -> str:
+    scratch = _scratch_dir_hint()
     return (
         f"Blocked: `{operation}` would rewrite Hermes's live source checkout "
         f"({root}) and can mix module versions in this running process. "
-        "Use a separate worktree or temporary clone. To change this checkout, "
-        "stop Hermes, run the command externally, then restart Hermes."
+        f"Use a separate worktree or a shared clone on real disk, e.g. "
+        f"`git clone --shared {root} {scratch}/<task>` — avoid /tmp for "
+        "clones that install node/python deps: /tmp is usually RAM-backed "
+        "tmpfs and a few dependency installs can fill it and ENOSPC other "
+        "work. Delete the clone when the branch is pushed. To change this "
+        "checkout, stop Hermes, run the command externally, then restart "
+        "Hermes."
     )
+
+
+def _scratch_dir_hint() -> str:
+    """Disk-backed scratch location suggested to agents for temporary clones."""
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    base = Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes"
+    return str(base / "scratch")
