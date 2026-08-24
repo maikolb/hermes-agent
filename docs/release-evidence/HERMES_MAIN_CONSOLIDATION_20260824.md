@@ -294,9 +294,36 @@ Rollback refs for the pre-consolidation fork main, installed integration head
 and the final candidate are still pending publication. No row above authorizes
 branch/worktree deletion before exact remote reachability is recorded.
 
+## Final upstream-first consolidation pass
+
+The accumulated local runtime was sealed on the isolated release branch as
+`8a9f136a9b37`. Official `origin/main` at `057dcdf236f8` was then merged in
+full. Fourteen of the fifteen paths changed on both sides merged
+automatically. The only textual conflict was
+`tests/run_agent/test_identity_flush.py`; its two sides covered distinct
+invariants, so both tests were retained instead of selecting one side.
+
+One bounded post-merge floor matrix produced the following local evidence:
+
+- recovery/checkpoint/process boundaries: 106 passed initially; the sole
+  failure exposed a missing `name` -> `tool_name` persistence fallback, whose
+  exact reproduction passed after the one-line correction (effective result:
+  107/107);
+- Project OS, Telegram routing, Kanban workers and workspace protocol: 234/234;
+- Windows zero-UI, generic AOF guardrails and Honcho: 259 passed with 47
+  declared environment/SDK-conditional skips;
+- passive intake, Git ownership gates and meeting-action parsing: 18/18;
+- the native WhatsApp bridge Node test command completed with exit code zero;
+- `run_agent.py` compiles and the final diff check is clean.
+
+Total Python result for this bounded final pass: 618 passed, 47 declared
+skips, zero remaining failures. This promotes the consolidated candidate to
+`validated-local`; PR/CI, remote reachability and any later target canary remain
+separate readiness gates. The installed runtime was not modified or restarted.
+
 ## Publication state
 
-- Current readiness: `implemented-in-progress`.
+- Current readiness: `validated-local`.
 - Candidate branch is not pushed by this ledger update.
 - Personal-fork `main` is not changed.
 - Installed runtime is not changed.
