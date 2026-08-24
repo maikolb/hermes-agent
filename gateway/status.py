@@ -1059,6 +1059,11 @@ def write_runtime_status(
     payload["pid"] = current_record["pid"]
     payload["argv"] = current_record["argv"]
     payload["start_time"] = current_record["start_time"]
+    # Backfill runtime identity on every write, not only when the status file
+    # is first created.  Pre-identity snapshots otherwise kept reporting
+    # ``recorded_home_unavailable`` forever even though the live gateway was
+    # continuously refreshing PID/start_time/platform health.
+    payload["hermes_home"] = current_record["hermes_home"]
     payload["updated_at"] = _utc_now_iso()
 
     if gateway_state is not _UNSET:
