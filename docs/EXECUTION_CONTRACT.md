@@ -5,96 +5,88 @@
 - Mode: RELEASE
 - Risk Level: HIGH
 - Workspace: `C:\Users\maiko\Projetos\hermes-main-consolidation-20260824`
-- Updated At: 2026-08-24T09:25:00-03:00
-- Machine Runtime Authority: none: the installed Hermes runtime and all external systems remain read-only
+- Updated At: 2026-08-24T11:45:00-03:00
+- Machine Runtime Authority: none: Git and GitHub mutations are issued explicitly by the root agent; no autonomous code-edit loop is authorized
 
 ## Requested Outcome
-- Reconcile every completed local Hermes change with current upstream, preserve the user-accepted runtime behaviors, publish a clean and recoverable `main` on `maikolb/hermes-agent`, and add a fail-closed lifecycle that prevents future completed tasks from leaving unmerged branches or worktrees.
+- Confirm that the personal Hermes fork `main` contains the completed consolidation and current official upstream, remove only obsolete clean branches/worktrees whose work is already represented or deliberately superseded, and install a fail-closed repository-native automation that keeps the fork synchronized with upstream.
 
 ## Acceptance Criteria
-- Every one of the 42 local commits is classified by behavior, files, chronological successors, supersession and release decision; no commit is accepted merely because it is newer.
-- Every textual Git conflict has a recorded resolution tied to an intended behavior and a verification command.
-- The current installed runtime, profiles, bindings, Kanbans and relevant logs are inventoried read-only and sanitized; no token, phone number, message body or other secret/PII is committed.
-- A traceability matrix covers at least Telegram Project OS, project/topic provisioning, Kanban operations, conversational context on mention, parallel steer/workers, activity/focus display, Git/PR/merge/deploy closure, Kanban table rendering, scope/AOF guardrails, Honcho/Claude TL/Codex Loop/AIRC/Grok/ai-memory workflow, safe task phrasing, Read.ai-to-spec flow and WhatsApp raw→Hermes PF→curated→Jira intake.
-- Foreign responsibilities are identified explicitly: no Titan, DarkFactory, AOF product source or external Intake Hub implementation is silently absorbed into Hermes core.
-- The candidate passes syntax/static checks, focused tests for every touched subsystem, the broad repository suite available on this machine, deterministic semantic replays and failure-injection cases without reading or mutating the live Hermes home.
-- Future task completion is fail-closed unless its owned branch is committed, pushed to the personal fork, represented by a PR, green, merged, verified reachable from remote `main`, and its worktree is then removed safely; incomplete/quarantined work remains preserved and reported, never auto-merged or deleted.
-- Immutable rollback refs preserve the prior fork `main`, the pre-merge local integration head and every incomplete/quarantine stash before any branch deletion.
-- The personal fork is the only write remote. `origin` (`NousResearch/hermes-agent`) remains read-only and no force-push is used.
-- The candidate is published through a PR and GitHub checks when available. `main` may advance only after local/replay and remote gates are green and is not installed or deployed by this contract.
-- All retained worktrees are clean. A worktree or branch is removed only after its exact commit is proven reachable from a confirmed remote ref.
-- Final readiness is claimed precisely: Git publication can reach `validated-local`; the live runtime remains on its previous pinned version until a separately authorized target canary earns `validated-target`, `released` and `accepted`.
-- The final execution-contract validation and Windows verifier report success with `VisibleWindows=0`.
+- Fresh fetches prove `main == maikolb/main` and `origin/main` is an ancestor of that exact fork commit before any cleanup.
+- The completed consolidation branch and installed integration lineage are ancestors of `main`; older non-ancestral local branches are deleted only when the existing 42/42 audit and release ledger identify their work as retained or superseded.
+- Every removed worktree is clean, resolves to an exact path under `C:\Users\maiko\Projetos`, and belongs to this repository's common Git directory.
+- The open quarantine PR #1 (`feature/project-ops-core`) and all four stashes remain preserved because their contents were explicitly excluded from the consolidation.
+- A private control repository `maikolb/hermes-upstream-sync` owns a bounded scheduled/manual workflow with `permissions: {}`, no third-party action, explicit source `NousResearch/hermes-agent:main` and target `maikolb/hermes-agent:main`, ordinary conflict-detecting Git merge/push, and fail-closed behavior on conflict or concurrent target update.
+- The write credential is a new Ed25519 deploy key dedicated to the fork. Its private half is stored only as the control repository secret `HERMES_FORK_DEPLOY_KEY`; the public fork contains no matching private secret, personal token, reusable account SSH key, or credential with access to another repository.
+- Workflow syntax and merge behavior pass local validation, the change is merged into the fork through a PR, and a manual target run finishes successfully.
+- After remote verification, obsolete auxiliary worktrees and local/remote delivery branches are gone. The canonical checkout moves to `main` only if no live Hermes process holds that installed tree; otherwise its exact clean runtime branch remains pinned and recoverable without changing live files.
+- The Windows no-visible-UI verifier reports `VisibleWindows=0` for the real operational command path.
 
 ## In Scope
-- `C:\Users\maiko\Projetos\hermes-main-consolidation-20260824\**`
-- Read-only comparison against `C:\Users\maiko\AppData\Local\hermes\hermes-agent\**` and other registered Hermes worktrees/profiles.
-- Git refs, branches, stashes and worktree metadata belonging to `maikolb/hermes-agent`, with deletion allowed only under the reachability criterion above.
-- Remote `maikolb` for non-force branch push, PR, merge and hash verification.
-- Remote `origin` for fetch/read-only ancestry comparison.
-- `docs\EXECUTION_CONTRACT.md`
-- `docs\release-evidence\HERMES_MAIN_CONSOLIDATION_20260824.md`
-- The minimum core source and tests required to enforce the branch/worktree→PR→merge completion lifecycle, after its actual ownership path is identified in source.
+- `C:\Users\maiko\Projetos\hermes-main-consolidation-20260824\docs\EXECUTION_CONTRACT.md`
+- Isolated build/operations checkout `C:\Users\maiko\Projetos\hermes-upstream-sync-control-20260824\**`, retained clean after private control-repository publication.
+- Git refs and worktree metadata in `C:\Users\maiko\AppData\Local\hermes\hermes-agent\.git\**`.
+- A no-runtime safety gate for `C:\Users\maiko\AppData\Local\hermes\hermes-agent\**`; checkout transition to the already-validated fork `main` is allowed only when no live Hermes process uses that tree.
+- Registered auxiliary worktrees `C:\Users\maiko\Projetos\hermes-bug-intake-20260821\**`, `C:\Users\maiko\Projetos\hermes-tool-guardrail-fix-20260821\**`, `C:\Users\maiko\Projetos\hermes-workspace-api-worktree\**`, and `C:\Users\maiko\Projetos\hermes-main-consolidation-20260824\**`.
+- Personal remote `maikolb`: PR publication/merge, creation of the private control repository, one repository-scoped write deploy key on the fork, one matching Actions secret in the control repository, workflow dispatch, and deletion of only the obsolete delivery branches proven safe by this contract.
+- Official remote `origin`: fetch/read-only ancestry comparison only.
 
 ## Out of Scope
-- Installing, restarting, stopping, reconfiguring or pointing any Hermes, Titan, DarkFactory, Telegram, WhatsApp, Jira, cron, Honcho, AIRC or ai-memory runtime at the candidate.
-- Mutating Telegram topics/groups, WhatsApp chats, Jira issues/projects, Kanban data, Read.ai meetings, production repositories or deployments.
-- Copying source code from `C:\Users\maiko\Projetos\hermes-intake-hub` into Hermes core; the hub remains a separate project.
-- Copying Titan, DarkFactory or canonical AOF implementation into Hermes core. Core may keep only generic integration contracts/guardrails whose ownership is proven.
-- Applying, dropping or rewriting quarantined, incomplete or unidentified stashes without an independent acceptance decision.
-- Force-push, destructive reset/checkout, `git clean`, blind recursive deletion, or deleting any branch/worktree lacking confirmed remote recoverability.
-- Treating existing tests, commit age, agent assertions or a successful process exit as sufficient proof of behavior.
-- Claiming the live runtime is validated, released or accepted as a result of Git-only consolidation.
+- Any edit to Hermes product code, tests, runtime configuration, profiles, credentials, data, cron jobs, gateways, or external integrations.
+- Starting, stopping, restarting, deploying, canarying, or otherwise exercising the live Hermes runtime.
+- Writing to `NousResearch/hermes-agent` or changing any upstream branch, setting, issue, PR, or workflow.
+- Force-push, destructive reset, `git clean`, recursive shell deletion, rebase, or automatic conflict resolution.
+- Deleting or modifying any stash.
+- Closing, merging, rebasing, or deleting `feature/project-ops-core` / PR #1; its audited quarantine remains recoverable.
+- Changing repository-wide Actions defaults, branch protection, visibility, collaborators, or any secret/credential other than the one dedicated deploy-key pair named in scope.
+- Persisting or exposing the deploy key outside the private control repository's encrypted Actions secret after target validation.
 
 ## Failure Signal / Repro
-- The personal fork `main` is thousands of upstream commits behind while 42 local commits span multiple feature families and several branches/worktrees; a direct merge produces conflicts in core runtime paths such as `gateway/run.py`, `plugins/platforms/telegram/adapter.py`, guardrails, Honcho and Kanban.
-- Repeated intake rounds were previously called ready based on component tests but failed autonomously in the real target; therefore test-green without a semantic replay/target evidence chain is an explicitly rejected release signal.
-- Completed work was left distributed across integration branches and worktrees instead of being closed through personal-fork PRs, causing uncertain ancestry and delayed integration.
-- Existing evidence includes `docs/regressions/REG-2026-08-23-003.md` plus the Git graph, reflogs, registered worktrees and current conflict stages.
+- The completed merge is present at fork `main`, but four auxiliary worktrees and multiple completed/superseded branches still remain registered.
+- The fork has custom commits on top of official history, so a simple fast-forward-only sync cannot keep it current after the next upstream commit; no scheduled upstream merge workflow currently exists. GitHub's native `GITHUB_TOKEN` also cannot update workflow files introduced by a future upstream delta because that conditional operation requires a permission the token cannot request.
 
 ## Root-Cause Hypothesis
-- Facts: isolation worktrees were created for concurrent work; their lifecycle did not require verified PR/merge closure; upstream advanced by thousands of commits; 42 local commits include multiple independent behaviors; current runtime has not been switched to this candidate.
-- Assumptions: the user-accepted runtime behavior and current external data are the comparison baseline, but neither historical tests nor memory alone is authoritative.
-- Chosen fix point: audit and reconcile behavior at the Git integration boundary, add semantic replay evidence, publish only through the personal fork, and make PR/merge/reachability/worktree cleanup a fail-closed completion contract.
+- Facts: PRs #2 and #3 merged the consolidation as `1f4b3c1e5a`; current fresh refs show `main == maikolb/main`; `origin/main` is its ancestor; the primary and three obsolete auxiliary worktrees are clean, while the isolated delivery worktree contains only this contract update; PR #1 remains open and intentionally quarantined.
+- Assumptions: the personal fork `maikolb/hermes-agent` is the only writable authority, while official upstream `NousResearch/hermes-agent` remains read-only.
+- Chosen fix point: isolate a scheduled GitHub Actions workflow in a private control repository so upstream-synchronized workflows cannot read its fork-scoped deploy key, then remove only the delivery residue made obsolete by the confirmed main.
 
 ## Claim Discipline
-- Facts already established: the 42-commit local range was consolidated; official upstream `057dcdf236f8` was merged in full; the bounded final floor matrix passed 618 Python tests with 47 declared conditional skips and zero remaining failures; PR #2 merged as `c4daea6b51`; rollback refs are remote; the live runtime remains unchanged and clean at `66c2257b9f`.
-- Inferences that still require validation: whether the Git candidate preserves every user-observed behavior in the live target and whether the separately configured external integrations remain healthy after a future deployment.
-- Highest readiness state allowed by current evidence: validated-local.
-- Target readiness checklist or equivalent: a separately authorized canary must deploy the pinned release, observe the natural Telegram/intake behaviors and earn `validated-target`, `released` and `accepted`; no such claim is made here.
+- Facts already established: local and fork main are identical at `1f4b3c1e5a`; official upstream `057dcdf236f8` is reachable from that commit; the consolidation and installed integration heads are ancestors of main; every cleanup candidate is clean and the delivery worktree has only the intended staged changes.
+- Inferences that still require validation: a future genuine upstream merge conflict will exercise the already-reviewed fail-closed path; manufacturing such a remote conflict is prohibited.
+- Highest readiness state allowed by current evidence: released for the synchronization automation; the live Hermes runtime remains on its existing pinned checkout.
+- Target readiness checklist or equivalent: both contracts green; control workflow syntax/behavior green; private repository and isolated secret verified; fork evidence PR merged; remote main hash confirmed; manual control-workflow run green; cleanup inventory confirms retained refs and the canonical worktree.
 
 ## Forbidden Actions
 - No scope expansion beyond the requested outcome.
 - No hidden side effects.
 - No behavior changes outside the declared scope.
 - No placeholders, fake values, temporary keys, or config overrides unless explicitly requested.
-- No use of manual intervention as proof that an autonomous workflow works.
-- No resolution based only on “ours”, “theirs” or newest timestamp; behavior and evidence decide each conflict.
-- No merge of Titan, DarkFactory, AOF product source or Intake Hub internals into Hermes core to make tests pass.
-- No deletion of a worktree, branch or stash until its exact contents and recovery ref are proven.
-- No installation or deployment of the candidate under this contract.
+- Do not remove a worktree unless its status is clean and its resolved path matches the exact in-scope path.
+- Do not delete a branch unless its release decision is documented and its recovery/retention condition is satisfied.
+- Do not touch the open quarantined PR #1 branch or any stash.
+- Do not start or restart Hermes to validate this Git-only maintenance task.
+- Do not print, log, commit, reuse, or retain a local copy of the private deploy key after the Actions secret and target push are verified.
 
 ## Loop Control
-- Controlled micro-loop is not required because this release is an explicitly reviewed Git reconciliation and no autonomous edit runner is authorized.
-- Qualification: bounded manual spec→build→review→green release consolidation.
-- Maximum build/test/fix iterations: 3 per independently identified failure class.
-- Stop condition: all acceptance rows required for Git publication are green, remote refs/hashes are confirmed and no unresolved conflict or unexplained behavior remains.
-- Escalation rule: after three failed iterations for one root cause, any unproven destructive cleanup, or any unresolved semantic conflict, stop before merging/pushing `main` and report the exact blocker.
-- Runtime authority path: none; only the root agent may edit the candidate and no live-runtime mutation is authorized.
-- Append-only evidence path: `docs/release-evidence/HERMES_MAIN_CONSOLIDATION_20260824.md`.
+- Controlled micro-loop is not required because no autonomous edit runner is used; the root agent will perform at most three explicit patch-validate-review iterations.
+- Qualification: bounded manual spec -> build -> review -> green maintenance release.
+- Maximum build/test/fix iterations: 3.
+- Stop condition: workflow validation and target run are green, remote `main` is confirmed, obsolete auxiliary refs/worktrees are removed, and any branch retained solely by an active runtime is exact, clean and protected by a rollback tag.
+- Escalation rule: stop before push or deletion on any unexplained commit, dirty worktree, merge conflict, failed ancestry gate, or third repeated validation failure.
+- Runtime authority path: none.
+- Append-only evidence path: not applicable; no autonomous loop is used, and Git/GitHub refs plus the workflow run are the delivery evidence.
 
 ## Validation Plan
-- Analyze/lint: conflict-marker scan, `git diff --check`, AST/compile checks, ancestry/range-diff, secret/path/boundary scan and per-commit/per-conflict ledger.
-- Unit tests: all focused suites mapped to each retained behavior, including guardrails, compression, workers/leases, topic/project routing, activity indicator, delivery recovery, Honcho scoping, Windows zero-UI and passive intake transport.
-- Integration/contract tests: repository canonical runner plus deterministic event replays for topic→project→Kanban→worker, steer/focus, completion lifecycle and raw→curated→Jira checkpoint without live egress.
-- Build/install/deploy checks: package/import/build checks in the isolated worktree; install/deploy is prohibited.
-- Target or environment checks: read-only source/runtime hash and configuration comparison; live target acceptance is deferred to a separately authorized canary.
-- Delivery pipeline checks: push candidate to `maikolb`, open PR, inspect checks, merge without force only if green, verify remote `main` hash and rollback refs.
-- Manual smoke checks: user acceptance is required later for live Telegram/intake behavior; this contract cannot claim it. Windows verifier must report `VisibleWindows=0` now.
+- Analyze/lint: canonical validation of both execution contracts, `git diff --check`, control-workflow YAML/Bash parse, secret-isolation/host-key/permission review, and exact branch/worktree inventory.
+- Unit tests: not applicable; no product code is changed.
+- Integration/contract tests: local structural assertions cover exact source/target, empty native-token permissions and forbidden-operation absence; an ephemeral target branch proves the dedicated deploy key can update `.github/workflows/**` and is then deleted; a manual private-control dispatch exercises the real no-op sync, while conflict handling remains fail-closed without manufacturing a destructive remote conflict.
+- Build/install/deploy checks: not applicable; install/deploy is prohibited.
+- Target or environment checks: fresh fetch/`ls-remote`, deploy-key-authenticated ephemeral workflow-branch push/delete, fork evidence PR merge hash verification, and one manual private-control GitHub Actions dispatch.
+- Delivery pipeline checks: PR status/mergeability plus resulting remote `main` and branch inventory.
+- Manual smoke checks: Windows window verifier must report `VisibleWindows=0`; no Hermes UI/runtime smoke is authorized.
 
 ## Status
-- Contract preflight: validated on 2026-08-24 with the canonical global validator (phase `Preflight`).
-- Implementation: completed on the isolated release branch; official upstream merged with one resolved test-only conflict and one evidence-backed recovery fallback.
-- Validation: 618 Python tests passed, 47 conditional skips, Node bridge command exit 0, PR mergeability clean; the fork exposes no GitHub checks, so no remote CI result exists to claim.
-- Publication: PR #2 merged into `maikolb/main` as `c4daea6b51`; candidate and official upstream are both proven ancestors; rollback/release tags are remote.
-- Completion: completed for Git consolidation at `validated-local`; installation, runtime reload and target acceptance remain explicitly out of scope.
+- Contract preflight: validated by the canonical global validator (phase `Preflight`) on 2026-08-24.
+- Implementation: private `maikolb/hermes-upstream-sync` is published and active with target-only deploy key `161167502` and isolated secret; six archive tags are remote; three obsolete auxiliary worktrees, eight obsolete local branches and thirteen obsolete remote branches were removed; no product code changed.
+- Validation: both contracts, workflow YAML/Bash and structural review are green; ephemeral workflow-write probe `aa3febd867` was pushed/deleted; manual run `32739966897` succeeded in 14 seconds; fresh refs still show fork main `1f4b3c1e5a` contains upstream `057dcdf236f8`; PR #1 and four stashes remain. Eighteen live Hermes-linked processes triggered the safety gate, so the clean canonical checkout remains pinned to `integrate/local-runtime-v2-20260820` at `66c2257b9f` instead of mutating live files.
+- Completion: pending only the evidence PR merge, delivery-worktree self-removal and final inventory/window-verifier evidence.
