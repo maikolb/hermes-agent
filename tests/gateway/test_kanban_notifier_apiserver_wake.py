@@ -107,6 +107,13 @@ def test_apiserver_sub_wakes_real_session_via_self_post(tmp_path, monkeypatch):
     would run the wake under a build_session_key()-derived key that can't
     match the raw X-Hermes-Session-Id session)."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "apiserver.db"))
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda: {"kanban": {"agent_wake_on_events": True}},
+    )
     kb.init_db()
     tid = _create_completed_subscription(
         "api_server", "raw-sid-123", session_id="raw-sid-123",
@@ -136,3 +143,29 @@ def test_apiserver_sub_wakes_real_session_via_self_post(tmp_path, monkeypatch):
     # once the wake succeeds.
     assert _unseen_terminal_events(tid, "api_server", "raw-sid-123") == []
 
+
+def test_apiserver_sub_is_passive_without_explicit_agent_wake_opt_in(
+    tmp_path, monkeypatch,
+):
+    """Lifecycle notifications must not synthesize agent work by default."""
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "passive.db"))
+    import hermes_cli.config as config_mod
+    import gateway.wake as wake_mod
+
+    monkeypatch.setattr(config_mod, "load_config", lambda: {"kanban": {}})
+    kb.init_db()
+    _create_completed_subscription(
+        "api_server", "raw-sid-passive", session_id="raw-sid-passive",
+    )
+    posts = []
+
+    async def fake_self_post(adapter, *, text, session_id):
+        posts.append({"text": text, "session_id": session_id})
+
+    monkeypatch.setattr(wake_mod, "_self_post_chat_completion", fake_self_post)
+    adapter = ApiServerLikeAdapter()
+    runner = _make_runner({Platform.API_SERVER: adapter})
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert posts == []
+    assert adapter.handle_message_calls == []
