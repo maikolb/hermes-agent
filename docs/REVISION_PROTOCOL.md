@@ -167,3 +167,43 @@ Autoridade canônica de regressões operacionais deste checkout.
 - Prevenção vinculada: `tests/agent/test_tool_guardrail_strategy_redirect.py` executa falha estrutural, bloqueio da mesma assinatura/rota, disponibilidade da alternativa, redirecionamento de falha genérica e limpeza por reset.
 - Comando de validação: `scripts/run_tests.sh tests/agent/test_tool_guardrail_strategy_redirect.py` pelo wrapper obrigatório do repositório.
 - Evidência de prevenção: o wrapper obrigatório passou 6/6 sem retry; o fix isolado `7d245700be` entrou pelo merge `a9c727bfb6`. Após o reinstall do hotfix de normalização do root Windows, Titan/default (PID 27504, Telegram e WhatsApp conectados) e Project Factory (PID 56836, Telegram conectado) recarregaram pela tarefa oculta, registraram o runtime AOF `af15523b1d8da6efb9c9a4349f579a8804cdb37f152e84e5ac3d6b0ed85a25de` e passaram o probe pré-dispatch ligado ao PID atual. Os dois reloads reportaram `visible_windows=[]`; o verificador global posterior reportou `VisibleWindows=0`.
+
+## REG-2026-08-23-001 — Entrega final em streaming deixa checkpoint falsamente retomável
+
+- Status: validated-local; reload e aceite comportamental pendentes.
+- Cenário reproduzível: o agente compõe a resposta final, o adapter confirma a entrega por streaming/edição e o usuário recebe a mensagem, mas o checkpoint permanece em `delivery_pending` ou `deliverable_composed`. Em restart posterior, o estado parece trabalho inacabado e pode disputar a autoridade com uma mensagem humana nova.
+- Causa raiz: o caminho não-streaming encerrava a entrega, mas o caminho `already_sent` não promovia o checkpoint para `delivered`. Não havia vínculo criptográfico entre o texto realmente confirmado pelo adapter e o `pending_deliverable` persistido.
+- Correção: `mark_delivery_if_content_matches` calcula SHA-256 do payload final confirmado, exige igualdade com o `pending_deliverable.sha256` e só então grava entrega/phase `delivered`. Preview, finalize antigo ou conteúdo divergente não conseguem fechar o checkpoint.
+- Prevenção vinculada: `tests/agent/test_turn_checkpoint.py::test_stream_delivery_closes_only_the_exact_pending_deliverable` e call site em `gateway/run.py` somente após confirmação de envio.
+- Comando de validação: `scripts/run_tests.sh tests/agent/test_turn_checkpoint.py tests/gateway/test_restart_resume_pending.py -q`.
+- Estado alvo atual: o dry-run agregado encontrou 246 checkpoints válidos ainda classificados como retomáveis; nenhum foi alterado. O saneamento histórico exige fase operacional separada e confirmação humana.
+
+## REG-2026-08-23-002 — Boards diferentes podem iniciar workers no mesmo checkout
+
+- Status: validated-local; runtime load pendente.
+- Cenário reproduzível: cards de boards/perfis distintos apontam para o mesmo `workspace_path`. Como claim/capacidade eram locais ao board, dois dispatchers podiam iniciar writers concorrentes no mesmo checkout e corromper diff, branch ou entrega.
+- Causa raiz: a tabela de lease do router não era consultada no boundary real de spawn do Kanban; cada board enxergava apenas seus próprios workers.
+- Correção: lease machine-global por caminho canônico em `<kanban_home>/workspace-leases`, adquirido atomicamente antes de claim/spawn, promovido do dispatcher para a identidade PID+create-time do worker e liberado/reclamado apenas com prova de owner morto. Workers vivos anteriores ao upgrade são adotados antes de qualquer novo spawn.
+- Prevenção vinculada: `tests/hermes_cli/test_kanban_workspace_lease.py` cobre exclusão no mesmo workspace, paralelismo em workspaces distintos e adoção fail-closed de worker pré-upgrade.
+- Comando de validação: `scripts/run_tests.sh tests/hermes_cli/test_kanban_workspace_lease.py tests/hermes_cli/test_kanban_per_profile_cap.py tests/hermes_cli/test_kanban_review_lifecycle.py -q`.
+- Invariante: contenção de lease não conta como falha do card, não consome retry e não muda status; apenas adia o spawn.
+
+## REG-2026-08-23-003 — ACL explícita confunde membro da equipe com administrador
+
+- Status: validated-local; reload pendente.
+- Cenário reproduzível: um membro explicitamente permitido em um grupo/tópico recebe a mesma decisão `allow` usada para capacidade administrativa, contrariando a premissa “todos podem pedir tarefas, poucos administram runtime/board”.
+- Causa raiz: `acl_entries` persistia apenas `allow|deny`; não existia papel separado. O provisionamento histórico de `allowed_users` dependia do significado administrativo de `allow`.
+- Correção: a ACL passa a persistir `role=member|admin`; associação implícita e `role=member` retornam capacidade de membro, enquanto entradas antigas e `allowed_users` migram como admin para manter compatibilidade. `deny` continua prevalecendo.
+- Prevenção vinculada: `tests/gateway/test_project_router.py::test_explicit_acl_separates_member_from_admin_capability` e suíte integrada de router/slash gating.
+- Comando de validação: `scripts/run_tests.sh tests/gateway/test_project_router.py tests/gateway/test_project_router_provisioning.py tests/gateway/test_project_router_gateway.py tests/gateway/test_slash_access_dispatch.py -q`.
+- Evidência local: 104/104 verdes.
+
+## REG-2026-08-23-004 — Snapshot vivo não prova qual perfil possui o gateway
+
+- Status: validated-local; runtime load pendente.
+- Cenário reproduzível: um `gateway_state.json` criado antes do campo de identidade continua sendo atualizado com PID, start-time e canais, mas a saúde global retorna `recorded_home_unavailable` indefinidamente.
+- Causa raiz: `write_runtime_status` copiava do registro atual PID, argv e start-time, mas só gravava `hermes_home` na criação de arquivo novo; snapshots legados nunca eram migrados.
+- Correção: todo write de runtime agora atualiza também o `hermes_home` canônico do processo. O reconciliador continua fail-closed para mismatch ou identidade não comprovável.
+- Prevenção vinculada: `tests/gateway/test_status.py::TestGatewayRuntimeStatus::test_write_runtime_status_backfills_home_on_legacy_snapshot`.
+- Comando de validação: `scripts/run_tests.sh tests/gateway/test_status.py -q -k write_runtime_status`.
+- Evidência local: 3/3 testes de write verdes; duas provas POSIX da suíte completa continuam incompatíveis com Windows (`sleep`/fallback `ps`) e foram mantidas fora desta reivindicação.
