@@ -7723,6 +7723,13 @@ class DispatchResult:
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
     counting a failure. These never trip the circuit breaker — a long quota
     window just makes the task bounce cheaply until the window clears."""
+    skipped_workspace_leased: list[tuple[str, str, str]] = field(default_factory=list)
+    """Tasks deferred because another live worker owns the same canonical
+    workspace. Entries are ``(task_id, owner_task_id, workspace_path)``.
+    Contention is not a task failure and never increments retry counters."""
+    workspace_lease_conflicts: list[tuple[str, str, str]] = field(default_factory=list)
+    """Already-running tasks that resolve to a workspace owned by another
+    live task. This is an observed pre-existing collision, not a new spawn."""
     skipped_locked: bool = False
     """True when this tick was skipped because another process already held
     the board's dispatch lock (issue #35240). A losing dispatcher does no
@@ -7895,6 +7902,279 @@ def _pid_alive(pid: Optional[int]) -> bool:
             # If the secondary probe fails, keep the kill(0) answer.
             pass
     return True
+
+
+@dataclass(frozen=True)
+class _WorkspaceRunLease:
+    path: Path
+    token: str
+    task_id: str
+    workspace: str
+
+
+_WORKSPACE_SEED_LOCK = threading.Lock()
+_WORKSPACE_SEEDED_ROOTS: set[str] = set()
+
+
+def _process_start_time(pid: int) -> float | None:
+    """Return a PID-reuse-safe process identity when psutil can inspect it."""
+    try:
+        import psutil  # type: ignore
+
+        return float(psutil.Process(int(pid)).create_time())
+    except Exception:
+        return None
+
+
+def _workspace_lease_path(workspace: str | Path) -> tuple[Path, str]:
+    canonical = str(Path(workspace).expanduser().resolve(strict=False))
+    normalized = os.path.normcase(canonical)
+    digest = hashlib.sha256(
+        normalized.encode("utf-8", errors="surrogatepass")
+    ).hexdigest()
+    return kanban_home() / "workspace-leases" / f"{digest}.json", canonical
+
+
+def _read_workspace_lease(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _process_identity_matches(pid: Any, started_at: Any) -> bool:
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if not _pid_alive(pid_int):
+        return False
+    if started_at is None:
+        return True
+    current = _process_start_time(pid_int)
+    if current is None:
+        # Liveness remains the safe fallback where process create-time is not
+        # available. Standard installs pin psutil, so this is exceptional.
+        return True
+    try:
+        return abs(current - float(started_at)) < 0.01
+    except (TypeError, ValueError):
+        return False
+
+
+def _workspace_lease_is_live(path: Path, payload: Mapping[str, Any] | None) -> bool:
+    if not isinstance(payload, Mapping):
+        # Another process may be between O_EXCL creation and its first write.
+        # Treat a very recent empty/malformed file as live; old corruption is
+        # safe to reclaim.
+        try:
+            return time.time() - path.stat().st_mtime < 5.0
+        except OSError:
+            return False
+    if payload.get("worker_pid"):
+        return _process_identity_matches(
+            payload.get("worker_pid"), payload.get("worker_started_at")
+        )
+    return _process_identity_matches(
+        payload.get("owner_pid"), payload.get("owner_started_at")
+    )
+
+
+def _try_acquire_workspace_lease(
+    workspace: str | Path,
+    *,
+    task_id: str,
+) -> tuple[_WorkspaceRunLease | None, dict[str, Any] | None]:
+    """Atomically reserve a workspace across boards, profiles and processes."""
+    path, canonical = _workspace_lease_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _attempt in range(3):
+        token = secrets.token_hex(16)
+        payload = {
+            "schema_version": 1,
+            "token": token,
+            "task_id": str(task_id),
+            "workspace": canonical,
+            "owner_pid": os.getpid(),
+            "owner_started_at": _process_start_time(os.getpid()),
+            "worker_pid": None,
+            "worker_started_at": None,
+            "acquired_at": time.time(),
+        }
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            current = _read_workspace_lease(path)
+            if _workspace_lease_is_live(path, current):
+                return None, current
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return None, current
+            continue
+        try:
+            encoded = json.dumps(
+                payload, ensure_ascii=False, sort_keys=True
+            ).encode("utf-8")
+            os.write(fd, encoded)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return _WorkspaceRunLease(path, token, str(task_id), canonical), payload
+    return None, _read_workspace_lease(path)
+
+
+def _promote_workspace_lease(lease: _WorkspaceRunLease, worker_pid: int) -> bool:
+    """Bind an acquired lease to the spawned worker's PID identity."""
+    payload = _read_workspace_lease(lease.path)
+    if not isinstance(payload, dict) or payload.get("token") != lease.token:
+        return False
+    payload["worker_pid"] = int(worker_pid)
+    payload["worker_started_at"] = _process_start_time(int(worker_pid))
+    payload["spawned_at"] = time.time()
+    temp = lease.path.with_name(
+        f".{lease.path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    )
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, lease.path)
+        return True
+    except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _release_workspace_lease(lease: _WorkspaceRunLease) -> None:
+    """Release only the exact lease token acquired by this dispatcher."""
+    payload = _read_workspace_lease(lease.path)
+    if not isinstance(payload, Mapping) or payload.get("token") != lease.token:
+        return
+    try:
+        lease.path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        _log.debug("failed to release workspace lease %s", lease.path, exc_info=True)
+
+
+def _seed_running_workspace_rows(
+    rows: Iterable[Mapping[str, Any]],
+    result: DispatchResult,
+) -> None:
+    """Adopt live pre-upgrade workers represented by *rows*."""
+    for row in rows:
+        worker_pid = int(row["worker_pid"] or 0)
+        if not _pid_alive(worker_pid):
+            continue
+        lease, owner = _try_acquire_workspace_lease(
+            row["workspace_path"],
+            task_id=row["id"],
+        )
+        if lease is not None:
+            if not _promote_workspace_lease(lease, worker_pid):
+                _log.error(
+                    "failed to adopt workspace lease for live task %s pid %s; "
+                    "parent-owned lease remains fail-closed",
+                    row["id"],
+                    worker_pid,
+                )
+            continue
+        owner_task = str((owner or {}).get("task_id") or "unknown")
+        if owner_task != row["id"]:
+            result.workspace_lease_conflicts.append(
+                (
+                    row["id"],
+                    owner_task,
+                    str(Path(row["workspace_path"]).resolve(strict=False)),
+                )
+            )
+
+
+def _running_workspace_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT id, workspace_path, worker_pid FROM tasks "
+        "WHERE status = 'running' AND workspace_path IS NOT NULL "
+        "AND workspace_path != '' AND worker_pid IS NOT NULL"
+    ).fetchall()
+
+
+def _seed_running_workspace_leases(
+    conn: sqlite3.Connection,
+    result: DispatchResult,
+) -> None:
+    """Adopt pre-upgrade workers across every board before any new spawn.
+
+    A dispatch tick owns only one board lock, but the workspace exclusion
+    contract is machine-global.  Scanning only the current DB leaves a cutover
+    race where an old worker in board A has no lease yet and board B starts a
+    second writer.  The current board is checked every tick; all other known
+    boards are scanned read-only once per process/root. Concurrent gateway
+    processes converge through the atomic global lease files.
+    """
+    _seed_running_workspace_rows(_running_workspace_rows(conn), result)
+
+    root_key = os.path.normcase(str(kanban_home().resolve(strict=False)))
+    with _WORKSPACE_SEED_LOCK:
+        if root_key in _WORKSPACE_SEEDED_ROOTS:
+            return
+
+        current_files: set[str] = set()
+        try:
+            for row in conn.execute("PRAGMA database_list").fetchall():
+                raw = row["file"] if isinstance(row, sqlite3.Row) else row[2]
+                if raw:
+                    current_files.add(
+                        os.path.normcase(str(Path(raw).resolve(strict=False)))
+                    )
+        except sqlite3.Error:
+            pass
+
+        candidates = [kanban_home() / "kanban.db"]
+        board_root = boards_root()
+        if board_root.is_dir():
+            candidates.extend(sorted(board_root.glob("*/kanban.db")))
+
+        complete = True
+        for path in candidates:
+            canonical = os.path.normcase(str(path.resolve(strict=False)))
+            if canonical in current_files or not path.is_file():
+                continue
+            try:
+                external = sqlite3.connect(
+                    path.resolve().as_uri() + "?mode=ro",
+                    uri=True,
+                )
+                external.row_factory = sqlite3.Row
+                try:
+                    has_tasks = external.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='tasks'"
+                    ).fetchone()
+                    if has_tasks:
+                        _seed_running_workspace_rows(
+                            _running_workspace_rows(external),
+                            result,
+                        )
+                finally:
+                    external.close()
+            except sqlite3.Error:
+                complete = False
+                _log.warning(
+                    "workspace lease pre-upgrade scan could not read one board; "
+                    "global adoption will retry next tick",
+                    exc_info=True,
+                )
+        if complete:
+            _WORKSPACE_SEEDED_ROOTS.add(root_key)
 
 
 def _terminate_reclaimed_worker(
@@ -9378,6 +9658,10 @@ def _dispatch_once_locked(
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
+    # Existing workers may predate this process/code version. Adopt their
+    # workspaces before looking at ready/review lanes so activation cannot
+    # create a parallel writer beside an already-running task.
+    _seed_running_workspace_leases(conn, result)
 
     # Both knobs are total in-flight caps. Collapse them before either lane
     # dispatches so ready and review workers consume the same budget without
@@ -9560,22 +9844,42 @@ def _dispatch_once_locked(
                     _per_profile_running.get(row_assignee, 0) + 1
                 )
             continue
-        claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
-        if claimed is None:
+        candidate = get_task(conn, row["id"])
+        if candidate is None:
             continue
         try:
             resolved_branch_name = None
-            if claimed.workspace_kind == "worktree":
-                workspace, resolved_branch_name = _resolve_worktree_workspace(claimed, board=board)
+            if candidate.workspace_kind == "worktree":
+                workspace, resolved_branch_name = _resolve_worktree_workspace(candidate, board=board)
             else:
-                workspace = resolve_workspace(claimed, board=board)
+                workspace = resolve_workspace(candidate, board=board)
         except Exception as exc:
+            claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
+            if claimed is None:
+                continue
             auto = _record_spawn_failure(
                 conn, claimed.id, f"workspace: {exc}",
                 failure_limit=failure_limit,
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
+            continue
+        workspace_lease, lease_owner = _try_acquire_workspace_lease(
+            workspace,
+            task_id=candidate.id,
+        )
+        if workspace_lease is None:
+            result.skipped_workspace_leased.append(
+                (
+                    candidate.id,
+                    str((lease_owner or {}).get("task_id") or "unknown"),
+                    str(workspace.resolve(strict=False)),
+                )
+            )
+            continue
+        claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
+        if claimed is None:
+            _release_workspace_lease(workspace_lease)
             continue
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
@@ -9598,6 +9902,15 @@ def _dispatch_once_locked(
                 pid = _spawn(claimed, str(workspace))
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
+                if not _promote_workspace_lease(workspace_lease, int(pid)):
+                    _log.error(
+                        "workspace lease for task %s could not be bound to worker pid %s; "
+                        "the parent-owned lease remains fail-closed",
+                        claimed.id,
+                        pid,
+                    )
+            else:
+                _release_workspace_lease(workspace_lease)
             # NOTE: we intentionally do NOT reset consecutive_failures
             # here. A successful spawn proves the worker can start but
             # doesn't prove the run will succeed. Under unified
@@ -9615,6 +9928,7 @@ def _dispatch_once_locked(
                     _per_profile_running.get(claimed.assignee, 0) + 1
                 )
         except Exception as exc:
+            _release_workspace_lease(workspace_lease)
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),
                 failure_limit=failure_limit,
@@ -9680,22 +9994,42 @@ def _dispatch_once_locked(
                     _per_profile_running.get(row["assignee"], 0) + 1
                 )
             continue
-        claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
-        if claimed is None:
+        candidate = get_task(conn, row["id"])
+        if candidate is None:
             continue
         try:
             resolved_branch_name = None
-            if claimed.workspace_kind == "worktree":
-                workspace, resolved_branch_name = _resolve_worktree_workspace(claimed, board=board)
+            if candidate.workspace_kind == "worktree":
+                workspace, resolved_branch_name = _resolve_worktree_workspace(candidate, board=board)
             else:
-                workspace = resolve_workspace(claimed, board=board)
+                workspace = resolve_workspace(candidate, board=board)
         except Exception as exc:
+            claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
+            if claimed is None:
+                continue
             auto = _record_spawn_failure(
                 conn, claimed.id, f"workspace: {exc}",
                 failure_limit=failure_limit,
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
+            continue
+        workspace_lease, lease_owner = _try_acquire_workspace_lease(
+            workspace,
+            task_id=candidate.id,
+        )
+        if workspace_lease is None:
+            result.skipped_workspace_leased.append(
+                (
+                    candidate.id,
+                    str((lease_owner or {}).get("task_id") or "unknown"),
+                    str(workspace.resolve(strict=False)),
+                )
+            )
+            continue
+        claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
+        if claimed is None:
+            _release_workspace_lease(workspace_lease)
             continue
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
@@ -9723,6 +10057,15 @@ def _dispatch_once_locked(
                 pid = _spawn(claimed, str(workspace))
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
+                if not _promote_workspace_lease(workspace_lease, int(pid)):
+                    _log.error(
+                        "workspace lease for review task %s could not be bound to worker pid %s; "
+                        "the parent-owned lease remains fail-closed",
+                        claimed.id,
+                        pid,
+                    )
+            else:
+                _release_workspace_lease(workspace_lease)
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
             if _per_profile_cap is not None and claimed.assignee:
@@ -9730,6 +10073,7 @@ def _dispatch_once_locked(
                     _per_profile_running.get(claimed.assignee, 0) + 1
                 )
         except Exception as exc:
+            _release_workspace_lease(workspace_lease)
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),
                 failure_limit=failure_limit,
