@@ -283,6 +283,7 @@ class ProjectRouter:
             chat_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+            role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('member', 'admin')),
             PRIMARY KEY (profile, chat_id, user_id)
         );
         CREATE TABLE IF NOT EXISTS processed_events (
@@ -330,6 +331,20 @@ class ProjectRouter:
                         """ALTER TABLE topic_bindings
                            ADD COLUMN is_closed INTEGER NOT NULL DEFAULT 0
                            CHECK (is_closed IN (0, 1))"""
+                    )
+                acl_columns = {
+                    row["name"]
+                    for row in self._connection.execute(
+                        "PRAGMA table_info(acl_entries)"
+                    )
+                }
+                if "role" not in acl_columns:
+                    # Preserve historical semantics: an explicit allow was
+                    # the management/admin capability before roles existed.
+                    self._connection.execute(
+                        """ALTER TABLE acl_entries
+                           ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'
+                           CHECK (role IN ('member', 'admin'))"""
                     )
             except BaseException:
                 if self._connection.in_transaction:
@@ -395,14 +410,14 @@ class ProjectRouter:
     ) -> str:
         """Apply explicit ACL first, then the opt-in verified-member fallback."""
         acl = connection.execute(
-            """SELECT effect FROM acl_entries
+            """SELECT effect, role FROM acl_entries
                WHERE profile=? AND chat_id=? AND user_id=?""",
             (self.profile, chat_id, sender_user_id),
         ).fetchone()
         if acl is not None and acl["effect"] == "deny":
             raise AccessDeniedError("sender is denied by ACL")
         if acl is not None and acl["effect"] == "allow":
-            return "allow"
+            return "member" if acl["role"] == "member" else "allow"
 
         verified_s = (
             _id(verified_sender_user_id, "verified_sender_user_id")
@@ -565,10 +580,10 @@ class ProjectRouter:
                 if normalized_effect not in {"allow", "deny"}:
                     raise ValueError("effect must be 'allow' or 'deny'")
                 connection.execute(
-                    """INSERT INTO acl_entries(profile, chat_id, user_id, effect)
-                       VALUES (?, ?, ?, ?)
+                    """INSERT INTO acl_entries(profile, chat_id, user_id, effect, role)
+                       VALUES (?, ?, ?, ?, 'admin')
                        ON CONFLICT(profile, chat_id, user_id)
-                       DO UPDATE SET effect=excluded.effect""",
+                       DO UPDATE SET effect=excluded.effect, role=excluded.role""",
                     (self.profile, chat_s, _id(user_id, "user_id"), normalized_effect),
                 )
 
@@ -1041,22 +1056,34 @@ class ProjectRouter:
 
         return self._transaction(operation)
 
-    def set_acl(self, chat_id: object, user_id: object, effect: str) -> None:
+    def set_acl(
+        self,
+        chat_id: object,
+        user_id: object,
+        effect: str,
+        *,
+        role: str = "admin",
+    ) -> None:
         normalized_effect = _required(effect, "effect").lower()
         if normalized_effect not in {"allow", "deny"}:
             raise ValueError("effect must be 'allow' or 'deny'")
+        normalized_role = _required(role, "role").lower()
+        if normalized_role not in {"member", "admin"}:
+            raise ValueError("role must be 'member' or 'admin'")
         with self._lock:
             self._connection.execute(
                 """
-                INSERT INTO acl_entries(profile, chat_id, user_id, effect)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(profile, chat_id, user_id) DO UPDATE SET effect=excluded.effect
+                INSERT INTO acl_entries(profile, chat_id, user_id, effect, role)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(profile, chat_id, user_id)
+                DO UPDATE SET effect=excluded.effect, role=excluded.role
                 """,
                 (
                     self.profile,
                     _id(chat_id, "chat_id"),
                     _id(user_id, "user_id"),
                     normalized_effect,
+                    normalized_role,
                 ),
             )
 

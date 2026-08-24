@@ -111,6 +111,15 @@ def test_authorize_sender_exposes_capability_without_topic_binding(tmp_path: Pat
             )
 
 
+def test_explicit_acl_separates_member_from_admin_capability(tmp_path: Path) -> None:
+    with ProjectRouter(tmp_path / "router.db", "pf") as router:
+        router.set_acl("team", "member", "allow", role="member")
+        router.set_acl("team", "admin", "allow")
+
+        assert router.authorize_sender("team", "member") == "member"
+        assert router.authorize_sender("team", "admin") == "allow"
+
+
 def test_unknown_topic_fails_closed(tmp_path: Path) -> None:
     with configured_router(tmp_path / "router.db", tmp_path / "workspace") as router:
         router.set_acl(100, 7, "allow")
