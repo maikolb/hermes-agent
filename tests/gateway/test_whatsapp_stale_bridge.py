@@ -212,6 +212,4 @@ class TestCacheDirEnvPassthrough:
         assert env["HERMES_DOCUMENT_CACHE_DIR"] == str(get_document_cache_dir())
         assert env["WHATSAPP_SEND_READ_RECEIPTS"] == "true"
         assert env["WHATSAPP_PASSIVE_INTAKE_CONFIG"] == '{"enabled":false,"routes":[]}'
-        assert env["HERMES_PASSIVE_INTAKE_ROOT"] == str(
-            adapter._session_path.parent / "passive-intake"
-        )
+        assert env["HERMES_PASSIVE_INTAKE_ROOT"] == ""

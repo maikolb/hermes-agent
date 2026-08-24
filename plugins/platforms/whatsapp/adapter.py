@@ -355,7 +355,7 @@ def _file_content_hash(path: Path) -> str:
         return ""
 
 
-def _passive_intake_bridge_values(value: Any, root: Path) -> tuple[str, str]:
+def _passive_intake_bridge_values(value: Any, root: Optional[Path]) -> tuple[str, str]:
     """Return canonical bridge JSON and its restart-handshake fingerprint.
 
     The Node bridge performs the authoritative schema validation and exits
@@ -378,7 +378,7 @@ def _passive_intake_bridge_values(value: Any, root: Path) -> tuple[str, str]:
     except (TypeError, ValueError) as exc:
         raise ValueError("WhatsApp passive_intake must be JSON-serializable") from exc
     fingerprint = hashlib.sha256(
-        f"{serialized}\0{root}".encode("utf-8")
+        f"{serialized}\0{root or ''}".encode("utf-8")
     ).hexdigest()[:16]
     return serialized, fingerprint
 
@@ -483,15 +483,27 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             read_receipts if isinstance(read_receipts, bool)
             else str(read_receipts or "").strip().lower() in {"1", "true", "yes", "on"}
         )
-        self._passive_intake_root = get_hermes_dir(
-            "platforms/whatsapp/passive-intake",
-            "whatsapp/passive-intake",
-        )
+        configured_intake_root = config.extra.get("passive_intake_root")
+        self._passive_intake_root: Optional[Path] = None
+        if configured_intake_root:
+            intake_root = Path(str(configured_intake_root)).expanduser()
+            if not intake_root.is_absolute():
+                raise ValueError("WhatsApp passive_intake_root must be absolute")
+            self._passive_intake_root = intake_root.resolve()
+        passive_intake_config = config.extra.get("passive_intake")
+        if (
+            isinstance(passive_intake_config, dict)
+            and passive_intake_config.get("enabled") is True
+            and self._passive_intake_root is None
+        ):
+            raise ValueError(
+                "WhatsApp passive_intake_root is required when passive_intake is enabled"
+            )
         (
             self._passive_intake_config,
             self._passive_intake_config_hash,
         ) = _passive_intake_bridge_values(
-            config.extra.get("passive_intake"),
+            passive_intake_config,
             self._passive_intake_root,
         )
         self._mention_patterns = self._compile_mention_patterns()
@@ -572,10 +584,9 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
 
         # A few focused tests construct the adapter with ``__new__`` to avoid
         # unrelated base initialization. Keep their disabled-route behavior
-        # explicit while normal instances always use the profile-aware values
-        # established in ``__init__``.
+        # explicit without inventing a legacy spool root.
         if not hasattr(self, "_passive_intake_root"):
-            self._passive_intake_root = self._session_path.parent / "passive-intake"
+            self._passive_intake_root = None
         if not hasattr(self, "_passive_intake_config"):
             (
                 self._passive_intake_config,
@@ -748,7 +759,9 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 "true" if self._send_read_receipts else "false"
             )
             bridge_env["WHATSAPP_PASSIVE_INTAKE_CONFIG"] = self._passive_intake_config
-            bridge_env["HERMES_PASSIVE_INTAKE_ROOT"] = str(self._passive_intake_root)
+            bridge_env["HERMES_PASSIVE_INTAKE_ROOT"] = str(
+                self._passive_intake_root or ""
+            )
             # Under multiplexing, the bridge subprocess runs with a copy of
             # os.environ that does NOT contain the secondary profile's .env
             # vars.  Inject the resolved WHATSAPP_* values so the Node bridge

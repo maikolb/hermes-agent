@@ -7,19 +7,15 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   unlinkSync,
   writeFileSync,
 } from 'fs';
-import {
-  createCipheriv,
-  createDecipheriv,
-  createHash,
-  createHmac,
-  randomBytes,
-} from 'crypto';
+import { createHash, createHmac, randomBytes } from 'crypto';
 
 const PROJECT_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const GROUP_JID_PATTERN = /^[0-9][0-9-]{4,63}@g\.us$/;
+const EVENT_ID_PATTERN = /^[a-f0-9]{64}$/;
 const MAX_ROUTES = 32;
 const MAX_TEXT_LENGTH = 32_768;
 const MAX_FILENAME_LENGTH = 255;
@@ -83,7 +79,7 @@ export function parsePassiveIntakeConfig(rawConfig, rootDir) {
     throw new PassiveIntakeConfigError('enabled passive intake requires at least one route');
   }
   if (enabled && (!rootDir || !path.isAbsolute(String(rootDir)))) {
-    throw new PassiveIntakeConfigError('enabled passive intake requires an absolute spool root');
+    throw new PassiveIntakeConfigError('enabled passive intake requires an absolute root');
   }
 
   const seenProjects = new Set();
@@ -192,12 +188,11 @@ function attachmentMetadata(message) {
     .filter(([, value]) => isPlainObject(value))
     .map(([kind, value]) => ({
       kind,
-      mime: boundedString(value.mimetype, MAX_MIME_LENGTH),
+      mime: boundedString(value.mimetype, MAX_MIME_LENGTH).toLowerCase(),
       fileName: boundedString(value.fileName, MAX_FILENAME_LENGTH),
       bytes: Number.isSafeInteger(Number(value.fileLength)) && Number(value.fileLength) >= 0
         ? Number(value.fileLength)
         : null,
-      mediaCaptured: false,
     }));
 }
 
@@ -228,9 +223,6 @@ function atomicWriteExclusive(finalPath, data, { mode = 0o600 } = {}) {
     closeSync(descriptor);
     descriptor = undefined;
     try {
-      // A hard-link publish is create-if-absent on both Windows and POSIX.
-      // Unlike rename(), it cannot silently replace an event persisted by a
-      // concurrent replay.
       linkSync(temporaryPath, finalPath);
     } catch (error) {
       if (error?.code === 'EEXIST' || existsSync(finalPath)) {
@@ -251,80 +243,133 @@ function atomicWriteExclusive(finalPath, data, { mode = 0o600 } = {}) {
   }
 }
 
-function readOrCreateSecret(secretPath) {
-  mkdirSync(path.dirname(secretPath), { recursive: true });
-  if (!existsSync(secretPath)) {
-    atomicWriteExclusive(secretPath, randomBytes(32).toString('hex'));
+function readOrCreateActorKey(rootDir) {
+  const keyPath = path.join(rootDir, '.actor-key');
+  mkdirSync(rootDir, { recursive: true });
+  if (!existsSync(keyPath)) {
+    atomicWriteExclusive(keyPath, randomBytes(32).toString('hex'));
   }
-  const encoded = readFileSync(secretPath, 'utf8').trim();
+  const encoded = readFileSync(keyPath, 'utf8').trim();
   if (!/^[a-f0-9]{64}$/.test(encoded)) {
-    throw new Error('passive intake secret material is invalid');
+    throw new Error('passive intake actor key is invalid');
   }
   return Buffer.from(encoded, 'hex');
-}
-
-function encryptEnvelope(envelope, key) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const plaintext = Buffer.from(JSON.stringify(envelope), 'utf8');
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  return {
-    schema: 'EncryptedIntakeEnvelopeV1',
-    algorithm: 'A256GCM',
-    keyId: createHash('sha256').update(key).digest('hex').slice(0, 16),
-    iv: iv.toString('base64'),
-    tag: cipher.getAuthTag().toString('base64'),
-    ciphertext: ciphertext.toString('base64'),
-  };
-}
-
-function encryptMediaRecord({ eventId, kind, mime, bytes }, key) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const ciphertext = Buffer.concat([cipher.update(bytes), cipher.final()]);
-  return {
-    schema: 'EncryptedIntakeMediaV1',
-    version: 1,
-    algorithm: 'A256GCM',
-    keyId: createHash('sha256').update(key).digest('hex').slice(0, 16),
-    eventId,
-    kind,
-    mime,
-    bytes: bytes.length,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-    iv: iv.toString('base64'),
-    tag: cipher.getAuthTag().toString('base64'),
-    ciphertext: ciphertext.toString('base64'),
-  };
-}
-
-function mediaRecordPath(projectRoot, eventId) {
-  if (!/^[a-f0-9]{64}$/.test(String(eventId || ''))) {
-    throw new Error('passive intake media event ID is invalid');
-  }
-  return path.join(projectRoot, 'media', `${eventId}.json`);
-}
-
-function decryptEnvelope(record, key) {
-  if (!isPlainObject(record) || record.schema !== 'EncryptedIntakeEnvelopeV1' || record.algorithm !== 'A256GCM') {
-    throw new Error('passive intake spool record has an unsupported format');
-  }
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(record.iv, 'base64'));
-  decipher.setAuthTag(Buffer.from(record.tag, 'base64'));
-  const plaintext = Buffer.concat([
-    decipher.update(Buffer.from(record.ciphertext, 'base64')),
-    decipher.final(),
-  ]);
-  return JSON.parse(plaintext.toString('utf8'));
 }
 
 function safeProjectRoot(rootDir, project) {
   const resolvedRoot = path.resolve(rootDir);
   const projectRoot = path.resolve(resolvedRoot, project);
   if (projectRoot !== resolvedRoot && !projectRoot.startsWith(`${resolvedRoot}${path.sep}`)) {
-    throw new Error('passive intake project path escaped the spool root');
+    throw new Error('passive intake project path escaped the root');
   }
   return projectRoot;
+}
+
+function eventPaths(rootDir, project, eventId) {
+  if (!EVENT_ID_PATTERN.test(String(eventId || ''))) {
+    throw new Error('passive intake event ID is invalid');
+  }
+  const projectRoot = safeProjectRoot(rootDir, project);
+  const rawRoot = path.join(projectRoot, 'raw');
+  const curatedRoot = path.join(projectRoot, 'curated');
+  const eventRoot = path.join(rawRoot, eventId);
+  mkdirSync(rawRoot, { recursive: true });
+  mkdirSync(curatedRoot, { recursive: true });
+  return {
+    eventRoot,
+    messagePath: path.join(eventRoot, 'message.md'),
+    readyPath: path.join(eventRoot, 'ready.md'),
+    receiptPath: path.join(eventRoot, 'receipt.md'),
+  };
+}
+
+function markdownScalar(value) {
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+function rawMessageMarkdown(envelope) {
+  const quoted = envelope.quotedText
+    ? `\n\n## Texto citado\n\n${envelope.quotedText}`
+    : '';
+  const body = envelope.text || '(mensagem sem texto; veja a evidência anexada)';
+  return [
+    '---',
+    'schema: WhatsAppRawMessageV1',
+    'version: 1',
+    'status: pending',
+    `intake_id: ${markdownScalar(envelope.intakeId)}`,
+    `message_id: ${markdownScalar(envelope.nativeId)}`,
+    `project: ${markdownScalar(envelope.project)}`,
+    `occurred_at: ${markdownScalar(envelope.occurredAt)}`,
+    `received_at: ${markdownScalar(envelope.receivedAt)}`,
+    `actor: ${markdownScalar(envelope.actor)}`,
+    `from_titan_number: ${envelope.fromTitanNumber ? 'true' : 'false'}`,
+    `reply_to_message_id: ${markdownScalar(envelope.replyToNativeId)}`,
+    `content_kind: ${markdownScalar(envelope.contentKind)}`,
+    `media_expected: ${envelope.mediaExpected ? 'true' : 'false'}`,
+    `media_kind: ${markdownScalar(envelope.mediaKind)}`,
+    `media_mime: ${markdownScalar(envelope.mediaMime)}`,
+    `media_original_name: ${markdownScalar(envelope.mediaOriginalName)}`,
+    'untrusted_input: true',
+    '---',
+    '',
+    '# Conteúdo recebido',
+    '',
+    body,
+    quoted,
+    '',
+  ].join('\n');
+}
+
+function readyMarkdown({ eventId, mediaState, attachmentPath = null, kind = null, mime = null, bytes = null, sha256 = null, error = null }) {
+  return [
+    '---',
+    'schema: WhatsAppRawReadyV1',
+    'version: 1',
+    'status: ready',
+    `intake_id: ${markdownScalar(`wa_${eventId}`)}`,
+    `media_state: ${markdownScalar(mediaState)}`,
+    `attachment_path: ${markdownScalar(attachmentPath)}`,
+    `attachment_kind: ${markdownScalar(kind)}`,
+    `attachment_mime: ${markdownScalar(mime)}`,
+    `attachment_bytes: ${bytes === null ? 'null' : bytes}`,
+    `attachment_sha256: ${markdownScalar(sha256)}`,
+    `media_error: ${markdownScalar(error)}`,
+    '---',
+    '',
+  ].join('\n');
+}
+
+function retryableMediaMarkdown({ eventId, error }) {
+  return [
+    '---',
+    'schema: WhatsAppRawMediaRetryV1',
+    'version: 1',
+    'status: retryable',
+    `intake_id: ${markdownScalar(`wa_${eventId}`)}`,
+    `media_error: ${markdownScalar(error)}`,
+    '---',
+    '',
+  ].join('\n');
+}
+
+function extensionFor(kind, mime) {
+  const normalized = String(mime || '').split(';', 1)[0].trim().toLowerCase();
+  const byMime = new Map([
+    ['image/jpeg', '.jpg'], ['image/png', '.png'], ['image/gif', '.gif'], ['image/webp', '.webp'],
+    ['audio/ogg', '.ogg'], ['audio/opus', '.opus'], ['audio/mpeg', '.mp3'], ['audio/wav', '.wav'], ['audio/mp4', '.m4a'],
+    ['video/mp4', '.mp4'], ['video/quicktime', '.mov'], ['video/webm', '.webm'],
+    ['application/pdf', '.pdf'], ['text/plain', '.txt'],
+  ]);
+  if (byMime.has(normalized)) return byMime.get(normalized);
+  return ({ image: '.img', video: '.video', audio: '.audio', document: '.bin', sticker: '.webp' })[kind] || '.bin';
+}
+
+function validateSourcePath(paths, sourcePath) {
+  const resolved = path.resolve(String(sourcePath || ''));
+  if (resolved !== path.resolve(paths.messagePath) || !existsSync(resolved)) {
+    throw new Error('passive intake media has no durable raw message');
+  }
 }
 
 export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now() } = {}) {
@@ -345,69 +390,73 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
   function captureMessage({ msg, chatId, senderId }) {
     const route = routeFor(chatId);
     if (!route) return { matched: false };
-    if (msg?.key?.fromMe) {
-      return { matched: true, project: route.project, persisted: false, reason: 'from_me' };
-    }
 
     const privacyRestricted = isViewOnceMessage(msg?.message);
     const message = unwrapMessage(msg?.message);
-    const ingestedAtMs = now();
-    const occurredAtMs = timestampMilliseconds(msg?.messageTimestamp, ingestedAtMs);
-    const projectRoot = safeProjectRoot(config.rootDir, route.project);
-    const privateRoot = path.join(projectRoot, 'private');
-    const actorKey = readOrCreateSecret(path.join(privateRoot, 'pseudonym.key'));
-    const storageKey = readOrCreateSecret(path.join(privateRoot, 'storage.key'));
+    const receivedAtMs = now();
+    const occurredAtMs = timestampMilliseconds(msg?.messageTimestamp, receivedAtMs);
+    const actorKey = readOrCreateActorKey(config.rootDir);
+    const projectActorKey = createHmac('sha256', actorKey).update(route.project).digest();
     const nativeId = boundedString(msg?.key?.id, 256);
     const contextInfo = contextInfoFor(message);
     const text = firstText(message);
+    const quotedText = firstText(unwrapMessage(contextInfo.quotedMessage));
     const contentKind = contentKindFor(message);
-    const actorId = createHmac('sha256', actorKey)
+    const actorHash = createHmac('sha256', projectActorKey)
       .update(boundedString(senderId, 256))
-      .digest('hex');
-    const routeId = createHmac('sha256', actorKey).update(chatId).digest('hex');
-    const eventMaterial = nativeId || JSON.stringify({ occurredAtMs, actorId, contentKind, text });
+      .digest('hex')
+      .slice(0, 24);
+    const routeHash = createHmac('sha256', projectActorKey).update(chatId).digest('hex');
+    const eventMaterial = nativeId || JSON.stringify({ occurredAtMs, actorHash, contentKind, text });
     const eventId = createHash('sha256')
-      .update(`${route.project}\u0000${routeId}\u0000${eventMaterial}`)
+      .update(`${route.project}\u0000${routeHash}\u0000${eventMaterial}`)
       .digest('hex');
     const attachments = attachmentMetadata(message);
+    const paths = eventPaths(config.rootDir, route.project, eventId);
     const envelope = {
-      schema: 'IntakeEnvelopeV1',
-      version: 1,
       intakeId: `wa_${eventId}`,
       project: route.project,
-      source: 'whatsapp',
       nativeId: nativeId || null,
       occurredAt: new Date(occurredAtMs).toISOString(),
-      ingestedAt: new Date(ingestedAtMs).toISOString(),
-      actor: { id: `wa_actor_${actorId}`, pseudonymized: true },
-      route: { id: `wa_group_${routeId}`, kind: 'whatsapp-group' },
-      content: {
-        kind: contentKind,
-        text,
-        replyToNativeId: boundedString(contextInfo.stanzaId, 256) || null,
-        attachments,
-      },
-      integrity: {
-        eventHash: eventId,
-        configHash,
-      },
+      receivedAt: new Date(receivedAtMs).toISOString(),
+      actor: `participant_${actorHash}`,
+      fromTitanNumber: msg?.key?.fromMe === true,
+      replyToNativeId: boundedString(contextInfo.stanzaId, 256) || null,
+      contentKind,
+      text,
+      quotedText,
+      mediaExpected: attachments.length > 0,
+      mediaKind: attachments[0]?.kind || null,
+      mediaMime: attachments[0]?.mime || null,
+      mediaOriginalName: attachments[0]?.fileName || null,
     };
-    const date = new Date(occurredAtMs);
-    const datePath = [
-      String(date.getUTCFullYear()),
-      String(date.getUTCMonth() + 1).padStart(2, '0'),
-      String(date.getUTCDate()).padStart(2, '0'),
-    ];
-    const spoolPath = path.join(projectRoot, 'spool', ...datePath, `${eventId}.json`);
-    const encryptedRecord = encryptEnvelope(envelope, storageKey);
-    const persisted = atomicWriteExclusive(spoolPath, `${JSON.stringify(encryptedRecord)}\n`);
+
+    if (existsSync(paths.receiptPath)) {
+      return {
+        matched: true,
+        project: route.project,
+        eventId,
+        persisted: false,
+        duplicate: true,
+        reason: 'already_curated',
+        spoolPath: paths.messagePath,
+        hasMedia: attachments.length > 0,
+        mediaMetadata: attachments,
+        privacyRestricted,
+      };
+    }
+
+    const persisted = atomicWriteExclusive(paths.messagePath, rawMessageMarkdown(envelope));
+    if (attachments.length === 0) {
+      atomicWriteExclusive(paths.readyPath, readyMarkdown({ eventId, mediaState: 'none' }));
+    }
     return {
       matched: true,
       project: route.project,
       eventId,
       persisted,
       duplicate: !persisted,
-      spoolPath,
+      spoolPath: paths.messagePath,
       hasMedia: attachments.length > 0,
       mediaMetadata: attachments,
       privacyRestricted,
@@ -418,26 +467,32 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
     if (!Buffer.isBuffer(bytes) || bytes.length <= 0 || bytes.length > MAX_MEDIA_BYTES) {
       throw new Error('passive intake media size is invalid');
     }
-    const projectRoot = safeProjectRoot(config.rootDir, project);
-    const resolvedSpoolPath = path.resolve(String(spoolPath || ''));
-    if (!resolvedSpoolPath.startsWith(`${path.join(projectRoot, 'spool')}${path.sep}`) || !existsSync(resolvedSpoolPath)) {
-      throw new Error('passive intake media has no durable source envelope');
+    const paths = eventPaths(config.rootDir, project, eventId);
+    validateSourcePath(paths, spoolPath);
+    if (existsSync(paths.receiptPath)) {
+      return { persisted: false, duplicate: true, status: 'done' };
     }
     const safeKind = ['image', 'video', 'audio', 'document', 'sticker'].includes(kind) ? kind : 'document';
     const safeMime = boundedString(mime, MAX_MIME_LENGTH).toLowerCase();
-    const storageKey = readOrCreateSecret(path.join(projectRoot, 'private', 'storage.key'));
-    const record = encryptMediaRecord({ eventId, kind: safeKind, mime: safeMime, bytes }, storageKey);
-    const target = mediaRecordPath(projectRoot, eventId);
-    const persisted = atomicWriteExclusive(target, `${JSON.stringify(record)}\n`);
-    return { persisted, duplicate: !persisted, status: 'captured', sha256: record.sha256 };
+    const fileName = `evidence${extensionFor(safeKind, safeMime)}`;
+    const target = path.join(paths.eventRoot, fileName);
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const persisted = atomicWriteExclusive(target, bytes);
+    atomicWriteExclusive(paths.readyPath, readyMarkdown({
+      eventId,
+      mediaState: 'captured',
+      attachmentPath: fileName,
+      kind: safeKind === 'sticker' ? 'image' : safeKind,
+      mime: safeMime,
+      bytes: bytes.length,
+      sha256: digest,
+    }));
+    return { persisted, duplicate: !persisted, status: 'captured', sha256: digest, path: target };
   }
 
   function captureMediaFailure({ project, eventId, spoolPath, code }) {
-    const projectRoot = safeProjectRoot(config.rootDir, project);
-    const resolvedSpoolPath = path.resolve(String(spoolPath || ''));
-    if (!resolvedSpoolPath.startsWith(`${path.join(projectRoot, 'spool')}${path.sep}`) || !existsSync(resolvedSpoolPath)) {
-      throw new Error('passive intake media failure has no durable source envelope');
-    }
+    const paths = eventPaths(config.rootDir, project, eventId);
+    validateSourcePath(paths, spoolPath);
     const allowedCodes = new Set([
       'media-download-failed',
       'media-download-timeout',
@@ -446,57 +501,38 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
       'media-too-large',
     ]);
     const reasonCode = allowedCodes.has(code) ? code : 'media-download-failed';
-    const target = mediaRecordPath(projectRoot, eventId);
-    const record = {
-      schema: 'IntakeMediaFailureV1',
-      version: 1,
+    if (reasonCode === 'media-download-failed' || reasonCode === 'media-download-timeout') {
+      const persisted = atomicWriteExclusive(
+        path.join(paths.eventRoot, 'media-error.md'),
+        retryableMediaMarkdown({ eventId, error: reasonCode }),
+      );
+      return { persisted, duplicate: !persisted, status: 'retryable', reasonCode };
+    }
+    const persisted = atomicWriteExclusive(paths.readyPath, readyMarkdown({
       eventId,
-      reasonCode,
-    };
-    const persisted = atomicWriteExclusive(target, `${JSON.stringify(record)}\n`);
+      mediaState: 'failed',
+      error: reasonCode,
+    }));
     return { persisted, duplicate: !persisted, status: 'failed', reasonCode };
   }
 
   function mediaState(project, eventId) {
-    const projectRoot = safeProjectRoot(config.rootDir, project);
-    const target = mediaRecordPath(projectRoot, eventId);
-    if (!existsSync(target)) return 'pending';
+    const paths = eventPaths(config.rootDir, project, eventId);
+    if (existsSync(paths.receiptPath)) return 'done';
+    if (!existsSync(paths.readyPath)) return 'pending';
     try {
-      const record = JSON.parse(readFileSync(target, 'utf8'));
-      if (record?.schema === 'EncryptedIntakeMediaV1') return 'captured';
-      if (record?.schema === 'IntakeMediaFailureV1') return 'failed';
+      const value = readFileSync(paths.readyPath, 'utf8');
+      if (value.includes('media_state: "captured"')) return 'captured';
+      if (value.includes('media_state: "failed"')) return 'failed';
+      if (value.includes('media_state: "none"')) return 'none';
     } catch {}
     return 'invalid';
   }
 
-  function readMedia(project, eventId) {
-    const projectRoot = safeProjectRoot(config.rootDir, project);
-    const target = mediaRecordPath(projectRoot, eventId);
-    const record = JSON.parse(readFileSync(target, 'utf8'));
-    if (record?.schema !== 'EncryptedIntakeMediaV1' || record?.algorithm !== 'A256GCM') {
-      throw new Error('passive intake media record has an unsupported format');
-    }
-    const storageKey = readOrCreateSecret(path.join(projectRoot, 'private', 'storage.key'));
-    const decipher = createDecipheriv('aes-256-gcm', storageKey, Buffer.from(record.iv, 'base64'));
-    decipher.setAuthTag(Buffer.from(record.tag, 'base64'));
-    const plaintext = Buffer.concat([
-      decipher.update(Buffer.from(record.ciphertext, 'base64')),
-      decipher.final(),
-    ]);
-    if (plaintext.length !== record.bytes || createHash('sha256').update(plaintext).digest('hex') !== record.sha256) {
-      throw new Error('passive intake media integrity validation failed');
-    }
-    return { ...record, plaintext };
-  }
-
-  function readEnvelope(spoolPath, project) {
-    const projectRoot = safeProjectRoot(config.rootDir, project);
-    const resolvedSpoolPath = path.resolve(spoolPath);
-    if (!resolvedSpoolPath.startsWith(`${projectRoot}${path.sep}`)) {
-      throw new Error('passive intake spool path is outside the project root');
-    }
-    const storageKey = readOrCreateSecret(path.join(projectRoot, 'private', 'storage.key'));
-    return decryptEnvelope(JSON.parse(readFileSync(resolvedSpoolPath, 'utf8')), storageKey);
+  function listRawEventFiles(project, eventId) {
+    const paths = eventPaths(config.rootDir, project, eventId);
+    if (!existsSync(paths.eventRoot)) return [];
+    return readdirSync(paths.eventRoot).sort();
   }
 
   return Object.freeze({
@@ -509,7 +545,6 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
     captureMedia,
     captureMediaFailure,
     mediaState,
-    readMedia,
-    readEnvelope,
+    listRawEventFiles,
   });
 }

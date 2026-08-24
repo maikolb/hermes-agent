@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 
 import {
   PassiveIntakeConfigError,
@@ -41,14 +41,14 @@ function mediaMessage({ id = 'MEDIA-1', viewOnce = false, ephemeral = false } = 
   };
 }
 
-await test('disabled-by-default configuration has no routes', () => {
+test('disabled-by-default configuration has no routes', () => {
   const intake = createPassiveIntake({ rawConfig: '', rootDir: '' });
   assert.equal(intake.enabled, false);
   assert.equal(intake.routeCount, 0);
   assert.equal(intake.routeFor(CONCURSA_JID), null);
 });
 
-await test('invalid enabled configuration fails closed at initialization', () => {
+test('invalid enabled configuration fails closed at initialization', () => {
   const root = path.resolve(os.tmpdir(), 'hermes-passive-config-test');
   assert.throws(
     () => createPassiveIntake({ rawConfig: '{broken', rootDir: root }),
@@ -74,7 +74,7 @@ await test('invalid enabled configuration fails closed at initialization', () =>
   );
 });
 
-await test('routes only the exact configured JID and denies its egress', () => {
+test('routes only the exact configured JID and denies its egress', () => {
   const root = path.resolve(os.tmpdir(), 'hermes-passive-route-test');
   const intake = createPassiveIntake({
     rawConfig: config([{ project: 'concursa-ai', jid: CONCURSA_JID }]),
@@ -89,7 +89,7 @@ await test('routes only the exact configured JID and denies its egress', () => {
   assert.doesNotThrow(() => intake.assertEgressAllowed(DOV_JID, 'send'));
 });
 
-await test('persists encrypted, idempotent and project-isolated envelopes', () => {
+test('persists readable raw markdown, idempotent IDs and project isolation', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'hermes-passive-intake-'));
   try {
     const intake = createPassiveIntake({
@@ -119,29 +119,25 @@ await test('persists encrypted, idempotent and project-isolated envelopes', () =
     assert.equal(first.persisted, true);
     assert.equal(replay.duplicate, true);
     assert.equal(first.eventId, replay.eventId);
-    assert.ok(first.spoolPath.startsWith(path.join(root, 'concursa-ai', 'spool')));
-    assert.equal(readdirSync(path.dirname(first.spoolPath)).length, 1);
+    assert.ok(first.spoolPath.startsWith(path.join(root, 'concursa-ai', 'raw')));
+    assert.deepEqual(readdirSync(path.dirname(first.spoolPath)).sort(), ['message.md', 'ready.md']);
 
     const onDisk = readFileSync(first.spoolPath, 'utf8');
-    assert.doesNotMatch(onDisk, /Tela trava ao salvar/);
+    assert.match(onDisk, /Tela trava ao salvar/);
     assert.doesNotMatch(onDisk, /5511999999999/);
-    const envelope = intake.readEnvelope(first.spoolPath, 'concursa-ai');
-    const dovEnvelope = intake.readEnvelope(dov.spoolPath, 'dovcrm');
-    assert.equal(envelope.schema, 'IntakeEnvelopeV1');
-    assert.equal(envelope.project, 'concursa-ai');
-    assert.equal(envelope.content.text, 'Tela trava ao salvar');
-    assert.equal(envelope.content.replyToNativeId, 'QUOTE-1');
-    assert.equal(envelope.actor.pseudonymized, true);
-    assert.ok(dov.spoolPath.startsWith(path.join(root, 'dovcrm', 'spool')));
-    assert.equal(dovEnvelope.project, 'dovcrm');
-    assert.equal(dovEnvelope.content.text, 'CRM não salva contato');
-    assert.notEqual(envelope.actor.id, dovEnvelope.actor.id);
+    assert.match(onDisk, /schema: WhatsAppRawMessageV1/);
+    assert.match(onDisk, /reply_to_message_id: "QUOTE-1"/);
+    assert.match(onDisk, /actor: "participant_[a-f0-9]{24}"/);
+    assert.ok(dov.spoolPath.startsWith(path.join(root, 'dovcrm', 'raw')));
+    assert.match(readFileSync(dov.spoolPath, 'utf8'), /CRM não salva contato/);
+    assert.ok(existsSync(path.join(root, 'concursa-ai', 'curated')));
+    assert.ok(existsSync(path.join(root, 'dovcrm', 'curated')));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-await test('fromMe messages in passive groups are consumed without being spooled', () => {
+test('captures fromMe metadata without confusing another participant with Titan', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'hermes-passive-from-me-'));
   try {
     const intake = createPassiveIntake({
@@ -153,18 +149,22 @@ await test('fromMe messages in passive groups are consumed without being spooled
       chatId: CONCURSA_JID,
       senderId: '5511999999999@s.whatsapp.net',
     });
-    assert.deepEqual(result, {
-      matched: true,
-      project: 'concursa-ai',
-      persisted: false,
-      reason: 'from_me',
+    assert.equal(result.matched, true);
+    assert.equal(result.persisted, true);
+    assert.match(readFileSync(result.spoolPath, 'utf8'), /from_titan_number: true/);
+
+    const external = intake.captureMessage({
+      msg: message({ id: 'MSG-EXTERNAL', fromMe: false }),
+      chatId: CONCURSA_JID,
+      senderId: '5511888888888@s.whatsapp.net',
     });
+    assert.match(readFileSync(external.spoolPath, 'utf8'), /from_titan_number: false/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-await test('captures media encrypted and binds it to the durable source event', () => {
+test('captures original media bytes beside raw markdown and binds them by hash', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'hermes-passive-media-'));
   try {
     const intake = createPassiveIntake({
@@ -189,9 +189,13 @@ await test('captures media encrypted and binds it to the durable source event', 
     });
     assert.equal(media.status, 'captured');
     assert.equal(intake.mediaState('concursa-ai', captured.eventId), 'captured');
-    const recordPath = path.join(root, 'concursa-ai', 'media', `${captured.eventId}.json`);
-    assert.doesNotMatch(readFileSync(recordPath, 'utf8'), new RegExp(bytes.toString('base64')));
-    assert.deepEqual(intake.readMedia('concursa-ai', captured.eventId).plaintext, bytes);
+    const eventRoot = path.dirname(captured.spoolPath);
+    const recordPath = path.join(eventRoot, 'evidence.png');
+    assert.deepEqual(readFileSync(recordPath), bytes);
+    const ready = readFileSync(path.join(eventRoot, 'ready.md'), 'utf8');
+    assert.match(ready, /media_state: "captured"/);
+    assert.match(ready, /attachment_path: "evidence.png"/);
+    assert.match(ready, new RegExp(media.sha256));
     assert.equal(intake.captureMedia({
       project: 'concursa-ai',
       eventId: captured.eventId,
@@ -200,12 +204,17 @@ await test('captures media encrypted and binds it to the durable source event', 
       mime: 'image/png',
       bytes,
     }).duplicate, true);
+    assert.deepEqual(intake.listRawEventFiles('concursa-ai', captured.eventId), [
+      'evidence.png',
+      'message.md',
+      'ready.md',
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-await test('view-once media is marked privacy-restricted without capturing bytes', () => {
+test('view-once media is marked privacy-restricted without capturing bytes', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'hermes-passive-view-once-'));
   try {
     const intake = createPassiveIntake({

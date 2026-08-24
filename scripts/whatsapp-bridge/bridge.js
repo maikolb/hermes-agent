@@ -667,28 +667,41 @@ async function startSocket() {
                 code: 'media-privacy-restricted',
               }).status;
             } else {
-              let timeout;
-              try {
-                const mediaBytes = await Promise.race([
-                  downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage }),
-                  new Promise((_, reject) => {
-                    timeout = setTimeout(
-                      () => reject(Object.assign(new Error('passive media timeout'), { code: 'MEDIA_TIMEOUT' })),
-                      PASSIVE_MEDIA_TIMEOUT_MS,
-                    );
-                  }),
-                ]);
-                const metadata = result.mediaMetadata?.[0] || {};
-                mediaStatus = passiveIntake.captureMedia({
-                  project: result.project,
-                  eventId: result.eventId,
-                  spoolPath: result.spoolPath,
-                  kind: metadata.kind,
-                  mime: metadata.mime,
-                  bytes: mediaBytes,
-                }).status;
-              } catch (mediaError) {
-                const code = mediaError?.code === 'MEDIA_TIMEOUT'
+              let lastMediaError = null;
+              for (let attempt = 1; attempt <= 2; attempt += 1) {
+                let timeout;
+                try {
+                  const mediaBytes = await Promise.race([
+                    downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage }),
+                    new Promise((_, reject) => {
+                      timeout = setTimeout(
+                        () => reject(Object.assign(new Error('passive media timeout'), { code: 'MEDIA_TIMEOUT' })),
+                        PASSIVE_MEDIA_TIMEOUT_MS,
+                      );
+                    }),
+                  ]);
+                  const metadata = result.mediaMetadata?.[0] || {};
+                  mediaStatus = passiveIntake.captureMedia({
+                    project: result.project,
+                    eventId: result.eventId,
+                    spoolPath: result.spoolPath,
+                    kind: metadata.kind,
+                    mime: metadata.mime,
+                    bytes: mediaBytes,
+                  }).status;
+                  lastMediaError = null;
+                  break;
+                } catch (mediaError) {
+                  lastMediaError = mediaError;
+                  if (attempt < 2) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                  }
+                } finally {
+                  if (timeout) clearTimeout(timeout);
+                }
+              }
+              if (lastMediaError) {
+                const code = lastMediaError?.code === 'MEDIA_TIMEOUT'
                   ? 'media-download-timeout'
                   : 'media-download-failed';
                 mediaStatus = passiveIntake.captureMediaFailure({
@@ -697,8 +710,6 @@ async function startSocket() {
                   spoolPath: result.spoolPath,
                   code,
                 }).status;
-              } finally {
-                if (timeout) clearTimeout(timeout);
               }
             }
           }
@@ -718,6 +729,11 @@ async function startSocket() {
             project: passiveRoute.project,
             code: error?.code || 'PASSIVE_INTAKE_PERSIST_FAILED',
           }));
+          // A message must never be silently acknowledged after raw
+          // persistence failed.  Fail the bridge so the gateway's existing
+          // retryable-adapter supervisor reconnects and WhatsApp can replay.
+          setImmediate(() => process.exit(70));
+          return;
         }
         continue;
       }
