@@ -29,6 +29,7 @@
 ## In Scope
 - `C:\Users\maiko\AppData\Local\hermes\hermes-agent\**`
 - Worktrees registrados `C:\Users\maiko\Projetos\hermes-bug-intake-20260821\**`, `C:\Users\maiko\Projetos\hermes-tool-guardrail-fix-20260821\**` e `C:\Users\maiko\Projetos\hermes-workspace-api-worktree\**`.
+- Worktree temporário de integração `C:\Users\maiko\Projetos\hermes-main-consolidation-20260824\**`, criado de `origin/main` e removido somente depois do push verificado.
 - Branches locais `codex/hermes-workspace-api`, `codex/tool-guardrail-redirect-state`, `feat/passive-intake-20260821`, `fix/context-compaction-active-turn-20260819`, `fix/telegram-topic-status-isolation-20260818`, `integrate/local-runtime-20260820`, `integrate/local-runtime-v2-20260820`, `main` e `preserve/wip-local-main-20260818`.
 - Remoto pessoal `maikolb`; remoto `origin` somente como upstream de leitura.
 - Remoção explícita do resíduo inválido não rastreado `tests/gateway/test_whatsapp_bridge_spawn_config.py`, após confirmação de que importa helper promovido/removido.
