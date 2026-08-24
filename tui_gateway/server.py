@@ -1564,14 +1564,25 @@ def write_json(obj: dict) -> bool:
 
 
 def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
-    params: dict = {"type": event, "session_id": sid}
-    if payload is not None:
-        params["payload"] = payload
+    # Keep the historical ``type`` field while adding the stable, resumable
+    # Workspace Portal envelope. Protocol state is attached to the existing
+    # live session record, not owned by the WebSocket transport.
+    from tui_gateway.workspace_protocol import build_event_params
+
+    params = build_event_params(event, sid, payload, _sessions.get(sid))
     return {"jsonrpc": "2.0", "method": "event", "params": params}
 
 
 def _emit(event: str, sid: str, payload: dict | None = None):
     write_json(_event_frame(event, sid, payload))
+    # Dashboard events sometimes combine two public lifecycle facts. Preserve
+    # the legacy event and append explicit contract events without changing the
+    # old frame's type (message.complete -> message.completed + turn terminal;
+    # todo tool completion -> tool.completed + todo.snapshot).
+    from tui_gateway.workspace_protocol import additional_contract_events
+
+    for contract_event, contract_payload in additional_contract_events(event, payload):
+        write_json(_event_frame(contract_event, sid, contract_payload))
 
 
 # Live client transports, one per connected WS peer (maintained by tui_gateway.ws).
@@ -14428,3 +14439,19 @@ for _m in (
 ):
     _m.register(sys.modules[__name__])
 del _m
+
+
+# Install the stable Workspace Portal vocabulary only after every legacy
+# handler it delegates to has been registered. The adapter keeps
+# ``session.create`` response-compatible and adds turn-oriented aliases over
+# the existing conversation/session primitives used by ``hermes serve``.
+from tui_gateway.workspace_protocol import WorkspaceProtocolAdapter
+
+_workspace_protocol_adapter = WorkspaceProtocolAdapter(
+    sessions=_sessions,
+    methods=_methods,
+    ok=_ok,
+    err=_err,
+    emit=_emit,
+)
+_workspace_protocol_adapter.install()
