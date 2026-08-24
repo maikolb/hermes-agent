@@ -5,7 +5,7 @@
 - Mode: RELEASE
 - Risk Level: HIGH
 - Workspace: `C:\Users\maiko\Projetos\hermes-main-consolidation-20260824`
-- Updated At: 2026-08-24T11:45:00-03:00
+- Updated At: 2026-08-24T11:52:00-03:00
 - Machine Runtime Authority: none: Git and GitHub mutations are issued explicitly by the root agent; no autonomous code-edit loop is authorized
 
 ## Requested Outcome
@@ -51,10 +51,10 @@
 - Chosen fix point: isolate a scheduled GitHub Actions workflow in a private control repository so upstream-synchronized workflows cannot read its fork-scoped deploy key, then remove only the delivery residue made obsolete by the confirmed main.
 
 ## Claim Discipline
-- Facts already established: local and fork main are identical at `1f4b3c1e5a`; official upstream `057dcdf236f8` is reachable from that commit; the consolidation and installed integration heads are ancestors of main; every cleanup candidate is clean and the delivery worktree has only the intended staged changes.
+- Facts already established: local and fork main are identical at `7e51ba5476`; official upstream `057dcdf236f8` is reachable from that commit; all obsolete cleanup candidates were clean and recovered before deletion. During cleanup, the active runtime branch gained unmerged commit `986c77afbd`; it was retained and protected remotely by `archive/hermes-20260824-active-runtime-986c77afbd` instead of being misclassified as obsolete.
 - Inferences that still require validation: a future genuine upstream merge conflict will exercise the already-reviewed fail-closed path; manufacturing such a remote conflict is prohibited.
 - Highest readiness state allowed by current evidence: released for the synchronization automation; the live Hermes runtime remains on its existing pinned checkout.
-- Target readiness checklist or equivalent: both contracts green; control workflow syntax/behavior green; private repository and isolated secret verified; fork evidence PR merged; remote main hash confirmed; manual control-workflow run green; cleanup inventory confirms retained refs and the canonical worktree.
+- Target readiness checklist or equivalent: both contracts green; control workflow syntax/behavior green; private repository and isolated secret verified; PR #4 merged; local/remote main confirmed; manual control run green; recovery tags and retained refs inventoried; final window verifier green.
 
 ## Forbidden Actions
 - No scope expansion beyond the requested outcome.
@@ -87,6 +87,6 @@
 
 ## Status
 - Contract preflight: validated by the canonical global validator (phase `Preflight`) on 2026-08-24.
-- Implementation: private `maikolb/hermes-upstream-sync` is published and active with target-only deploy key `161167502` and isolated secret; six archive tags are remote; three obsolete auxiliary worktrees, eight obsolete local branches and thirteen obsolete remote branches were removed; no product code changed.
-- Validation: both contracts, workflow YAML/Bash and structural review are green; ephemeral workflow-write probe `aa3febd867` was pushed/deleted; manual run `32739966897` succeeded in 14 seconds; fresh refs still show fork main `1f4b3c1e5a` contains upstream `057dcdf236f8`; PR #1 and four stashes remain. Eighteen live Hermes-linked processes triggered the safety gate, so the clean canonical checkout remains pinned to `integrate/local-runtime-v2-20260820` at `66c2257b9f` instead of mutating live files.
-- Completion: pending only the evidence PR merge, delivery-worktree self-removal and final inventory/window-verifier evidence.
+- Implementation: private `maikolb/hermes-upstream-sync` is published and active with target-only deploy key `161167502` and isolated secret; seven archive tags are remote; four obsolete auxiliary worktrees, nine obsolete local branches and fourteen obsolete remote branches were removed; no product code changed.
+- Validation: both contracts, workflow YAML/Bash and independent structural/security review are green; ephemeral workflow-write probe `aa3febd867` was pushed/deleted; manual run `32739966897` succeeded in 14 seconds; PR #4 merged as `7e51ba5476`; local/fork main match and contain upstream; only PR #1 and four stashes remain quarantined. Live Hermes-linked processes triggered the safety gate; a concurrent unmerged commit advanced the clean runtime checkout to `986c77afbd`, so it was archived and retained rather than overwritten. Final zero-UI verification reported `VisibleWindows=0` and no shell descendants.
+- Completion: completed at `released` for automatic synchronization and `validated-local` for Git cleanup. The transient closeout worktree exists only to publish this terminal record and is removed immediately after its commit reaches remote main; no Hermes runtime-release or acceptance claim is made.
