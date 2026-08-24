@@ -810,6 +810,41 @@ class TurnCheckpointStore:
         state["revision"] = int(state.get("revision", 0)) + 1
         return self._write(state)
 
+    def mark_delivery_if_content_matches(
+        self,
+        session_id: str,
+        *,
+        content: str,
+        obligation_id: str,
+    ) -> dict[str, Any] | None:
+        """Close delivery only when *content* is the checkpointed artifact.
+
+        Streaming bypasses the gateway's ordinary send boundary.  Its final
+        delivery acknowledgement is authoritative only for the exact payload
+        recorded in ``pending_deliverable``; a preview, stale finalize, or a
+        later turn must never close an unrelated checkpoint.
+        """
+        state = copy.deepcopy(self.load(session_id))
+        pending = state.get("pending_deliverable")
+        expected_sha = pending.get("sha256") if isinstance(pending, Mapping) else None
+        if not expected_sha or expected_sha != _sha256_text(content or ""):
+            return None
+        if (
+            state.get("phase") == "delivered"
+            and isinstance(state.get("delivery"), Mapping)
+            and state["delivery"].get("obligation_id") == obligation_id
+        ):
+            return state
+        state["verification"] = {**state.get("verification", {}), "pending": False}
+        state["delivery"] = {
+            "obligation_id": str(obligation_id or ""),
+            "status": "delivered",
+        }
+        state["phase"] = "delivered"
+        state["next_action"] = "none"
+        state["revision"] = int(state.get("revision", 0)) + 1
+        return self._write(state)
+
 
 def checkpoint_store_for_agent(agent: Any) -> TurnCheckpointStore | None:
     """Return the profile-scoped store for a real durable-session agent."""
@@ -1044,6 +1079,33 @@ def update_checkpoint_delivery(
     return True
 
 
+def update_checkpoint_stream_delivery(
+    session_id: str | None,
+    *,
+    final_response: str,
+) -> bool:
+    """Close a streamed turn after exact final-payload confirmation.
+
+    Returns ``False`` when there is no checkpoint or when the streamed final
+    response does not match its pending deliverable byte-for-byte.
+    """
+    if not session_id or not final_response:
+        return False
+    from hermes_constants import get_hermes_home
+
+    store = TurnCheckpointStore(get_hermes_home() / "sessions" / "turn-checkpoints")
+    digest = _sha256_text(final_response)
+    try:
+        state = store.mark_delivery_if_content_matches(
+            str(session_id),
+            content=final_response,
+            obligation_id=f"stream:{digest}",
+        )
+    except FileNotFoundError:
+        return False
+    return state is not None
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "CheckpointConflictError",
@@ -1061,4 +1123,5 @@ __all__ = [
     "tool_fingerprint",
     "transcript_hash",
     "update_checkpoint_delivery",
+    "update_checkpoint_stream_delivery",
 ]

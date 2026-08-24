@@ -718,6 +718,13 @@ async def test_startup_auto_resume_skips_marker_without_durable_checkpoint():
         last_resume_marked_at=datetime.now(),
     )
     runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    def clear_resume_pending(session_key):
+        entry = runner.session_store._entries[session_key]
+        entry.resume_pending = False
+        entry.resume_reason = None
+        return True
+
+    runner.session_store.clear_resume_pending.side_effect = clear_resume_pending
     adapter.handle_message = AsyncMock()
 
     scheduled = runner._schedule_resume_pending_sessions()
@@ -726,6 +733,8 @@ async def test_startup_auto_resume_skips_marker_without_durable_checkpoint():
     assert scheduled == 0
     adapter.handle_message.assert_not_called()
     assert pending_entry.session_key not in runner._running_agents
+    assert pending_entry.resume_pending is False
+    assert pending_entry.resume_reason is None
 
 
 @pytest.mark.asyncio

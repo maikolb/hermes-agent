@@ -11431,7 +11431,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if self._auto_resume_requires_checkpoint():
             checkpoint_backed = []
-            rejected = 0
+            rejected_keys = []
             for entry in candidates:
                 if self._entry_has_resumable_turn_checkpoint(
                     entry,
@@ -11439,13 +11439,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 ):
                     checkpoint_backed.append(entry)
                 else:
-                    rejected += 1
+                    rejected_keys.append(entry.session_key)
             candidates = checkpoint_backed
-            if rejected:
+            cleared = 0
+            for session_key in rejected_keys:
+                try:
+                    if self.session_store.clear_resume_pending(session_key):
+                        cleared += 1
+                except Exception:
+                    logger.warning(
+                        "Failed to clear checkpoint-less resume marker for %s",
+                        session_key,
+                        exc_info=True,
+                    )
+            if rejected_keys:
                 logger.warning(
-                    "Skipped %d resume-pending session(s) without an intact "
-                    "unfinished durable checkpoint",
-                    rejected,
+                    "Skipped %d resume-pending session(s) without a fresh, "
+                    "intact unfinished durable checkpoint; cleared %d stale "
+                    "control marker(s) while preserving transcripts",
+                    len(rejected_keys),
+                    cleared,
                 )
 
         # Defense-3 (#30719): break the SIGTERM-respawn loop. Only count this
@@ -28246,6 +28259,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             "Failed to edit streamed message for session %s: %s",
                             session_key or "?", _edit_err,
                         )
+
+            # A confirmed streamed final bypasses the ordinary adapter send
+            # boundary, which is where checkpoints are normally marked
+            # delivered. Close it here, but only when the exact final payload
+            # matches the checkpoint's pending deliverable. This prevents a
+            # preview, stale finalize, or newer turn from closing old work.
+            if response.get("already_sent") and not _is_empty_sentinel:
+                try:
+                    from agent.turn_checkpoint import update_checkpoint_stream_delivery
+
+                    update_checkpoint_stream_delivery(
+                        session_id,
+                        final_response=_final,
+                    )
+                except Exception:
+                    logger.debug(
+                        "streamed final checkpoint handoff failed for session %s",
+                        session_id or "?",
+                        exc_info=True,
+                    )
 
         # Schedule deletion of tracked temporary progress bubbles after the
         # final response lands. Failed runs skip this so bubbles remain as

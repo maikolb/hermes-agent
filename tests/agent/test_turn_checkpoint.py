@@ -264,6 +264,33 @@ def test_terminal_checkpoint_keeps_delivery_reference_without_payload_duplicatio
     assert state["pending_deliverable"]["sha256"]
 
 
+def test_stream_delivery_closes_only_the_exact_pending_deliverable(tmp_path):
+    store = _store(tmp_path)
+    store.start_turn("session-1", "turn-1", "answer", _messages("answer"))
+    store.mark_deliverable("session-1", "final answer", verification_pending=False)
+
+    mismatch = store.mark_delivery_if_content_matches(
+        "session-1",
+        content="different answer",
+        obligation_id="stream:wrong",
+    )
+    assert mismatch is None
+    assert store.load("session-1")["phase"] == "deliverable_composed"
+
+    delivered = store.mark_delivery_if_content_matches(
+        "session-1",
+        content="final answer",
+        obligation_id="stream:exact",
+    )
+    assert delivered is not None
+    assert delivered["phase"] == "delivered"
+    assert delivered["next_action"] == "none"
+    assert delivered["delivery"] == {
+        "obligation_id": "stream:exact",
+        "status": "delivered",
+    }
+
+
 def test_explicit_tool_effect_disposition_is_preserved(tmp_path):
     store = TurnCheckpointStore(tmp_path)
     store.start_turn("s1", "t1", "run", [{"role": "user", "content": "run"}])
