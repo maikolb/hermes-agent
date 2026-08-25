@@ -294,6 +294,7 @@ from gateway.platforms.base import (
     SUPPORTED_DOCUMENT_TYPES,
     cache_image_from_url,
     cache_audio_from_url,
+    utf16_len,
 )
 from utils import env_int
 
@@ -438,6 +439,28 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
     # Default bridge location resolved via shared helper
     _DEFAULT_BRIDGE_DIR = None  # resolved in __init__
     splits_long_messages = True  # send() chunks via truncate_message()
+    supports_exact_text_delivery = True
+
+    def can_deliver_exact_text(self, content: str, metadata=None) -> bool:
+        """Exact ACK is limited to one formatted WhatsApp text message."""
+
+        del metadata
+        try:
+            formatted = self.format_message(content)
+            # The Baileys bridge chunks with JavaScript ``String.length``
+            # (UTF-16 code units), not Python code points.  It can also prepend
+            # the self-chat identity banner after the Python adapter has
+            # already decided whether this is a single exact message.  Count
+            # that default banner conservatively even in bot mode: a false
+            # negative merely uses best-effort delivery, while a false positive
+            # could split/trim a payload that was already sealed as exact.
+            prefix = self._effective_reply_prefix()
+            return (
+                len(formatted) <= self._outgoing_chunk_limit()
+                and utf16_len(f"{prefix}{formatted}") <= self.MAX_MESSAGE_LENGTH
+            )
+        except Exception:
+            return False
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WHATSAPP)
@@ -662,6 +685,11 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     )
                     if install_result.returncode != 0:
                         print(f"[{self.name}] npm install failed: {install_result.stderr}")
+                        self._set_fatal_error(
+                            "whatsapp_npm_install_failed",
+                            f"WhatsApp bridge npm install failed. Run `cd {bridge_dir} && {_npm_bin} install` manually, then restart `hermes gateway`.",
+                            retryable=False,
+                        )
                         return False
                     print(f"[{self.name}] Dependencies installed")
                     if _pkg_hash:
@@ -671,6 +699,11 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                             pass  # Stamp is an optimization; install still succeeded
                 except Exception as e:
                     print(f"[{self.name}] Failed to install dependencies: {e}")
+                    self._set_fatal_error(
+                        "whatsapp_npm_install_failed",
+                        f"WhatsApp bridge npm install failed ({e}). Run `cd {bridge_dir} && {_npm_bin} install` manually, then restart `hermes gateway`.",
+                        retryable=False,
+                    )
                     return False
 
             # Ensure session directory exists
@@ -1012,10 +1045,18 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         that preserve code block boundaries, and sends each chunk sequentially.
         """
         if not self._running or not self._http_session:
-            return SendResult(success=False, error="Not connected")
+            return SendResult(
+                success=False,
+                error="Not connected",
+                raw_response={"send_attempted": False},
+            )
         bridge_exit = await self._check_managed_bridge_exit()
         if bridge_exit:
-            return SendResult(success=False, error=bridge_exit)
+            return SendResult(
+                success=False,
+                error=bridge_exit,
+                raw_response={"send_attempted": False},
+            )
 
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
@@ -1493,7 +1534,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             event.source,
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-            profile=event.source.profile,
+            profile=self._session_key_profile(event.source),
         )
 
     def _enqueue_text_event(self, event: MessageEvent) -> None:

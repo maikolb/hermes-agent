@@ -113,8 +113,13 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
             workspace_path=str(occupied),  # inherited shared/stale path
         )
         task = kb.get_task(conn, tid)
-
-    workspace, branch = kb._resolve_worktree_workspace(task)
+        workspace, branch = kb._resolve_worktree_workspace(task, conn=conn)
+        owned, ownership, error = kb._validate_worktree_ownership(
+            conn, tid, require_checkout=True
+        )
+        assert owned, error
+        assert ownership is not None
+        assert Path(ownership["canonical_worktree"]) == workspace
     assert workspace == (repo / ".worktrees" / tid).resolve()
     assert branch == f"wt/{tid}"
     # The sibling's checkout is untouched, still on its own branch.
@@ -126,5 +131,49 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
     assert head == "wt/sibling"
 
 
+def test_worktree_creation_crash_never_adopts_unsealed_checkout(
+    kanban_home, tmp_path, monkeypatch
+):
+    repo = _make_repo(tmp_path)
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="recover worktree creation",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        task = kb.get_task(conn, tid)
+        target = repo / ".worktrees" / tid
+        original_seal = kb._seal_materialized_worktree_ownership
 
+        def crash_before_seal(*_args, **_kwargs):
+            raise RuntimeError("simulated crash after git worktree add")
 
+        monkeypatch.setattr(
+            kb, "_seal_materialized_worktree_ownership", crash_before_seal
+        )
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            kb.resolve_workspace(task, conn=conn)
+
+        ownership_row = conn.execute(
+            "SELECT ownership_json FROM task_git_delivery WHERE task_id=?",
+            (tid,),
+        ).fetchone()
+        assert ownership_row["ownership_json"] is None
+        assert target.is_dir()
+
+        # Security wins over automatic recovery: after a crash before the DB
+        # seal, the checkout is foreign. A retry must never adopt or remove it.
+        monkeypatch.setattr(
+            kb, "_seal_materialized_worktree_ownership", original_seal
+        )
+        resumed_task = kb.get_task(conn, tid)
+        with pytest.raises(RuntimeError, match="no Hermes creation receipt"):
+            kb.resolve_workspace(resumed_task, conn=conn)
+        valid, ownership, error = kb._validate_worktree_ownership(
+            conn, tid, require_checkout=True
+        )
+        assert valid is False
+        assert ownership is None
+        assert "missing" in error
+        assert target.is_dir()

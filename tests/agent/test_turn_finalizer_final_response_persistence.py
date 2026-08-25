@@ -123,9 +123,57 @@ def test_final_response_closes_tool_tail_before_persistence(monkeypatch):
         _turn_exit_reason="fallback_prior_turn_content",
     )
 
-    assert result["messages"][-1] == {"role": "assistant", "content": "Done."}
+    assert result["messages"][-1]["role"] == "assistant"
+    assert result["messages"][-1]["content"] == "Done."
+    assert isinstance(result["messages"][-1]["timestamp"], float)
     assert agent.persisted_messages is not None
-    assert agent.persisted_messages[-1] == {"role": "assistant", "content": "Done."}
+    assert agent.persisted_messages[-1] == result["messages"][-1]
+
+
+def test_fallback_timestamp_survives_delayed_sqlite_persistence(
+    monkeypatch, tmp_path
+):
+    """The durable row records message creation, not the later DB flush."""
+    from hermes_state import SessionDB
+
+    created_at = 1_781_976_577.25
+    persisted_at = created_at + 600
+    monkeypatch.setattr("agent.message_metadata.wall_time", lambda: created_at)
+    monkeypatch.setattr("hermes_state.time.time", lambda: persisted_at)
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("sess-test", source="cli")
+    agent = FakeAgent()
+
+    def persist_to_sqlite(messages, _conversation_history):
+        db.replace_messages(agent.session_id, messages)
+        agent.persisted_messages = db.get_messages_as_conversation(agent.session_id)
+
+    agent._persist_session = persist_to_sqlite
+    messages = [
+        {"role": "user", "content": "do it", "timestamp": created_at - 1},
+        {"role": "tool", "content": "ok", "tool_call_id": "call-1"},
+    ]
+
+    finalize_turn(
+        agent,
+        final_response="Done.",
+        api_call_count=2,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="do it",
+        original_user_message="do it",
+        _should_review_memory=False,
+        _turn_exit_reason="fallback_prior_turn_content",
+    )
+
+    assert agent.persisted_messages[-1]["timestamp"] == created_at
+    assert agent.persisted_messages[-1]["timestamp"] != persisted_at
 
 
 def test_final_response_fills_pure_tool_call_tail(monkeypatch):
@@ -223,3 +271,89 @@ def test_final_response_fill_invalidates_flush_scan_cursor():
     )
 
     assert agent._db_flush_scan_prefix is None
+
+
+def test_finalizer_exports_the_exact_checkpoint_store_namespace(
+    monkeypatch, tmp_path
+):
+    """A profile turn must carry its real store beyond runtime-scope teardown."""
+    from agent.turn_checkpoint import TurnCheckpointStore
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "wrong-default-home"))
+    storage_home = tmp_path / "profiles" / "worker"
+    checkpoint_root = storage_home / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    messages = [
+        {"role": "user", "content": "do it"},
+        {"role": "assistant", "content": "Done."},
+    ]
+    state = store.start_turn(
+        session_id="sess-test",
+        turn_id="turn-profile",
+        user_content="do it",
+        messages=messages,
+    )
+    agent = FakeAgent()
+    agent._turn_checkpoint_store = store
+    agent._turn_checkpoint_state = state
+    agent._flush_messages_to_session_db = lambda *_args, **_kwargs: True
+
+    result = finalize_turn(
+        agent,
+        final_response="Done.",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn-profile",
+        user_message="do it",
+        original_user_message="do it",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(final)",
+    )
+
+    assert result["turn_checkpoint_fence"]
+    assert result["turn_checkpoint_root"] == str(
+        checkpoint_root.resolve(strict=False)
+    )
+    assert result["storage_home"] == str(storage_home.resolve(strict=False))
+    assert "wrong-default-home" not in result["turn_checkpoint_root"]
+
+
+def test_checkpoint_seal_failure_cannot_report_completed_success(monkeypatch):
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = FakeAgent()
+    agent._turn_checkpoint_store = SimpleNamespace(
+        mark_deliverable=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("checkpoint storage unavailable")
+        )
+    )
+    agent._flush_messages_to_session_db = lambda *_args, **_kwargs: True
+    messages = [
+        {"role": "user", "content": "do it"},
+        {"role": "assistant", "content": "Done."},
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response="Done.",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="do it",
+        original_user_message="do it",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(final)",
+    )
+
+    assert result["failed"] is True
+    assert result["completed"] is False
+    assert result["turn_exit_reason"] == "delivery_checkpoint_failed"
+    assert result.get("turn_checkpoint_fence") is None

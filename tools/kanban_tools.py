@@ -928,6 +928,7 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and keep this task alive."
                 )
 
+            delivery = kb.get_git_delivery_contract(conn, tid)
             try:
                 ok = kb.complete_task(
                     conn, tid,
@@ -963,6 +964,33 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
             if not ok:
+                if delivery is not None and delivery["required"]:
+                    blocked = conn.execute(
+                        "SELECT payload FROM task_events WHERE task_id = ? "
+                        "AND kind = 'completion_blocked_delivery' "
+                        "ORDER BY id DESC LIMIT 1",
+                        (tid,),
+                    ).fetchone()
+                    try:
+                        blocked_payload = (
+                            json.loads(blocked["payload"])
+                            if blocked is not None and blocked["payload"]
+                            else {}
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        blocked_payload = {}
+                    code = blocked_payload.get("code")
+                    reason = blocked_payload.get("reason")
+                    detail = (
+                        f" ({code}): {reason}"
+                        if code and reason
+                        else "."
+                    )
+                    return tool_error(
+                        "kanban_complete blocked by the sealed Git delivery "
+                        f"gate{detail} The card remains retryable; restore the "
+                        "exact worktree/branch/PR evidence and retry."
+                    )
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
@@ -1090,6 +1118,24 @@ def _handle_request_review(args: dict, **kw) -> str:
         except json.JSONDecodeError:
             return tool_error("metadata could not be safely serialized")
     metadata = _stamp_worker_session_metadata(tid, metadata)
+    pull_request = args.get("pull_request")
+    declared_artifacts = args.get("declared_artifacts")
+    git_delivery_request = None
+    if pull_request is not None or declared_artifacts is not None:
+        if isinstance(declared_artifacts, str):
+            declared_artifacts = [declared_artifacts]
+        if not isinstance(declared_artifacts, (list, tuple)):
+            return tool_error(
+                "declared_artifacts must be a list of repository-relative paths"
+            )
+        git_delivery_request = {
+            "pull_request": pull_request,
+            "declared_artifacts": [
+                str(path).strip()
+                for path in declared_artifacts
+                if str(path).strip()
+            ],
+        }
     reviewer = args.get("reviewer") or None
     if reviewer:
         # Model-supplied free text stored durably on the event payload —
@@ -1112,6 +1158,7 @@ def _handle_request_review(args: dict, **kw) -> str:
                 summary=summary,
                 metadata=metadata,
                 reviewer=reviewer,
+                git_delivery_request=git_delivery_request,
                 expected_run_id=_worker_run_id(tid),
                 with_reason=True,
             )
@@ -1757,6 +1804,7 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
+                board=board,
             )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
@@ -1852,9 +1900,12 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
                 return False  # CLI / cron / test — no persistent channel
             platform = "tui"
             chat_id = session_key
+        is_gateway_session = platform != "tui"
+        chat_type = get_session_env("HERMES_SESSION_CHAT_TYPE", "") or None
+        delivery_mode = "notify+wake" if is_gateway_session else None
         thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "") or None
         user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
-        chat_type = get_session_env("HERMES_SESSION_CHAT_TYPE", "") or None
+        user_id_alt = get_session_env("HERMES_SESSION_USER_ID_ALT", "") or None
         message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "") or ""
         notifier_profile = (
             get_session_env("HERMES_SESSION_PROFILE", "")
@@ -1887,9 +1938,10 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
         _kb.add_notify_sub(
             conn, task_id=task_id,
             platform=platform, chat_id=chat_id,
+            thread_id=thread_id, user_id=user_id, user_id_alt=user_id_alt,
             chat_type=chat_type,
-            thread_id=thread_id, user_id=user_id,
             notifier_profile=notifier_profile,
+            delivery_mode=delivery_mode,
             delivery_metadata=delivery_metadata or None,
         )
         return True
@@ -2071,6 +2123,9 @@ KANBAN_COMPLETE_SCHEMA = {
         "native attachments to the human who subscribed to the task, "
         "so the deliverable lands in their chat alongside the summary "
         "instead of being a path they have to fetch by hand."
+        " For a worktree on a board with git_delivery.required=true, this "
+        "tool first verifies the sealed PR manifest, required checks, merge, "
+        "and base ancestry. Failure leaves the same card retryable in review."
     ),
     "parameters": {
         "type": "object",
@@ -2202,7 +2257,10 @@ KANBAN_REQUEST_REVIEW_SCHEMA = {
         "NOT a blocker — it never counts toward unblock-loop detection, so a "
         "task can cycle through review across follow-ups without ever being "
         "falsely escalated to triage. Use this instead of blocking with a "
-        "free-form 'review-required:' reason."
+        "free-form 'review-required:' reason. On boards whose sealed "
+        "git_delivery policy has required=true, also pass pull_request and "
+        "declared_artifacts; they are stored structurally and later verified "
+        "before kanban_complete can mark the same card done."
     ),
     "parameters": {
         "type": "object",
@@ -2233,6 +2291,23 @@ KANBAN_REQUEST_REVIEW_SCHEMA = {
                     "as changed_files, tests_run, commit, or decisions."
                 ),
                 "additionalProperties": True,
+            },
+            "pull_request": {
+                "oneOf": [{"type": "integer"}, {"type": "string"}],
+                "description": (
+                    "PR number or canonical PR URL. Required only when this "
+                    "board has git_delivery.required=true; never put it only "
+                    "in summary or metadata."
+                ),
+            },
+            "declared_artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Exact repository-relative paths changed by the PR. "
+                    "Required with pull_request on boards that enforce Git "
+                    "delivery; renames include both old and new paths."
+                ),
             },
             "board": _board_schema_prop(),
         },

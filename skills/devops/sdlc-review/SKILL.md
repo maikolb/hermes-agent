@@ -40,6 +40,10 @@ Do not use it for a separate downstream review card. A downstream card is ordina
 This skill is loaded automatically by the review dispatcher. Start with `kanban_show` before inspecting files or choosing a verdict.
 
 1. Read the task specification and the latest `review_requested` handoff.
+   For a board with `git_delivery.required=true`, confirm that the implementer
+   supplied `pull_request` and exact repository-relative
+   `declared_artifacts` through `kanban_request_review`; prose is not a
+   substitute for this sealed manifest.
 2. Inspect the actual deliverable and run relevant verification.
 3. Choose exactly one verdict: approve, request changes, or escalate.
 4. Record concrete evidence in the terminal Kanban transition.
@@ -118,6 +122,11 @@ kanban_complete(
 ```
 
 Include the exact checks that passed and any bounded caveat that does not block acceptance.
+For a required Git-delivery board, refresh the configured base remote before
+approval when needed. `kanban_complete` then verifies the sealed PR identity,
+required checks, merge and task-head ancestry itself; a verification error
+leaves this same card in review, so correct the evidence and retry rather than
+creating a replacement card.
 
 #### Request changes
 
@@ -177,5 +186,7 @@ Before submitting the verdict, confirm:
 - [ ] Prior requested changes were re-tested on re-review.
 - [ ] Unrelated regressions and scope changes were considered.
 - [ ] The verdict uses exactly one terminal action.
+- [ ] Required Git delivery has a sealed PR/artifact manifest and passed the
+      `kanban_complete` delivery gate.
 - [ ] The summary contains concrete, non-secret evidence.
 - [ ] No implementation files were edited by the reviewer.

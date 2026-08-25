@@ -18,7 +18,7 @@ import os
 import logging
 import hashlib
 import ipaddress
-import threading
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -27,12 +27,32 @@ from agent.secret_scope import get_secret
 from hermes_constants import get_hermes_home
 from hermes_cli.profiles import _get_default_hermes_home
 from plugins.plugin_utils import SingletonSlot
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from honcho import Honcho
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_url(url: str | None) -> str | None:
+    """Return url unchanged, or None if it contains non-printable ASCII characters.
+
+    A stray terminal escape sequence (e.g. \x1b from copy-paste) in a URL can
+    cause upstream SDKs to raise ``Invalid non-printable ASCII character`` at
+    client construction time. Dropping the bad value keeps Honcho disabled with
+    a clear warning rather than poisoning startup.
+    """
+    if url is None:
+        return None
+    if all(0x20 <= ord(c) < 0x7F for c in url):
+        return url
+    logger.warning(
+        "Honcho base_url contains non-printable characters and will be ignored: %r",
+        url,
+    )
+    return None
+
 
 HOST = "hermes"
 
@@ -355,16 +375,11 @@ def _resolve_observation(
     }
 
 
-def _bound_session_value(name: str) -> str | None:
-    """Read only a value explicitly bound in this task's session ContextVars.
 
-    ``get_session_env`` intentionally falls back to ``os.environ`` for CLI
-    compatibility.  That fallback is unsafe for workspace partitioning in a
-    multiplexed gateway: a fresh worker thread has no inherited ContextVars and
-    could otherwise consume stale process-global identity.  Returning ``None``
-    for the unbound sentinel lets callers distinguish that worker-thread case
-    from an explicitly bound empty value.
-    """
+
+
+def _bound_session_value(name: str) -> str | None:
+    """Read only a value explicitly bound in this task's session ContextVars."""
     try:
         from gateway import session_context
 
@@ -382,12 +397,7 @@ def _bound_session_value(name: str) -> str | None:
 def _telegram_project_workspace_id(
     base_workspace: str,
 ) -> tuple[bool, str | None]:
-    """Return task-binding state and a digest-only Telegram project workspace.
-
-    The digest uses length-framed inputs so no two component tuples can be
-    confused by delimiters.  Raw profile/chat/project identifiers are never
-    retained in the returned identifier or the client cache key.
-    """
+    """Return task-binding state and a digest-only Telegram project workspace."""
     platform = _bound_session_value("HERMES_SESSION_PLATFORM")
     if platform is None:
         return False, None
@@ -412,12 +422,9 @@ def _telegram_project_workspace_id(
 
 
 def _capture_bound_workspace_id(base_workspace: str) -> str | None:
-    """Capture only the derived digest for use by non-context-propagating threads."""
+    """Capture only the derived digest for non-context-propagating threads."""
     _, scoped_workspace = _telegram_project_workspace_id(base_workspace)
     return scoped_workspace
-
-
-
 
 
 @dataclass
@@ -525,11 +532,29 @@ class HonchoClientConfig:
     # stray HONCHO_API_KEY env var.
     explicitly_configured: bool = False
     # Digest-only effective workspace captured while gateway ContextVars are
-    # bound.  Honcho owns background threads that do not inherit ContextVars;
+    # bound. Honcho owns background threads that do not inherit ContextVars;
     # retaining this non-sensitive value keeps those calls in the same scope.
     _bound_workspace_id: str | None = field(
         default=None, repr=False, compare=False
     )
+    # Provenance: WHERE this config was resolved from, captured at resolution
+    # time (inside the caller's profile scope). Bound consumers (session
+    # manager, OAuth refresh paths) use these instead of re-resolving
+    # resolve_config_path()/get_hermes_home() later — those resolvers read a
+    # ContextVar that background threads cannot see, so re-resolution from a
+    # daemon thread silently lands on the DEFAULT profile (#69123, #74065).
+    config_path: Path | None = None
+    hermes_home: Path | None = None
+
+    def bound_config_path(self) -> Path:
+        """Return the config path this config was resolved from.
+
+        Falls back to ambient resolution only for hand-constructed configs
+        (tests, env-only setups) that carry no provenance.
+        """
+        if self.config_path is not None:
+            return self.config_path
+        return resolve_config_path()
 
     @classmethod
     def from_env(
@@ -540,8 +565,18 @@ class HonchoClientConfig:
         """Create config from environment variables (fallback)."""
         resolved_host = host or resolve_active_host()
         api_key = get_secret("HONCHO_API_KEY")
-        base_url = os.environ.get("HONCHO_BASE_URL", "").strip() or None
+        # HONCHO_URL is the SDK's own env var (honcho.client resolves it when
+        # no environment is passed); accept it here so the fallback path
+        # behaves the same as from_global_config() when no config file exists.
+        # Read straight from os.environ, matching HONCHO_BASE_URL: a base URL
+        # is a deployment setting, not a profile-scoped credential.
+        base_url = _sanitize_url(
+            os.environ.get("HONCHO_BASE_URL", "").strip()
+            or os.environ.get("HONCHO_URL", "").strip()
+            or None
+        )
         timeout = _resolve_optional_float(os.environ.get("HONCHO_TIMEOUT"))
+        _resolved_path = resolve_config_path()
         return cls(
             host=resolved_host,
             workspace_id=workspace_id,
@@ -552,6 +587,8 @@ class HonchoClientConfig:
             timeout=timeout,
             ai_peer=resolved_host,
             enabled=bool(api_key or base_url),
+            config_path=_resolved_path,
+            hermes_home=get_hermes_home(),
         )
 
     @classmethod
@@ -598,16 +635,47 @@ class HonchoClientConfig:
             or raw.get("apiKey")
             or get_secret("HONCHO_API_KEY")
         )
+        # Named-profile host blocks do NOT inherit the default host's apiKey —
+        # profiles are isolated islands by design (see resolve_active_host).
+        # But the failure mode is silent: the profile runs unauthenticated and
+        # every write 401s while tools report "no context". Warn loudly so the
+        # operator learns the key must be set on THIS host block (#36098, #66125).
+        if (
+            not api_key
+            and host_block
+            and resolved_host != HOST
+            and _host_block(raw, HOST).get("apiKey")
+        ):
+            logger.warning(
+                "Honcho host block '%s' has no apiKey; the default '%s' host's key "
+                "is NOT inherited (profiles are credential-isolated). Set apiKey on "
+                "hosts.%s in %s or this profile runs unauthenticated.",
+                resolved_host, HOST, resolved_host, path,
+            )
 
         environment = (
             host_block.get("environment")
             or raw.get("environment", "production")
         )
 
-        base_url = (
-            raw.get("baseUrl")
+        # The Honcho SDK's native config format — and what Claude Desktop
+        # writes — nests the URL at endpoint.baseUrl. Read it first: a user
+        # who has that block set almost certainly means it, and the flat
+        # baseUrl / base_url keys below are the Hermes-specific spelling.
+        endpoint_block = raw.get("endpoint")
+        native_base_url = (
+            endpoint_block.get("baseUrl")
+            if isinstance(endpoint_block, dict)
+            else None
+        )
+        base_url = _sanitize_url(
+            host_block.get("baseUrl")
+            or host_block.get("base_url")
+            or native_base_url
+            or raw.get("baseUrl")
             or raw.get("base_url")
             or os.environ.get("HONCHO_BASE_URL", "").strip()
+            or os.environ.get("HONCHO_URL", "").strip()
             or None
         )
         # Host config wins over flat/global config and environment.
@@ -804,6 +872,8 @@ class HonchoClientConfig:
             sessions=raw.get("sessions", {}),
             raw=raw,
             explicitly_configured=_explicitly_configured,
+            config_path=path,
+            hermes_home=get_hermes_home(),
         )
 
     @staticmethod
@@ -926,171 +996,90 @@ class HonchoClientConfig:
         return self.workspace_id
 
 
-@dataclass(frozen=True)
-class _HonchoClientSignature:
-    """Non-secret identity for one reusable SDK client.
+_honcho_client_slot: SingletonSlot = SingletonSlot()
+# --- per-identity client cache -------------------------------------------
+# One slot per client identity, replacing the single process-wide slot that
+# pinned the first profile's workspace and bearer for every later profile in
+# multi-profile processes (#69123 multiplexed gateway, #74065 dashboard).
+# The legacy names above are retained only for reset bookkeeping.
+import threading as _threading
 
-    The credential participates only through its SHA-256 digest.  Keeping the
-    raw key out of cache keys also keeps it out of accidental cache/debug reprs.
+_client_slots: dict[tuple, SingletonSlot] = {}
+_client_slots_lock = _threading.Lock()
+
+
+def spawn_context_thread(
+    target,
+    *,
+    name: str,
+    daemon: bool = True,
+    args: tuple = (),
+) -> "_threading.Thread":
+    """Spawn a thread that inherits the caller's contextvars.
+
+    Profile isolation in multi-profile processes is a ContextVar
+    (set_hermes_home_override); plain threading.Thread targets start with an
+    EMPTY context, so any ambient resolution on the thread
+    (resolve_config_path, resolve_active_host, get_hermes_home) silently
+    lands on the default profile. Copying the caller's context at spawn time
+    makes the thread see the profile scope it was created under.
     """
+    import contextvars
 
-    host: str
-    workspace_id: str
-    base_url: str | None
-    environment: str
-    credential_sha256: bytes = field(repr=False)
-    timeout: float
-
-
-class _KeyedHonchoClientSlots:
-    """Thread-safe singleton slots partitioned by client signature.
-
-    ``get(factory)``/``peek()`` without a signature remain available for the
-    old private ``_honcho_client_slot`` test surface.  Runtime acquisitions use
-    ``signature=...`` and therefore never inherit another profile's client.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._slots: dict[_HonchoClientSignature, SingletonSlot[Any]] = {}
-        self._legacy_slot: SingletonSlot[Any] = SingletonSlot()
-
-    def get(
-        self,
-        factory: Callable[[], Any],
-        *,
-        signature: _HonchoClientSignature | None = None,
-    ) -> Any:
-        if signature is None:
-            return self._legacy_slot.get(factory)
-        with self._lock:
-            slot = self._slots.get(signature)
-            if slot is None:
-                slot = SingletonSlot()
-                self._slots[signature] = slot
-        # Each key has its own lock, so unrelated profiles can build in
-        # parallel while same-key callers still construct exactly once.
-        return slot.get(factory)
-
-    def peek(
-        self, signature: _HonchoClientSignature | None = None
-    ) -> Any | None:
-        if signature is not None:
-            with self._lock:
-                slot = self._slots.get(signature)
-            return slot.peek() if slot is not None else None
-
-        legacy = self._legacy_slot.peek()
-        if legacy is not None:
-            return legacy
-        with self._lock:
-            cached = [
-                value
-                for slot in self._slots.values()
-                if (value := slot.peek()) is not None
-            ]
-        return cached[0] if len(cached) == 1 else None
-
-    def reset(
-        self, signature: _HonchoClientSignature | None = None
-    ) -> None:
-        if signature is not None:
-            with self._lock:
-                slot = self._slots.pop(signature, None)
-            if slot is not None:
-                slot.reset()
-            return
-
-        with self._lock:
-            slots = list(self._slots.values())
-            self._slots.clear()
-        self._legacy_slot.reset()
-        for slot in slots:
-            slot.reset()
-
-
-_honcho_client_slot = _KeyedHonchoClientSlots()
-
-
-def _normalize_sdk_base_url(base_url: str | None) -> str | None:
-    if not base_url:
-        return None
-    import re as _re
-
-    return _re.sub(r"/v\d+/*$", "", base_url).rstrip("/")
-
-
-def _resolve_client_settings(
-    config: HonchoClientConfig,
-) -> tuple[str | None, float]:
-    """Resolve the exact transport settings used by both cache and builder."""
-    resolved_base_url = config.base_url
-    resolved_timeout = config.timeout
-    if not resolved_base_url or resolved_timeout is None:
-        try:
-            from hermes_cli.config import load_config_readonly
-
-            honcho_cfg = load_config_readonly().get("honcho", {})
-            if isinstance(honcho_cfg, dict):
-                if not resolved_base_url:
-                    configured_url = honcho_cfg.get("base_url")
-                    if isinstance(configured_url, str):
-                        resolved_base_url = configured_url.strip() or None
-                if resolved_timeout is None:
-                    resolved_timeout = _resolve_optional_float(
-                        honcho_cfg.get("timeout"),
-                        honcho_cfg.get("request_timeout"),
-                    )
-        except Exception:
-            pass
-
-    if resolved_timeout is None:
-        resolved_timeout = _DEFAULT_HTTP_TIMEOUT
-    return _normalize_sdk_base_url(resolved_base_url), resolved_timeout
-
-
-def _effective_api_key(
-    config: HonchoClientConfig, resolved_base_url: str | None
-) -> str | None:
-    """Return the credential the SDK will receive for these settings."""
-    if not _is_local_base_url(resolved_base_url):
-        return config.api_key
-
-    # Local/LAN/VPN servers usually run without cloud auth.  Only an explicit
-    # host-block key opts into local auth; otherwise use the SDK placeholder.
-    raw = config.raw if isinstance(config.raw, dict) else {}
-    host_block = _host_block(raw, config.host)
-    return config.api_key if host_block.get("apiKey") else "local"
-
-
-def _client_signature(
-    config: HonchoClientConfig,
-    effective_workspace_id: str,
-    resolved_base_url: str | None,
-    resolved_timeout: float,
-    effective_api_key: str | None,
-) -> _HonchoClientSignature:
-    credential_sha256 = hashlib.sha256(
-        (effective_api_key or "").encode("utf-8")
-    ).digest()
-    return _HonchoClientSignature(
-        host=config.host,
-        workspace_id=effective_workspace_id,
-        base_url=resolved_base_url,
-        environment=config.environment,
-        credential_sha256=credential_sha256,
-        timeout=resolved_timeout,
+    ctx = contextvars.copy_context()
+    t = _threading.Thread(
+        target=lambda: ctx.run(target, *args),
+        name=name,
+        daemon=daemon,
     )
+    return t
+
+
+def _credential_fingerprint(config: HonchoClientConfig | None) -> str:
+    """Stable identity for the credential a client will be built with.
+
+    OAuth grants rotate their access token in place (apply_token_to_client),
+    so the fingerprint must NOT change on rotation — it hashes the REFRESH
+    token, which is stable across access-token rotation but changes on
+    re-auth or account switch. Static keys hash the key itself. This is what
+    makes 'hermes honcho setup' account switches produce a NEW cache identity
+    instead of silently reusing the old account's client (a first-config-wins
+    hole that per-path keys alone cannot close).
+    """
+    try:
+        if config is not None:
+            block = _host_block(config.raw or {}, config.host)
+            oauth_block = block.get("oauth")
+            if isinstance(oauth_block, dict) and oauth_block.get("refreshToken"):
+                basis = f"oauth:{oauth_block['refreshToken']}"
+            elif config.api_key:
+                basis = f"key:{config.api_key}"
+            else:
+                return ""
+            return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+        # Ambient: read the active file so legacy no-config callers still get
+        # a credential-aware key (correct on main threads; bound configs are
+        # the supported path for background threads).
+        path = resolve_config_path()
+        if path.exists():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            block = _host_block(raw, resolve_active_host())
+            oauth_block = block.get("oauth")
+            if isinstance(oauth_block, dict) and oauth_block.get("refreshToken"):
+                basis = f"oauth:{oauth_block['refreshToken']}"
+            else:
+                key = block.get("apiKey") or raw.get("apiKey") or get_secret("HONCHO_API_KEY") or ""
+                if not key:
+                    return ""
+                basis = f"key:{key}"
+            return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        pass
+    return ""
 
 
 def _effective_workspace_id(config: HonchoClientConfig) -> str:
-    """Resolve the workspace before cache lookup without exposing raw IDs.
-
-    An explicitly bound current task always wins.  If this call runs in one of
-    Honcho's own worker threads (no ContextVars), reuse the digest captured on
-    the config while the gateway context was still present.  Legacy/non-project
-    contexts return the configured workspace unchanged.
-    """
+    """Resolve the project-scoped workspace before client cache lookup."""
     context_bound, scoped_workspace = _telegram_project_workspace_id(
         str(config.workspace_id)
     )
@@ -1099,8 +1088,203 @@ def _effective_workspace_id(config: HonchoClientConfig) -> str:
     return config._bound_workspace_id or config.workspace_id
 
 
+def _client_cache_key(
+    config: HonchoClientConfig | None,
+    *,
+    effective_settings: tuple[str | None, float] | None = None,
+) -> tuple:
+    """Cache identity for a Honcho client build.
+
+    Explicit configs key on the connection identity ``_build`` embeds in the
+    client (host, workspace, base_url, environment), the provenance paths the
+    config was resolved from, the effective timeout, and a credential
+    fingerprint that is stable across OAuth access-token rotation but changes
+    on re-auth/account switch. The access token itself is deliberately NOT in
+    the key — in-place rotation must stay within one slot.
+
+    Ambient callers (config=None: CLI one-shots, tests) key on what
+    from_global_config() would resolve. Ambient resolution reads the profile
+    ContextVar and is therefore only correct on threads that can see it;
+    bound configs are the supported path everywhere else.
+    """
+    if config is not None:
+        if effective_settings is None:
+            effective_settings = _resolve_effective_client_settings(config)
+        effective_base_url, effective_timeout = effective_settings
+        return (
+            "explicit",
+            config.host,
+            _effective_workspace_id(config),
+            effective_base_url or "",
+            config.environment,
+            str(config.config_path) if config.config_path is not None else "",
+            str(config.hermes_home) if config.hermes_home is not None else "",
+            effective_timeout,
+            _credential_fingerprint(config),
+        )
+    return (
+        "ambient",
+        str(resolve_config_path()),
+        resolve_active_host(),
+        _resolve_timeout_from_sources(None),
+        _credential_fingerprint(None),
+    )
+
+
+def _slot_for(key: tuple) -> SingletonSlot:
+    """Return the slot for ``key``, evicting stale same-identity slots.
+
+    When a (kind, host, config_path/hermes_home) identity reappears with a
+    DIFFERENT credential fingerprint or timeout, the old slot is dropped so
+    the replaced client stops being served and its pools can close once the
+    last holder releases it. Without eviction, credential churn leaks one
+    pinned client per change — the gap that made #81401's retirement
+    machinery inert.
+    """
+    identity = (
+        key[:3]
+        if key[0] == "ambient"
+        else (key[0], key[1], key[2], key[5], key[6])
+    )
+    with _client_slots_lock:
+        slot = _client_slots.get(key)
+        if slot is None:
+            stale = [
+                k for k in _client_slots
+                if k != key and (
+                    (
+                        k[:3]
+                        if k[0] == "ambient"
+                        else (k[0], k[1], k[2], k[5], k[6])
+                    ) == identity
+                )
+            ]
+            for k in stale:
+                _client_slots.pop(k, None)
+            slot = SingletonSlot()
+            _client_slots[key] = slot
+        return slot
+# Memo for the honcho.json-derived timeout, keyed PER CONFIG PATH on the
+# file's mtime_ns so the staleness check on every get_honcho_client() call
+# costs one stat() instead of a JSON parse. Path-keyed because multi-profile
+# processes resolve different honcho.json files — a single-slot memo would
+# thrash between profiles and return profile A's timeout for profile B.
+# mtime -1 = file absent. config.yaml needs no such memo:
+# load_config_readonly() is internally cached on both the user and managed
+# files' signatures, and a bespoke key here would have to duplicate that
+# invalidation logic.
+_honcho_json_timeout_memo: dict[str, tuple[int, float | None]] = {}
+
+
+def _config_yaml_honcho_settings() -> tuple[str | None, float | None]:
+    """Read the connection settings inherited from config.yaml once."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        honcho_cfg = load_config_readonly().get("honcho", {})
+        if isinstance(honcho_cfg, dict):
+            raw_base_url = honcho_cfg.get("base_url")
+            base_url = (
+                _normalize_sdk_base_url(raw_base_url)
+                if isinstance(raw_base_url, str)
+                else None
+            )
+            timeout = _resolve_optional_float(
+                honcho_cfg.get("timeout"),
+                honcho_cfg.get("request_timeout"),
+            )
+            return base_url, timeout
+    except Exception:
+        pass
+    return None, None
+
+
+def _config_yaml_timeout() -> float | None:
+    """Read honcho.timeout / honcho.request_timeout via the cached config loader."""
+    return _config_yaml_honcho_settings()[1]
+
+
+def _honcho_json_timeout() -> float | None:
+    """Read timeout/requestTimeout from honcho.json (host block wins), memoized on mtime."""
+    try:
+        path = resolve_config_path()
+        path_key = str(path)
+        try:
+            mtime_ns: int = path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = -1
+        memo = _honcho_json_timeout_memo.get(path_key)
+        if memo is not None and memo[0] == mtime_ns:
+            return memo[1]
+
+        timeout = None
+        if mtime_ns != -1:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            host_block = _host_block(raw, resolve_active_host())
+            timeout = _resolve_optional_float(
+                host_block.get("timeout"),
+                host_block.get("requestTimeout"),
+                raw.get("timeout"),
+                raw.get("requestTimeout"),
+            )
+        _honcho_json_timeout_memo[path_key] = (mtime_ns, timeout)
+        return timeout
+    except Exception:
+        return None
+
+
+def _resolve_timeout_from_sources(config: HonchoClientConfig | None) -> float:
+    """Mirror the build path's timeout resolution so the staleness check agrees with it.
+
+    With an explicit config this matches ``_build`` (config.timeout, then
+    config.yaml, then default).  With no config it matches what
+    ``from_global_config`` + ``_build`` would produce: honcho.json host
+    block/root keys, then HONCHO_TIMEOUT, then config.yaml, then default.
+    Any source skew here makes the check disagree with the built client
+    forever and rebuild it on every call.
+    """
+    if config is not None:
+        timeout = config.timeout
+    else:
+        timeout = _honcho_json_timeout()
+        if timeout is None:
+            timeout = _resolve_optional_float(os.environ.get("HONCHO_TIMEOUT"))
+    if timeout is None:
+        timeout = _config_yaml_timeout()
+    return timeout if timeout is not None else _DEFAULT_HTTP_TIMEOUT
+
+
+def _normalize_sdk_base_url(base_url: str | None) -> str | None:
+    """Normalize a configured URL to the exact destination passed to the SDK."""
+    if base_url is None:
+        return None
+    sanitized = _sanitize_url(base_url.strip() or None)
+    if not sanitized:
+        return None
+    return re.sub(r"/v\d+/*$", "", sanitized).rstrip("/")
+
+
+def _resolve_effective_client_settings(
+    config: HonchoClientConfig,
+) -> tuple[str | None, float]:
+    """Resolve the URL and timeout that both cache identity and SDK build use."""
+    resolved_base_url = _normalize_sdk_base_url(config.base_url)
+    resolved_timeout = config.timeout
+
+    if resolved_base_url is None or resolved_timeout is None:
+        yaml_base_url, yaml_timeout = _config_yaml_honcho_settings()
+        if resolved_base_url is None:
+            resolved_base_url = yaml_base_url
+        if resolved_timeout is None:
+            resolved_timeout = yaml_timeout
+
+    if resolved_timeout is None:
+        resolved_timeout = _DEFAULT_HTTP_TIMEOUT
+    return resolved_base_url, resolved_timeout
+
+
 def _apply_fresh_oauth_token(config: HonchoClientConfig) -> None:
-    """Refresh OAuth before cache lookup and point ``config.api_key`` at it.
+    """Refresh a near-expiry OAuth grant and point ``config.api_key`` at it.
 
     No-op for static API keys or when refresh fails: the stale token stays in
     place and the first rejected call triggers the post-401 recovery in
@@ -1109,31 +1293,84 @@ def _apply_fresh_oauth_token(config: HonchoClientConfig) -> None:
     try:
         from plugins.memory.honcho import oauth
 
-        token, _ = oauth.ensure_fresh_token(resolve_config_path(), config.host)
+        # Bound path: refresh against the honcho.json this config came from,
+        # not whatever the current context resolves to. On daemon threads the
+        # ambient resolver lands on the default profile and a refresh here
+        # would persist the rotated token into the WRONG profile's file.
+        token, _ = oauth.ensure_fresh_token(config.bound_config_path(), config.host)
         if token:
             config.api_key = token
     except Exception:
         logger.warning("Honcho OAuth pre-build refresh failed", exc_info=True)
 
 
+def _refresh_cached_oauth(
+    client: "Honcho",
+    config: HonchoClientConfig | None,
+    slot: SingletonSlot | None = None,
+) -> None:
+    """Rotate the cached client's Bearer in place when its OAuth token is stale.
+
+    If the SDK shape changed and the in-place rotation can't apply, the
+    client's own slot is reset so the next acquisition rebuilds with the
+    fresh token.
+    """
+    try:
+        from plugins.memory.honcho import oauth
+
+        if config is not None:
+            host = config.host
+            path = config.bound_config_path()
+        else:
+            host = resolve_active_host()
+            path = resolve_config_path()
+        token, refreshed = oauth.ensure_fresh_token(path, host)
+        if refreshed and token and not oauth.apply_token_to_client(client, token):
+            if slot is not None:
+                slot.reset()
+    except Exception:
+        logger.warning("Honcho OAuth cached refresh failed", exc_info=True)
+
+
 def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
-    """Get or create the Honcho client singleton for this exact signature.
+    """Get or create the Honcho client for this config's identity.
 
-    When no config is provided, attempts to load ~/.honcho/config.json
-    first, falling back to environment variables.
+    Clients are cached PER IDENTITY (host, workspace, provenance paths,
+    credential fingerprint, timeout), not per process: multi-profile
+    processes (gateway multiplexer, dashboard, cron) previously shared one
+    first-config-wins client, so every profile's memory landed in whichever
+    workspace initialized first (#69123, #74065).
 
-    Thread-safe: each host/workspace/transport/credential signature is built
-    exactly once even under concurrent first calls.  Different profiles never
-    receive whichever client happened to initialize the old global slot first.
+    When no config is provided, resolves the active honcho.json — correct
+    only on threads that can see the profile ContextVar; pass a bound config
+    everywhere else (HonchoSessionManager does).
+
+    Thread-safe: each identity's client is built exactly once even under
+    concurrent first calls (double-checked locking via SingletonSlot), so
+    racing threads can't each construct a client and leak the loser's
+    connection.
     """
     if config is None:
         config = HonchoClientConfig.from_global_config()
 
-    # Refresh before deriving the signature: a token rotation must select a new
-    # slot instead of returning an SDK client that still carries the old Bearer.
-    _apply_fresh_oauth_token(config)
+    effective_settings = _resolve_effective_client_settings(config)
+    resolved_base_url, resolved_timeout = effective_settings
+    key = _client_cache_key(config, effective_settings=effective_settings)
+    slot = _slot_for(key)
+    cached = slot.peek()
+    if cached is not None:
+        _refresh_cached_oauth(cached, config, slot)
+        refreshed = slot.peek()
+        if refreshed is not None:
+            return refreshed
+        # Slot was reset by a failed in-place rotation — rebuild below.
 
-    if not config.api_key and not config.base_url:
+    # Refresh a near-expiry OAuth grant before the first build so the client
+    # starts with a live access token rather than 401ing an hour in.
+    _apply_fresh_oauth_token(config)
+    resolved_workspace = _effective_workspace_id(config)
+
+    if not config.api_key and not resolved_base_url:
         raise ValueError(
             "Honcho API key not found. "
             "Get your API key at https://app.honcho.dev, "
@@ -1141,25 +1378,7 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
             "For local instances, set HONCHO_BASE_URL instead."
         )
 
-    resolved_base_url, resolved_timeout = _resolve_client_settings(config)
-    effective_api_key = _effective_api_key(config, resolved_base_url)
-    resolved_workspace = _effective_workspace_id(config)
-    signature = _client_signature(
-        config,
-        resolved_workspace,
-        resolved_base_url,
-        resolved_timeout,
-        effective_api_key,
-    )
-
-    # Snapshot every constructor input before entering the per-key slot.  The
-    # caller may reuse/mutate its config object (OAuth refresh does), but that
-    # must never make a client disagree with the signature under which it lives.
-    resolved_host = config.host
-    resolved_environment = config.environment
-
-    # Build inside the keyed singleton factory so same-signature racers share
-    # one client while unrelated profiles can initialize concurrently.
+    # Build inside the singleton factory so racing callers share one client.
     def _build() -> "Honcho":
         # Lazy dependency failures fall through to the canonical import error.
         try:
@@ -1189,25 +1408,53 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
                 resolved_workspace,
             )
         else:
+            # No base_url resolved, so the SDK falls back to its own
+            # ENVIRONMENTS map (honcho.client: local -> http://localhost:8000,
+            # production -> https://api.honcho.dev). Name the target at INFO:
+            # a self-hosted user whose config wasn't picked up otherwise sees
+            # a healthy-looking startup and silently talks to the public cloud.
             logger.info(
-                "Initializing Honcho client (host: %s, workspace: %s)",
-                resolved_host,
-                resolved_workspace,
+                "Initializing Honcho client (host: %s, workspace: %s, "
+                "base_url unset — SDK will resolve from environment=%s)",
+                config.host, resolved_workspace, config.environment,
             )
+
+        # Local Honcho instances don't require an API key, but the SDK
+        # expects a non-empty string.  Use a placeholder for local URLs.
+        # For local: honor config.api_key when the user set it EXPLICITLY in
+        # honcho.json — host block or top-level (#36098 issue 2: the top-level
+        # key was dropped for the placeholder, 401ing AUTH_USE_AUTH=true
+        # self-hosts). Only an env-sourced key (HONCHO_API_KEY) is still
+        # treated as likely-cloud and skipped for local URLs.
+        _is_local = _is_local_base_url(resolved_base_url)
+        if _is_local:
+            _raw = config.raw or {}
+            _host_block_local = _host_block(_raw, config.host)  # uses dot-form legacy fallback (#37436)
+            _explicit_key = bool(
+                _host_block_local.get("apiKey") or _raw.get("apiKey")
+            )
+            effective_api_key = config.api_key if _explicit_key else "local"
+        else:
+            effective_api_key = config.api_key
 
         kwargs: dict = {
             "workspace_id": resolved_workspace,
             "api_key": effective_api_key,
-            "environment": resolved_environment,
+            "environment": config.environment,
         }
         if resolved_base_url:
             kwargs["base_url"] = resolved_base_url
-        kwargs["timeout"] = resolved_timeout
+        if resolved_timeout is not None:
+            kwargs["timeout"] = resolved_timeout
+
         return Honcho(**kwargs)
 
-    return _honcho_client_slot.get(_build, signature=signature)
+    return slot.get(_build)
 
 
 def reset_honcho_client() -> None:
-    """Reset every keyed Honcho client singleton (useful for testing)."""
+    """Reset all cached Honcho clients (tests, OAuth re-login)."""
+    with _client_slots_lock:
+        _client_slots.clear()
     _honcho_client_slot.reset()
+    _honcho_json_timeout_memo.clear()

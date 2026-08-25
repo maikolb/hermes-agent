@@ -231,7 +231,20 @@ def test_context_scoped_homes_resolve_distinct_clients_concurrently(
     assert results["beta"][0].kwargs["workspace_id"] == "workspace-beta"
 
 
-def test_cache_signature_separates_every_sdk_identity_field(monkeypatch):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("host", "host-b"),
+        ("workspace_id", "workspace-b"),
+        ("base_url", "https://two.invalid"),
+        ("environment", "staging"),
+        ("api_key", "credential-b"),
+        ("timeout", 60),
+    ],
+)
+def test_cache_signature_separates_every_sdk_identity_field(
+    monkeypatch, field, value
+):
     build_count = {"n": 0}
     build_lock = threading.Lock()
     _install_fake_honcho_sdk(monkeypatch, build_count, build_lock)
@@ -244,25 +257,17 @@ def test_cache_signature_separates_every_sdk_identity_field(monkeypatch):
         api_key="credential-a",
         timeout=30,
     )
-    configs = [
-        base,
-        replace(base, host="host-b"),
-        replace(base, workspace_id="workspace-b"),
-        replace(base, base_url="https://two.invalid"),
-        replace(base, environment="staging"),
-        replace(base, api_key="credential-b"),
-        replace(base, timeout=60),
-    ]
+    variant = replace(base, **{field: value})
 
-    clients = [get_honcho_client(config) for config in configs]
+    base_client = get_honcho_client(base)
+    variant_client = get_honcho_client(variant)
 
-    assert build_count["n"] == len(configs)
-    assert len({id(client) for client in clients}) == len(configs)
-    assert [get_honcho_client(config) for config in configs] == clients
-    assert build_count["n"] == len(configs)
+    assert base_client is not variant_client
+    assert get_honcho_client(variant) is variant_client
+    assert build_count["n"] == 2
 
 
-def test_cache_signature_hashes_credential_without_retaining_raw_key():
+def test_cache_key_hashes_credential_without_retaining_raw_key():
     raw_key = "credential-must-not-enter-cache-key"
     config = HonchoClientConfig(
         host="host",
@@ -272,13 +277,11 @@ def test_cache_signature_hashes_credential_without_retaining_raw_key():
         timeout=30,
     )
 
-    signature = honcho_client._client_signature(
-        config, config.workspace_id, None, 30, raw_key
-    )
+    key = honcho_client._client_cache_key(config)
 
-    assert raw_key not in repr(signature)
-    assert raw_key not in vars(signature).values()
-    assert signature.credential_sha256 == hashlib.sha256(raw_key.encode()).digest()
+    assert raw_key not in repr(key)
+    expected = hashlib.sha256(f"key:{raw_key}".encode()).hexdigest()[:16]
+    assert key[-1] == expected
 
 
 def test_telegram_project_workspace_is_stable_separated_and_digest_only():
@@ -466,20 +469,29 @@ def test_oauth_rotation_rebuilds_only_the_rotated_signature(monkeypatch, tmp_pat
             ("oauth-token-old", False),
             ("oauth-token-new", True),
             ("oauth-token-new", False),
+            ("oauth-token-new", False),
         ]
     )
     monkeypatch.setattr(
         oauth, "ensure_fresh_token", lambda *args, **kwargs: next(tokens)
     )
-    monkeypatch.setattr(
-        honcho_client, "resolve_config_path", lambda: tmp_path / "honcho.json"
-    )
+    monkeypatch.setattr(oauth, "apply_token_to_client", lambda client, token: False)
+    config_path = tmp_path / "honcho.json"
     config = HonchoClientConfig(
         host="profile-oauth",
         api_key="oauth-token-old",
         workspace_id="workspace-oauth",
         environment="production",
         timeout=30,
+        config_path=config_path,
+        hermes_home=tmp_path,
+        raw={
+            "hosts": {
+                "profile-oauth": {
+                    "oauth": {"refreshToken": "oauth-refresh-stable"}
+                }
+            }
+        },
     )
 
     first = get_honcho_client(config)

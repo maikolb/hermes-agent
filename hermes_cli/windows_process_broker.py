@@ -39,7 +39,38 @@ _DIRECT_HIDDEN_CHILD_ENV = "HERMES_INTERNAL_DIRECT_HIDDEN_CHILD"
 _install_lock = threading.Lock()
 _installed = False
 _original_popen = subprocess.Popen
-_popen_signature = inspect.signature(_original_popen)
+
+
+def _concrete_popen_signature(candidate) -> inspect.Signature:
+    """Resolve the concrete ``Popen(args, ...)`` contract through wrappers.
+
+    Policy wrappers may override ``__init__`` as ``(cmd, *args, **kwargs)``.
+    Binding against that generic signature loses the named stdlib options and
+    cannot supply the broker's replacement command safely.  Keep the wrapper
+    itself as the executor, but normalize calls with the first concrete base
+    signature that exposes the public ``args`` parameter.
+    """
+    candidates = candidate.__mro__ if isinstance(candidate, type) else (candidate,)
+    fallback = None
+    for current in candidates:
+        try:
+            signature = inspect.signature(current)
+        except (TypeError, ValueError):
+            continue
+        if fallback is None:
+            fallback = signature
+        argument = signature.parameters.get("args")
+        if argument is not None and argument.kind in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }:
+            return signature
+    if fallback is None:
+        raise TypeError(f"Cannot inspect Popen-compatible callable: {candidate!r}")
+    return fallback
+
+
+_popen_signature = _concrete_popen_signature(_original_popen)
 _hidden_desktop_handle = None
 _hidden_desktop_name = ""
 _runner_path = Path(__file__).with_name("windows_process_runner.py")

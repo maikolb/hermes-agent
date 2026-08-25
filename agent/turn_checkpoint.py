@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from filelock import FileLock, Timeout as FileLockTimeout
 
@@ -96,6 +96,35 @@ def _canonical_json(value: Any) -> str:
 
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _canonical_delivery_route(
+    routing: Mapping[str, Any] | None,
+) -> dict[str, str] | None:
+    """Normalize the three fields that identify one outbound destination."""
+    if not isinstance(routing, Mapping):
+        return None
+    raw_platform = routing.get("platform")
+    platform_value = getattr(raw_platform, "value", raw_platform)
+    platform = str(platform_value or "").strip().casefold()
+    if platform.startswith("platform."):
+        platform = platform.split(".", 1)[1]
+    raw_chat_id = routing.get("chat_id")
+    chat_id = "" if raw_chat_id is None else str(raw_chat_id)
+    raw_thread_id = routing.get("thread_id")
+    thread_id = "" if raw_thread_id is None else str(raw_thread_id)
+    if not platform or not chat_id:
+        return None
+    return {
+        "platform": platform,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+    }
+
+
+def _delivery_route_sha256(routing: Mapping[str, Any] | None) -> str | None:
+    canonical = _canonical_delivery_route(routing)
+    return _sha256_text(_canonical_json(canonical)) if canonical is not None else None
 
 
 def _redacted_literal(value: Any, *, limit: int = _MAX_LITERAL_CHARS) -> str:
@@ -207,7 +236,74 @@ class TurnCheckpointStore:
 
     def __init__(self, root: str | os.PathLike[str]):
         self.root = Path(root)
-        self._blocked_this_process: set[tuple[str, str]] = set()
+
+    def delivery_namespace(self) -> dict[str, str]:
+        """Return the exact storage namespace owned by this store.
+
+        Delivery acknowledgement can happen after a multiplexed profile's
+        runtime scope has unwound.  Re-resolving ``get_hermes_home()`` at that
+        boundary can therefore write the secondary profile's acknowledgement
+        into the default profile.  Bind delivery metadata to the store that
+        actually sealed the turn instead.
+
+        The canonical checkpoint layout is part of the durable contract.  A
+        non-canonical store remains usable by low-level tests and tooling, but
+        it cannot mint trusted delivery-routing metadata.
+        """
+        checkpoint_root = self.root.expanduser().resolve(strict=False)
+        if (
+            checkpoint_root.name.casefold() != "turn-checkpoints"
+            or checkpoint_root.parent.name.casefold() != "sessions"
+        ):
+            raise CheckpointIntegrityError(
+                "delivery checkpoint store is outside the canonical "
+                "<storage-home>/sessions/turn-checkpoints layout"
+            )
+        storage_home = checkpoint_root.parent.parent.resolve(strict=False)
+        return {
+            "checkpoint_root": str(checkpoint_root),
+            "storage_home": str(storage_home),
+        }
+
+    def _mutate_current(
+        self,
+        session_id: str,
+        mutator,
+        *,
+        expected_turn_id: str | None = None,
+        max_conflict_retries: int = 16,
+        precommit: Callable[[], Any] | None = None,
+    ) -> dict[str, Any]:
+        """Apply one optimistic mutation without losing concurrent tool updates.
+
+        Tool workers can finish concurrently.  A plain ``load`` followed by
+        ``_write`` lets two workers start from the same revision and one lose
+        its checkpoint update.  Retry only compare-and-swap conflicts, and
+        fence late workers to the turn that dispatched them so they can never
+        mutate a newer turn in the same session.
+        """
+        last_conflict: CheckpointConflictError | None = None
+        for _ in range(max_conflict_retries):
+            state = copy.deepcopy(self.load(session_id))
+            if (
+                expected_turn_id is not None
+                and str(state.get("turn_id") or "") != str(expected_turn_id)
+            ):
+                raise CheckpointConflictError(
+                    "tool checkpoint update belongs to an older session turn"
+                )
+            changed = mutator(state)
+            if changed is False:
+                return state
+            state["revision"] = int(state.get("revision", 0)) + 1
+            try:
+                return self._write(state, precommit=precommit)
+            except CheckpointConflictError as exc:
+                last_conflict = exc
+                continue
+        raise CheckpointConflictError(
+            "checkpoint mutation could not commit after concurrent retries"
+        ) from last_conflict
 
     def path_for(self, session_id: str) -> Path:
         digest = _sha256_text(str(session_id))[:32]
@@ -228,7 +324,12 @@ class TurnCheckpointStore:
         with _lock_for(path):
             return self._read_path(path, session_id)
 
-    def _write(self, state: Mapping[str, Any]) -> dict[str, Any]:
+    def _write(
+        self,
+        state: Mapping[str, Any],
+        *,
+        precommit: Callable[[], Any] | None = None,
+    ) -> dict[str, Any]:
         candidate = copy.deepcopy(dict(state))
         candidate["schema_version"] = SCHEMA_VERSION
         candidate["updated_at"] = time.time()
@@ -273,6 +374,13 @@ class TurnCheckpointStore:
                             "stale checkpoint write rejected: candidate turn predates "
                             "the active session turn"
                         )
+                # Run sidecar persistence only after the revision/turn CAS has
+                # succeeded and while the checkpoint's cross-process lock is
+                # still held.  Gateway reseals use this to persist the exact
+                # inactive recovery artifact before publishing its new hash,
+                # without allowing a stale turn to leave an orphan artifact.
+                if precommit is not None:
+                    precommit()
                 try:
                     with open(temp, "xb") as handle:
                         handle.write(encoded)
@@ -637,10 +745,76 @@ class TurnCheckpointStore:
         call_id: str,
         name: str,
         arguments: Any,
+        expected_turn_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.mark_tool_batch_attempt(
+        pending = self._pending_tool_record(
+            {"call_id": call_id, "name": name, "arguments": arguments}
+        )
+
+        def mutate(state: dict[str, Any]) -> bool:
+            pending_items = list(state.get("pending_tools") or [])
+            if isinstance(state.get("pending_tool"), dict):
+                legacy = state["pending_tool"]
+                if not any(
+                    str(item.get("call_id") or "")
+                    == str(legacy.get("call_id") or "")
+                    for item in pending_items
+                    if isinstance(item, dict)
+                ):
+                    pending_items.append(legacy)
+            if any(
+                isinstance(item, dict)
+                and str(item.get("call_id") or "") == str(call_id)
+                for item in pending_items
+            ):
+                return False
+
+            fingerprint = pending.get("fingerprint")
+            matching_unknown = [
+                item
+                for item in (state.get("unknown_outcomes") or [])
+                if isinstance(item, dict)
+                and item.get("fingerprint") == fingerprint
+                and not (
+                    isinstance(item.get("reconciliation"), dict)
+                    and item["reconciliation"].get("retry_completed_at")
+                )
+            ]
+            retry_authorized = False
+            for unknown in state.get("unknown_outcomes") or []:
+                if not isinstance(unknown, dict):
+                    continue
+                if unknown.get("fingerprint") != fingerprint:
+                    continue
+                reconciliation = unknown.get("reconciliation")
+                if not isinstance(reconciliation, dict):
+                    continue
+                if reconciliation.get("disposition") != "safe_to_retry":
+                    continue
+                if reconciliation.get("retry_consumed_at"):
+                    continue
+                reconciliation["retry_consumed_at"] = time.time()
+                reconciliation["retry_call_id"] = str(call_id)
+                retry_authorized = True
+                break
+            if matching_unknown and not retry_authorized:
+                raise CheckpointIntegrityError(
+                    "uncertain tool effect has no durable safe-to-retry authorization"
+                )
+
+            pending_items.append(pending)
+            state["phase"] = "tool_attempting"
+            state["next_action"] = "await_tool_results"
+            state["pending_tools"] = pending_items
+            state["pending_tool"] = (
+                pending_items[0] if len(pending_items) == 1 else None
+            )
+            return True
+
+        return self._mutate_current(
             session_id,
-            [{"call_id": call_id, "name": name, "arguments": arguments}],
+            mutate,
+            expected_turn_id=expected_turn_id,
         )
 
     def mark_tool_batch_results(
@@ -701,10 +875,105 @@ class TurnCheckpointStore:
         *,
         call_id: str,
         result_summary: Any,
+        disposition: str = "completed",
+        expected_turn_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.mark_tool_batch_results(
+        def mutate(state: dict[str, Any]) -> bool:
+            pending_items = list(state.get("pending_tools") or [])
+            if not pending_items and isinstance(state.get("pending_tool"), dict):
+                pending_items = [state["pending_tool"]]
+            pending = next(
+                (
+                    item
+                    for item in pending_items
+                    if isinstance(item, dict)
+                    and str(item.get("call_id") or "") == str(call_id)
+                ),
+                None,
+            )
+            if pending is None:
+                completed_ids = {
+                    str(item.get("call_id") or "")
+                    for item in (state.get("completed_tools") or [])
+                    if isinstance(item, dict)
+                }
+                unknown_ids = {
+                    str(item.get("call_id") or "")
+                    for item in (state.get("unknown_outcomes") or [])
+                    if isinstance(item, dict)
+                }
+                if str(call_id) in completed_ids | unknown_ids:
+                    return False
+                raise CheckpointIntegrityError(
+                    "tool result does not match a pending checkpoint call"
+                )
+
+            effect_disposition = str(disposition or "completed")
+            if effect_disposition not in {
+                "completed",
+                "safe_to_retry",
+                "unknown_outcome",
+            }:
+                effect_disposition = "completed"
+            record = {
+                "call_id": str(call_id),
+                "name": pending.get("name"),
+                "fingerprint": pending.get("fingerprint"),
+                "result_sha256": _sha256_text(_canonical_json(result_summary)),
+                "result_summary": _redacted_literal(result_summary, limit=16_384),
+                "effect_disposition": effect_disposition,
+                "completed_at": time.time(),
+            }
+            remaining = [
+                item
+                for item in pending_items
+                if not (
+                    isinstance(item, dict)
+                    and str(item.get("call_id") or "") == str(call_id)
+                )
+            ]
+            completed = list(state.get("completed_tools") or [])
+            unknown = list(state.get("unknown_outcomes") or [])
+            if effect_disposition == "unknown_outcome":
+                record["status"] = "unknown_outcome"
+                record["detected_at"] = time.time()
+                record["replay_block_count"] = 0
+                unknown.append(record)
+            else:
+                completed.append(record)
+                for prior in unknown:
+                    if not isinstance(prior, dict):
+                        continue
+                    if prior.get("fingerprint") != pending.get("fingerprint"):
+                        continue
+                    reconciliation = prior.get("reconciliation")
+                    if not isinstance(reconciliation, dict):
+                        continue
+                    if reconciliation.get("retry_call_id") != str(call_id):
+                        continue
+                    reconciliation["retry_completed_at"] = time.time()
+                    reconciliation["retry_result_sha256"] = record["result_sha256"]
+            state["completed_tools"] = completed[-32:]
+            state["unknown_outcomes"] = unknown[-32:]
+            state["pending_tools"] = remaining
+            state["pending_tool"] = remaining[0] if len(remaining) == 1 else None
+            unresolved = any(
+                isinstance(item, dict)
+                and not isinstance(item.get("reconciliation"), dict)
+                for item in state["unknown_outcomes"]
+            )
+            state["phase"] = "reconcile_required" if unresolved else "tool_completed"
+            state["next_action"] = (
+                "read_back_target_before_retrying_uncertain_tool"
+                if unresolved
+                else "evaluate_tool_results"
+            )
+            return True
+
+        return self._mutate_current(
             session_id,
-            [{"call_id": call_id, "result_summary": result_summary}],
+            mutate,
+            expected_turn_id=expected_turn_id,
         )
 
     def guard_unknown_replay(
@@ -712,15 +981,33 @@ class TurnCheckpointStore:
     ) -> str | None:
         state = copy.deepcopy(self.load(session_id))
         fingerprint = tool_fingerprint(name, arguments)
-        key = (session_id, fingerprint)
         matches = [
             item
             for item in state.get("unknown_outcomes", [])
             if isinstance(item, dict) and item.get("fingerprint") == fingerprint
         ]
-        if not matches or key in self._blocked_this_process:
+        if not matches:
             return None
-        self._blocked_this_process.add(key)
+        unresolved = [
+            item
+            for item in matches
+            if not isinstance(item.get("reconciliation"), dict)
+        ]
+        retryable = [
+            item
+            for item in matches
+            if isinstance(item.get("reconciliation"), dict)
+            and item["reconciliation"].get("disposition") == "safe_to_retry"
+            and not item["reconciliation"].get("retry_consumed_at")
+        ]
+        if not unresolved and retryable:
+            return None
+        if not unresolved and all(
+            isinstance(item.get("reconciliation"), dict)
+            and item["reconciliation"].get("retry_completed_at")
+            for item in matches
+        ):
+            return None
         for item in state.get("unknown_outcomes", []):
             if isinstance(item, dict) and item.get("fingerprint") == fingerprint:
                 item["replay_block_count"] = int(item.get("replay_block_count", 0)) + 1
@@ -730,9 +1017,99 @@ class TurnCheckpointStore:
         state["revision"] = int(state.get("revision", 0)) + 1
         self._write(state)
         return (
-            "Checkpoint blocked the first exact replay because the prior tool call "
-            "has an unknown outcome after restart. Read back the authoritative target "
-            "state before deciding whether an idempotent retry is safe."
+            "Checkpoint blocked this exact replay because a prior tool call has an "
+            "unknown outcome. The block is durable: perform an authoritative, "
+            "tool-specific readback and record a reconciled disposition before any "
+            "retry. Generic model text cannot unlock this effect boundary."
+        )
+
+    def reconcile_unknown_outcome(
+        self,
+        session_id: str,
+        *,
+        fingerprint: str,
+        disposition: str,
+        readback_call_id: str,
+        reconciler_identity: str,
+        evidence: Any,
+        expected_turn_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Seal a tool-specific authoritative readback for an uncertain effect.
+
+        This is deliberately a store API, not a generic model-callable escape
+        hatch.  A registered reconciler must first perform a real readback and
+        pass the completed call id.  Free-form model text alone cannot change
+        the replay disposition.
+        """
+        if disposition not in {"already_applied", "safe_to_retry"}:
+            raise CheckpointIntegrityError(
+                "reconciliation disposition must be already_applied or safe_to_retry"
+            )
+        if not str(reconciler_identity or "").strip():
+            raise CheckpointIntegrityError("reconciler identity is required")
+
+        def mutate(state: dict[str, Any]) -> bool:
+            target = next(
+                (
+                    item
+                    for item in reversed(state.get("unknown_outcomes") or [])
+                    if isinstance(item, dict)
+                    and item.get("fingerprint") == fingerprint
+                    and not isinstance(item.get("reconciliation"), dict)
+                ),
+                None,
+            )
+            if target is None:
+                raise CheckpointIntegrityError(
+                    "unknown tool outcome was not found or is already reconciled"
+                )
+            readback = next(
+                (
+                    item
+                    for item in reversed(state.get("completed_tools") or [])
+                    if isinstance(item, dict)
+                    and str(item.get("call_id") or "") == str(readback_call_id)
+                ),
+                None,
+            )
+            if readback is None:
+                raise CheckpointIntegrityError(
+                    "authoritative readback call is not durably completed"
+                )
+            detected_at = float(
+                target.get("detected_at") or target.get("completed_at") or 0
+            )
+            if float(readback.get("completed_at") or 0) < detected_at:
+                raise CheckpointIntegrityError(
+                    "authoritative readback predates the uncertain outcome"
+                )
+            target["reconciliation"] = {
+                "disposition": disposition,
+                "readback_call_id": str(readback_call_id),
+                "readback_tool": readback.get("name"),
+                "readback_fingerprint": readback.get("fingerprint"),
+                "readback_result_sha256": readback.get("result_sha256"),
+                "evidence_sha256": _sha256_text(_canonical_json(evidence)),
+                "evidence": _redacted_literal(evidence, limit=8_192),
+                "reconciler_identity": str(reconciler_identity),
+                "reconciled_at": time.time(),
+            }
+            state["phase"] = (
+                "tool_completed"
+                if disposition == "already_applied"
+                else "reconcile_required"
+            )
+            state["next_action"] = (
+                "evaluate_tool_results"
+                if disposition == "already_applied"
+                else "retry_authorized_tool_once"
+            )
+            return True
+
+        return self._mutate_current(
+            session_id,
+            mutate,
+            expected_turn_id=expected_turn_id,
         )
 
     def mark_deliverable(
@@ -743,22 +1120,94 @@ class TurnCheckpointStore:
         verification_pending: bool,
         verification_attempts: int = 0,
         verification_kind: str = "verify_on_stop",
+        expected_fence: Mapping[str, Any] | None = None,
+        require_unbound_delivery: bool = False,
+        precommit: Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
-        state = copy.deepcopy(self.load(session_id))
-        state["pending_deliverable"] = {
-            "sha256": _sha256_text(content or ""),
-            "content": _redacted_literal(content or ""),
-            "captured_at": time.time(),
-        }
-        state["verification"] = {
-            "pending": bool(verification_pending),
-            "attempts": int(verification_attempts),
-            "kind": str(verification_kind),
-        }
-        state["phase"] = "verification_pending" if verification_pending else "deliverable_composed"
-        state["next_action"] = "verify_then_deliver" if verification_pending else "finalize_delivery"
-        state["revision"] = int(state.get("revision", 0)) + 1
-        return self._write(state)
+        normalized_expected_fence = None
+        if expected_fence is not None:
+            normalized_expected_fence = {
+                "turn_id": str(expected_fence.get("turn_id") or ""),
+                "deliverable_revision": str(
+                    expected_fence.get("deliverable_revision") or ""
+                ),
+                "content_sha256": str(expected_fence.get("content_sha256") or ""),
+            }
+            if not all(normalized_expected_fence.values()):
+                raise ValueError("expected deliverable fence must be complete")
+
+        def mutate(state: dict[str, Any]) -> bool:
+            previous = state.get("pending_deliverable")
+            if normalized_expected_fence is not None:
+                current_fence = {
+                    "turn_id": str(
+                        previous.get("turn_id") or state.get("turn_id") or ""
+                    )
+                    if isinstance(previous, Mapping)
+                    else "",
+                    "deliverable_revision": str(
+                        previous.get("deliverable_revision") or ""
+                    )
+                    if isinstance(previous, Mapping)
+                    else "",
+                    "content_sha256": str(previous.get("sha256") or "")
+                    if isinstance(previous, Mapping)
+                    else "",
+                }
+                if current_fence != normalized_expected_fence:
+                    raise CheckpointConflictError(
+                        "deliverable reseal belongs to a stale checkpoint fence"
+                    )
+            delivery = state.get("delivery")
+            if (
+                require_unbound_delivery
+                and isinstance(delivery, Mapping)
+                and delivery.get("obligation_id")
+            ):
+                raise CheckpointConflictError(
+                    "bound delivery checkpoint cannot be resealed"
+                )
+
+            digest = _sha256_text(content or "")
+            previous_revision = (
+                previous.get("deliverable_revision")
+                if isinstance(previous, Mapping)
+                and previous.get("sha256") == digest
+                and previous.get("turn_id") == state.get("turn_id")
+                else None
+            )
+            state["pending_deliverable"] = {
+                "turn_id": state.get("turn_id"),
+                "deliverable_revision": previous_revision or uuid.uuid4().hex,
+                "sha256": digest,
+                "content": _redacted_literal(content or ""),
+                "captured_at": time.time(),
+            }
+            state["verification"] = {
+                "pending": bool(verification_pending),
+                "attempts": int(verification_attempts),
+                "kind": str(verification_kind),
+            }
+            state["phase"] = (
+                "verification_pending"
+                if verification_pending
+                else "deliverable_composed"
+            )
+            state["next_action"] = (
+                "verify_then_deliver" if verification_pending else "finalize_delivery"
+            )
+            return True
+
+        return self._mutate_current(
+            session_id,
+            mutate,
+            expected_turn_id=(
+                normalized_expected_fence["turn_id"]
+                if normalized_expected_fence is not None
+                else None
+            ),
+            precommit=precommit,
+        )
 
     def mark_terminal(
         self,
@@ -792,15 +1241,160 @@ class TurnCheckpointStore:
         state["revision"] = int(state.get("revision", 0)) + 1
         return self._write(state)
 
+    def bind_delivery_obligation(
+        self,
+        session_id: str,
+        *,
+        obligation_id: str,
+        turn_id: str,
+        deliverable_revision: str,
+        content_sha256: str,
+        routing: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """CAS-bind one delivery obligation to one exact deliverable fence.
+
+        The first non-empty obligation id committed for the fenced deliverable
+        owns that checkpoint.  Rebinding the same id is idempotent (and does
+        not advance the checkpoint revision); a different id or stale fence is
+        rejected without mutating durable state.
+        """
+        requested_obligation = str(obligation_id or "")
+        requested_route = _canonical_delivery_route(routing)
+        requested_route_sha256 = _delivery_route_sha256(routing)
+        requested_fence = {
+            "turn_id": str(turn_id or ""),
+            "deliverable_revision": str(deliverable_revision or ""),
+            "content_sha256": str(content_sha256 or ""),
+        }
+        if (
+            not requested_obligation
+            or not all(requested_fence.values())
+            or requested_route is None
+            or requested_route_sha256 is None
+        ):
+            return None
+
+        def mutate(state: dict[str, Any]) -> bool:
+            pending = state.get("pending_deliverable")
+            if not isinstance(pending, Mapping):
+                return False
+            current_fence = {
+                "turn_id": str(
+                    pending.get("turn_id") or state.get("turn_id") or ""
+                ),
+                "deliverable_revision": str(
+                    pending.get("deliverable_revision") or ""
+                ),
+                "content_sha256": str(pending.get("sha256") or ""),
+            }
+            if current_fence != requested_fence:
+                return False
+            checkpoint_route = _canonical_delivery_route(state.get("routing"))
+            if checkpoint_route != requested_route:
+                return False
+
+            current_delivery = state.get("delivery")
+            delivery = (
+                dict(current_delivery)
+                if isinstance(current_delivery, Mapping)
+                else {"status": "none"}
+            )
+            current_obligation = str(delivery.get("obligation_id") or "")
+            current_route_sha256 = str(delivery.get("route_sha256") or "")
+            if current_obligation and current_obligation != requested_obligation:
+                return False
+            if current_route_sha256 and current_route_sha256 != requested_route_sha256:
+                return False
+            delivery["obligation_id"] = requested_obligation
+            delivery["route_sha256"] = requested_route_sha256
+            state["delivery"] = delivery
+            return not (
+                current_obligation == requested_obligation
+                and current_route_sha256 == requested_route_sha256
+            )
+
+        state = self._mutate_current(
+            session_id,
+            mutate,
+        )
+        pending = state.get("pending_deliverable")
+        if not isinstance(pending, Mapping):
+            return None
+        committed_fence = {
+            "turn_id": str(pending.get("turn_id") or state.get("turn_id") or ""),
+            "deliverable_revision": str(
+                pending.get("deliverable_revision") or ""
+            ),
+            "content_sha256": str(pending.get("sha256") or ""),
+        }
+        delivery = state.get("delivery")
+        committed_obligation = (
+            str(delivery.get("obligation_id") or "")
+            if isinstance(delivery, Mapping)
+            else ""
+        )
+        committed_route_sha256 = (
+            str(delivery.get("route_sha256") or "")
+            if isinstance(delivery, Mapping)
+            else ""
+        )
+        if (
+            committed_fence != requested_fence
+            or committed_obligation != requested_obligation
+            or committed_route_sha256 != requested_route_sha256
+            or _canonical_delivery_route(state.get("routing")) != requested_route
+        ):
+            return None
+        return state
+
     def mark_delivery_status(
         self,
         session_id: str,
         *,
         obligation_id: str,
         status: str,
-    ) -> dict[str, Any]:
+        turn_id: str,
+        deliverable_revision: str,
+        content_sha256: str,
+    ) -> dict[str, Any] | None:
         state = copy.deepcopy(self.load(session_id))
-        state["delivery"] = {"obligation_id": obligation_id, "status": status}
+        pending = state.get("pending_deliverable")
+        if not isinstance(pending, Mapping):
+            return None
+        if (
+            str(state.get("turn_id") or "") != str(turn_id or "")
+            or str(pending.get("turn_id") or "") != str(turn_id or "")
+            or str(pending.get("deliverable_revision") or "")
+            != str(deliverable_revision or "")
+            or str(pending.get("sha256") or "") != str(content_sha256 or "")
+        ):
+            return None
+        current_delivery = state.get("delivery")
+        current_obligation = (
+            str(current_delivery.get("obligation_id") or "")
+            if isinstance(current_delivery, Mapping)
+            else ""
+        )
+        requested_obligation = str(obligation_id or "")
+        if not requested_obligation:
+            return None
+        if current_obligation and current_obligation != requested_obligation:
+            return None
+        if status in {"delivered", "failed", "deferred", "delivery_ambiguous"}:
+            if not current_obligation:
+                return None
+        delivery = (
+            dict(current_delivery)
+            if isinstance(current_delivery, Mapping)
+            else {}
+        )
+        delivery.update(
+            {
+                "obligation_id": requested_obligation,
+                "status": status,
+            }
+        )
+        state["delivery"] = delivery
         if status == "delivered":
             state["phase"] = "delivered"
             state["next_action"] = "none"
@@ -809,6 +1403,71 @@ class TurnCheckpointStore:
             state["next_action"] = "recover_delivery_obligation"
         state["revision"] = int(state.get("revision", 0)) + 1
         return self._write(state)
+
+    def mark_best_effort_delivery(
+        self,
+        session_id: str,
+        *,
+        reported_success: bool,
+        turn_id: str,
+        deliverable_revision: str,
+        content_sha256: str,
+    ) -> dict[str, Any]:
+        """Close an unsupported transport without claiming exact delivery.
+
+        Some platform adapters can reformat or truncate text while returning
+        success.  They must not bind an exactly-once obligation to the full
+        checkpoint payload.  Record their transport outcome explicitly as
+        best-effort and make the checkpoint terminal so restart recovery does
+        not loop on a guarantee that transport cannot provide.
+        """
+
+        expected_fence = {
+            "turn_id": str(turn_id or ""),
+            "deliverable_revision": str(deliverable_revision or ""),
+            "content_sha256": str(content_sha256 or ""),
+        }
+        if not all(expected_fence.values()):
+            raise ValueError("best-effort delivery fence must be complete")
+
+        def mutate(state: dict[str, Any]) -> bool:
+            pending = state.get("pending_deliverable")
+            current_fence = {
+                "turn_id": str(state.get("turn_id") or ""),
+                "deliverable_revision": (
+                    str(pending.get("deliverable_revision") or "")
+                    if isinstance(pending, Mapping)
+                    else ""
+                ),
+                "content_sha256": (
+                    str(pending.get("sha256") or "")
+                    if isinstance(pending, Mapping)
+                    else ""
+                ),
+            }
+            if current_fence != expected_fence:
+                raise CheckpointConflictError(
+                    "best-effort delivery belongs to a stale checkpoint fence"
+                )
+            delivery = state.get("delivery")
+            if isinstance(delivery, Mapping) and delivery.get("obligation_id"):
+                raise CheckpointConflictError(
+                    "bound exact delivery cannot be downgraded to best-effort"
+                )
+            state["delivery"] = {
+                "obligation_id": None,
+                "status": "best_effort",
+                "reported_success": bool(reported_success),
+            }
+            state["phase"] = "terminal"
+            state["next_action"] = "none"
+            return True
+
+        return self._mutate_current(
+            session_id,
+            mutate,
+            expected_turn_id=expected_fence["turn_id"],
+        )
 
     def mark_delivery_if_content_matches(
         self,
@@ -1060,29 +1719,193 @@ def update_checkpoint_delivery(
     *,
     obligation_id: str,
     status: str,
+    turn_id: str,
+    deliverable_revision: str,
+    content_sha256: str,
+    checkpoint_root: str | os.PathLike[str] | None = None,
 ) -> bool:
-    """Update a turn checkpoint from the gateway delivery boundary."""
+    """Update only the exact deliverable revision owning an obligation.
+
+    ``checkpoint_root`` is the trusted namespace emitted by the finalizer.
+    The ambient-home fallback is retained only for single-profile and legacy
+    direct callers; multiplexed gateway delivery must pass the explicit root.
+    """
     if not session_id:
         return False
-    from hermes_constants import get_hermes_home
+    if checkpoint_root is None:
+        from hermes_constants import get_hermes_home
 
-    store = TurnCheckpointStore(get_hermes_home() / "sessions" / "turn-checkpoints")
+        checkpoint_root = get_hermes_home() / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
     try:
         store.load(str(session_id))
     except FileNotFoundError:
         return False
-    store.mark_delivery_status(
+    updated = store.mark_delivery_status(
         str(session_id),
         obligation_id=str(obligation_id or ""),
         status=str(status),
+        turn_id=str(turn_id or ""),
+        deliverable_revision=str(deliverable_revision or ""),
+        content_sha256=str(content_sha256 or ""),
     )
+    return updated is not None
+
+
+def update_checkpoint_best_effort_delivery(
+    session_id: str | None,
+    *,
+    reported_success: bool,
+    turn_id: str,
+    deliverable_revision: str,
+    content_sha256: str,
+    checkpoint_root: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Record a non-exact transport outcome without minting an obligation."""
+
+    if not session_id:
+        return False
+    if checkpoint_root is None:
+        from hermes_constants import get_hermes_home
+
+        checkpoint_root = get_hermes_home() / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    try:
+        store.mark_best_effort_delivery(
+            str(session_id),
+            reported_success=bool(reported_success),
+            turn_id=str(turn_id or ""),
+            deliverable_revision=str(deliverable_revision or ""),
+            content_sha256=str(content_sha256 or ""),
+        )
+    except FileNotFoundError:
+        return False
     return True
+
+
+def bind_checkpoint_delivery_obligation(
+    session_id: str | None,
+    *,
+    obligation_id: str,
+    turn_id: str,
+    deliverable_revision: str,
+    content_sha256: str,
+    routing: Mapping[str, Any],
+    checkpoint_root: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Durably bind one exact obligation before any delivery side effect.
+
+    ``checkpoint_root`` remains explicit for multiplexed profiles.  Omitting it
+    retains the legacy single-profile ambient-home behavior.
+    """
+    if not session_id:
+        return False
+    if checkpoint_root is None:
+        from hermes_constants import get_hermes_home
+
+        checkpoint_root = get_hermes_home() / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    try:
+        bound = store.bind_delivery_obligation(
+            str(session_id),
+            obligation_id=str(obligation_id or ""),
+            turn_id=str(turn_id or ""),
+            deliverable_revision=str(deliverable_revision or ""),
+            content_sha256=str(content_sha256 or ""),
+            routing=routing,
+        )
+    except FileNotFoundError:
+        return False
+    return bound is not None
+
+
+def checkpoint_delivery_fence(
+    state: Mapping[str, Any] | None,
+) -> dict[str, str] | None:
+    """Return the immutable fence for the currently composed deliverable."""
+    if not isinstance(state, Mapping):
+        return None
+    pending = state.get("pending_deliverable")
+    if not isinstance(pending, Mapping):
+        return None
+    fence = {
+        "turn_id": str(pending.get("turn_id") or state.get("turn_id") or ""),
+        "deliverable_revision": str(
+            pending.get("deliverable_revision") or ""
+        ),
+        "content_sha256": str(pending.get("sha256") or ""),
+    }
+    return fence if all(fence.values()) else None
+
+
+def checkpoint_delivery_fence_matches(
+    session_id: str,
+    *,
+    turn_id: str,
+    deliverable_revision: str,
+    content_sha256: str,
+    obligation_id: str | None = None,
+    routing: Mapping[str, Any] | None = None,
+    checkpoint_root: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Read-only stale-obligation fence check used by startup recovery.
+
+    Legacy callers may omit ``obligation_id`` to compare only the deliverable
+    fence.  Passing it requires the checkpoint to be bound to that exact id.
+    """
+    if checkpoint_root is None:
+        from hermes_constants import get_hermes_home
+
+        checkpoint_root = get_hermes_home() / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    state = store.load(str(session_id))
+    fence = checkpoint_delivery_fence(state)
+    if fence != {
+        "turn_id": str(turn_id or ""),
+        "deliverable_revision": str(deliverable_revision or ""),
+        "content_sha256": str(content_sha256 or ""),
+    }:
+        return False
+    if obligation_id is None:
+        if routing is None:
+            return True
+        requested_route = _canonical_delivery_route(routing)
+        return (
+            requested_route is not None
+            and _canonical_delivery_route(state.get("routing")) == requested_route
+        )
+    requested_route = _canonical_delivery_route(routing)
+    requested_route_sha256 = _delivery_route_sha256(routing)
+    if requested_route is None or requested_route_sha256 is None:
+        return False
+    if _canonical_delivery_route(state.get("routing")) != requested_route:
+        return False
+    delivery = state.get("delivery")
+    bound_obligation = (
+        str(delivery.get("obligation_id") or "")
+        if isinstance(delivery, Mapping)
+        else ""
+    )
+    bound_route_sha256 = (
+        str(delivery.get("route_sha256") or "")
+        if isinstance(delivery, Mapping)
+        else ""
+    )
+    return (
+        bool(bound_obligation)
+        and bound_obligation == str(obligation_id or "")
+        and bound_route_sha256 == requested_route_sha256
+    )
 
 
 def update_checkpoint_stream_delivery(
     session_id: str | None,
     *,
     final_response: str,
+    turn_id: str,
+    deliverable_revision: str,
+    content_sha256: str,
+    checkpoint_root: str | os.PathLike[str] | None = None,
 ) -> bool:
     """Close a streamed turn after exact final-payload confirmation.
 
@@ -1091,15 +1914,40 @@ def update_checkpoint_stream_delivery(
     """
     if not session_id or not final_response:
         return False
-    from hermes_constants import get_hermes_home
+    fence = {
+        "turn_id": str(turn_id or ""),
+        "deliverable_revision": str(deliverable_revision or ""),
+        "content_sha256": str(content_sha256 or ""),
+    }
+    if not all(fence.values()) or _sha256_text(final_response) != fence["content_sha256"]:
+        return False
+    if checkpoint_root is None:
+        from hermes_constants import get_hermes_home
 
-    store = TurnCheckpointStore(get_hermes_home() / "sessions" / "turn-checkpoints")
-    digest = _sha256_text(final_response)
+        checkpoint_root = get_hermes_home() / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    obligation_id = "stream:" + hashlib.sha256(
+        _canonical_json(fence).encode("utf-8", "surrogatepass")
+    ).hexdigest()
     try:
-        state = store.mark_delivery_if_content_matches(
+        checkpoint_state = store.load(str(session_id))
+        bound = store.bind_delivery_obligation(
             str(session_id),
-            content=final_response,
-            obligation_id=f"stream:{digest}",
+            obligation_id=obligation_id,
+            turn_id=fence["turn_id"],
+            deliverable_revision=fence["deliverable_revision"],
+            content_sha256=fence["content_sha256"],
+            routing=checkpoint_state.get("routing") or {},
+        )
+        if bound is None:
+            return False
+        state = store.mark_delivery_status(
+            str(session_id),
+            obligation_id=obligation_id,
+            status="delivered",
+            turn_id=fence["turn_id"],
+            deliverable_revision=fence["deliverable_revision"],
+            content_sha256=fence["content_sha256"],
         )
     except FileNotFoundError:
         return False
@@ -1113,9 +1961,12 @@ __all__ = [
     "CheckpointIntegrityError",
     "CheckpointWriteError",
     "TurnCheckpointStore",
+    "bind_checkpoint_delivery_obligation",
     "build_checkpoint_resume_note",
     "build_checkpoint_continuation_nudge",
     "checkpoint_is_resumable",
+    "checkpoint_delivery_fence",
+    "checkpoint_delivery_fence_matches",
     "checkpoint_store_for_agent",
     "initialize_agent_turn_checkpoint",
     "recover_checkpoint_message_content",
@@ -1123,5 +1974,6 @@ __all__ = [
     "tool_fingerprint",
     "transcript_hash",
     "update_checkpoint_delivery",
+    "update_checkpoint_best_effort_delivery",
     "update_checkpoint_stream_delivery",
 ]

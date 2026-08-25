@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,18 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import windows_process_broker as broker
+
+
+def test_policy_wrapper_uses_concrete_base_popen_signature():
+    class GuardedPopen(broker._original_popen):
+        def __init__(self, cmd, *args, **kwargs):
+            super().__init__(cmd, *args, **kwargs)
+
+    signature = broker._concrete_popen_signature(GuardedPopen)
+    bound = signature.bind([sys.executable, "-V"], stdout=subprocess.PIPE)
+
+    assert bound.arguments["args"] == [sys.executable, "-V"]
+    assert signature.parameters["args"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific contract")

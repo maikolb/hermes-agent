@@ -15,6 +15,7 @@ Covers the pieces added when boards became a first-class concept:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -145,7 +146,7 @@ class TestBoardCRUD:
 
 
     @pytest.mark.parametrize("archive", [True, False])
-    def test_remove_clears_init_cache_for_recreated_db(self, fresh_home, archive):
+    def test_removed_board_requires_explicit_recreation(self, fresh_home, archive):
         # Regression for #23833: poll loops that call connect(board=slug) right
         # after remove_board() recreate an empty kanban.db at the same path
         # (connect() does mkdir(exist_ok=True)). If _INITIALIZED_PATHS still
@@ -153,7 +154,7 @@ class TestBoardCRUD:
         # downstream readers hit `no such table: task_events`.
         kb.create_board("recycle")
         # First connect populates _INITIALIZED_PATHS for this DB.
-        with kb.connect(board="recycle") as conn:
+        with kb.connect_closing(board="recycle") as conn:
             kb.create_task(conn, title="t1", assignee="dev")
         db_path = kb.board_dir("recycle") / "kanban.db"
         assert str(db_path.resolve()) in kb._INITIALIZED_PATHS
@@ -163,8 +164,15 @@ class TestBoardCRUD:
         # connect() gets a fresh schema-init pass.
         assert str(db_path.resolve()) not in kb._INITIALIZED_PATHS
 
-        # Simulate the event-stream poll: re-open the same slug. connect()
-        # recreates the directory + empty .db; the schema must be re-applied.
+        # A late poll must not resurrect the removed board. Only the explicit
+        # board-creation authority may clear the external tombstone.
+        with pytest.raises(RuntimeError, match="was removed"):
+            kb.connect(board="recycle")
+        with pytest.raises(RuntimeError, match="was removed"):
+            kb.connect(db_path=db_path)
+        assert not kb.board_exists("recycle")
+
+        kb.create_board("recycle")
         with kb.connect(board="recycle") as conn:
             tables = {
                 row[0]
@@ -181,6 +189,368 @@ class TestBoardCRUD:
         assert kb.read_board_metadata("slug-immutable")["name"] == "New Display Name"
         # Slug must not change.
         assert kb.board_exists("slug-immutable")
+
+    @staticmethod
+    def _owned_worktree(conn, tmp_path: Path, title: str = "owned") -> str:
+        task_id = kb.create_task(
+            conn,
+            title=title,
+            workspace_kind="worktree",
+            workspace_path=str(tmp_path / "placeholder"),
+        )
+        owned_path = (tmp_path / ".worktrees" / task_id).resolve()
+        repo_root = tmp_path.resolve()
+        ownership = {
+            "schema_version": 1,
+            "task_id": task_id,
+            "repo_root": str(repo_root),
+            "git_common_dir": str(repo_root / ".git"),
+            "git_dir": str(repo_root / ".git" / "worktrees" / task_id),
+            "canonical_worktree": str(owned_path),
+            "branch": f"project/{task_id}-delivery",
+            "creation_nonce": "a" * 32,
+            "created_at": 1,
+        }
+        ownership_json = json.dumps(
+            ownership, sort_keys=True, separators=(",", ":")
+        )
+        ownership_fingerprint = hashlib.sha256(
+            ownership_json.encode("utf-8")
+        ).hexdigest()
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET workspace_path = ?, branch_name = ? WHERE id = ?",
+                (
+                    str(owned_path),
+                    f"project/{task_id}-delivery",
+                    task_id,
+                ),
+            )
+            conn.execute(
+                "UPDATE task_git_delivery SET ownership_json = ?, "
+                "ownership_fingerprint = ? WHERE task_id = ?",
+                (ownership_json, ownership_fingerprint, task_id),
+            )
+        return task_id
+
+    @pytest.mark.parametrize("archive", [True, False])
+    @pytest.mark.parametrize("cleanup_state", ["not_requested", "pending"])
+    def test_remove_board_blocks_owned_unresolved_worktree_atomically(
+        self,
+        fresh_home,
+        tmp_path,
+        archive,
+        cleanup_state,
+    ):
+        slug = f"blocked-{int(archive)}-{cleanup_state}"
+        kb.create_board(slug)
+        with kb.connect_closing(board=slug) as conn:
+            task_id = self._owned_worktree(conn, tmp_path)
+            if cleanup_state != "not_requested":
+                with kb.write_txn(conn):
+                    conn.execute(
+                        "UPDATE task_git_delivery SET cleanup_state = ? "
+                        "WHERE task_id = ?",
+                        (cleanup_state, task_id),
+                    )
+
+        with pytest.raises(ValueError, match="still owns worktree task"):
+            kb.remove_board(slug, archive=archive)
+        assert kb.board_exists(slug)
+        # The failed lifecycle action rolls its tombstone back atomically.
+        with kb.connect_closing(board=slug) as conn:
+            assert kb.create_task(conn, title="still writable")
+
+    @pytest.mark.parametrize("archive", [True, False])
+    def test_remove_board_allows_owned_worktree_only_after_cleanup_complete(
+        self,
+        fresh_home,
+        tmp_path,
+        archive,
+        monkeypatch,
+    ):
+        slug = f"reaped-{int(archive)}"
+        kb.create_board(slug)
+        with kb.connect_closing(board=slug) as conn:
+            task_id = self._owned_worktree(conn, tmp_path)
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET status = 'done' WHERE id = ?",
+                    (task_id,),
+                )
+        monkeypatch.setattr(
+            kb,
+            "_validate_cleanup_obligation",
+            lambda *_args, **_kwargs: (True, {"task_id": task_id}, ""),
+        )
+
+        result = kb.remove_board(slug, archive=archive)
+        assert result["action"] == ("archived" if archive else "deleted")
+        assert result["preserved_worktrees"] == []
+
+    def test_metadata_archive_used_by_topic_close_blocks_pending_cleanup(
+        self,
+        fresh_home,
+        tmp_path,
+    ):
+        slug = "topic-close-pending"
+        kb.create_board(slug)
+        with kb.connect_closing(board=slug) as conn:
+            task_id = self._owned_worktree(conn, tmp_path)
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_git_delivery SET cleanup_state = 'pending' "
+                    "WHERE task_id = ?",
+                    (task_id,),
+                )
+
+        with pytest.raises(ValueError, match="without terminal cleanup proof"):
+            kb.set_board_archived(slug, True)
+        assert kb.read_board_metadata(slug)["archived"] is False
+        with kb.connect_closing(board=slug) as conn:
+            assert kb.create_task(conn, title="archive rollback stayed active")
+
+    def test_metadata_archive_quiesces_existing_connections_until_reactivated(
+        self,
+        fresh_home,
+        tmp_path,
+        monkeypatch,
+    ):
+        slug = "topic-close-clean"
+        kb.create_board(slug)
+        writer = kb.connect(board=slug)
+        try:
+            task_id = self._owned_worktree(writer, tmp_path)
+            with kb.write_txn(writer):
+                writer.execute(
+                    "UPDATE tasks SET status = 'done' WHERE id = ?",
+                    (task_id,),
+                )
+            monkeypatch.setattr(
+                kb,
+                "_validate_cleanup_obligation",
+                lambda *_args, **_kwargs: (True, {"task_id": task_id}, ""),
+            )
+            meta = kb.set_board_archived(slug, True)
+            assert meta["archived"] is True
+            with pytest.raises(RuntimeError, match="archived or removal"):
+                kb.create_task(writer, title="must stay quiesced")
+        finally:
+            writer.close()
+
+        kb.set_board_archived(slug, False)
+        with kb.connect_closing(board=slug) as conn:
+            assert kb.create_task(conn, title="reactivated")
+
+    def test_remove_board_tombstone_closes_check_to_rename_writer_race(
+        self,
+        fresh_home,
+        tmp_path,
+        monkeypatch,
+    ):
+        slug = "remove-race"
+        kb.create_board(slug)
+        writer = kb.connect(board=slug)
+        task_id = self._owned_worktree(writer, tmp_path)
+        with kb.write_txn(writer):
+            writer.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?",
+                (task_id,),
+            )
+        monkeypatch.setattr(
+            kb,
+            "_validate_cleanup_obligation",
+            lambda *_args, **_kwargs: (True, {"task_id": task_id}, ""),
+        )
+        original_rename = Path.rename
+        raced = {"old_writer_blocked": False, "recreate_blocked": False}
+
+        def _rename_after_concurrent_attempt(path, target):
+            if path == kb.board_dir(slug):
+                try:
+                    with pytest.raises(RuntimeError, match="removal is in progress"):
+                        kb.create_task(
+                            writer,
+                            title="late concurrent worktree",
+                            workspace_kind="worktree",
+                        )
+                    raced["old_writer_blocked"] = True
+                finally:
+                    writer.close()
+                result = original_rename(path, target)
+                with pytest.raises(RuntimeError, match="was removed"):
+                    kb.connect(board=slug)
+                raced["recreate_blocked"] = True
+                return result
+            return original_rename(path, target)
+
+        monkeypatch.setattr(Path, "rename", _rename_after_concurrent_attempt)
+        result = kb.remove_board(slug, archive=True)
+        assert result["action"] == "archived"
+        assert raced == {"old_writer_blocked": True, "recreate_blocked": True}
+        assert not kb.board_exists(slug)
+
+    def test_remove_board_retry_resumes_after_crash_before_archive_move(
+        self,
+        fresh_home,
+        monkeypatch,
+    ):
+        slug = "resume-before-move"
+        kb.create_board(slug)
+        original_rename = Path.rename
+        crashed = {"once": False}
+
+        def _crash_before_move(path, target):
+            if path == kb.board_dir(slug) and not crashed["once"]:
+                crashed["once"] = True
+                raise RuntimeError("simulated crash before archive move")
+            return original_rename(path, target)
+
+        monkeypatch.setattr(Path, "rename", _crash_before_move)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            kb.remove_board(slug, archive=True)
+        with pytest.raises(RuntimeError, match="was removed"):
+            kb.connect(board=slug)
+
+        result = kb.remove_board(slug, archive=True)
+        assert result["action"] == "archived"
+        assert Path(result["new_path"]).is_dir()
+
+    def test_remove_board_retry_recovers_after_move_completed_before_return(
+        self,
+        fresh_home,
+        monkeypatch,
+    ):
+        slug = "resume-after-move"
+        kb.create_board(slug)
+        original_rename = Path.rename
+        crashed = {"once": False}
+
+        def _crash_after_move(path, target):
+            result = original_rename(path, target)
+            if path == kb.board_dir(slug) and not crashed["once"]:
+                crashed["once"] = True
+                raise RuntimeError("simulated crash after archive move")
+            return result
+
+        monkeypatch.setattr(Path, "rename", _crash_after_move)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            kb.remove_board(slug, archive=True)
+
+        result = kb.remove_board(slug, archive=True)
+        assert result["action"] == "archived"
+        assert Path(result["new_path"]).is_dir()
+
+    def test_remove_board_retry_resumes_partial_hard_delete(
+        self,
+        fresh_home,
+        monkeypatch,
+    ):
+        slug = "resume-hard-delete"
+        kb.create_board(slug)
+        original_rmtree = kb.shutil.rmtree
+        crashed = {"once": False}
+
+        def _crash_once(path, *args, **kwargs):
+            if Path(path) == kb.board_dir(slug) and not crashed["once"]:
+                crashed["once"] = True
+                raise RuntimeError("simulated hard-delete crash")
+            return original_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(kb.shutil, "rmtree", _crash_once)
+        with pytest.raises(RuntimeError, match="simulated hard-delete crash"):
+            kb.remove_board(slug, archive=False)
+
+        result = kb.remove_board(slug, archive=False)
+        assert result == {
+            "slug": slug,
+            "action": "deleted",
+            "new_path": "",
+            "preserved_worktrees": [],
+        }
+        assert not kb.board_dir(slug).exists()
+
+    @pytest.mark.parametrize("archive", [True, False])
+    def test_remove_board_refuses_tampered_ownership_instead_of_forgetting_it(
+        self,
+        fresh_home,
+        tmp_path,
+        archive,
+    ):
+        slug = f"tampered-{int(archive)}"
+        kb.create_board(slug)
+        with kb.connect_closing(board=slug) as conn:
+            task_id = self._owned_worktree(conn, tmp_path)
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_git_delivery SET ownership_fingerprint = ? "
+                    "WHERE task_id = ?",
+                    ("f" * 64, task_id),
+                )
+
+        with pytest.raises(ValueError, match="invalid ownership"):
+            kb.remove_board(slug, archive=archive)
+        assert kb.board_exists(slug)
+        with kb.connect_closing(board=slug) as conn:
+            assert kb.get_task(conn, task_id) is not None
+
+    def test_remove_board_treats_empty_nonnull_ownership_as_corruption(
+        self,
+        fresh_home,
+        tmp_path,
+    ):
+        slug = "empty-ownership"
+        kb.create_board(slug)
+        with kb.connect_closing(board=slug) as conn:
+            task_id = self._owned_worktree(conn, tmp_path)
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_git_delivery SET ownership_json = '', "
+                    "ownership_fingerprint = '' WHERE task_id = ?",
+                    (task_id,),
+                )
+
+        with pytest.raises(ValueError, match="invalid ownership"):
+            kb.remove_board(slug, archive=True)
+        assert kb.board_exists(slug)
+
+    @pytest.mark.parametrize("archive", [True, False])
+    def test_remove_board_forgets_foreign_metadata_but_preserves_checkout(
+        self,
+        fresh_home,
+        tmp_path,
+        archive,
+        monkeypatch,
+    ):
+        slug = f"foreign-{int(archive)}"
+        checkout = tmp_path / f"manual-checkout-{int(archive)}"
+        checkout.mkdir()
+        kb.create_board(slug)
+        with kb.connect_closing(board=slug) as conn:
+            task_id = kb.create_task(
+                conn,
+                title="Manual foreign checkout",
+                workspace_kind="worktree",
+                workspace_path=str(checkout),
+                branch_name="feature/manual",
+            )
+        monkeypatch.setattr(
+            kb,
+            "_cleanup_git",
+            lambda *_args, **_kwargs: pytest.fail(
+                "foreign checkout must never enter Git cleanup"
+            ),
+        )
+
+        result = kb.remove_board(slug, archive=archive)
+        assert checkout.is_dir()
+        assert result["preserved_worktrees"] == [
+            {
+                "task_id": task_id,
+                "workspace_path": str(checkout),
+                "branch_name": "feature/manual",
+            }
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +711,3 @@ class TestCLI:
         assert titlesA == ["Task A"]
         assert titlesB == ["Task B"]
         assert titlesD == []
-
-
-

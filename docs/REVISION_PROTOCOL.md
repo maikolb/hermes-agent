@@ -2,6 +2,162 @@
 
 Autoridade canônica de regressões operacionais deste checkout.
 
+## REG-2026-08-24-001 — Kanban concludes before Git delivery is proven
+
+- Status: root cause confirmed; correction and target validation pending.
+- Cenário: Project OS grava `done` antes de provar commit, push, PR, checks,
+  merge e ancestralidade em `main`; a limpeza posterior é best-effort e não
+  possui retry owner.
+- Causa raiz: Git delivery is not part of the task state machine. Reachability
+  from any remote is incorrectly treated as sufficient cleanup evidence, and
+  manually named worktrees are outside canonical Kanban ownership.
+- Invariante da correção: `delivery_verified` sealed receipt → canonical safe
+  prune → `done`; failure remains `completion_blocked_delivery`; no force
+  removal and no globally hardcoded remote/project.
+- Prevenção/commands: see `docs/regressions/REG-2026-08-24-001.md`.
+
+## REG-2026-08-24-002 — Windows PTY reports false EOF success
+
+- Status: validated-local; candidate merge and target acceptance pending.
+- Cenário reproduzível: `close_stdin()` em PTY Windows devolvia sucesso, mas o
+  processo bloqueado em `sys.stdin.read()` nunca recebia EOF nem encerrava.
+- Causa raiz: `pywinpty.PtyProcess.sendeof()` escreve Ctrl-D; não fecha o pipe
+  de entrada do ConPTY. O teste POSIX de half-close não tinha marker de SO.
+- Correção: operação Windows agora falha fechado e não chama `sendeof()` nem
+  `close()`; o E2E de EOF é POSIX-only e há teste Windows do erro explícito.
+- Prevenção vinculada: `docs/regressions/REG-2026-08-24-002.md` e
+  `tests/tools/test_process_registry.py::TestStdinHelpers`.
+- Comando: `.venv\Scripts\python.exe -m pytest -q tests/tools/test_process_registry.py tests/tools/test_code_execution.py`.
+- Evidência: 90 passed, 48 skipped, 5 subtests passed.
+
+## REG-2026-08-24-003 — Archived Kanban subscription is never removed
+
+- Status: validated-local; candidate merge/target pending.
+- Causa: `archived` era claimed como focus/control, mas filtrado antes da
+  delivery silenciosa que avança cursor e remove a assinatura.
+- Correção: archive-only atravessa o pipeline sem mensagem; completed+archive
+  entrega a conclusão uma vez e depois remove a assinatura.
+- Prevenção: `docs/regressions/REG-2026-08-24-003.md`; Project OS 297/297.
+
+## REG-2026-08-24-004 — Exact-call redirect races with concurrent call
+
+- Status: validated-local; candidate merge pending.
+- Causa: threshold de uma assinatura exata era persistido como redirect da
+  ferramenta inteira, tornando lote concorrente dependente da ordem de thread.
+- Correção: exact/no-progress redirect por canonical signature; escalonamento
+  próprio da ferramenta permanece separado.
+- Prevenção: `docs/regressions/REG-2026-08-24-004.md`; suite 23/23 e 20 reruns.
+
+## REG-2026-08-24-005 — Production tool effects are not durably fenced against replay
+
+- Status: open; root cause confirmed; correction in progress; hard-process
+  crash/restart gate pending.
+- Cenário: a produção executa um efeito real e morre com `os._exit(88)` antes
+  do retorno. O efeito existe, mas o checkpoint auditado permanece em
+  `planning`, sem call pending/unknown; o replay guard isolado bloqueia a mesma
+  incerteza apenas uma vez por processo.
+- Causa: as APIs de attempt/result não estavam ligadas ao effect boundary de
+  `agent/tool_executor.py`, e a autorização de replay dependia de estado
+  volátil em vez de reconciliação durável.
+- Invariante: exact post-middleware args persistidos antes do efeito; resultado
+  após flush canônico; unknown permanece bloqueado até readback autoritativo.
+- Prevenção/commands: `docs/regressions/REG-2026-08-24-005.md`.
+
+## REG-2026-08-24-006 — Delivery replay can reset proof or acknowledge the wrong turn
+
+- Status: open; root cause confirmed; correction in progress; exact-once não
+  reivindicado.
+- Cenário: regravar o mesmo obligation ID entregue com `INSERT OR REPLACE`
+  volta a deixá-lo retryable; um ACK antigo pode terminalizar o checkpoint de
+  um turno novo; acceptance remota sem ACK local pode ser reenviada.
+- Causa: identidade substituível, transições não monotônicas e ausência de
+  fence `(turn_id, deliverable_revision, content_sha256)` entre ledger e
+  checkpoint; estado ambíguo era tratado como retry normal.
+- Invariante: insert-once, transições condicionais, fence exato e
+  `delivery_ambiguous` sem resend automático.
+- Prevenção/commands: `docs/regressions/REG-2026-08-24-006.md`.
+
+## REG-2026-08-24-007 — Ordinary final response is not an exact replayable checkpoint
+
+- Status: open; root cause confirmed; correction in progress; fresh-process
+  final-delivery replay pending.
+- Cenário: SessionDB contém user+assistant de um final comum, mas o checkpoint
+  segue em `planning` sem deliverable. Após queda, o loop chama o modelo de
+  novo em vez de repetir o payload final exato.
+- Causa: o final comum não era selado após fill/plugins/footer/sanitização e a
+  recuperação não tinha branch `pending exact final -> skip model`.
+- Invariante: tail exata flushed + `ordinary_final` revision/hash antes do
+  envio; restart reutiliza o payload sem nova inferência.
+- Prevenção/commands: `docs/regressions/REG-2026-08-24-007.md`.
+
+## REG-2026-08-24-008 — Windows zero-UI broker depends on import order
+
+- Status: validated-local; candidate merge/target pending.
+- Cenário: o teste de recuperação passava na matriz multi-file, mas falhava
+  isolado antes de criar o primeiro filho com `KeyError: 'args'`.
+- Causa: quando importado depois do guard de testes, o broker capturava
+  `Popen(cmd, *args, **kwargs)` e assumia que o bind continha a chave stdlib
+  `args`; import anterior na matriz mascarava a premissa.
+- Correção: normalização usa a assinatura concreta `Popen(args, ...)` derivada
+  pela MRO, mas o wrapper de política capturado continua sendo o executor.
+- Prevenção/commands: `docs/regressions/REG-2026-08-24-008.md`; matriz 224/224
+  executados, um skip Linux-only declarado, e fronteira 20/20 em processos
+  pytest novos.
+
+## REG-2026-08-24-009 — Compaction checkpoint seals the pre-salvage transcript
+
+- Status: validated-local no cenário exato; matriz completa e target pendentes.
+- Cenário: a compactação durável produzia um candidato quase sem redução; o
+  anti-growth salvava um transcript menor depois de o checkpoint já ter selado
+  o hash anterior, causando `CheckpointConflictError` no commit.
+- Causa raiz: `prepare_compaction()` era executado antes da decisão final de
+  crescimento/salvage, enquanto SQLite persistia o transcript pós-salvage.
+- Correção: preparar a fase 2 somente depois da decisão anti-growth e de todo
+  salvage, imediatamente antes da mutação durável.
+- Prevenção/commands: `docs/regressions/REG-2026-08-24-009.md` e o cenário exato
+  `TestInPlaceAntiGrowthGuard::test_in_place_salvages_near_break_even_growth`;
+  reprodução adjacente 3/3 verde após a correção.
+
+## REG-2026-08-24-010 — Terminal imports local backend before the Windows zero-UI boundary
+
+- Status: causa raiz confirmada; correção local aplicada; matriz/target pendentes.
+- Cenário: os três testes do limite terminal falhavam porque
+  `_install_windows_terminal_zero_ui_boundary()` não existia e
+  `LocalEnvironment` era importado diretamente.
+- Causa raiz: o commit rebased preservado `8b76dee159` carregava os testes, mas
+  dependia de um hunk de produção presente apenas na linhagem anterior
+  `2173defe1c`, que não foi consolidada.
+- Correção: instalar e verificar o broker antes de importar o backend local;
+  falhar fechado no Windows e manter no-op fora dele.
+- Prevenção/commands: `docs/regressions/REG-2026-08-24-010.md` e
+  `tests/tools/test_terminal_zero_ui_boundary.py`.
+
+## REG-2026-08-24-011 — Honcho cache retains the previous configured backend
+
+- Status: validated-local no cenário exato; SDK/serviço real e target pendentes.
+- Cenário: um gateway longo alterava `honcho.base_url` no `config.yaml`, mas
+  recebia o cliente já conectado ao endpoint anterior.
+- Causa raiz: a chave de cache era calculada antes de resolver a URL efetiva
+  herdada do arquivo; um cache hit impedia o factory de observar a mudança.
+- Correção: resolver URL/timeout antes do lookup, incluí-los na identidade e
+  usar exatamente os mesmos valores na construção do SDK.
+- Prevenção/commands: `docs/regressions/REG-2026-08-24-011.md` e
+  `TestGetHonchoClient::test_config_yaml_base_url_change_rebuilds_long_lived_client`;
+  reprodução 1/1 e matriz focada 59 passed, 16 skips condicionais ao SDK.
+
+## REG-2026-08-24-012 — Archiving a running task orphans its worker
+
+- Status: causa raiz confirmada; correção e validação pendentes.
+- Cenário: arquivar uma tarefa running apagava PID/claim e encerrava o run, mas
+  não terminava o processo; em worktree preservada, ele seguia mutando sem
+  owner no ledger.
+- Causa raiz: `archive_task()` limpava a identidade antes de capturá-la e nunca
+  chamava `_terminate_reclaimed_worker()` após o commit.
+- Invariante: snapshot exato de PID/claim/start dentro da transação, audit trail
+  durável e término pós-commit; falha de término nunca autoriza apagar checkout.
+- Prevenção/commands: `docs/regressions/REG-2026-08-24-012.md`; direct e
+  dashboard single/bulk archive com worker real/spies e restart reconciliation.
+
 ## REG-2026-08-17-001 — Titan pareado/conectado sem responder após reboot
 
 - Status: closed — validated-target

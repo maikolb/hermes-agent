@@ -16,7 +16,6 @@ def _bare_adapter():
     adapter._bot = _RecordingBot()
     adapter._telegram_typing_cooldown_until = {}
     adapter._telegram_typing_cooldown_seconds = 30.0
-    adapter.name = "telegram"
     return adapter
 
 

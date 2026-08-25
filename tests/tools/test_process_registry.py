@@ -187,6 +187,47 @@ def test_write_stdin_uses_bytes_for_posix_pty(registry):
     assert written == [b"hello\n"]
 
 
+@pytest.mark.windows_only
+def test_submit_stdin_uses_crlf_for_windows_pty(registry):
+    """Enter on a Windows PTY is a carriage return, not a bare LF.
+
+    ConPTY cooked input only ends a line on ``\\r``; a bare ``\\n`` through
+    pywinpty is never delivered to a blocking line read (Python readline,
+    Go bufio.Scanner — the exact hang seen live with ``gh auth login``'s
+    "Press Enter to open the browser" prompt). submit_stdin must append
+    ``\\r\\n`` for Windows PTY sessions.
+    """
+    written = []
+
+    class _FakePty:
+        def write(self, value):
+            written.append(value)
+
+    session = _make_session(sid="pty-win-submit")
+    session._pty = _FakePty()
+    registry._running[session.id] = session
+
+    result = registry.submit_stdin(session.id, "Y")
+
+    assert result["status"] == "ok"
+    assert written == ["Y\r\n"]
+
+
+@pytest.mark.windows_only
+def test_submit_stdin_keeps_lf_for_windows_pipe(registry):
+    """Non-PTY (Popen pipe) sessions keep the plain LF on Windows."""
+    session = _make_session(sid="pipe-win-submit")
+    fake_stdin = MagicMock()
+    session.process = MagicMock()
+    session.process.stdin = fake_stdin
+    registry._running[session.id] = session
+
+    result = registry.submit_stdin(session.id, "Y")
+
+    assert result["status"] == "ok"
+    fake_stdin.write.assert_called_once_with("Y\n")
+
+
 # =========================================================================
 # Get / Poll
 # =========================================================================
@@ -529,6 +570,7 @@ class TestStdinHelpers:
         proc.stdin.close.assert_called_once()
         assert result["status"] == "ok"
 
+    @pytest.mark.linux_only
     def test_close_stdin_allows_eof_driven_process_to_finish(self, registry, tmp_path):
         """PTY mode: writing data + sending EOF lets an EOF-driven child finish.
 
@@ -565,6 +607,20 @@ class TestStdinHelpers:
             pytest.fail("process did not exit after stdin was closed")
         finally:
             registry.kill_process(session.id)
+
+    @pytest.mark.windows_only
+    def test_close_stdin_windows_pty_fails_closed(self, registry):
+        pty = MagicMock()
+        session = _make_session()
+        session._pty = pty
+        registry._running[session.id] = session
+
+        result = registry.close_stdin(session.id)
+
+        assert result["status"] == "error"
+        assert "pywinpty/ConPTY" in result["error"]
+        pty.sendeof.assert_not_called()
+        pty.close.assert_not_called()
 
 
 # =========================================================================
@@ -666,7 +722,7 @@ class TestPruning:
 # =========================================================================
 
 class TestSpawnEnvSanitization:
-    def test_spawn_local_strips_blocked_vars_from_background_env(self, registry):
+    def test_spawn_local_strips_blocked_vars_from_background_env(self, registry, tmp_path):
         captured = {}
 
         def fake_popen(cmd, **kwargs):
@@ -684,6 +740,7 @@ class TestSpawnEnvSanitization:
             "PATH": "/usr/bin:/bin",
             "HOME": "/home/user",
             "USER": "tester",
+            "HERMES_HOME": str(tmp_path / "hermes-home"),
             "TELEGRAM_BOT_TOKEN": "bot-secret",
             "FIRECRAWL_API_KEY": "fc-secret",
         }, clear=True), \
@@ -803,7 +860,7 @@ class TestPopenLeakOnSetupFailure:
         with patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
              patch("subprocess.Popen", return_value=proc), \
              patch("threading.Thread", side_effect=boom), \
-             patch("os.getpgid", side_effect=ProcessLookupError), \
+             patch("os.getpgid", side_effect=ProcessLookupError, create=True), \
              patch.object(registry, "_write_checkpoint"):
             with pytest.raises(RuntimeError, match="Thread creation failed"):
                 registry.spawn_local("echo hello", cwd="/tmp")
@@ -874,6 +931,7 @@ class TestSpawnRewriteCompoundBackground:
         # Simple background must remain as-is
         assert "sleep 5 &" in shell_cmd
 
+    @pytest.mark.linux_only
     def test_pty_path_uses_rewritten_command(self, registry):
         """PTY spawn path must also use the rewritten command (issue #68915)."""
         mock_pty_proc = MagicMock()
@@ -900,6 +958,27 @@ class TestSpawnRewriteCompoundBackground:
         pty_args = mock_pty_module.PtyProcess.spawn.call_args[0][0]
         assert "&& { node server.js & }" in pty_args[2], \
             f"PTY path should use rewritten command, got: {pty_args[2]}"
+        assert session.command == "cd /app && node server.js &"
+
+    @pytest.mark.windows_only
+    def test_windows_pty_path_uses_rewritten_command(self, registry):
+        mock_pty_proc = MagicMock()
+        mock_pty_proc.pid = 5555
+        fake_thread = MagicMock()
+        fake_thread.daemon = False
+
+        with patch("tools.process_registry._find_shell", return_value="bash.exe"), \
+             patch("winpty.PtyProcess.spawn", return_value=mock_pty_proc) as spawn, \
+             patch("threading.Thread", return_value=fake_thread), \
+             patch.object(registry, "_write_checkpoint"):
+            session = registry.spawn_local(
+                "cd /app && node server.js &",
+                cwd="C:/tmp",
+                use_pty=True,
+            )
+
+        pty_args = spawn.call_args.args[0]
+        assert "&& { node server.js & }" in pty_args[2]
         assert session.command == "cd /app && node server.js &"
 
 
@@ -1026,34 +1105,17 @@ class TestKillProcess:
         s.detached = True
         registry._running[s.id] = s
 
-        terminate_calls = []
-
-        class FakeProcess:
-            def __init__(self, pid):
-                self.pid = pid
-            def children(self, recursive=False):
-                return []
-            def terminate(self):
-                terminate_calls.append(("terminate", self.pid))
-
-        import psutil as _psutil
-
         try:
-            # Post-#21561: liveness probe routes through
-            # ``ProcessRegistry._is_host_pid_alive`` (→
-            # ``gateway.status._pid_exists``), and the actual kill on POSIX
-            # routes through ``psutil.Process(pid).terminate()``. Neither
-            # touches ``os.kill`` directly. Mock both seams.  Disable the
-            # SIGKILL-escalation step (grace=0) so it doesn't call
-            # ``psutil.wait_procs`` on the FakeProcess.
-            with patch("gateway.status._pid_exists", return_value=True), \
-                 patch.object(ProcessRegistry, "_daemon_term_grace_seconds",
-                              staticmethod(lambda: 0.0)), \
-                 patch.object(_psutil, "Process", side_effect=lambda pid: FakeProcess(pid)):
+            # This contract is cross-platform: a recovered detached session
+            # must validate ownership and delegate termination using its host
+            # PID. Platform-specific termination is covered separately.
+            with patch.object(
+                ProcessRegistry, "_host_pid_is_ours", return_value=True
+            ), patch.object(ProcessRegistry, "_terminate_host_pid") as terminate:
                 result = registry.kill_process(s.id)
 
             assert result["status"] == "killed"
-            assert ("terminate", 424242) in terminate_calls
+            terminate.assert_called_once_with(424242, s.host_start_time)
         finally:
             registry._running.pop(s.id, None)
 
@@ -1242,6 +1304,7 @@ class TestTerminateHostPidWindows:
         assert "/T" in captured["args"], "Tree flag required to reach descendants"
         assert "/F" in captured["args"], "Force flag required for headless Chromium"
 
+@pytest.mark.linux_only
 class TestTerminateHostPidPosix:
     """POSIX branch walks the tree via psutil and SIGTERMs children first."""
 
@@ -2243,3 +2306,132 @@ class TestSystemdCgroupIsolation:
         )
 
         assert pr._stop_systemd_unit("hermes-worker-gone.scope") is True
+
+
+class TestNotificationRedaction:
+    """Background-process notification delivery (completion_queue) applies the
+    same redaction as the explicit process tool — issue #43025 gap.
+
+    The _move_to_finished() and _check_watch_patterns() paths enqueue raw
+    output into the completion_queue.  After the fix, _redact_process_result()
+    is called before enqueueing so secrets are masked in the [IMPORTANT: ...]
+    messages delivered to the LLM.
+    """
+
+    def test_completion_notification_redacts_secret(self, monkeypatch):
+        """_move_to_finished completion notification redacts API keys."""
+        import agent.redact as _r
+        monkeypatch.setattr(_r, "_REDACT_ENABLED", True)
+        from tools import process_registry as pr
+
+        reg = ProcessRegistry()
+        sess = _make_session(sid="proc_notif1", command="env")
+        sess.output_buffer = "OPENAI_API_KEY=sk-proj-secret123\nHOME=/home/u"
+        sess.notify_on_complete = True
+        sess.exited = True
+        sess.exit_code = 0
+        reg._running[sess.id] = sess
+        monkeypatch.setattr(pr, "process_registry", reg)
+
+        reg._move_to_finished(sess)
+
+        # Drain and check the notification
+        results = reg.drain_notifications()
+        assert len(results) == 1
+        _evt, text = results[0]
+        assert "sk-proj-secret123" not in text
+        assert "REDACTED" in text or "sk-proj" not in text
+
+    def test_watch_match_notification_redacts_secret(self, monkeypatch):
+        """_check_watch_patterns watch_match notification redacts secrets."""
+        import agent.redact as _r
+        monkeypatch.setattr(_r, "_REDACT_ENABLED", True)
+        from tools import process_registry as pr
+
+        reg = ProcessRegistry()
+        sess = _make_session(sid="proc_notif2", command="python server.py")
+        sess.output_buffer = "Server started\nAPI_TOKEN=ghp_abc123def456\nListening on :8080"
+        sess.watch_patterns = ["API_TOKEN"]
+        sess._watch_disabled = False
+        sess._watch_hits = 0
+        sess._watch_suppressed = 0
+        sess.watcher_platform = None
+        sess.watcher_chat_id = None
+        sess.watcher_user_id = None
+        sess.watcher_user_name = None
+        sess.watcher_thread_id = None
+        sess.watcher_message_id = None
+        sess.exited = False
+        reg._running[sess.id] = sess
+        monkeypatch.setattr(pr, "process_registry", reg)
+
+        reg._check_watch_patterns(sess, "API_TOKEN=ghp_abc123def456\n")
+
+        results = reg.drain_notifications()
+        assert len(results) == 1
+        _evt, text = results[0]
+        assert "ghp_abc123def456" not in text
+        assert "ghp_" not in text or "REDACTED" in text
+
+
+# ── Prefix resolution (Factory Droid-inspired task-ID prefixes) ──────────────
+
+
+class TestGetByPrefix:
+    """ProcessRegistry.get() resolves unique ID prefixes like git short hashes."""
+
+    def test_full_id_still_exact(self, registry):
+        s = _make_session(sid="proc_4dae56ca81f6")
+        registry._running[s.id] = s
+        assert registry.get("proc_4dae56ca81f6") is s
+
+    def test_unique_prefix_resolves(self, registry):
+        s = _make_session(sid="proc_4dae56ca81f6")
+        registry._running[s.id] = s
+        assert registry.get("proc_4dae5") is s
+
+    def test_bare_suffix_resolves(self, registry):
+        s = _make_session(sid="proc_4dae56ca81f6")
+        registry._running[s.id] = s
+        assert registry.get("4dae56") is s
+
+    def test_finished_sessions_also_resolve(self, registry):
+        s = _make_session(sid="proc_9bee77aa0011", exited=True, exit_code=0)
+        registry._finished[s.id] = s
+        assert registry.get("proc_9bee") is s
+
+    def test_ambiguous_prefix_returns_none(self, registry):
+        a = _make_session(sid="proc_4dae56ca81f6")
+        b = _make_session(sid="proc_4dae99999999")
+        registry._running[a.id] = a
+        registry._running[b.id] = b
+        assert registry.get("proc_4dae") is None
+
+    def test_too_short_prefix_returns_none(self, registry):
+        s = _make_session(sid="proc_4dae56ca81f6")
+        registry._running[s.id] = s
+        assert registry.get("proc_4da") is None
+        assert registry.get("4da") is None
+        assert registry.get("proc_") is None
+        assert registry.get("") is None
+
+    def test_exact_id_wins_over_prefix_scan(self, registry):
+        # A session whose FULL id happens to be a prefix of another's must
+        # resolve to itself, never trigger the ambiguity path.
+        short = _make_session(sid="proc_4dae")
+        long = _make_session(sid="proc_4dae56ca81f6")
+        registry._running[short.id] = short
+        registry._running[long.id] = long
+        assert registry.get("proc_4dae") is short
+
+    def test_no_match_returns_none(self, registry):
+        s = _make_session(sid="proc_4dae56ca81f6")
+        registry._running[s.id] = s
+        assert registry.get("proc_ffff") is None
+
+    def test_poll_accepts_prefix(self, registry):
+        s = _make_session(sid="proc_4dae56ca81f6", output="hello world")
+        registry._running[s.id] = s
+        result = registry.poll("4dae56ca")
+        assert result["session_id"] == "proc_4dae56ca81f6"
+        assert result["status"] == "running"

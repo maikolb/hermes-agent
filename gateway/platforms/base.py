@@ -1939,11 +1939,17 @@ _MEDIA_EXT_ALTERNATION = "|".join(
 # guard keeps multi-part extensions intact — for ``archive.tar.gz`` the
 # ``.`` after ``tar`` is followed by ``g``, so the match must extend to
 # ``.gz`` instead of stopping early at ``.tar``.
+# CJK full-width punctuation accepted as MEDIA path terminators, mirroring the
+# ASCII set in the looka below. Chinese-language agent output naturally writes
+# ``MEDIA:D:\path\早报.pdf（782.6 KB）`` or ``MEDIA:...pdf：内容`` — without
+# these, the lookahead fails and the attachment is silently dropped (#88038).
+_MEDIA_CJK_TERMINATORS = "（）〈〉《》：，。；！？、\u201c\u201d\u2018\u2019【】"
+
 MEDIA_TAG_CLEANUP_RE = re.compile(
     r'''[`"'*_]{0,3}MEDIA:\s*'''
     r'''(?P<path>`[^`\n]+?`|"[^"\n]+?"|'[^'\n]+?'|'''
     r'''(?:~/|/|[A-Za-z]:[/\\])\S+?(?:[^\S\n]+\S+?)*?\.(?:''' + _MEDIA_EXT_ALTERNATION + r'''))'''
-    r'''(?=[\s`"'*_,;:)\]}\[]|MEDIA:|\.(?:\s|$)|$)[`"'*_]{0,3}\.?''',
+    r'''(?=[\s`"'*_,;:)\]}\[''' + _MEDIA_CJK_TERMINATORS + r''']|MEDIA:|\.(?:\s|$)|$)[`"'*_]{0,3}\.?''',
     re.IGNORECASE,
 )
 
@@ -1979,7 +1985,7 @@ MEDIA_EXTENSIONLESS_TAG_RE = re.compile(
     r'''[`"'*_]{0,3}MEDIA:\s*'''
     r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
     r'''(?:~/|/|[A-Za-z]:[/\\])[^\s\n`"']+?)'''
-    r'''(?=[`"'\s,;:)\]}]|MEDIA:|$)'''
+    r'''(?=[`"'\s,;:)\]}''' + _MEDIA_CJK_TERMINATORS + r''']|MEDIA:|$)'''
     r'''[`"'*_]{0,3}\s*''',
     re.IGNORECASE,
 )
@@ -2375,10 +2381,24 @@ class MessageEvent:
 
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
+
+    # Whether this event may resolve gateway commands or pending control
+    # prompts. Kept before new delivery-only fields to preserve positional
+    # construction compatibility with the historical event contract.
+    # Proactive plugin events set this to False so untrusted payload text
+    # remains conversational input.
+    allow_gateway_control: bool = True
+
+    # Immutable delivery boundary produced by the durable agent finalizer.
+    # The adapter only consumes these fields; inbound platforms never set them.
+    delivery_checkpoint_session_id: Optional[str] = None
+    delivery_checkpoint_fence: Optional[Dict[str, str]] = None
+    delivery_checkpoint_root: Optional[str] = None
+    delivery_storage_home: Optional[str] = None
     
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""
-        return (self.text or "").lstrip().startswith("/")
+        return self.allow_gateway_control and (self.text or "").lstrip().startswith("/")
     
     def get_command(self) -> Optional[str]:
         """Extract command name if this is a command message."""
@@ -2938,6 +2958,27 @@ class BasePlatformAdapter(ABC):
     # set this to False to stay correct-by-default.
     supports_async_delivery: bool = True
 
+    # Whether ``send()`` reports success only after the complete input text has
+    # been accepted without silent truncation or content substitution.  Exact
+    # checkpoint/ledger acknowledgement is conservative-by-default: adapters
+    # must opt in after their long-message and formatting paths are audited.
+    supports_exact_text_delivery: bool = False
+
+    def can_deliver_exact_text(
+        self,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Return whether this concrete payload stays on an audited exact rail.
+
+        The class capability is intentionally insufficient for adapters whose
+        long-message path paginates or normalizes chunks. Such adapters
+        override this probe and opt long payloads back into best-effort.
+        """
+
+        del content, metadata
+        return bool(self.supports_exact_text_delivery)
+
     # Whether this adapter's ``send()`` splits long content into multiple
     # messages via ``truncate_message()``.  When True, the delivery router
     # (gateway/delivery.py) skips gateway-level truncation and lets the
@@ -3005,6 +3046,12 @@ class BasePlatformAdapter(ABC):
         self._reaction_handler: Optional[
             Callable[[Dict[str, Any]], Awaitable[None]]
         ] = None
+        # Normalized platform events cross this runner-owned boundary before
+        # plugin dispatch so authorization/profile state never lives in an SDK
+        # adapter. The second argument is an internal SessionSource.
+        self._platform_event_handler: Optional[
+            Callable[[Dict[str, Any], Any], Awaitable[None]]
+        ] = None
         # Optional hook (e.g. Telegram DM topic recovery) that rewrites
         # ``event.source.thread_id`` before session keying. Returns the
         # corrected thread_id or None to leave the source untouched.
@@ -3064,6 +3111,14 @@ class BasePlatformAdapter(ABC):
         self._post_delivery_callbacks: Dict[str, Any] = {}
         self._expected_cancelled_tasks: set[asyncio.Task] = set()
         self._busy_session_handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]] = None
+        # Owning profile for a multiplexed secondary adapter, installed by
+        # ``GatewayRunner._configure_profile_adapter``. Adapter-level session
+        # keys must carry the profile namespace, but ``source.profile`` is only
+        # stamped later by the runner's profile message handler — so at adapter
+        # ingress every bot in a multiplexed gateway would otherwise derive the
+        # same ``agent:main:`` key (see ``_session_key_profile``). ``None`` on a
+        # primary/single-profile adapter, which keeps the legacy namespace.
+        self._owner_profile: Optional[str] = None
         # Optional authorization check, registered by GatewayRunner. Used by
         # adapters that fetch external context (e.g. Slack thread history) to
         # mark senders not on the allowlist as unverified in LLM context,
@@ -3198,6 +3253,7 @@ class BasePlatformAdapter(ABC):
         self,
         chat_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        chat_id: Optional[str] = None,
     ) -> bool:
         """Whether this adapter supports native streaming-draft updates.
 
@@ -3206,6 +3262,10 @@ class BasePlatformAdapter(ABC):
         same ``draft_id`` and growing text.  Adapters that implement
         ``send_draft`` should return True here for the chat types where the
         platform supports it (Telegram restricts drafts to private DMs).
+
+        ``chat_id`` lets multi-platform adapters (relay) resolve the answer
+        through the chat's own negotiated capability profile instead of the
+        primary identity's; single-platform adapters may ignore it.
 
         Default implementation returns False.  Stream consumers fall back to
         the edit-based path (``send`` + ``edit_message``) when this returns
@@ -3439,7 +3499,15 @@ class BasePlatformAdapter(ABC):
         """
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(platform=self.platform.value, **kwargs)
+            # Multiplexed secondary adapters share the process-level runtime
+            # status file with the primary adapter.  Their runner stamps a
+            # namespaced key (``<profile>:<platform>``) so one profile's fatal
+            # state cannot overwrite another profile's healthy entry.
+            platform_key = (
+                getattr(self, "_runtime_status_platform_key", None)
+                or self.platform.value
+            )
+            write_runtime_status(platform=platform_key, **kwargs)
         except Exception as exc:
             # Use getattr so object.__new__(...) test harnesses that skip __init__
             # don't blow up on attribute access.
@@ -3508,6 +3576,7 @@ class BasePlatformAdapter(ABC):
         """
         from gateway.status import (
             acquire_scoped_lock,
+            scoped_lock_owner_label,
             take_over_scoped_lock_holder,
         )
 
@@ -3555,11 +3624,21 @@ class BasePlatformAdapter(ABC):
                     return True
 
         owner_pid = existing.get('pid') if isinstance(existing, dict) else None
-        message = (
-            f'{resource_desc} already in use'
-            + (f' (PID {owner_pid})' if owner_pid else '')
-            + '. Stop the other gateway first.'
-        )
+        # OOF-3: scoped locks are machine-global, so the holder can be a
+        # different profile's gateway. A bare PID gives an operator no way to
+        # tell WHICH profile owns the credential — name it when we can.
+        owner_profile = scoped_lock_owner_label(existing)
+        if owner_profile:
+            holder = f" by the '{owner_profile}' profile gateway"
+            holder += f" (PID {owner_pid})" if owner_pid else ""
+            remedy = (
+                f" Stop that gateway first "
+                f"(hermes --profile {owner_profile} gateway stop)."
+            )
+        else:
+            holder = f" (PID {owner_pid})" if owner_pid else ""
+            remedy = " Stop the other gateway first."
+        message = f"{resource_desc} already in use{holder}.{remedy}"
         logger.error('[%s] %s', self.name, message)
         self._set_fatal_error(f'{scope}_lock', message, retryable=True)
         return False
@@ -3582,7 +3661,7 @@ class BasePlatformAdapter(ABC):
     def is_connected(self) -> bool:
         """Check if adapter is currently connected."""
         return self._running
-    
+
     def set_message_handler(self, handler: MessageHandler) -> None:
         """
         Set the handler for incoming messages.
@@ -3591,6 +3670,19 @@ class BasePlatformAdapter(ABC):
         an optional response string.
         """
         self._message_handler = handler
+
+    def set_platform_event_handler(
+        self,
+        handler: Optional[Callable[[Dict[str, Any], Any], Awaitable[None]]],
+    ) -> None:
+        """Install the gateway-owned normalized platform-event boundary.
+
+        Adapters normalize SDK updates and pass only stable dictionaries plus an
+        internal ``SessionSource`` to this callback. The runner owns the final
+        authorization decision and plugin dispatch; an adapter with no callback
+        therefore fails closed instead of exposing pre-auth events.
+        """
+        self._platform_event_handler = handler
 
     def set_topic_recovery_fn(
         self,
@@ -3696,6 +3788,57 @@ class BasePlatformAdapter(ABC):
         thread replies without explicit mentions).
         """
         self._session_store = session_store
+
+    def set_owner_profile(self, profile_name: Optional[str]) -> None:
+        """Declare which multiplex profile owns this adapter.
+
+        Installed by ``GatewayRunner._configure_profile_adapter`` for secondary
+        profiles. Read by :meth:`_session_key_profile` so adapter-level keys
+        land in this profile's namespace instead of the shared ``agent:main:``.
+        """
+        name = (profile_name or "").strip() or None
+        self._owner_profile = None if name == "default" else name
+
+    def _session_key_profile(self, source: Optional[Any] = None) -> Optional[str]:
+        """Resolve the profile namespace for an adapter-derived session key.
+
+        Adapter ingress runs BEFORE the runner stamps ``source.profile``
+        (``_make_profile_message_handler``), so the session store's resolver
+        falls back to the *active* profile and every bot in a multiplexed
+        gateway derives the same ``agent:main:`` key. Batching dicts,
+        ``_active_sessions`` and the busy-session guard are keyed on that
+        string, so two profiles sharing a chat id — which is EVERY Telegram DM,
+        where ``chat.id`` is the user's own id — collide on one lane.
+
+        Resolution order:
+          1. ``source.profile`` when already stamped (relay/connector ingress).
+          2. ``self._owner_profile`` — this adapter's own credential owner.
+          3. The session store's resolver (active profile / no-multiplex None).
+
+        ``getattr`` throughout: adapters are routinely constructed without
+        ``BasePlatformAdapter.__init__`` (``object.__new__`` in tests, subclasses
+        that build their own state), so no attribute here may be assumed to
+        exist — see the ``object.__new__`` pitfall in AGENTS.md. Every candidate
+        is also type-checked: a duck-typed/mock session store returns a truthy
+        non-string from ``_resolve_profile_for_key``, which would otherwise be
+        interpolated straight into the key as ``agent:<MagicMock ...>:``.
+        """
+        for candidate in (
+            getattr(source, "profile", None) if source is not None else None,
+            getattr(self, "_owner_profile", None),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+        store = getattr(self, "_session_store", None)
+        resolver = getattr(store, "_resolve_profile_for_key", None) if store else None
+        if callable(resolver):
+            try:
+                resolved = resolver(source)
+            except Exception:
+                return None
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved
+        return None
     
     def _history_media_paths_for_session(self, session_key: str) -> Optional[set]:
         """Return media paths already delivered in prior turns of this session.
@@ -5424,21 +5567,32 @@ class BasePlatformAdapter(ABC):
         metadata: Any = None,
         max_retries: int = 2,
         base_delay: float = 2.0,
+        allow_content_fallback: bool = True,
     ) -> "SendResult":
         """
         Send a message with automatic retry for transient network errors.
 
-        On permanent failures (e.g. formatting / permission errors) falls back
-        to a plain-text version before giving up. If all attempts fail due to
-        network errors, sends the user a brief delivery-failure notice so they
-        know to retry rather than waiting indefinitely.
+        On permanent failures (e.g. formatting / permission errors) optionally
+        falls back to a plain-text version before giving up. Durable delivery
+        obligations disable that content-changing fallback so a successful send
+        can only acknowledge the exact bytes that were sealed. If all attempts
+        fail due to network errors, sends the user a brief delivery-failure
+        notice so they know to retry rather than waiting indefinitely.
         """
+
+        send_metadata = metadata
+        if not allow_content_fallback:
+            # Private transport contract: adapters with their own formatting
+            # fallback must not substitute content for a checkpoint-sealed
+            # exact delivery. Copy rather than mutate shared thread metadata.
+            send_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            send_metadata["_hermes_exact_text_delivery"] = True
 
         result = await self.send(
             chat_id=chat_id,
             content=content,
             reply_to=reply_to,
-            metadata=metadata,
+            metadata=send_metadata,
         )
 
         if result.success:
@@ -5472,7 +5626,7 @@ class BasePlatformAdapter(ABC):
                     chat_id=chat_id,
                     content=content,
                     reply_to=reply_to,
-                    metadata=metadata,
+                    metadata=send_metadata,
                 )
                 if result.success:
                     logger.info("[%s] Send succeeded on retry %d", self.name, attempt)
@@ -5483,17 +5637,30 @@ class BasePlatformAdapter(ABC):
                 if not (result.retryable or self._is_retryable_error(error_str)):
                     break  # error switched to non-transient — fall through to plain-text fallback
             else:
-                # All retries exhausted (loop completed without break) — notify user
+                # All retries exhausted (loop completed without break).  A
+                # durable exact-delivery obligation may only egress the sealed
+                # payload, so it must return the original failure without a
+                # content-changing notice.  Recovery owns any later retry.
+                if not allow_content_fallback:
+                    return result
+
+                # Best-effort callers retain the user-facing failure notice.
                 logger.error("[%s] Failed to deliver response after %d retries: %s", self.name, max_retries, error_str)
                 notice = (
                     "\u26a0\ufe0f Message delivery failed after multiple attempts. "
                     "Please try again \u2014 your request was processed but the response could not be sent."
                 )
                 try:
-                    await self.send(chat_id=chat_id, content=notice, reply_to=reply_to, metadata=metadata)
+                    await self.send(chat_id=chat_id, content=notice, reply_to=reply_to, metadata=send_metadata)
                 except Exception as notify_err:
                     logger.debug("[%s] Could not send delivery-failure notice: %s", self.name, notify_err)
                 return result
+
+        # A durable delivery obligation must never acknowledge content other
+        # than the exact payload sealed in its checkpoint/ledger.  Preserve the
+        # original failure so recovery can retry the original bytes.
+        if not allow_content_fallback:
+            return result
 
         # Non-network / post-retry formatting failure: try plain text as fallback
         logger.warning("[%s] Send failed: %s — trying plain-text fallback", self.name, error_str)
@@ -5501,7 +5668,7 @@ class BasePlatformAdapter(ABC):
             chat_id=chat_id,
             content=f"(Response formatting failed, plain text:)\n\n{content[:3500]}",
             reply_to=reply_to,
-            metadata=metadata,
+            metadata=send_metadata,
         )
         if not fallback_result.success:
             logger.error("[%s] Fallback send also failed: %s", self.name, fallback_result.error)
@@ -5939,7 +6106,8 @@ class BasePlatformAdapter(ABC):
         if not self._message_handler:
             return
 
-        coerce_plaintext_gateway_command(event)
+        if event.allow_gateway_control:
+            coerce_plaintext_gateway_command(event)
 
         # Telegram topic recovery only applies to private DM topic lanes. Do
         # not submit a no-op check for group/forum/channel traffic to the
@@ -5956,7 +6124,18 @@ class BasePlatformAdapter(ABC):
             event.source,
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            profile=self._session_key_profile(event.source),
         )
+        expected_session_key = str(
+            (event.metadata or {}).get("gateway_session_key") or ""
+        ).strip()
+        if expected_session_key and session_key != expected_session_key:
+            logger.warning(
+                "Dropping internally routed event: expected session=%s derived=%s",
+                expected_session_key,
+                session_key,
+            )
+            return
 
         # On-entry self-heal: if the adapter still has an _active_sessions
         # entry for this key but the owner task has already exited (done or
@@ -6042,7 +6221,7 @@ class BasePlatformAdapter(ABC):
             # Same shape as the /approve deadlock fix (PR #4926) — both
             # cases are "agent thread blocked on Event.wait, message must
             # reach the resolver before being treated as a new turn."
-            if not cmd:
+            if not cmd and event.allow_gateway_control:
                 try:
                     from tools import clarify_gateway as _clarify_mod
                     _has_text_clarify = (
@@ -6329,6 +6508,201 @@ class BasePlatformAdapter(ABC):
                 # metadata stays unmarked and progress bubbles remain
                 # thread-strict.
                 _final_thread_metadata = _mark_notify_metadata(_thread_metadata)
+                _suppress_remaining_final_delivery = False
+
+                # Seal/dedupe the durable text obligation before any optional
+                # TTS egress.  The row remains ``pending`` until the actual
+                # text send starts; therefore a crash during voice synthesis or
+                # voice-only playback can still recover the authoritative text.
+                _obligation_id = None
+                _ledger_outcome = None
+                _send_blocked = False
+                _attempt_token = ""
+                _checkpoint_session_id = str(
+                    getattr(event, "delivery_checkpoint_session_id", "") or ""
+                )
+                _checkpoint_root = getattr(event, "delivery_checkpoint_root", None)
+                _delivery_storage_home = getattr(
+                    event, "delivery_storage_home", None
+                )
+                _checkpoint_fence = getattr(
+                    event, "delivery_checkpoint_fence", None
+                )
+                _ordinary_response = not is_ephemeral_response and not str(
+                    event.text or ""
+                ).lstrip().startswith(("/", self.typed_command_prefix or "!"))
+                _fence_valid = bool(
+                    isinstance(_checkpoint_fence, dict)
+                    and _checkpoint_fence.get("turn_id")
+                    and _checkpoint_fence.get("deliverable_revision")
+                    and _checkpoint_fence.get("content_sha256")
+                    and _checkpoint_root
+                    and _delivery_storage_home
+                )
+                _checkpoint_delivery_candidate = bool(
+                    text_content and _checkpoint_session_id and _ordinary_response
+                )
+                # A reconnect may already have replaced the handler adapter.
+                # Bind capability and the exact obligation to the transport
+                # that would be used now, not to stale ``self``.
+                delivery_adapter = self._final_delivery_adapter(event.source)
+                try:
+                    _exact_text_supported = bool(
+                        delivery_adapter.can_deliver_exact_text(
+                            text_content,
+                            metadata=_final_thread_metadata,
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "[%s] Exact-text capability probe failed; using "
+                        "best-effort delivery",
+                        self.name,
+                        exc_info=True,
+                    )
+                    _exact_text_supported = False
+                _durable_final = bool(
+                    _checkpoint_delivery_candidate and _exact_text_supported
+                )
+                _best_effort_checkpoint = bool(
+                    _checkpoint_delivery_candidate
+                    and _fence_valid
+                    and not _exact_text_supported
+                )
+                if _durable_final:
+                    from gateway.delivery_ledger import ledger_enabled
+
+                    if not await asyncio.to_thread(ledger_enabled):
+                        logger.info(
+                            "[%s] Durable delivery ledger explicitly disabled; "
+                            "using legacy best-effort final delivery",
+                            self.name,
+                        )
+                        _durable_final = False
+                        _best_effort_checkpoint = bool(_fence_valid)
+
+                if _durable_final:
+                    try:
+                        from agent.turn_checkpoint import (
+                            bind_checkpoint_delivery_obligation,
+                            update_checkpoint_delivery,
+                        )
+                        from gateway.delivery_ledger import (
+                            compute_obligation_id,
+                            record_obligation,
+                        )
+
+                        if not _fence_valid:
+                            raise RuntimeError(
+                                "durable final is missing its checkpoint namespace/fence"
+                            )
+                        _obligation_id = compute_obligation_id(
+                            session_key,
+                            "checkpoint:"
+                            f"{_checkpoint_fence['turn_id']}:"
+                            f"{_checkpoint_fence['deliverable_revision']}",
+                            text_content,
+                        )
+                        _delivery_route = {
+                            "platform": _platform_name(event.source.platform),
+                            "chat_id": str(event.source.chat_id),
+                            "thread_id": (
+                                str(event.source.thread_id)
+                                if getattr(event.source, "thread_id", None) is not None
+                                else ""
+                            ),
+                        }
+                        if not await asyncio.to_thread(
+                            bind_checkpoint_delivery_obligation,
+                            _checkpoint_session_id,
+                            obligation_id=_obligation_id,
+                            turn_id=_checkpoint_fence["turn_id"],
+                            deliverable_revision=_checkpoint_fence[
+                                "deliverable_revision"
+                            ],
+                            content_sha256=_checkpoint_fence["content_sha256"],
+                            routing=_delivery_route,
+                            checkpoint_root=_checkpoint_root,
+                        ):
+                            raise RuntimeError(
+                                "checkpoint rejected delivery obligation binding"
+                            )
+                        _ledger_outcome = await asyncio.to_thread(
+                            record_obligation,
+                            obligation_id=_obligation_id,
+                            session_key=session_key,
+                            platform=_delivery_route["platform"],
+                            chat_id=_delivery_route["chat_id"],
+                            thread_id=_delivery_route["thread_id"] or None,
+                            content=text_content,
+                            session_id=_checkpoint_session_id,
+                            checkpoint_turn_id=_checkpoint_fence["turn_id"],
+                            checkpoint_revision=_checkpoint_fence[
+                                "deliverable_revision"
+                            ],
+                            checkpoint_content_sha256=_checkpoint_fence[
+                                "content_sha256"
+                            ],
+                            storage_home=_delivery_storage_home,
+                        )
+                        if _ledger_outcome == "already_delivered":
+                            await asyncio.to_thread(
+                                update_checkpoint_delivery,
+                                _checkpoint_session_id,
+                                obligation_id=_obligation_id,
+                                status="delivered",
+                                turn_id=_checkpoint_fence["turn_id"],
+                                deliverable_revision=_checkpoint_fence[
+                                    "deliverable_revision"
+                                ],
+                                content_sha256=_checkpoint_fence["content_sha256"],
+                                checkpoint_root=_checkpoint_root,
+                            )
+                            result = SendResult(
+                                success=True,
+                                raw_response={"deduplicated": True},
+                            )
+                            _send_blocked = True
+                        elif _ledger_outcome == "existing_in_flight":
+                            result = SendResult(
+                                success=False,
+                                error=(
+                                    "durable delivery is already pending or "
+                                    "ambiguous; duplicate send suppressed"
+                                ),
+                                raw_response={
+                                    "send_attempted": False,
+                                    "deduplicated": True,
+                                },
+                            )
+                            _send_blocked = True
+                        elif _ledger_outcome != "created":
+                            raise RuntimeError(
+                                "delivery ledger returned an invalid record outcome"
+                            )
+                    except Exception as exc:
+                        logger.error(
+                            "durable final was not sent because its delivery "
+                            "boundary could not be sealed",
+                            exc_info=True,
+                        )
+                        _runner = getattr(self, "gateway_runner", None)
+                        _mark_recovery = getattr(
+                            _runner,
+                            "_mark_delivery_checkpoint_recovery_pending",
+                            None,
+                        )
+                        if callable(_mark_recovery):
+                            await _mark_recovery(
+                                session_key,
+                                getattr(event.source, "platform", None),
+                            )
+                        result = SendResult(
+                            success=False,
+                            error=str(exc),
+                            raw_response={"send_attempted": False},
+                        )
+                        _send_blocked = True
 
                 # Auto-TTS: if voice message, generate audio FIRST (before sending text)
                 # Gated via ``_should_auto_tts_for_chat``: fires when the chat has
@@ -6339,7 +6713,8 @@ class BasePlatformAdapter(ABC):
                 _tts_path = None
                 _tts_paths: List[str] = []
                 _tts_requested_path = None
-                if (self._should_auto_tts_for_chat(event.source.chat_id)
+                if (not _send_blocked
+                        and self._should_auto_tts_for_chat(event.source.chat_id)
                         and event.message_type == MessageType.VOICE
                         and text_content
                         and not media_files
@@ -6400,6 +6775,7 @@ class BasePlatformAdapter(ABC):
                             and self.platform == Platform.TELEGRAM
                             and text_content
                             and text_content[:1024] == text_content
+                            and not _durable_final
                         ):
                             telegram_tts_caption = text_content
                         tts_result = await self.play_tts(
@@ -6428,12 +6804,62 @@ class BasePlatformAdapter(ABC):
                         except OSError:
                             pass
 
+                if _best_effort_checkpoint and _tts_caption_delivered:
+                    try:
+                        from agent.turn_checkpoint import (
+                            update_checkpoint_best_effort_delivery,
+                        )
+
+                        await asyncio.to_thread(
+                            update_checkpoint_best_effort_delivery,
+                            _checkpoint_session_id,
+                            reported_success=True,
+                            turn_id=_checkpoint_fence["turn_id"],
+                            deliverable_revision=_checkpoint_fence[
+                                "deliverable_revision"
+                            ],
+                            content_sha256=_checkpoint_fence["content_sha256"],
+                            checkpoint_root=_checkpoint_root,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "best-effort TTS caption outcome could not be recorded",
+                            exc_info=True,
+                        )
+                    _best_effort_checkpoint = False
+
                 # Send the text portion. A reconnect may have replaced this
                 # adapter while its in-flight handler was still producing a
                 # final response; that response is a new message, so resolve
                 # the current transport before sending it.
                 if text_content and not _tts_caption_delivered:
-                    delivery_adapter = self._final_delivery_adapter(event.source)
+                    current_delivery_adapter = self._final_delivery_adapter(
+                        event.source
+                    )
+                    if _durable_final and not _send_blocked:
+                        try:
+                            current_exact_supported = bool(
+                                current_delivery_adapter.can_deliver_exact_text(
+                                    text_content,
+                                    metadata=_final_thread_metadata,
+                                )
+                            )
+                        except Exception:
+                            current_exact_supported = False
+                        if not current_exact_supported:
+                            logger.error(
+                                "[%s] Durable final withheld because the active "
+                                "transport no longer proves exact full-text "
+                                "delivery",
+                                current_delivery_adapter.name,
+                            )
+                            result = SendResult(
+                                success=False,
+                                error="active adapter exact capability unavailable",
+                                raw_response={"send_attempted": False},
+                            )
+                            _send_blocked = True
+                    delivery_adapter = current_delivery_adapter
                     logger.info(
                         "[%s] Sending response (%d chars) to %s",
                         delivery_adapter.name,
@@ -6441,78 +6867,171 @@ class BasePlatformAdapter(ABC):
                         event.source.chat_id,
                     )
                     _reply_anchor = _reply_anchor_for_event(event)
-                    # Delivery-obligation ledger: durably record the final
-                    # response BEFORE the send attempt so a gateway crash
-                    # between finalize and platform ACK can redeliver it on
-                    # the next boot instead of silently losing the turn's
-                    # output (#58818). Best-effort at every step — ledger
-                    # trouble must never block or delay the actual send.
-                    # Slash-command and ephemeral replies are cheap to
-                    # regenerate and are not recorded.
-                    _obligation_id = None
-                    try:
-                        from gateway.session_context import get_session_env
-
-                        _checkpoint_session_id = get_session_env(
-                            "HERMES_SESSION_ID", ""
-                        )
-                    except Exception:
-                        _checkpoint_session_id = ""
-                    if not is_ephemeral_response and not str(
-                        event.text or ""
-                    ).lstrip().startswith(("/", self.typed_command_prefix or "!")):
-                        try:
-                            from gateway.delivery_ledger import (
-                                compute_obligation_id,
-                                ledger_enabled,
-                                mark_attempting,
-                                record_obligation,
-                            )
-
-                            if await asyncio.to_thread(ledger_enabled):
-                                _obligation_id = compute_obligation_id(
-                                    session_key,
-                                    str(getattr(event, "message_id", "") or ""),
-                                    text_content,
-                                )
-                                await asyncio.to_thread(
-                                    record_obligation,
-                                    obligation_id=_obligation_id,
-                                    session_key=session_key,
-                                    platform=str(
-                                        getattr(event.source.platform, "value",
-                                                event.source.platform)
-                                    ),
-                                    chat_id=event.source.chat_id,
-                                    thread_id=getattr(event.source, "thread_id", None),
-                                    content=text_content,
-                                    session_id=_checkpoint_session_id or None,
-                                )
-                                await asyncio.to_thread(mark_attempting, _obligation_id)
-                        except Exception:
-                            logger.debug("delivery ledger record failed", exc_info=True)
-                            _obligation_id = None
-                    if _checkpoint_session_id:
+                    if _durable_final and not _send_blocked:
                         try:
                             from agent.turn_checkpoint import update_checkpoint_delivery
+                            from gateway.delivery_ledger import (
+                                mark_claimed,
+                                mark_claimed_attempting,
+                                mark_deferred,
+                            )
 
-                            update_checkpoint_delivery(
+                            _attempt_token = await asyncio.to_thread(
+                                mark_claimed,
+                                _obligation_id,
+                                storage_home=_delivery_storage_home,
+                            )
+                            if not _attempt_token:
+                                raise RuntimeError(
+                                    "delivery obligation could not enter claimed"
+                                )
+                            if not await asyncio.to_thread(
+                                update_checkpoint_delivery,
                                 _checkpoint_session_id,
-                                obligation_id=_obligation_id or "",
-                                status="attempting" if _obligation_id else "pending",
+                                obligation_id=_obligation_id,
+                                status="attempting",
+                                turn_id=_checkpoint_fence["turn_id"],
+                                deliverable_revision=_checkpoint_fence[
+                                    "deliverable_revision"
+                                ],
+                                content_sha256=_checkpoint_fence["content_sha256"],
+                                checkpoint_root=_checkpoint_root,
+                            ):
+                                await asyncio.to_thread(
+                                    mark_deferred,
+                                    _obligation_id,
+                                    "checkpoint handoff rejected before send",
+                                    attempt_token=_attempt_token,
+                                    storage_home=_delivery_storage_home,
+                                )
+                                raise RuntimeError(
+                                    "checkpoint rejected the delivery handoff"
+                                )
+                            # The checkpoint FileLock above may outlive an
+                            # adapter reconnect. Resolve and probe the live
+                            # transport once more before crossing the local
+                            # network-attempt boundary.
+                            latest_delivery_adapter = self._final_delivery_adapter(
+                                event.source
+                            )
+                            if not latest_delivery_adapter.can_deliver_exact_text(
+                                text_content,
+                                metadata=_final_thread_metadata,
+                            ):
+                                raise RuntimeError(
+                                    "active adapter exact capability unavailable "
+                                    "after checkpoint handoff"
+                                )
+                            delivery_adapter = latest_delivery_adapter
+                            if not await asyncio.to_thread(
+                                mark_claimed_attempting,
+                                _obligation_id,
+                                attempt_token=_attempt_token,
+                                storage_home=_delivery_storage_home,
+                            ):
+                                raise RuntimeError(
+                                    "delivery obligation lost its pre-network claim"
+                                )
+                        except asyncio.CancelledError:
+                            # Cancellation before ``_send_with_retry`` is
+                            # proven pre-network. Release either ``claimed`` or
+                            # the just-entered ``attempting`` state under the
+                            # same token so this live PID cannot strand it.
+                            if _attempt_token:
+                                mark_deferred(
+                                    _obligation_id,
+                                    "delivery task cancelled before send",
+                                    attempt_token=_attempt_token,
+                                    refund_attempt=True,
+                                    storage_home=_delivery_storage_home,
+                                )
+                            raise
+                        except Exception as exc:
+                            if _attempt_token:
+                                await asyncio.to_thread(
+                                    mark_deferred,
+                                    _obligation_id,
+                                    "pre-network delivery handoff failed",
+                                    attempt_token=_attempt_token,
+                                    refund_attempt=True,
+                                    storage_home=_delivery_storage_home,
+                                )
+                            logger.error(
+                                "durable final was not sent because its delivery "
+                                "attempt could not be sealed",
+                                exc_info=True,
+                            )
+                            result = SendResult(
+                                success=False,
+                                error=str(exc),
+                                raw_response={"send_attempted": False},
+                            )
+                            _send_blocked = True
+
+                    if not _send_blocked:
+                        try:
+                            result = await delivery_adapter._send_with_retry(
+                                chat_id=event.source.chat_id,
+                                content=text_content,
+                                reply_to=_reply_anchor,
+                                metadata=_final_thread_metadata,
+                                allow_content_fallback=not _durable_final,
+                            )
+                        except Exception as send_exc:
+                            if not _durable_final:
+                                raise
+                            # The remote outcome is unknowable once the adapter
+                            # boundary was entered.  Convert the exception into
+                            # an explicit attempted failure so the CAS ledger
+                            # seals it as ambiguous-on-restart; do not escape to
+                            # the generic handler, which would emit a second,
+                            # untracked error message.
+                            logger.error(
+                                "[%s] Durable final send raised after handoff: %s",
+                                delivery_adapter.name,
+                                send_exc,
+                                exc_info=True,
+                            )
+                            result = SendResult(
+                                success=False,
+                                error=str(send_exc),
+                                raw_response={"send_attempted": True},
+                            )
+                    _record_delivery(result)
+                    if _best_effort_checkpoint:
+                        try:
+                            from agent.turn_checkpoint import (
+                                update_checkpoint_best_effort_delivery,
+                            )
+
+                            await asyncio.to_thread(
+                                update_checkpoint_best_effort_delivery,
+                                _checkpoint_session_id,
+                                reported_success=bool(
+                                    getattr(result, "success", False)
+                                ),
+                                turn_id=_checkpoint_fence["turn_id"],
+                                deliverable_revision=_checkpoint_fence[
+                                    "deliverable_revision"
+                                ],
+                                content_sha256=_checkpoint_fence[
+                                    "content_sha256"
+                                ],
+                                checkpoint_root=_checkpoint_root,
                             )
                         except Exception:
-                            logger.debug(
-                                "turn checkpoint delivery handoff failed", exc_info=True
+                            logger.warning(
+                                "best-effort delivery outcome could not be recorded",
+                                exc_info=True,
                             )
-                    result = await delivery_adapter._send_with_retry(
-                        chat_id=event.source.chat_id,
-                        content=text_content,
-                        reply_to=_reply_anchor,
-                        metadata=_final_thread_metadata,
-                    )
-                    _record_delivery(result)
-                    if _obligation_id is not None:
+                    if _durable_final and (
+                        _send_blocked or not getattr(result, "success", False)
+                    ):
+                        # A duplicate/in-flight/failed durable text obligation
+                        # is one delivery unit. Never leak its attachments after
+                        # the text boundary has deliberately suppressed egress.
+                        _suppress_remaining_final_delivery = True
+                    if _obligation_id is not None and not _send_blocked:
                         try:
                             from gateway.delivery_ledger import (
                                 mark_deferred,
@@ -6521,35 +7040,52 @@ class BasePlatformAdapter(ABC):
                                 send_was_not_attempted,
                             )
 
+                            _ledger_transitioned = False
+                            _checkpoint_status = "failed"
                             if getattr(result, "success", False):
-                                await asyncio.to_thread(mark_delivered, _obligation_id)
+                                _ledger_transitioned = await asyncio.to_thread(
+                                    mark_delivered,
+                                    _obligation_id,
+                                    attempt_token=_attempt_token,
+                                    storage_home=_delivery_storage_home,
+                                )
+                                _checkpoint_status = "delivered"
+                            elif send_was_not_attempted(result):
+                                _ledger_transitioned = await asyncio.to_thread(
+                                    mark_deferred,
+                                    _obligation_id,
+                                    str(getattr(result, "error", "") or ""),
+                                    attempt_token=_attempt_token,
+                                    refund_attempt=True,
+                                    storage_home=_delivery_storage_home,
+                                )
+                                _checkpoint_status = "deferred"
                             else:
-                                await asyncio.to_thread(
+                                _ledger_transitioned = await asyncio.to_thread(
                                     mark_failed,
                                     _obligation_id,
                                     str(getattr(result, "error", "") or ""),
+                                    attempt_token=_attempt_token,
+                                    storage_home=_delivery_storage_home,
+                                )
+                            if _ledger_transitioned and _durable_final:
+                                await asyncio.to_thread(
+                                    update_checkpoint_delivery,
+                                    _checkpoint_session_id,
+                                    obligation_id=_obligation_id,
+                                    status=_checkpoint_status,
+                                    turn_id=_checkpoint_fence["turn_id"],
+                                    deliverable_revision=_checkpoint_fence[
+                                        "deliverable_revision"
+                                    ],
+                                    content_sha256=_checkpoint_fence[
+                                        "content_sha256"
+                                    ],
+                                    checkpoint_root=_checkpoint_root,
                                 )
                         except Exception:
-                            logger.debug(
-                                "delivery ledger update failed", exc_info=True
-                            )
-
-                    if _checkpoint_session_id:
-                        try:
-                            from agent.turn_checkpoint import update_checkpoint_delivery
-
-                            update_checkpoint_delivery(
-                                _checkpoint_session_id,
-                                obligation_id=_obligation_id or "",
-                                status=(
-                                    "delivered"
-                                    if getattr(result, "success", False)
-                                    else "failed"
-                                ),
-                            )
-                        except Exception:
-                            logger.debug(
-                                "turn checkpoint delivery result update failed",
+                            logger.error(
+                                "durable delivery result could not be sealed",
                                 exc_info=True,
                             )
 
@@ -6569,6 +7105,16 @@ class BasePlatformAdapter(ABC):
 
                 # Human-like pacing delay between text and media
                 human_delay = self._get_human_delay()
+
+                if _suppress_remaining_final_delivery:
+                    logger.warning(
+                        "[%s] Suppressing final attachments because the durable "
+                        "text obligation was not newly delivered",
+                        self.name,
+                    )
+                    images = []
+                    media_files = []
+                    local_files = []
 
                 # Send extracted images as native attachments
                 if images:
@@ -6787,7 +7333,7 @@ class BasePlatformAdapter(ABC):
                 outcome = ProcessingOutcome.FAILURE
             await self._run_processing_hook("on_processing_complete", event, outcome)
             raise
-        except Exception as e:
+        except BaseException as e:
             await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
             logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
             # Send the error to the user so they aren't left with radio silence
@@ -6809,6 +7355,14 @@ class BasePlatformAdapter(ABC):
                     "[%s] Failed to send error notification to user: %s",
                     self.name, notify_err, exc_info=True,
                 )  # Last resort — don't let error reporting crash the handler
+            # Preserve shutdown semantics: SystemExit/KeyboardInterrupt must
+            # still propagate after the user-facing failure notification, so
+            # the loop's own signal handling can shut down cleanly. Other
+            # BaseExceptions (e.g. GeneratorExit) are contained like ordinary
+            # failures — this handler is fire-and-forget, so swallowing them
+            # here prevents "Task exception was never retrieved" radio silence.
+            if isinstance(e, (SystemExit, KeyboardInterrupt)):
+                raise
         finally:
             # Stop typing before any deferred callback work.  Post-delivery
             # callbacks may perform platform I/O; a stuck callback must not
@@ -7050,8 +7604,11 @@ class BasePlatformAdapter(ABC):
 
         # Resolve profile from configured routes (None when no match / no routes)
         profile = None
+        profile_route_rejected = False
         runner = getattr(self, "gateway_runner", None)
         if runner is not None:
+            from gateway.profile_routing import ProfileRouteRejected
+
             try:
                 profile = runner._profile_name_for_source(
                     SessionSource(
@@ -7072,6 +7629,8 @@ class BasePlatformAdapter(ABC):
                         message_id=str(message_id) if message_id else None,
                     )
                 )
+            except ProfileRouteRejected:
+                profile_route_rejected = True
             except Exception:
                 logger.warning(
                     "Profile resolution failed for %s/%s, defaulting to active profile",
@@ -7103,6 +7662,11 @@ class BasePlatformAdapter(ABC):
         # SessionSource.to_dict(). The live receiving adapter is authoritative
         # for this turn even when profile_routes selects a different runtime.
         source._transport_adapter_ref = weakref.ref(self)
+        # Keep this transport-only fail-closed signal out of SessionSource
+        # serialization/session identity. The shared gateway handler consumes it
+        # before auth, hooks, or session setup, so every adapter drops matched
+        # routes to unserved profiles consistently without surfacing HTTP 500s.
+        source.profile_route_rejected = profile_route_rejected
         return source
     
     @abstractmethod
@@ -7115,6 +7679,26 @@ class BasePlatformAdapter(ABC):
         - type: "dm", "group", "channel"
         """
         pass
+
+    def toolsets_for_source(self, source: "SessionSource") -> Optional[List[str]]:
+        """Per-source toolset override for agent runs triggered by this adapter.
+
+        Return a list of configurable toolset keys (e.g. ``["terminal",
+        "file", "web"]``) to REPLACE the platform-level toolset resolution
+        for this specific source, or ``None`` to use the normal
+        ``platform_toolsets.<platform>`` resolution (the default).
+
+        The gateway validates the returned list through the same
+        ``_get_platform_tools`` path as platform-level config, so unknown or
+        platform-restricted toolset names are dropped rather than trusted.
+
+        Currently used by the webhook adapter so individual routes can pin
+        their own toolsets (a trusted local monitoring route can get
+        ``terminal`` without widening every webhook route's default-safe
+        toolset). See ``platforms.webhook.extra.routes.<name>.toolsets`` and
+        the ``toolsets`` key in ``webhook_subscriptions.json``.
+        """
+        return None
     
     def format_message(self, content: str) -> str:
         """

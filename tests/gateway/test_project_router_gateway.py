@@ -962,7 +962,8 @@ async def test_allowed_context_is_resolved_before_session_and_reaches_env(monkey
     runner._is_telegram_topic_lane = lambda source: False
 
     class Store:
-        async def get_or_create_session(self, source):
+        async def get_or_create_session(self, source, *, touch_activity=True):
+            assert touch_activity is True
             order.append("session")
             return entry
 
@@ -1010,7 +1011,8 @@ async def test_missing_bound_board_is_ensured_before_session_creation(monkeypatc
             order.append("ensure_board")
 
     class Store:
-        async def get_or_create_session(self, source):
+        async def get_or_create_session(self, source, *, touch_activity=True):
+            assert touch_activity is True
             order.append("session")
             raise StopAtSession()
 

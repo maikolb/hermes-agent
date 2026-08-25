@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,8 +12,12 @@ from agent.turn_checkpoint import (
     CheckpointIntegrityError,
     CheckpointWriteError,
     TurnCheckpointStore,
+    bind_checkpoint_delivery_obligation,
+    checkpoint_delivery_fence,
+    checkpoint_delivery_fence_matches,
     checkpoint_is_resumable,
     transcript_hash,
+    update_checkpoint_delivery,
 )
 
 
@@ -48,6 +53,443 @@ def test_start_turn_writes_versioned_checksumbound_redacted_checkpoint(tmp_path)
     assert state["transcript"]["current_hash"] == transcript_hash(messages)
     assert state["payload_sha256"]
     assert store.load("session-1") == state
+
+
+def test_delivery_update_uses_explicit_profile_checkpoint_root(
+    tmp_path, monkeypatch
+):
+    profile_home = tmp_path / "profiles" / "worker"
+    checkpoint_root = profile_home / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    route = {"platform": "telegram", "chat_id": "chat-1", "thread_id": "topic-9"}
+    store.start_turn(
+        "session-1",
+        "turn-1",
+        "deliver",
+        _messages("deliver"),
+        routing=route,
+    )
+    state = store.mark_deliverable(
+        "session-1",
+        "profile response",
+        verification_pending=False,
+        verification_kind="ordinary_final",
+    )
+    fence = checkpoint_delivery_fence(state)
+    assert fence is not None
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "wrong-default-home"))
+
+    assert update_checkpoint_delivery(
+        "session-1",
+        obligation_id="obligation-1",
+        status="attempting",
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+    assert update_checkpoint_delivery(
+        "session-1",
+        obligation_id="obligation-1",
+        status="delivered",
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+
+    delivered = store.load("session-1")
+    assert delivered["delivery"] == {
+        "obligation_id": "obligation-1",
+        "status": "delivered",
+    }
+    assert not (tmp_path / "wrong-default-home" / "sessions").exists()
+
+
+def test_delivery_obligation_binding_is_durable_idempotent_and_first_bind_wins(
+    tmp_path, monkeypatch
+):
+    profile_home = tmp_path / "profiles" / "worker"
+    checkpoint_root = profile_home / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    route = {"platform": "telegram", "chat_id": "chat-1", "thread_id": "topic-9"}
+    store.start_turn(
+        "session-bind",
+        "turn-bind",
+        "deliver",
+        _messages("deliver"),
+        routing=route,
+    )
+    composed = store.mark_deliverable(
+        "session-bind",
+        "bound response",
+        verification_pending=False,
+        verification_kind="ordinary_final",
+    )
+    fence = checkpoint_delivery_fence(composed)
+    assert fence is not None
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "wrong-default-home"))
+
+    def bind(candidate: str) -> tuple[str, bool]:
+        return candidate, bind_checkpoint_delivery_obligation(
+            "session-bind",
+            obligation_id=candidate,
+            routing=route,
+            checkpoint_root=checkpoint_root,
+            **fence,
+        )
+
+    outcomes = dict(bind(candidate) for candidate in ("obligation-a", "obligation-b"))
+
+    assert sum(outcomes.values()) == 1
+    winner = next(key for key, accepted in outcomes.items() if accepted)
+    loser = next(key for key, accepted in outcomes.items() if not accepted)
+    bound = store.load("session-bind")
+    bound_revision = bound["revision"]
+    assert bound["delivery"]["obligation_id"] == winner
+    assert bound["delivery"]["status"] == "none"
+    assert len(bound["delivery"]["route_sha256"]) == 64
+
+    assert bind_checkpoint_delivery_obligation(
+        "session-bind",
+        obligation_id=winner,
+        routing=route,
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+    assert store.load("session-bind")["revision"] == bound_revision
+    assert not bind_checkpoint_delivery_obligation(
+        "session-bind",
+        obligation_id=loser,
+        routing=route,
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+    assert store.load("session-bind")["revision"] == bound_revision
+
+    assert checkpoint_delivery_fence_matches(
+        "session-bind",
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+    assert checkpoint_delivery_fence_matches(
+        "session-bind",
+        obligation_id=winner,
+        routing=route,
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+    assert not checkpoint_delivery_fence_matches(
+        "session-bind",
+        obligation_id=loser,
+        routing=route,
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+    assert not bind_checkpoint_delivery_obligation(
+        "session-bind",
+        obligation_id=winner,
+        routing=route,
+        checkpoint_root=checkpoint_root,
+        **{**fence, "content_sha256": "0" * 64},
+    )
+    assert not bind_checkpoint_delivery_obligation(
+        "session-bind",
+        obligation_id=winner,
+        routing=route,
+        checkpoint_root=checkpoint_root,
+        **{**fence, "turn_id": "stale-turn"},
+    )
+    assert not update_checkpoint_delivery(
+        "session-bind",
+        obligation_id=loser,
+        status="attempting",
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+    final_delivery = store.load("session-bind")["delivery"]
+    assert final_delivery["obligation_id"] == winner
+    assert final_delivery["status"] == "none"
+    assert len(final_delivery["route_sha256"]) == 64
+    assert not (tmp_path / "wrong-default-home" / "sessions").exists()
+
+
+@pytest.mark.parametrize(
+    "wrong_route",
+    [
+        {"platform": "slack", "chat_id": "chat-1", "thread_id": "topic-9"},
+        {"platform": "telegram", "chat_id": "chat-2", "thread_id": "topic-9"},
+        {"platform": "telegram", "chat_id": "chat-1", "thread_id": "topic-10"},
+    ],
+)
+def test_delivery_obligation_rejects_cross_route_binding(tmp_path, wrong_route):
+    checkpoint_root = tmp_path / "profile" / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    route = {"platform": "telegram", "chat_id": "chat-1", "thread_id": "topic-9"}
+    store.start_turn(
+        "session-route",
+        "turn-route",
+        "deliver",
+        _messages("deliver"),
+        routing=route,
+    )
+    state = store.mark_deliverable(
+        "session-route", "routed response", verification_pending=False
+    )
+    fence = checkpoint_delivery_fence(state)
+    assert fence is not None
+
+    assert not bind_checkpoint_delivery_obligation(
+        "session-route",
+        obligation_id="wrong-route-obligation",
+        routing=wrong_route,
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+    assert store.load("session-route")["delivery"]["obligation_id"] is None
+
+    assert bind_checkpoint_delivery_obligation(
+        "session-route",
+        obligation_id="correct-route-obligation",
+        routing=route,
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+    assert not checkpoint_delivery_fence_matches(
+        "session-route",
+        obligation_id="correct-route-obligation",
+        routing=wrong_route,
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+
+
+def test_delivery_obligation_cas_reloads_after_competing_bind(tmp_path, monkeypatch):
+    checkpoint_root = tmp_path / "profile" / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    competing_store = TurnCheckpointStore(checkpoint_root)
+    route = {"platform": "telegram", "chat_id": "chat-1", "thread_id": "topic-9"}
+    store.start_turn(
+        "session-race",
+        "turn-race",
+        "deliver",
+        _messages("deliver"),
+        routing=route,
+    )
+    state = store.mark_deliverable(
+        "session-race", "routed response", verification_pending=False
+    )
+    fence = checkpoint_delivery_fence(state)
+    assert fence is not None
+    original_write = store._write
+    injected = False
+
+    def write_after_competing_bind(candidate, *, precommit=None):
+        nonlocal injected
+        if not injected:
+            injected = True
+            assert competing_store.bind_delivery_obligation(
+                "session-race",
+                obligation_id="winner",
+                routing=route,
+                **fence,
+            ) is not None
+        return original_write(candidate, precommit=precommit)
+
+    monkeypatch.setattr(store, "_write", write_after_competing_bind)
+    assert store.bind_delivery_obligation(
+        "session-race",
+        obligation_id="loser",
+        routing=route,
+        **fence,
+    ) is None
+    delivery = competing_store.load("session-race")["delivery"]
+    assert delivery["obligation_id"] == "winner"
+    assert len(delivery["route_sha256"]) == 64
+
+
+def test_fence_requires_binding_when_exact_obligation_is_requested(tmp_path):
+    checkpoint_root = tmp_path / "profile" / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    route = {"platform": "telegram", "chat_id": "chat", "thread_id": ""}
+    store.start_turn(
+        "session-unbound",
+        "turn-unbound",
+        "deliver",
+        _messages("deliver"),
+        routing=route,
+    )
+    state = store.mark_deliverable(
+        "session-unbound",
+        "unbound response",
+        verification_pending=False,
+    )
+    fence = checkpoint_delivery_fence(state)
+    assert fence is not None
+
+    assert checkpoint_delivery_fence_matches(
+        "session-unbound",
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+    assert not checkpoint_delivery_fence_matches(
+        "session-unbound",
+        obligation_id="not-bound",
+        routing=route,
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+
+
+def test_stream_delivery_uses_explicit_profile_checkpoint_root(tmp_path, monkeypatch):
+    from agent.turn_checkpoint import update_checkpoint_stream_delivery
+
+    profile_home = tmp_path / "profiles" / "worker"
+    checkpoint_root = profile_home / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    route = {"platform": "slack", "chat_id": "C1", "thread_id": ""}
+    store.start_turn(
+        "session-stream",
+        "turn-stream",
+        "deliver",
+        _messages("deliver"),
+        routing=route,
+    )
+    state = store.mark_deliverable(
+        "session-stream",
+        "streamed response",
+        verification_pending=False,
+        verification_kind="ordinary_final",
+    )
+    fence = checkpoint_delivery_fence(state)
+    assert fence is not None
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "wrong-default-home"))
+
+    assert update_checkpoint_stream_delivery(
+        "session-stream",
+        final_response="streamed response",
+        **fence,
+        checkpoint_root=checkpoint_root,
+    )
+    state = store.load("session-stream")
+    assert state["phase"] == "delivered"
+    assert state["delivery"]["status"] == "delivered"
+    assert not (tmp_path / "wrong-default-home" / "sessions").exists()
+
+
+def test_late_stream_ack_cannot_close_new_turn_with_same_text(tmp_path):
+    from agent.turn_checkpoint import update_checkpoint_stream_delivery
+
+    checkpoint_root = tmp_path / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    route = {"platform": "slack", "chat_id": "C1", "thread_id": ""}
+    store.start_turn(
+        "session-stream", "turn-1", "one", _messages("one"), routing=route
+    )
+    first = store.mark_deliverable(
+        "session-stream",
+        "same response",
+        verification_pending=False,
+        verification_kind="ordinary_final",
+    )
+    first_fence = checkpoint_delivery_fence(first)
+    assert first_fence is not None
+
+    store.start_turn(
+        "session-stream", "turn-2", "two", _messages("two"), routing=route
+    )
+    second = store.mark_deliverable(
+        "session-stream",
+        "same response",
+        verification_pending=False,
+        verification_kind="ordinary_final",
+    )
+    second_fence = checkpoint_delivery_fence(second)
+    assert second_fence is not None
+
+    assert not update_checkpoint_stream_delivery(
+        "session-stream",
+        final_response="same response",
+        checkpoint_root=checkpoint_root,
+        **first_fence,
+    )
+    state = store.load("session-stream")
+    assert state["turn_id"] == "turn-2"
+    assert state.get("delivery", {}).get("status") != "delivered"
+
+    assert update_checkpoint_stream_delivery(
+        "session-stream",
+        final_response="same response",
+        checkpoint_root=checkpoint_root,
+        **second_fence,
+    )
+
+
+def test_best_effort_delivery_is_terminal_without_claiming_exact_ack(tmp_path):
+    from agent.turn_checkpoint import update_checkpoint_best_effort_delivery
+
+    checkpoint_root = tmp_path / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    store.start_turn(
+        "session-best-effort",
+        "turn-1",
+        "request",
+        _messages("request"),
+    )
+    state = store.mark_deliverable(
+        "session-best-effort",
+        "long platform response",
+        verification_pending=False,
+        verification_kind="ordinary_final",
+    )
+    fence = checkpoint_delivery_fence(state)
+    assert fence is not None
+
+    assert update_checkpoint_best_effort_delivery(
+        "session-best-effort",
+        reported_success=True,
+        checkpoint_root=checkpoint_root,
+        **fence,
+    )
+
+    state = store.load("session-best-effort")
+    assert state["phase"] == "terminal"
+    assert state["next_action"] == "none"
+    assert state["delivery"] == {
+        "obligation_id": None,
+        "status": "best_effort",
+        "reported_success": True,
+    }
+
+
+def test_best_effort_delivery_rejects_stale_fence(tmp_path):
+    from agent.turn_checkpoint import (
+        CheckpointConflictError,
+        update_checkpoint_best_effort_delivery,
+    )
+
+    checkpoint_root = tmp_path / "sessions" / "turn-checkpoints"
+    store = TurnCheckpointStore(checkpoint_root)
+    store.start_turn("session-best-effort", "turn-1", "one", _messages("one"))
+    first = store.mark_deliverable(
+        "session-best-effort",
+        "first",
+        verification_pending=False,
+        verification_kind="ordinary_final",
+    )
+    first_fence = checkpoint_delivery_fence(first)
+    assert first_fence is not None
+    store.start_turn("session-best-effort", "turn-2", "two", _messages("two"))
+    store.mark_deliverable(
+        "session-best-effort",
+        "second",
+        verification_pending=False,
+        verification_kind="ordinary_final",
+    )
+
+    with pytest.raises(CheckpointConflictError, match="older session turn"):
+        update_checkpoint_best_effort_delivery(
+            "session-best-effort",
+            reported_success=True,
+            checkpoint_root=checkpoint_root,
+            **first_fence,
+        )
 
 
 def test_checkpoint_atomic_write_failure_preserves_previous_revision(tmp_path, monkeypatch):
@@ -156,7 +598,7 @@ def test_prepared_checkpoint_rejects_third_transcript_hash(tmp_path):
     assert store.load("session-1")["compaction"]["state"] == "conflict"
 
 
-def test_interrupted_tool_becomes_unknown_and_exact_replay_is_blocked_once(tmp_path):
+def test_interrupted_tool_becomes_unknown_and_exact_replay_stays_blocked(tmp_path):
     store = _store(tmp_path)
     messages = _messages("deploy")
     store.start_turn("session-1", "turn-1", "deploy", messages)
@@ -181,7 +623,220 @@ def test_interrupted_tool_becomes_unknown_and_exact_replay_is_blocked_once(tmp_p
     )
     assert first is not None
     assert "unknown outcome" in first.lower()
-    assert second is None
+    assert second is not None
+
+    fresh_process = TurnCheckpointStore(store.root)
+    third = fresh_process.guard_unknown_replay(
+        "session-1", "terminal", {"command": "deploy --release abc"}
+    )
+    assert third is not None
+
+
+def test_safe_retry_requires_durable_readback_and_is_consumed_once(tmp_path):
+    store = _store(tmp_path)
+    messages = _messages("write")
+    store.start_turn("session-1", "turn-1", "write", messages)
+    store.mark_tool_attempt(
+        "session-1",
+        call_id="write-1",
+        name="write_file",
+        arguments={"path": "artifact.txt", "content": "one"},
+    )
+    store.mark_tool_result(
+        "session-1",
+        call_id="write-1",
+        result_summary="process exited before result persistence",
+        disposition="unknown_outcome",
+    )
+    fingerprint = store.load("session-1")["unknown_outcomes"][-1]["fingerprint"]
+
+    with pytest.raises(CheckpointIntegrityError, match="readback"):
+        store.reconcile_unknown_outcome(
+            "session-1",
+            fingerprint=fingerprint,
+            disposition="safe_to_retry",
+            readback_call_id="missing",
+            reconciler_identity="write-file-readback-v1",
+            evidence="target absent",
+        )
+
+    store.mark_tool_attempt(
+        "session-1",
+        call_id="readback-1",
+        name="read_file",
+        arguments={"path": "artifact.txt"},
+    )
+    store.mark_tool_result(
+        "session-1",
+        call_id="readback-1",
+        result_summary="not found",
+    )
+    store.reconcile_unknown_outcome(
+        "session-1",
+        fingerprint=fingerprint,
+        disposition="safe_to_retry",
+        readback_call_id="readback-1",
+        reconciler_identity="write-file-readback-v1",
+        evidence="authoritative file read returned not found",
+    )
+
+    assert store.guard_unknown_replay(
+        "session-1",
+        "write_file",
+        {"path": "artifact.txt", "content": "one"},
+    ) is None
+    store.mark_tool_attempt(
+        "session-1",
+        call_id="write-2",
+        name="write_file",
+        arguments={"path": "artifact.txt", "content": "one"},
+    )
+    assert store.guard_unknown_replay(
+        "session-1",
+        "write_file",
+        {"path": "artifact.txt", "content": "one"},
+    ) is not None
+    store.mark_tool_result(
+        "session-1",
+        call_id="write-2",
+        result_summary="written",
+    )
+    assert store.guard_unknown_replay(
+        "session-1",
+        "write_file",
+        {"path": "artifact.txt", "content": "one"},
+    ) is None
+
+
+def test_production_tool_middleware_reserves_effect_before_dispatch(
+    tmp_path, monkeypatch
+):
+    from agent import relay_tools
+    from agent import tool_executor
+    from hermes_cli import middleware
+
+    store = _store(tmp_path)
+    store.start_turn("session-1", "turn-1", "write", _messages("write"))
+    agent = SimpleNamespace(
+        session_id="session-1",
+        _turn_checkpoint_store=store,
+        _turn_checkpoint_state=store.load("session-1"),
+        _tool_guardrails=SimpleNamespace(
+            before_call=lambda *_args, **_kwargs: SimpleNamespace(
+                allows_execution=True
+            )
+        ),
+        _turns_since_memory=0,
+        _iters_since_skill=0,
+        _touch_activity=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(tool_executor, "_begin_tool_execution", lambda *a, **k: None)
+    monkeypatch.setattr(
+        relay_tools,
+        "execute",
+        lambda _name, args, callback, **_kwargs: (callback(args), args),
+    )
+    monkeypatch.setattr(
+        middleware,
+        "apply_tool_request_middleware",
+        lambda _name, args, **_kwargs: SimpleNamespace(payload=args, trace=[]),
+    )
+    monkeypatch.setattr(
+        middleware,
+        "run_tool_execution_middleware",
+        lambda _name, args, callback, **_kwargs: callback(args),
+    )
+
+    observed = []
+    outcome = tool_executor._run_agent_tool_execution_middleware(
+        agent,
+        function_name="write_file",
+        function_args={"path": "artifact.txt", "content": "one"},
+        effective_task_id="task-1",
+        tool_call_id="call-1",
+        execute=lambda args: observed.append(dict(args)) or "written",
+    )
+
+    assert outcome.result == "written"
+    assert observed == [{"path": "artifact.txt", "content": "one"}]
+    pending = store.load("session-1")["pending_tools"]
+    assert [row["call_id"] for row in pending] == ["call-1"]
+
+    assert tool_executor._checkpoint_tool_result(
+        agent,
+        tool_call_id="call-1",
+        result_summary="written",
+        disposition="completed",
+    )
+    state = store.load("session-1")
+    assert state["pending_tools"] == []
+    assert state["completed_tools"][-1]["call_id"] == "call-1"
+
+
+def test_production_tool_middleware_records_uncertainty_on_abrupt_exception(
+    tmp_path, monkeypatch
+):
+    from agent import relay_tools
+    from agent import tool_executor
+    from hermes_cli import middleware
+
+    store = _store(tmp_path)
+    store.start_turn("session-1", "turn-1", "write", _messages("write"))
+    agent = SimpleNamespace(
+        session_id="session-1",
+        _turn_checkpoint_store=store,
+        _turn_checkpoint_state=store.load("session-1"),
+        _tool_guardrails=SimpleNamespace(
+            before_call=lambda *_args, **_kwargs: SimpleNamespace(
+                allows_execution=True
+            )
+        ),
+        _turns_since_memory=0,
+        _iters_since_skill=0,
+        _touch_activity=lambda *_args, **_kwargs: None,
+        _incremental_persistence_failed=False,
+    )
+    monkeypatch.setattr(tool_executor, "_begin_tool_execution", lambda *a, **k: None)
+    monkeypatch.setattr(
+        relay_tools,
+        "execute",
+        lambda _name, args, callback, **_kwargs: (callback(args), args),
+    )
+    monkeypatch.setattr(
+        middleware,
+        "apply_tool_request_middleware",
+        lambda _name, args, **_kwargs: SimpleNamespace(payload=args, trace=[]),
+    )
+    monkeypatch.setattr(
+        middleware,
+        "run_tool_execution_middleware",
+        lambda _name, args, callback, **_kwargs: callback(args),
+    )
+    sentinel = tmp_path / "effect.txt"
+
+    def effect_then_exit(_args):
+        sentinel.write_text("effect", encoding="utf-8")
+        raise SystemExit(88)
+
+    with pytest.raises(SystemExit, match="88"):
+        tool_executor._run_agent_tool_execution_middleware(
+            agent,
+            function_name="write_file",
+            function_args={"path": str(sentinel), "content": "effect"},
+            effective_task_id="task-1",
+            tool_call_id="call-1",
+            execute=effect_then_exit,
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "effect"
+    state = TurnCheckpointStore(store.root).load("session-1")
+    assert state["pending_tools"] == []
+    assert state["unknown_outcomes"][-1]["call_id"] == "call-1"
+    assert TurnCheckpointStore(store.root).guard_unknown_replay(
+        "session-1",
+        "write_file",
+        {"path": str(sentinel), "content": "effect"},
+    ) is not None
 
 
 def test_tool_result_and_pending_deliverable_survive_restart(tmp_path):

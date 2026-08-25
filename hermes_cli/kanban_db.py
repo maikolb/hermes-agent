@@ -87,8 +87,12 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
+from hermes_cli._subprocess_compat import (
+    noninteractive_git_env,
+    windows_hidden_popen_kwargs,
+)
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
 
@@ -208,6 +212,154 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
         invoke_hook(event, task_id=task_id, profile_name=profile_name, **fields)
     except Exception as exc:  # pragma: no cover - defensive
         _log.debug("kanban lifecycle hook %s failed: %s", event, exc)
+
+
+def _kanban_observer_consumed(event: str) -> bool:
+    """Return whether any first-party observer or plugin consumes *event*.
+
+    Hot-path short-circuit for the worker-lifecycle / task-mutation /
+    dispatch-tick observers (RFC #58548): those fire on every dispatcher
+    tick and every task write, so call sites skip payload assembly entirely
+    when nothing subscribes. Best-effort — if inspection fails the event is
+    treated as unconsumed (the invoke path would fail the same way, and
+    these are observers, so dropping is always safe).
+    """
+    try:
+        from hermes_cli.lifecycle import has_hook
+
+        return has_hook(event)
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+def _fire_worker_spawned_hook(
+    conn: sqlite3.Connection,
+    task: "Task",
+    workspace_path: str,
+    pid: Optional[int],
+    *,
+    board: Optional[str] = None,
+) -> None:
+    """Fire ``on_kanban_worker_spawned`` for one dispatched spawn.
+
+    Called by the dispatch loop AFTER ``spawn_fn`` returned and the worker
+    PID (when one was reported) has been durably persisted — the RFC #58548
+    timing contract. Fully best-effort: any failure is swallowed so a
+    misbehaving observer can never break the dispatch loop.
+    """
+    if not _kanban_observer_consumed("on_kanban_worker_spawned"):
+        return
+    try:
+        _fire_kanban_lifecycle_hook(
+            "on_kanban_worker_spawned",
+            task.id,
+            board=board or get_current_board(),
+            assignee=task.assignee,
+            run_id=_current_run_id(conn, task.id),
+            worker_pid=int(pid) if pid else None,
+            workspace_path=str(workspace_path),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.debug("kanban worker spawned hook failed: %s", exc)
+
+
+def notify_task_updated(
+    conn: sqlite3.Connection,
+    task_id: str,
+    changed_fields: Iterable[str],
+    *,
+    board: Optional[str] = None,
+) -> None:
+    """Fire ``on_kanban_task_updated`` for a committed task-row mutation.
+
+    Task-mutation boundary primitive from RFC #58548: a surface that mutates
+    a task row outside the claim/complete/block lifecycle calls this AFTER
+    its write txn has committed — including surfaces that write with direct
+    SQL and bypass every ``kanban_db`` mutator (the dashboard plugin API's
+    priority/title/body editors). ``changed_fields`` carries field NAMES
+    only, never values. Observer-only and fully best-effort: it can never
+    fail a task mutation, and it costs one ``has_hook`` probe when nothing
+    subscribes.
+    """
+    if not _kanban_observer_consumed("on_kanban_task_updated"):
+        return
+    try:
+        row = conn.execute(
+            "SELECT assignee, current_run_id FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        _fire_kanban_lifecycle_hook(
+            "on_kanban_task_updated",
+            task_id,
+            board=board or get_current_board(),
+            assignee=row["assignee"] if row else None,
+            run_id=row["current_run_id"] if row else None,
+            changed_fields=list(changed_fields),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.debug("kanban task updated hook failed: %s", exc)
+
+
+def _fire_dispatch_tick_hook(
+    result: "DispatchResult",
+    *,
+    board: Optional[str] = None,
+    dry_run: bool = False,
+) -> None:
+    """Fire ``on_kanban_dispatch_tick`` after one dispatcher tick.
+
+    Re-port of PR #56066 per the #64231 batch disposition: renamed to the
+    taxonomy form and called by ``dispatch_once`` strictly AFTER
+    ``_dispatch_tick_lock`` has been released — the original fired inside
+    the lock, so a slow subscriber could extend the single-writer critical
+    section and stall a sibling dispatcher's tick. Observer-only and fully
+    best-effort: any subscriber failure is swallowed.
+    """
+    if not _kanban_observer_consumed("on_kanban_dispatch_tick"):
+        return
+    try:
+        from hermes_cli.lifecycle import invoke_hook
+        from hermes_cli.profiles import get_active_profile_name
+
+        try:
+            profile_name = get_active_profile_name()
+        except Exception:
+            profile_name = "default"
+        if board is None:
+            try:
+                board = get_current_board()
+            except Exception:
+                board = None
+        outcome = "ok"
+        if result.skipped_locked:
+            outcome = "skipped_locked"
+        elif not any((
+            result.spawned,
+            result.reclaimed,
+            result.promoted,
+            result.reconciled_orphans,
+            result.crashed,
+            result.stale,
+            result.timed_out,
+            result.auto_blocked,
+            result.rate_limited,
+            result.auto_assigned_default,
+            result.respawn_guarded,
+            result.skipped_per_profile_capped,
+            result.skipped_unassigned,
+            result.skipped_nonspawnable,
+        )):
+            outcome = "idle"
+        invoke_hook(
+            "on_kanban_dispatch_tick",
+            board=board,
+            profile_name=profile_name,
+            dry_run=bool(dry_run),
+            outcome=outcome,
+            result=result,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.debug("kanban dispatch tick hook failed: %s", exc)
 
 
 # A running task's claim is valid for 15 minutes by default; after that the
@@ -447,6 +599,103 @@ def boards_root() -> Path:
     used by :func:`list_boards` to enumerate them.
     """
     return kanban_home() / "kanban" / "boards"
+
+
+def _board_removal_tombstone_path(slug: str) -> Path:
+    """Return the durable removal marker outside a named board directory."""
+
+    return kanban_home() / "kanban" / "board-tombstones" / f"{slug}.json"
+
+
+def _write_board_removal_tombstone(
+    slug: str,
+    *,
+    action: str,
+    new_path: str,
+    preserved_worktrees: list[dict[str, str]],
+) -> Path:
+    """Atomically refuse late connections while a named board is removed."""
+
+    path = _board_removal_tombstone_path(slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    payload = {
+        "schema_version": 1,
+        "slug": slug,
+        "removal_id": secrets.token_hex(16),
+        "action": action,
+        "new_path": new_path,
+        "preserved_worktrees": preserved_worktrees,
+        "removed_at": int(time.time()),
+    }
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
+
+
+def _read_board_removal_tombstone(slug: str) -> dict[str, Any]:
+    """Read and validate the durable result/resume record for one board."""
+
+    path = _board_removal_tombstone_path(slug)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"kanban board {slug!r} has an unreadable removal tombstone"
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or payload.get("slug") != slug
+        or payload.get("action") not in {"archived", "deleted"}
+        or not re.fullmatch(r"[0-9a-f]{32}", str(payload.get("removal_id") or ""))
+        or not isinstance(payload.get("preserved_worktrees"), list)
+    ):
+        raise RuntimeError(
+            f"kanban board {slug!r} has an invalid removal tombstone"
+        )
+    return payload
+
+
+def _named_board_slug_for_db_path(
+    path: Path,
+    *,
+    board: Optional[str],
+) -> Optional[str]:
+    """Resolve a named-board slug even when a stale DB path is supplied."""
+
+    explicit = _normalize_board_slug(board)
+    if explicit and explicit != DEFAULT_BOARD:
+        return explicit
+    try:
+        resolved = path.expanduser().resolve(strict=False)
+        parent = boards_root().expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+    if resolved.name != "kanban.db" or resolved.parent.parent != parent:
+        return None
+    try:
+        slug = _normalize_board_slug(resolved.parent.name)
+    except ValueError:
+        return None
+    return slug if slug != DEFAULT_BOARD else None
+
+
+def _assert_board_not_removed(path: Path, *, board: Optional[str]) -> None:
+    """Fail closed before SQLite can recreate a removed named board."""
+
+    slug = _named_board_slug_for_db_path(path, board=board)
+    if slug and _board_removal_tombstone_path(slug).exists():
+        raise RuntimeError(
+            f"kanban board {slug!r} was removed; call create_board({slug!r}) "
+            "explicitly before opening it again"
+        )
 
 
 def current_board_path() -> Path:
@@ -730,6 +979,7 @@ def write_board_metadata(
     archived: Optional[bool] = None,
     default_workdir: Optional[str] = None,
     project_id: Optional[str] = None,
+    git_delivery: Optional[Mapping[str, Any]] = None,
 ) -> dict:
     """Create / update ``board.json`` for ``board``.
 
@@ -760,6 +1010,8 @@ def write_board_metadata(
         meta["default_workdir"] = str(default_workdir) if default_workdir else None
     if project_id is not None:
         meta["project_id"] = str(project_id) if project_id else None
+    if git_delivery is not None:
+        meta["git_delivery"] = dict(git_delivery)
     if not meta.get("created_at"):
         meta["created_at"] = int(time.time())
     path = board_metadata_path(slug)
@@ -791,6 +1043,17 @@ def create_board(
     normed = _normalize_board_slug(slug)
     if not normed:
         raise ValueError("board slug is required")
+    tombstone = _board_removal_tombstone_path(normed)
+    if tombstone.exists():
+        # A remover writes the external marker before moving/deleting the
+        # board directory. Do not let an overlapping create clear that marker
+        # while the old board is still present. Once removal has finished,
+        # this explicit API is the only supported resurrection path.
+        if board_dir(normed).exists():
+            raise RuntimeError(
+                f"kanban board {normed!r} removal is still in progress"
+            )
+        tombstone.unlink()
     meta = write_board_metadata(
         normed,
         name=name,
@@ -803,6 +1066,138 @@ def create_board(
     # Touch the DB so list_boards() sees it immediately.
     init_db(board=normed)
     return meta
+
+
+def _task_owns_worktree_identity(
+    task_id: str,
+    workspace_path: object,
+    branch_name: object,
+) -> bool:
+    """Return whether DB identity names Hermes' exact disposable worktree."""
+
+    raw_path = str(workspace_path or "").strip()
+    branch = str(branch_name or "").strip()
+    if not raw_path or not branch:
+        return False
+    path = Path(raw_path).expanduser().resolve(strict=False)
+    if (
+        os.path.normcase(path.name) != os.path.normcase(task_id)
+        or path.parent.name.casefold() != ".worktrees"
+    ):
+        return False
+    from hermes_cli.git_delivery import task_owns_delivery_branch
+
+    return task_owns_delivery_branch(task_id, branch)
+
+
+def _set_board_lifecycle_state(db_path: Path, state: str) -> None:
+    """Set board quiescence without passing through the guarded writer path."""
+
+    if state not in {"active", "inactive", "removing"}:
+        raise ValueError(f"invalid board lifecycle state: {state}")
+    with _board_lifecycle_connection(db_path) as conn:
+        _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "UPDATE board_lifecycle SET state = ?, updated_at = ? "
+                "WHERE singleton = 1",
+                (state, int(time.time())),
+            )
+            _execute_boundary_with_retry(conn, "COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+
+@contextlib.contextmanager
+def _board_lifecycle_connection(db_path: Path):
+    """Open an existing board DB without allowing tombstone resurrection."""
+
+    if not db_path.is_file():
+        raise RuntimeError(f"board lifecycle database is unavailable: {db_path}")
+    conn = _sqlite_connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _quiesce_board_for_lifecycle(
+    slug: str,
+    *,
+    target_state: str,
+) -> tuple[str, list[dict[str, str]]]:
+    """Atomically quiesce writers and prove owned worktree cleanup.
+
+    The BEGIN IMMEDIATE boundary waits for older writers. Updating the durable
+    lifecycle row then makes every future ``write_txn`` fail closed before the
+    connection is released, closing the check-to-rename/archive race.
+    Foreign/manual worktrees are metadata only: explicit board lifecycle action
+    may forget them, but their checkout and branch are never cleanup targets.
+    """
+
+    db_path = board_dir(slug) / "kanban.db"
+    preserved: list[dict[str, str]] = []
+    with _board_lifecycle_connection(db_path) as conn:
+        _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
+        try:
+            lifecycle = conn.execute(
+                "SELECT state FROM board_lifecycle WHERE singleton = 1"
+            ).fetchone()
+            previous_state = str(lifecycle[0]) if lifecycle is not None else "active"
+            conn.execute(
+                "UPDATE board_lifecycle SET state = ?, updated_at = ? "
+                "WHERE singleton = 1",
+                (target_state, int(time.time())),
+            )
+            rows = conn.execute(
+                "SELECT t.id, t.status, t.workspace_path, t.branch_name, "
+                "d.cleanup_state, d.ownership_json, d.ownership_fingerprint "
+                "FROM tasks t LEFT JOIN task_git_delivery d ON d.task_id = t.id "
+                "WHERE t.workspace_kind = 'worktree'"
+            ).fetchall()
+            for row in rows:
+                ownership_present = (
+                    row["ownership_json"] is not None
+                    or row["ownership_fingerprint"] is not None
+                )
+                owned, _ownership, ownership_error = _validate_worktree_ownership(
+                    conn,
+                    str(row["id"]),
+                    require_checkout=False,
+                )
+                if ownership_present and not owned:
+                    raise ValueError(
+                        f"board {slug!r} has invalid ownership for worktree task "
+                        f"{row['id']}: {ownership_error}"
+                    )
+                if owned:
+                    reaped, _cleanup, cleanup_error = _validate_cleanup_obligation(
+                        conn,
+                        str(row["id"]),
+                        require_reaped=True,
+                    )
+                    if row["status"] not in {"done", "archived"} or not reaped:
+                        raise ValueError(
+                            f"board {slug!r} still owns worktree task {row['id']} "
+                            f"without terminal cleanup proof: {cleanup_error}"
+                        )
+                if not owned:
+                    preserved.append(
+                        {
+                            "task_id": str(row["id"]),
+                            "workspace_path": str(row["workspace_path"] or ""),
+                            "branch_name": str(row["branch_name"] or ""),
+                        }
+                    )
+            _execute_boundary_with_retry(conn, "COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    return previous_state, preserved
 
 
 def set_board_archived(slug: str, archived: bool) -> dict:
@@ -821,9 +1216,32 @@ def set_board_archived(slug: str, archived: bool) -> dict:
         raise ValueError("the 'default' board cannot be archived")
     if not board_exists(normed):
         raise ValueError(f"board {normed!r} does not exist")
-    if bool(archived) and get_current_board() == normed:
-        clear_current_board()
-    return write_board_metadata(normed, archived=bool(archived))
+    db_path = board_dir(normed) / "kanban.db"
+    if bool(archived):
+        previous_state, preserved = _quiesce_board_for_lifecycle(
+            normed, target_state="inactive"
+        )
+        try:
+            if get_current_board() == normed:
+                clear_current_board()
+            meta = write_board_metadata(normed, archived=True)
+        except Exception:
+            _set_board_lifecycle_state(db_path, previous_state)
+            raise
+        if preserved:
+            _log.warning(
+                "Archived board %s while preserving %d foreign/manual worktree "
+                "checkout(s): %s",
+                normed,
+                len(preserved),
+                preserved,
+            )
+        meta["preserved_worktrees"] = preserved
+        return meta
+
+    meta = write_board_metadata(normed, archived=False)
+    _set_board_lifecycle_state(db_path, "active")
+    return meta
 
 
 def list_boards(*, include_archived: bool = True) -> list[dict]:
@@ -888,8 +1306,72 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
     if normed == DEFAULT_BOARD:
         raise ValueError("the 'default' board cannot be removed")
     d = board_dir(normed)
+    tombstone_path = _board_removal_tombstone_path(normed)
     if not d.exists():
-        raise ValueError(f"board {normed!r} does not exist")
+        if not tombstone_path.exists():
+            raise ValueError(f"board {normed!r} does not exist")
+        prior = _read_board_removal_tombstone(normed)
+        expected_action = "archived" if archive else "deleted"
+        if prior["action"] != expected_action:
+            raise RuntimeError(
+                f"board {normed!r} was already removed as {prior['action']!r}"
+            )
+        if archive and not Path(str(prior["new_path"])).is_dir():
+            raise RuntimeError(
+                f"archived board {normed!r} is missing from its sealed destination"
+            )
+        return {
+            "slug": normed,
+            "action": prior["action"],
+            "new_path": str(prior["new_path"]),
+            "preserved_worktrees": list(prior["preserved_worktrees"]),
+        }
+
+    db_path = d / "kanban.db"
+    if tombstone_path.exists():
+        # A prior process died after quiescing and sealing the action. Resume
+        # that exact generation without reopening SQLite or inventing a new
+        # archive target; hard-delete may already have removed the DB itself.
+        removal = _read_board_removal_tombstone(normed)
+        expected_action = "archived" if archive else "deleted"
+        if removal["action"] != expected_action:
+            raise RuntimeError(
+                f"board {normed!r} removal is already sealed as "
+                f"{removal['action']!r}"
+            )
+        preserved = list(removal["preserved_worktrees"])
+    else:
+        # Quiesce all writers before checking obligations. This closes the
+        # check-to-rename race; the external marker written immediately after
+        # also closes the post-rename reconnect/resurrection race.
+        previous_state, preserved = _quiesce_board_for_lifecycle(
+            normed, target_state="removing"
+        )
+        if archive:
+            archive_root = boards_root() / "_archived"
+            archive_root.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time())
+            target = archive_root / f"{normed}-{ts}"
+            suffix = 1
+            while target.exists():
+                target = archive_root / f"{normed}-{ts}-{suffix}"
+                suffix += 1
+            action = "archived"
+            new_path = str(target)
+        else:
+            action = "deleted"
+            new_path = ""
+        try:
+            _write_board_removal_tombstone(
+                normed,
+                action=action,
+                new_path=new_path,
+                preserved_worktrees=preserved,
+            )
+        except Exception:
+            _set_board_lifecycle_state(db_path, previous_state)
+            raise
+        removal = _read_board_removal_tombstone(normed)
 
     # If the user removed the currently-active board, revert to default.
     if get_current_board() == normed:
@@ -900,22 +1382,38 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
     # dropped first so the schema init pass re-runs on that fresh file.
     _INITIALIZED_PATHS.discard(str((d / "kanban.db").resolve()))
 
-    if archive:
-        archive_root = boards_root() / "_archived"
-        archive_root.mkdir(parents=True, exist_ok=True)
-        ts = int(time.time())
-        target = archive_root / f"{normed}-{ts}"
-        # Avoid collision on rapid double-archives.
-        suffix = 1
-        while target.exists():
-            target = archive_root / f"{normed}-{ts}-{suffix}"
-            suffix += 1
-        d.rename(target)
-        return {"slug": normed, "action": "archived", "new_path": str(target)}
-    else:
-        import shutil
-        shutil.rmtree(d)
-        return {"slug": normed, "action": "deleted", "new_path": ""}
+    try:
+        if archive:
+            target = Path(str(removal["new_path"]))
+            if target.exists():
+                raise RuntimeError(
+                    f"sealed archive destination already exists while source remains: {target}"
+                )
+            d.rename(target)
+            result = {
+                "slug": normed,
+                "action": "archived",
+                "new_path": str(target),
+            }
+        else:
+            import shutil
+
+            shutil.rmtree(d)
+            result = {"slug": normed, "action": "deleted", "new_path": ""}
+    except Exception:
+        # Keep lifecycle=removing plus the external generation marker. A later
+        # explicit remove_board call resumes this exact action idempotently.
+        raise
+    if preserved:
+        _log.warning(
+            "Removed board %s metadata while preserving %d foreign/manual "
+            "worktree checkout(s): %s",
+            normed,
+            len(preserved),
+            preserved,
+        )
+    result["preserved_worktrees"] = preserved
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1232,6 +1730,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- exceeds DEFAULT_FAILURE_LIMIT consecutive non-successes.
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
     worker_pid           INTEGER,
+    -- OS process create-time paired with worker_pid.  This prevents an
+    -- archive retry from signalling an unrelated process after PID reuse.
+    worker_started_at    REAL,
     -- Short excerpt of the most recent failure's error text.
     last_failure_error   TEXT,
     max_runtime_seconds  INTEGER,
@@ -1297,6 +1798,66 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- the amnesia that let the loop run unbounded).
     block_recurrences    INTEGER NOT NULL DEFAULT 0
 );
+
+-- One durable delivery obligation per code/worktree task.  The row is created
+-- with the task; nullable receipt fields mean delivery is still owed.  A
+-- candidate digest is immutable once written and cannot be reused by another
+-- task, preventing a verified delivery from satisfying two cards.
+CREATE TABLE IF NOT EXISTS task_git_delivery (
+    task_id             TEXT PRIMARY KEY,
+    required_at         INTEGER NOT NULL,
+    required            INTEGER NOT NULL DEFAULT 1,
+    policy_json         TEXT,
+    policy_fingerprint  TEXT,
+    request_json        TEXT,
+    request_fingerprint TEXT,
+    ownership_json      TEXT,
+    ownership_fingerprint TEXT,
+    candidate_digest    TEXT UNIQUE,
+    receipt_json        TEXT,
+    receipt_fingerprint TEXT,
+    verified_at         INTEGER,
+    cleanup_state       TEXT NOT NULL DEFAULT 'not_requested',
+    cleanup_attempts    INTEGER NOT NULL DEFAULT 0,
+    cleanup_last_error  TEXT,
+    cleanup_updated_at  INTEGER,
+    cleanup_owner_pid   INTEGER,
+    cleanup_owner_started_at REAL,
+    cleanup_repo_path   TEXT,
+    cleanup_json        TEXT,
+    cleanup_fingerprint TEXT,
+    CHECK (required IN (0, 1)),
+    CHECK (
+        (ownership_json IS NULL AND ownership_fingerprint IS NULL)
+        OR
+        (ownership_json IS NOT NULL AND ownership_fingerprint IS NOT NULL)
+    ),
+    CHECK (
+        (cleanup_json IS NULL AND cleanup_fingerprint IS NULL)
+        OR
+        (cleanup_json IS NOT NULL AND cleanup_fingerprint IS NOT NULL)
+    ),
+    CHECK (
+        (candidate_digest IS NULL AND receipt_json IS NULL
+         AND receipt_fingerprint IS NULL AND verified_at IS NULL)
+        OR
+        (candidate_digest IS NOT NULL AND receipt_json IS NOT NULL
+         AND receipt_fingerprint IS NOT NULL AND verified_at IS NOT NULL)
+    ),
+    CHECK (cleanup_state IN ('not_requested', 'pending', 'complete'))
+);
+
+-- One in-DB tombstone closes the board-removal race.  ``write_txn`` refuses
+-- every new mutation after removal changes this state under BEGIN IMMEDIATE,
+-- so the subsequent obligation check and directory move cannot be overtaken
+-- by a concurrent task writer.
+CREATE TABLE IF NOT EXISTS board_lifecycle (
+    singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+    state       TEXT NOT NULL CHECK (state IN ('active', 'inactive', 'removing')),
+    updated_at  INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO board_lifecycle(singleton, state, updated_at)
+VALUES (1, 'active', 0);
 
 CREATE TABLE IF NOT EXISTS task_links (
     parent_id  TEXT NOT NULL,
@@ -1375,10 +1936,12 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     task_id       TEXT NOT NULL,
     platform      TEXT NOT NULL,
     chat_id       TEXT NOT NULL,
-    chat_type     TEXT,
     thread_id     TEXT NOT NULL DEFAULT '',
     user_id       TEXT,
+    user_id_alt   TEXT,
+    chat_type     TEXT,
     notifier_profile TEXT,
+    delivery_mode TEXT NOT NULL DEFAULT 'notify',
     delivery_metadata TEXT,
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
@@ -1638,11 +2201,19 @@ def _dispatch_tick_lock(db_path: Path):
 
 # Periodic WAL checkpoint state for the dispatcher tick path. The kanban
 # connections run with ``wal_autocheckpoint=100``, but a passive
-# autocheckpoint can be starved forever on a busy multi-process board (any
-# reader with an open snapshot blocks the WAL reset), letting the -wal file
-# grow without bound between gateway restarts. Once per coarse interval the
-# dispatcher — the board's single writer during a tick, and holding the
-# dispatch flock — issues an explicit ``wal_checkpoint(TRUNCATE)``.
+# autocheckpoint can be starved on a busy multi-process board (any reader
+# with an open snapshot blocks the WAL reset), letting the -wal file grow
+# between gateway restarts. Once per coarse interval the dispatcher issues
+# an explicit ``wal_checkpoint(PASSIVE)``.
+#
+# PASSIVE, not TRUNCATE (same class fix as the state.db checkpoints,
+# #45383/#80255/#44795): the dispatch flock only makes the dispatcher the
+# sole *dispatcher* — CLI kanban commands in other processes write to the
+# same board without taking that flock, so a TRUNCATE here races live
+# writers exactly like the state.db close() path did. PASSIVE never takes
+# the exclusive checkpoint lock; the WAL file size is instead bounded by
+# ``journal_size_limit`` (set at connection init) which truncates the file
+# on the writer's natural post-checkpoint reset.
 # Best-effort: a busy/locked checkpoint is logged at DEBUG and retried next
 # interval. Keyed per resolved DB path so multi-board dispatchers checkpoint
 # each board on its own clock.
@@ -1652,7 +2223,7 @@ _WAL_CHECKPOINT_LOCK = threading.Lock()
 
 
 def _maybe_checkpoint_wal(conn: sqlite3.Connection, db_path: Path) -> None:
-    """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` at a coarse interval.
+    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` at a coarse interval.
 
     Called from the dispatcher tick while the board's dispatch lock is
     held. No-ops (cheaply) until ``_WAL_CHECKPOINT_INTERVAL_SECONDS`` has
@@ -1672,9 +2243,9 @@ def _maybe_checkpoint_wal(conn: sqlite3.Connection, db_path: Path) -> None:
         # threads in this process) don't double-checkpoint on the boundary.
         _LAST_WAL_CHECKPOINT[key] = now
     try:
-        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         _log.debug(
-            "kanban WAL checkpoint (TRUNCATE) on %s -> %s "
+            "kanban WAL checkpoint (PASSIVE) on %s -> %s "
             "(busy, wal_frames, checkpointed_frames)",
             key, tuple(row) if row is not None else None,
         )
@@ -2167,6 +2738,26 @@ def repair_db(
         )
 
 
+def _schema_is_present(conn: sqlite3.Connection) -> bool:
+    """Whether an open connection actually sees the kanban schema.
+
+    ``tasks`` is the sentinel: :data:`SCHEMA_SQL` always creates it, and
+    SQLite loses tables all-or-nothing (a file is either the one we
+    initialized or a fresh one created by this very open), so one
+    ``sqlite_master`` lookup on the already-resident page 1 is enough. Cheap
+    by design — it runs on every steady-state :func:`connect`.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks' LIMIT 1"
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        # Unreadable schema table is not this guard's call — let the full init
+        # path's header/integrity probes classify and quarantine it.
+        return False
+    return row is not None
+
+
 def connect(
     db_path: Optional[Path] = None,
     *,
@@ -2194,6 +2785,7 @@ def connect(
         path = db_path
     else:
         path = kanban_db_path(board=board)
+    _assert_board_not_removed(path, board=board)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Fast path: once THIS process has initialized this path, the expensive
@@ -2216,13 +2808,35 @@ def connect(
                 apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
                 conn.execute("PRAGMA synchronous=FULL")
                 conn.execute("PRAGMA wal_autocheckpoint=100")
+                # Bound the WAL file size now that the periodic explicit
+                # checkpoint is PASSIVE (never truncates): on the writer's
+                # natural post-checkpoint reset SQLite trims the -wal file
+                # to this limit. 8 MiB is generous for a kanban board.
+                conn.execute("PRAGMA journal_size_limit=8388608")
                 conn.execute("PRAGMA foreign_keys=ON")
                 conn.execute("PRAGMA secure_delete=ON")
                 conn.execute("PRAGMA cell_size_check=ON")
+                schema_present = _schema_is_present(conn)
         except Exception:
             conn.close()
             raise
-        return conn
+        if schema_present:
+            return conn
+        # The cache says "initialized", the file says otherwise: it was deleted
+        # or replaced under a live process, and the open above silently
+        # recreated an empty DB. Left alone, every query on this path fails
+        # with "no such table: tasks" for the rest of the process's life and
+        # the board just renders empty (#83445). Drop the stale cache entry and
+        # fall through to the full init path, which re-runs the header and
+        # integrity probes and the schema script under the cross-process lock.
+        conn.close()
+        with _INIT_LOCK:
+            _INITIALIZED_PATHS.discard(resolved)
+        _log.warning(
+            "kanban DB %s lost its schema after this process initialized it "
+            "(deleted or replaced externally); re-initializing.",
+            path,
+        )
 
     with _cross_process_init_lock(path):
         # Read-only file/sidecar preflight (port of kilocode#12508) —
@@ -2256,6 +2870,11 @@ def connect(
                 # crash window that can leave a b-tree page header torn.
                 conn.execute("PRAGMA synchronous=FULL")
                 conn.execute("PRAGMA wal_autocheckpoint=100")
+                # Bound the WAL file size now that the periodic explicit
+                # checkpoint is PASSIVE (never truncates): on the writer's
+                # natural post-checkpoint reset SQLite trims the -wal file
+                # to this limit. 8 MiB is generous for a kanban board.
+                conn.execute("PRAGMA journal_size_limit=8388608")
                 conn.execute("PRAGMA foreign_keys=ON")
                 # Zero freed pages so a later torn write cannot expose stale
                 # cell content; persisted in the DB header for new DBs.
@@ -2349,6 +2968,50 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
 
     Called by ``init_db`` so opening an old DB is always safe.
     """
+    # ``SCHEMA_SQL`` creates the table before this migration runs. Keep the
+    # delivery state additive so databases created by an earlier build of the
+    # gate converge idempotently too.
+    delivery_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(task_git_delivery)")
+    }
+    for name, declaration in (
+        ("required", "required INTEGER NOT NULL DEFAULT 1"),
+        ("policy_json", "policy_json TEXT"),
+        ("policy_fingerprint", "policy_fingerprint TEXT"),
+        ("request_json", "request_json TEXT"),
+        ("request_fingerprint", "request_fingerprint TEXT"),
+        ("ownership_json", "ownership_json TEXT"),
+        ("ownership_fingerprint", "ownership_fingerprint TEXT"),
+        ("receipt_fingerprint", "receipt_fingerprint TEXT"),
+        ("cleanup_state", "cleanup_state TEXT NOT NULL DEFAULT 'not_requested'"),
+        ("cleanup_attempts", "cleanup_attempts INTEGER NOT NULL DEFAULT 0"),
+        ("cleanup_last_error", "cleanup_last_error TEXT"),
+        ("cleanup_updated_at", "cleanup_updated_at INTEGER"),
+        ("cleanup_owner_pid", "cleanup_owner_pid INTEGER"),
+        ("cleanup_owner_started_at", "cleanup_owner_started_at REAL"),
+        ("cleanup_repo_path", "cleanup_repo_path TEXT"),
+        ("cleanup_json", "cleanup_json TEXT"),
+        ("cleanup_fingerprint", "cleanup_fingerprint TEXT"),
+    ):
+        if name not in delivery_cols:
+            _add_column_if_missing(conn, "task_git_delivery", name, declaration)
+
+    # Backfill
+    # every pre-existing worktree task exactly once; INSERT OR IGNORE preserves
+    # any receipt already sealed by a prior run.
+    conn.execute(
+        "INSERT OR IGNORE INTO task_git_delivery (task_id, required_at, required) "
+        "SELECT id, created_at, 1 FROM tasks WHERE workspace_kind = 'worktree'"
+    )
+    # Future completion of every still-open code/worktree task is fail-closed,
+    # including rows created by builds where Git delivery was opt-in. Historical
+    # terminal cards stay untouched; they are evidence, not work to re-deliver.
+    conn.execute(
+        "UPDATE task_git_delivery SET required = 1 WHERE task_id IN ("
+        "SELECT id FROM tasks WHERE workspace_kind = 'worktree' "
+        "AND status NOT IN ('done', 'archived')"
+        ")"
+    )
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
     if "tenant" not in cols:
         _add_column_if_missing(conn, "tasks", "tenant", "tenant TEXT")
@@ -2398,6 +3061,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             )
     if "worker_pid" not in cols:
         _add_column_if_missing(conn, "tasks", "worker_pid", "worker_pid INTEGER")
+    if "worker_started_at" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "worker_started_at", "worker_started_at REAL"
+        )
     if "last_failure_error" not in cols:
         added = _add_column_if_missing(
             conn, "tasks", "last_failure_error", "last_failure_error TEXT"
@@ -2535,9 +3202,45 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(
                 conn, "kanban_notify_subs", "notifier_profile", "notifier_profile TEXT"
             )
+        if "delivery_mode" not in notify_cols:
+            _add_column_if_missing(
+                conn,
+                "kanban_notify_subs",
+                "delivery_mode",
+                "delivery_mode TEXT NOT NULL DEFAULT 'notify'",
+            )
+            # Backfill: before this column existed, the notifier woke the
+            # originating session unconditionally whenever the task carried a
+            # session_id — every pre-existing gateway subscription had de
+            # facto active wake. Defaulting them to plain 'notify' would
+            # silently disable that behavior on upgrade. TUI/CLI rows keep
+            # 'notify' (matching _maybe_auto_subscribe, which only requests
+            # 'notify+wake' for gateway sessions). Runs ONLY on first-add of
+            # the column, so a user's later explicit downgrade is never
+            # overwritten by a re-migration.
+            conn.execute(
+                "UPDATE kanban_notify_subs SET delivery_mode = 'notify+wake' "
+                "WHERE platform != 'tui'"
+            )
         if "chat_type" not in notify_cols:
             _add_column_if_missing(
-                conn, "kanban_notify_subs", "chat_type", "chat_type TEXT"
+                conn,
+                "kanban_notify_subs",
+                "chat_type",
+                "chat_type TEXT",
+            )
+        if "user_id_alt" not in notify_cols:
+            # Records the originating source's platform-specific stable alt ID
+            # (Signal UUID, Feishu union_id, ...) alongside ``user_id`` so an
+            # active-wake replay reconstructs the SAME ``build_session_key`` as
+            # the original event. ``build_session_key`` prefers ``user_id_alt``
+            # over ``user_id`` when both are present (gateway/session.py); a
+            # wake that only replayed ``user_id`` would key to a different,
+            # context-less session whenever the two diverge. Legacy rows
+            # default to NULL, which is inert: ``user_id_alt or user_id`` falls
+            # back to the already-persisted ``user_id``.
+            _add_column_if_missing(
+                conn, "kanban_notify_subs", "user_id_alt", "user_id_alt TEXT"
             )
         if "delivery_metadata" not in notify_cols:
             _add_column_if_missing(
@@ -2665,8 +3368,10 @@ _REBUILD_SPECS = {
     "kanban_notify_subs": (
         "CREATE TABLE kanban_notify_subs ("
         " task_id TEXT NOT NULL, platform TEXT NOT NULL, chat_id TEXT NOT NULL,"
-        " chat_type TEXT, thread_id TEXT NOT NULL DEFAULT '', user_id TEXT,"
-        " notifier_profile TEXT, delivery_metadata TEXT, created_at INTEGER NOT NULL,"
+        " thread_id TEXT NOT NULL DEFAULT '', user_id TEXT, user_id_alt TEXT,"
+        " chat_type TEXT,"
+        " notifier_profile TEXT, delivery_mode TEXT NOT NULL DEFAULT 'notify',"
+        " delivery_metadata TEXT, created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
@@ -2867,6 +3572,20 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
 
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
     try:
+        lifecycle = conn.execute(
+            "SELECT state FROM board_lifecycle WHERE singleton = 1"
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            conn.execute("ROLLBACK")
+            raise
+        lifecycle = None
+    if lifecycle is not None and lifecycle[0] != "active":
+        conn.execute("ROLLBACK")
+        raise RuntimeError(
+            "kanban board is archived or removal is in progress; mutation was refused"
+        )
+    try:
         yield conn
     except Exception:
         try:
@@ -2931,6 +3650,72 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     from hermes_cli.profiles import normalize_profile_name
 
     return normalize_profile_name(assignee)
+
+
+def _canonical_delivery_document(value: Mapping[str, Any]) -> tuple[str, str]:
+    """Return canonical JSON plus a stable SHA-256 fingerprint."""
+
+    encoded = json.dumps(
+        dict(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _configured_git_delivery_policy(
+    board: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve and seal the generic per-board Git-delivery policy."""
+
+    raw = read_board_metadata(board).get("git_delivery")
+    if not isinstance(raw, Mapping):
+        return None, None
+    policy_json, fingerprint = _canonical_delivery_document(raw)
+    return policy_json, fingerprint
+
+
+def _git_delivery_policy_has_required_shape(policy: object) -> bool:
+    """Decide policy immutability without consulting a caller's PR manifest."""
+
+    if not isinstance(policy, Mapping) or policy.get("required") is not True:
+        return False
+    required_text = (
+        "head_remote",
+        "expected_head_remote_url",
+        "base_remote",
+        "expected_base_remote_url",
+        "head_repository",
+        "base_repository",
+        "base_branch",
+    )
+    if any(not str(policy.get(field) or "").strip() for field in required_text):
+        return False
+    checks = policy.get("required_checks")
+    return (
+        isinstance(checks, (list, tuple))
+        and bool(checks)
+        and all(str(check or "").strip() for check in checks)
+    )
+
+
+def _insert_git_delivery_obligation(
+    conn: sqlite3.Connection,
+    task_id: str,
+    required_at: int,
+    *,
+    policy_json: Optional[str] = None,
+    policy_fingerprint: Optional[str] = None,
+) -> None:
+    """Create the one fail-closed delivery row for a worktree task."""
+
+    conn.execute(
+        "INSERT OR IGNORE INTO task_git_delivery "
+        "(task_id, required_at, required, policy_json, policy_fingerprint) "
+        "VALUES (?, ?, 1, ?, ?)",
+        (task_id, required_at, policy_json, policy_fingerprint),
+    )
 
 
 def create_task(
@@ -3187,6 +3972,10 @@ def create_task(
             return row["id"]
 
     now = int(time.time())
+    board_slug = board if board else get_current_board()
+    delivery_policy_json, delivery_policy_fingerprint = (
+        _configured_git_delivery_policy(board_slug)
+    )
 
     # Resolve workspace_path from board-level default_workdir when the
     # caller did not specify one explicitly. Board defaults represent
@@ -3202,7 +3991,6 @@ def create_task(
         and project_repo is None
         and workspace_kind in {"dir", "worktree"}
     ):
-        board_slug = board if board else get_current_board()
         board_meta = read_board_metadata(board_slug)
         board_default = board_meta.get("default_workdir")
         if board_default:
@@ -3304,11 +4092,23 @@ def create_task(
                         session_id,
                     ),
                 )
+                if workspace_kind == "worktree":
+                    _insert_git_delivery_obligation(
+                        conn,
+                        task_id,
+                        now,
+                        policy_json=delivery_policy_json,
+                        policy_fingerprint=delivery_policy_fingerprint,
+                    )
                 for pid in parents:
                     conn.execute(
                         "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
                         (pid, task_id),
                     )
+                # Notify-sub inheritance (ACK-edge: the originating channel
+                # still hears about a child that BLOCKs, not just the final
+                # fan-in) is handled by the single-owner helper below —
+                # _inherit_notify_subs copies every routing/delivery column.
                 _append_event(
                     conn,
                     task_id,
@@ -3364,6 +4164,13 @@ def _inherit_notify_subs(
     cursor. This makes manual `link_tasks(parent, existing_child)` safe: the
     parent chat receives future child terminal events without replaying the
     child's pre-link history.
+
+    Copies EVERY routing/delivery column (chat_type, user_id_alt,
+    delivery_mode, delivery_metadata included) — this helper is the single
+    owner of subscription inheritance for create_task, link_tasks, and triage
+    decomposition. Omitting columns here silently degrades routing: a
+    DM-originated child completion falls back to chat_type='group' and wakes
+    a fresh group-scoped session instead of the originating DM (issue #73030).
     """
     parent_ids = tuple(dict.fromkeys(p for p in parents if p))
     if not parent_ids:
@@ -3377,9 +4184,12 @@ def _inherit_notify_subs(
     conn.execute(
         f"""
         INSERT OR IGNORE INTO kanban_notify_subs
-            (task_id, platform, chat_id, thread_id, user_id,
-             notifier_profile, created_at, last_event_id)
-        SELECT ?, platform, chat_id, thread_id, user_id, notifier_profile, ?, ?
+            (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
+             chat_type, notifier_profile, delivery_mode, delivery_metadata,
+             created_at, last_event_id)
+        SELECT ?, platform, chat_id, thread_id, user_id, user_id_alt,
+               COALESCE(chat_type, 'dm'), notifier_profile,
+               COALESCE(delivery_mode, 'notify'), delivery_metadata, ?, ?
           FROM kanban_notify_subs
          WHERE task_id IN ({placeholders})
         """,
@@ -3493,7 +4303,10 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
         else:
             conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
         _append_event(conn, task_id, "assigned", {"assignee": profile})
-        return True
+    # Task-mutation observer (RFC #58548), fired AFTER the assignment txn
+    # has committed so subscribers always observe durable board state.
+    notify_task_updated(conn, task_id, ("assignee",))
+    return True
 
 
 def set_model_override(
@@ -3538,7 +4351,9 @@ def set_model_override(
             conn, task_id, "model_override_set",
             {"model": model, "provider": provider},
         )
-        return True
+    # Task-mutation observer (RFC #58548), fired AFTER the txn commits.
+    notify_task_updated(conn, task_id, ("model_override", "provider_override"))
+    return True
 
 
 def set_reasoning_effort(
@@ -3576,7 +4391,9 @@ def set_reasoning_effort(
         _append_event(
             conn, task_id, "reasoning_effort_set", {"reasoning_effort": effort}
         )
-        return True
+    # Task-mutation observer (RFC #58548), fired AFTER the txn commits.
+    notify_task_updated(conn, task_id, ("reasoning_effort",))
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -4735,7 +5552,8 @@ def release_stale_claims(
     reclaimed = 0
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
     stale = conn.execute(
-        "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at "
+        "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at, "
+        "       assignee "
         "FROM tasks "
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
         "  AND claim_expires < ?",
@@ -4846,6 +5664,24 @@ def release_stale_claims(
                 run_id=run_id,
             )
             reclaimed += 1
+        # Worker-lifecycle observer (RFC #58548): the reclaim txn above has
+        # committed. The ``continue`` branches (rowcount mismatch, claim
+        # extension, deferred reclaim) never reach this point, so only a
+        # genuinely reclaimed stale claim fires.
+        if _kanban_observer_consumed("on_kanban_worker_stale_claim"):
+            _fire_kanban_lifecycle_hook(
+                "on_kanban_worker_stale_claim",
+                row["id"],
+                board=get_current_board(),
+                assignee=row["assignee"],
+                run_id=run_id,
+                worker_pid=(
+                    int(row["worker_pid"])
+                    if row["worker_pid"] is not None else None
+                ),
+                heartbeat_stale=bool(heartbeat_stale),
+                retry_status=retry_status,
+            )
     return reclaimed
 
 
@@ -5087,6 +5923,672 @@ class ArtifactPreservationError(RuntimeError):
     """Raised when a declared scratch deliverable cannot be preserved."""
 
 
+def _path_identity(value: object) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        resolved = Path(raw).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    rendered = str(resolved)
+    return os.path.normcase(rendered) if os.name == "nt" else rendered
+
+
+def _loose_path_identity(value: object) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        rendered = str(Path(raw).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError):
+        return None
+    return os.path.normcase(rendered) if os.name == "nt" else rendered
+
+
+def _validate_worktree_ownership(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    require_checkout: bool,
+) -> tuple[bool, Optional[dict[str, Any]], str]:
+    """Validate the creation receipt emitted only by Hermes materialization."""
+
+    row = conn.execute(
+        "SELECT t.workspace_kind, t.workspace_path, t.branch_name, "
+        "d.ownership_json, d.ownership_fingerprint "
+        "FROM tasks t LEFT JOIN task_git_delivery d ON d.task_id = t.id "
+        "WHERE t.id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["workspace_kind"] != "worktree":
+        return False, None, "task is not a worktree"
+    raw_json = str(row["ownership_json"] or "")
+    fingerprint = str(row["ownership_fingerprint"] or "").lower()
+    if not raw_json or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        return False, None, "Hermes worktree ownership receipt is missing"
+    try:
+        payload = json.loads(raw_json)
+    except (TypeError, json.JSONDecodeError):
+        return False, None, "Hermes worktree ownership receipt is invalid JSON"
+    if not isinstance(payload, dict):
+        return False, None, "Hermes worktree ownership receipt is not an object"
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != fingerprint:
+        return False, None, "Hermes worktree ownership fingerprint does not match"
+
+    task_path = _loose_path_identity(row["workspace_path"])
+    owner_path = _loose_path_identity(payload.get("canonical_worktree"))
+    repo_root = _loose_path_identity(payload.get("repo_root"))
+    common_dir = _loose_path_identity(payload.get("git_common_dir"))
+    git_dir = _loose_path_identity(payload.get("git_dir"))
+    branch = str(row["branch_name"] or "")
+    owner_branch = str(payload.get("branch") or "")
+    nonce = str(payload.get("creation_nonce") or "")
+    if (
+        payload.get("schema_version") != 1
+        or str(payload.get("task_id") or "") != task_id
+        or task_path is None
+        or owner_path != task_path
+        or repo_root is None
+        or common_dir is None
+        or git_dir is None
+        or owner_branch != branch
+        or not re.fullmatch(r"[0-9a-f]{32}", nonce)
+        or not _task_owns_worktree_identity(task_id, task_path, branch)
+    ):
+        return False, None, "Hermes worktree ownership receipt changed identity"
+    if not require_checkout:
+        return True, payload, ""
+
+    worktree = Path(str(row["workspace_path"])).expanduser()
+    if not worktree.is_dir() or not _is_linked_worktree_checkout(worktree):
+        return False, None, "owned linked worktree is unavailable"
+    actual_common = _loose_path_identity(_git_common_dir(worktree))
+    actual_git_dir = _loose_path_identity(_git_dir(worktree))
+    actual_branch = _git_current_branch(worktree)
+    if (
+        actual_common != common_dir
+        or actual_git_dir != git_dir
+        or actual_branch != branch
+    ):
+        return False, None, "owned linked worktree no longer matches creation receipt"
+    return True, payload, ""
+
+
+def _seal_materialized_worktree_ownership(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    repo_root: Path,
+    worktree: Path,
+    branch: str,
+) -> None:
+    """Persist provenance immediately after Hermes creates a linked worktree."""
+
+    canonical_repo = repo_root.expanduser().resolve(strict=True)
+    canonical_worktree = worktree.expanduser().resolve(strict=True)
+    common_dir = _git_common_dir(canonical_worktree)
+    git_dir = _git_dir(canonical_worktree)
+    if (
+        common_dir is None
+        or git_dir is None
+        or not _is_linked_worktree_checkout(canonical_worktree)
+        or _git_current_branch(canonical_worktree) != branch
+        or not _task_owns_worktree_identity(task_id, canonical_worktree, branch)
+    ):
+        raise RuntimeError(
+            "new linked worktree does not match its exact Hermes task identity"
+        )
+    payload = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "repo_root": str(canonical_repo),
+        "git_common_dir": str(common_dir.resolve(strict=False)),
+        "git_dir": str(git_dir.resolve(strict=False)),
+        "canonical_worktree": str(canonical_worktree),
+        "branch": branch,
+        "creation_nonce": secrets.token_hex(16),
+        "created_at": int(time.time()),
+    }
+    ownership_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    fingerprint = hashlib.sha256(ownership_json.encode("utf-8")).hexdigest()
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT workspace_kind FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        existing = conn.execute(
+            "SELECT ownership_json, ownership_fingerprint "
+            "FROM task_git_delivery WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or row["workspace_kind"] != "worktree" or existing is None:
+            raise RuntimeError("worktree delivery obligation disappeared during creation")
+        if (
+            existing["ownership_json"] is not None
+            or existing["ownership_fingerprint"] is not None
+        ):
+            raise RuntimeError("worktree ownership is already sealed; refusing overwrite")
+        conn.execute(
+            "UPDATE tasks SET workspace_path = ?, branch_name = ? WHERE id = ?",
+            (str(canonical_worktree), branch, task_id),
+        )
+        updated = conn.execute(
+            "UPDATE task_git_delivery SET ownership_json = ?, "
+            "ownership_fingerprint = ? WHERE task_id = ? "
+            "AND ownership_json IS NULL AND ownership_fingerprint IS NULL",
+            (ownership_json, fingerprint, task_id),
+        )
+        if updated.rowcount != 1:
+            raise RuntimeError("worktree ownership could not be sealed atomically")
+        _append_event(
+            conn,
+            task_id,
+            "worktree_owned",
+            {
+                "canonical_worktree": str(canonical_worktree),
+                "branch": branch,
+                "ownership_fingerprint": fingerprint,
+            },
+        )
+
+
+def _build_cleanup_obligation(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    receipt_json: str,
+    owner_pid: Optional[int],
+) -> tuple[str, str, dict[str, Any]]:
+    """Seal every mutable cleanup authority before task completion commits."""
+
+    owned, ownership, reason = _validate_worktree_ownership(
+        conn,
+        task_id,
+        require_checkout=True,
+    )
+    if not owned or ownership is None:
+        raise RuntimeError(f"cleanup ownership is not valid: {reason}")
+    try:
+        receipt = json.loads(receipt_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("cleanup delivery receipt is invalid JSON") from exc
+    if not isinstance(receipt, Mapping):
+        raise RuntimeError("cleanup delivery receipt is not an object")
+    head_sha = str(receipt.get("head_sha") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", head_sha):
+        raise RuntimeError("cleanup delivery receipt has no valid HEAD")
+    owner_started_at = (
+        _process_start_time(owner_pid) if owner_pid is not None else None
+    )
+    payload = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "repo_root": str(ownership["repo_root"]),
+        "git_common_dir": str(ownership["git_common_dir"]),
+        "git_dir": str(ownership["git_dir"]),
+        "canonical_worktree": str(ownership["canonical_worktree"]),
+        "quarantine_path": str(
+            Path(str(ownership["canonical_worktree"])).parent
+            / ".hermes-cleanup"
+            / f"{task_id}-{secrets.token_hex(16)}"
+        ),
+        "branch": str(ownership["branch"]),
+        "head_sha": head_sha,
+        "owner_pid": owner_pid,
+        "owner_started_at": owner_started_at,
+        "created_at": int(time.time()),
+    }
+    cleanup_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    cleanup_fingerprint = hashlib.sha256(
+        cleanup_json.encode("utf-8")
+    ).hexdigest()
+    return cleanup_json, cleanup_fingerprint, payload
+
+
+def _validate_cleanup_obligation(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    require_reaped: bool,
+) -> tuple[bool, Optional[dict[str, Any]], str]:
+    """Validate sealed cleanup authority and optionally prove terminal absence."""
+
+    row = conn.execute(
+        "SELECT t.workspace_kind, t.workspace_path, t.branch_name, "
+        "d.candidate_digest, d.receipt_json, d.receipt_fingerprint, "
+        "d.verified_at, "
+        "d.ownership_json, d.ownership_fingerprint, d.cleanup_state, "
+        "d.cleanup_owner_pid, d.cleanup_owner_started_at, d.cleanup_repo_path, "
+        "d.cleanup_json, d.cleanup_fingerprint "
+        "FROM tasks t LEFT JOIN task_git_delivery d ON d.task_id = t.id "
+        "WHERE t.id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["workspace_kind"] != "worktree":
+        return False, None, "task is not a worktree"
+    raw_json = str(row["cleanup_json"] or "")
+    fingerprint = str(row["cleanup_fingerprint"] or "").lower()
+    if not raw_json or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        return False, None, "sealed cleanup obligation is missing"
+    try:
+        payload = json.loads(raw_json)
+    except (TypeError, json.JSONDecodeError):
+        return False, None, "sealed cleanup obligation is invalid JSON"
+    if not isinstance(payload, dict):
+        return False, None, "sealed cleanup obligation is not an object"
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != fingerprint:
+        return False, None, "sealed cleanup obligation fingerprint does not match"
+
+    path = _loose_path_identity(row["workspace_path"])
+    payload_path = _loose_path_identity(payload.get("canonical_worktree"))
+    repo = _loose_path_identity(row["cleanup_repo_path"])
+    payload_repo = _loose_path_identity(payload.get("repo_root"))
+    payload_common = _loose_path_identity(payload.get("git_common_dir"))
+    payload_git_dir = _loose_path_identity(payload.get("git_dir"))
+    quarantine = _loose_path_identity(payload.get("quarantine_path"))
+    owner_pid = row["cleanup_owner_pid"]
+    payload_pid = payload.get("owner_pid")
+    owner_started = row["cleanup_owner_started_at"]
+    payload_started = payload.get("owner_started_at")
+    head_sha = str(payload.get("head_sha") or "").lower()
+    if (
+        payload.get("schema_version") != 1
+        or str(payload.get("task_id") or "") != task_id
+        or path is None
+        or payload_path != path
+        or repo is None
+        or payload_repo != repo
+        or payload_common is None
+        or payload_git_dir is None
+        or quarantine is None
+        or Path(quarantine).parent
+        != Path(str(payload_path)).parent / ".hermes-cleanup"
+        or not re.fullmatch(
+            rf"{re.escape(task_id)}-[0-9a-f]{{32}}",
+            Path(quarantine).name,
+        )
+        or str(payload.get("branch") or "") != str(row["branch_name"] or "")
+        or not re.fullmatch(r"[0-9a-f]{40,64}", head_sha)
+        or owner_pid != payload_pid
+        or owner_started != payload_started
+    ):
+        return False, None, "sealed cleanup authority changed identity"
+
+    worktree = Path(str(row["workspace_path"])).expanduser()
+    owned, ownership, reason = _validate_worktree_ownership(
+        conn,
+        task_id,
+        require_checkout=worktree.exists(),
+    )
+    if not owned or ownership is None:
+        return False, None, f"cleanup ownership is invalid: {reason}"
+    if (
+        _loose_path_identity(ownership.get("repo_root")) != payload_repo
+        or _loose_path_identity(ownership.get("git_common_dir"))
+        != payload_common
+        or _loose_path_identity(ownership.get("git_dir")) != payload_git_dir
+    ):
+        return False, None, "cleanup repository differs from ownership receipt"
+
+    try:
+        from hermes_cli.git_delivery import validate_persisted_git_delivery_receipt
+
+        receipt_fence = validate_persisted_git_delivery_receipt(
+            str(row["receipt_json"] or ""),
+            str(row["candidate_digest"] or ""),
+            receipt_fingerprint=str(row["receipt_fingerprint"] or ""),
+            sealed_verified_at=int(row["verified_at"] or 0),
+            canonical_worktree=str(row["workspace_path"] or ""),
+            branch=str(row["branch_name"] or ""),
+            require_worktree=worktree.exists(),
+        )
+    except Exception as exc:
+        return False, None, f"cleanup delivery receipt check failed: {exc}"
+    if not receipt_fence.ok:
+        return False, None, receipt_fence.message
+    receipt = json.loads(str(row["receipt_json"] or "{}"))
+    if str(receipt.get("head_sha") or "").lower() != head_sha:
+        return False, None, "cleanup HEAD differs from delivery receipt"
+
+    repo_path = Path(str(row["cleanup_repo_path"])).expanduser()
+    common = _git_common_dir(repo_path)
+    if _loose_path_identity(common) != _loose_path_identity(
+        payload.get("git_common_dir")
+    ):
+        return False, None, "cleanup repository common-dir no longer matches"
+    if require_reaped:
+        if worktree.exists():
+            return False, None, "owned worktree still exists"
+        if Path(str(payload.get("quarantine_path"))).expanduser().exists():
+            return False, None, "owned cleanup quarantine still exists"
+        branch_probe = _cleanup_git(
+            repo_path,
+            "show-ref",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{row['branch_name']}",
+        )
+        if branch_probe.returncode != 1:
+            return False, None, "owned local branch is not proven absent"
+    return True, payload, ""
+
+
+def get_git_delivery_contract(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[dict[str, Any]]:
+    """Return the structured, sealed delivery contract for one task."""
+
+    row = conn.execute(
+        "SELECT required, policy_json, policy_fingerprint, request_json, "
+        "request_fingerprint, ownership_json, ownership_fingerprint, "
+        "candidate_digest, receipt_json, "
+        "receipt_fingerprint, verified_at "
+        "FROM task_git_delivery WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    def _decode(raw: object) -> Optional[dict[str, Any]]:
+        if not raw:
+            return None
+        try:
+            value = json.loads(str(raw))
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return dict(value) if isinstance(value, Mapping) else None
+
+    policy = _decode(row["policy_json"])
+    request = _decode(row["request_json"])
+    return {
+        "required": bool(row["required"]),
+        "policy": policy,
+        "policy_fingerprint": row["policy_fingerprint"],
+        "request": request,
+        "request_fingerprint": row["request_fingerprint"],
+        "ownership_json": row["ownership_json"],
+        "ownership_fingerprint": row["ownership_fingerprint"],
+        "candidate_digest": row["candidate_digest"],
+        "receipt_json": row["receipt_json"],
+        "receipt_fingerprint": row["receipt_fingerprint"],
+        "verified_at": row["verified_at"],
+    }
+
+
+def _invalidate_git_delivery_candidate(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    clear_ownership: bool = False,
+) -> None:
+    """Invalidate mutable review evidence while preserving sealed policy."""
+
+    ownership_sql = (
+        "ownership_json = NULL, ownership_fingerprint = NULL, "
+        if clear_ownership
+        else ""
+    )
+    sql = (
+        "UPDATE task_git_delivery SET request_json = NULL, "
+        "request_fingerprint = NULL, candidate_digest = NULL, "
+        "receipt_json = NULL, receipt_fingerprint = NULL, verified_at = NULL, "
+        + ownership_sql
+        + "cleanup_state = 'not_requested', cleanup_attempts = 0, "
+        "cleanup_last_error = NULL, cleanup_updated_at = NULL, "
+        "cleanup_owner_pid = NULL, cleanup_owner_started_at = NULL, "
+        "cleanup_repo_path = NULL, cleanup_json = NULL, "
+        "cleanup_fingerprint = NULL WHERE task_id = ? AND required = 1"
+    )
+    conn.execute(sql, (task_id,))
+
+
+def _invalidate_worktree_for_terminal_reopen(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> None:
+    """Reset delivery safely when terminal work is made executable again."""
+
+    row = conn.execute(
+        "SELECT cleanup_state, ownership_json, ownership_fingerprint "
+        "FROM task_git_delivery WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            "terminal worktree cannot be reopened without its delivery obligation"
+        )
+    cleanup_state = str(row["cleanup_state"] or "")
+    ownership_present = (
+        row["ownership_json"] is not None
+        or row["ownership_fingerprint"] is not None
+    )
+    if ownership_present:
+        owned, _ownership, ownership_error = _validate_worktree_ownership(
+            conn,
+            task_id,
+            require_checkout=False,
+        )
+        if not owned:
+            raise RuntimeError(
+                f"terminal worktree ownership is invalid: {ownership_error}"
+            )
+    if cleanup_state == "pending":
+        # Cleanup runs outside the status transaction. Refuse the reopen until
+        # it finishes so it cannot delete a checkout that the new run just
+        # reclaimed, or turn durable ownership into a foreign orphan.
+        raise RuntimeError(
+            "terminal worktree cleanup is still pending; retry cleanup before reopen"
+        )
+    clear_ownership = False
+    if cleanup_state == "complete":
+        reaped, _payload, reason = _validate_cleanup_obligation(
+            conn,
+            task_id,
+            require_reaped=True,
+        )
+        if not reaped:
+            raise RuntimeError(
+                f"terminal worktree cleanup is not proven complete: {reason}"
+            )
+        clear_ownership = True
+    _invalidate_git_delivery_candidate(
+        conn,
+        task_id,
+        clear_ownership=clear_ownership,
+    )
+
+
+def _run_claim_source_status(
+    conn: sqlite3.Connection, task_id: str, run_id: int
+) -> Optional[str]:
+    """Return the durable source lane recorded when one run was claimed."""
+
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND run_id = ? "
+        "AND kind = 'claimed' ORDER BY id DESC LIMIT 1",
+        (task_id, int(run_id)),
+    ).fetchone()
+    try:
+        payload = json.loads(row["payload"]) if row and row["payload"] else {}
+    except (json.JSONDecodeError, TypeError):
+        return None
+    source = payload.get("source_status") if isinstance(payload, Mapping) else None
+    return str(source) if isinstance(source, str) and source else None
+
+
+def _persist_verified_git_delivery_receipt(
+    conn: sqlite3.Connection,
+    task_id: str,
+    receipt: Mapping[str, Any],
+) -> bool:
+    """Seal one verifier-produced receipt against its exact worktree task.
+
+    This is the SQLite half of the gate.  Callers should use
+    ``git_delivery.verify_and_persist_git_delivery``; this helper deliberately
+    accepts only the already-normalized receipt mapping that wrapper emits.
+    The first candidate digest wins until the same-card review lifecycle
+    explicitly invalidates it. Replaying that candidate is idempotent.
+    """
+
+    if not isinstance(receipt, Mapping):
+        return False
+    digest = str(receipt.get("candidate_digest") or "")
+    branch = str(receipt.get("branch") or "")
+    worktree = _path_identity(receipt.get("canonical_worktree"))
+    head_sha = str(receipt.get("head_sha") or "")
+    merge_sha = str(receipt.get("merge_sha") or "")
+    checks = receipt.get("checks")
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", digest)
+        or not branch
+        or worktree is None
+        or not re.fullmatch(r"[0-9a-f]{40,64}", head_sha)
+        or not re.fullmatch(r"[0-9a-f]{40,64}", merge_sha)
+        or not isinstance(checks, (list, tuple))
+        or not checks
+        or any(
+            not isinstance(check, Mapping)
+            or not str(check.get("name") or "")
+            or str(check.get("state") or "").upper() != "SUCCESS"
+            for check in checks
+        )
+    ):
+        return False
+    receipt_json = json.dumps(
+        dict(receipt),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    receipt_fingerprint = hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
+    now = int(time.time())
+    with write_txn(conn):
+        task = conn.execute(
+            "SELECT workspace_kind, workspace_path, branch_name, status "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        obligation = conn.execute(
+            "SELECT required, policy_json, policy_fingerprint, request_json, "
+            "request_fingerprint, candidate_digest, receipt_json, "
+            "receipt_fingerprint, verified_at "
+            "FROM task_git_delivery WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if (
+            task is None
+            or obligation is None
+            or not bool(obligation["required"])
+            or task["workspace_kind"] != "worktree"
+            or task["status"] in {"done", "archived"}
+            or _path_identity(task["workspace_path"]) != worktree
+            or str(task["branch_name"] or "") != branch
+        ):
+            return False
+        owned, _ownership, _ownership_error = _validate_worktree_ownership(
+            conn,
+            task_id,
+            require_checkout=True,
+        )
+        if not owned:
+            return False
+        try:
+            policy = json.loads(str(obligation["policy_json"] or ""))
+            request = json.loads(str(obligation["request_json"] or ""))
+            if not isinstance(policy, Mapping) or not isinstance(request, Mapping):
+                return False
+            _, policy_fingerprint = _canonical_delivery_document(policy)
+            _, request_fingerprint = _canonical_delivery_document(request)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if (
+            policy_fingerprint != obligation["policy_fingerprint"]
+            or request_fingerprint != obligation["request_fingerprint"]
+        ):
+            return False
+        existing_digest = obligation["candidate_digest"]
+        if existing_digest is not None and str(existing_digest) != digest:
+            return False
+        try:
+            if existing_digest is None:
+                updated = conn.execute(
+                    "UPDATE task_git_delivery SET candidate_digest = ?, "
+                    "receipt_json = ?, receipt_fingerprint = ?, verified_at = ? "
+                    "WHERE task_id = ? AND candidate_digest IS NULL ",
+                    (
+                        digest,
+                        receipt_json,
+                        receipt_fingerprint,
+                        now,
+                        task_id,
+                    ),
+                )
+            else:
+                # A fresh authoritative re-query may observe a newer base SHA
+                # while the immutable candidate remains identical. Replace the
+                # entire receipt + full fingerprint atomically; never keep a
+                # stale or tampered receipt merely because candidate_digest is
+                # unchanged.
+                updated = conn.execute(
+                    "UPDATE task_git_delivery SET receipt_json = ?, "
+                    "receipt_fingerprint = ?, verified_at = ? "
+                    "WHERE task_id = ? AND candidate_digest = ?",
+                    (receipt_json, receipt_fingerprint, now, task_id, digest),
+                )
+        except sqlite3.IntegrityError:
+            return False
+        if updated.rowcount != 1:
+            current = conn.execute(
+                "SELECT candidate_digest, receipt_json, receipt_fingerprint, "
+                "verified_at "
+                "FROM task_git_delivery WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            return (
+                current is not None
+                and current["candidate_digest"] == digest
+                and current["receipt_fingerprint"] == receipt_fingerprint
+            )
+        if existing_digest is not None:
+            return True
+        _append_event(
+            conn,
+            task_id,
+            "delivery_verified",
+            {
+                "candidate_digest": digest,
+                "head_sha": head_sha,
+                "merge_sha": merge_sha,
+                "pr_number": receipt.get("pr_number"),
+                "pr_url": receipt.get("pr_url"),
+            },
+        )
+    return True
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -5097,6 +6599,7 @@ def complete_task(
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
     fire_lifecycle_hook: bool = True,
+    git_delivery_github_query: Optional[Callable[[Any], Mapping[str, Any]]] = None,
 ) -> bool:
     """Transition ``running|ready|blocked|review -> done`` and record ``result``.
 
@@ -5129,6 +6632,10 @@ def complete_task(
     Any suspected phantom references are recorded as a
     ``suspected_hallucinated_references`` event. This pass is advisory
     and never blocks.
+
+    Worktree tasks created through :func:`create_task` carry a durable Git
+    delivery obligation. They cannot become ``done`` until the existing Git
+    verifier has sealed a receipt for this same card/worktree/branch.
     """
     now = int(time.time())
     # Fail before validating cards or staging artifacts; re-check inside the
@@ -5166,6 +6673,58 @@ def complete_task(
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )
+    # This is the single completion authority for tools, CLI, dashboard and
+    # direct domain callers. Re-query remote PR/check/ref evidence on every
+    # eligible worktree completion attempt; the transaction below still
+    # rechecks the sealed contract and local HEAD as the final TOCTOU fence.
+    preflight = conn.execute(
+        "SELECT t.status, t.current_run_id, t.workspace_kind, d.required "
+        "FROM tasks t LEFT JOIN task_git_delivery d ON d.task_id = t.id "
+        "WHERE t.id = ?",
+        (task_id,),
+    ).fetchone()
+    if preflight is not None and preflight["workspace_kind"] == "worktree":
+        source_status = None
+        if (
+            preflight["status"] == "running"
+            and preflight["current_run_id"] is not None
+        ):
+            source_status = _run_claim_source_status(
+                conn, task_id, int(preflight["current_run_id"])
+            )
+        eligible_review = preflight["status"] == "review" or (
+            preflight["status"] == "running" and source_status == "review"
+        )
+        if eligible_review and bool(preflight["required"]):
+            from hermes_cli.git_delivery import verify_and_persist_git_delivery
+
+            refreshed = verify_and_persist_git_delivery(
+                conn,
+                task_id,
+                github_query=git_delivery_github_query,
+            )
+            if not refreshed.ok:
+                with write_txn(conn):
+                    current = conn.execute(
+                        "SELECT current_run_id FROM tasks WHERE id = ?",
+                        (task_id,),
+                    ).fetchone()
+                    _append_event(
+                        conn,
+                        task_id,
+                        "completion_blocked_delivery",
+                        {
+                            "reason": refreshed.message,
+                            "code": refreshed.code.value,
+                        },
+                        run_id=(
+                            int(current["current_run_id"])
+                            if current is not None
+                            and current["current_run_id"] is not None
+                            else None
+                        ),
+                    )
+                return False
     with write_txn(conn):
         # Parent completion is a hard invariant even for direct human review
         # approval. A parent may have been reopened after this task entered
@@ -5173,10 +6732,140 @@ def complete_task(
         if not _parents_satisfied(conn, task_id):
             return False
         prior = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?",
+            "SELECT status, current_run_id, workspace_kind, workspace_path, "
+            "branch_name, worker_pid FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         prior_status = prior["status"] if prior else None
+        delivery = conn.execute(
+            "SELECT required, policy_json, policy_fingerprint, request_json, "
+            "request_fingerprint, candidate_digest, receipt_json, "
+            "receipt_fingerprint, verified_at "
+            "FROM task_git_delivery WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if prior_status in {"running", "ready", "blocked", "review"}:
+            is_worktree = prior["workspace_kind"] == "worktree"
+            review_phase = prior_status == "review" or (
+                prior_status == "running"
+                and prior["current_run_id"] is not None
+                and _run_claim_source_status(
+                    conn, task_id, int(prior["current_run_id"])
+                )
+                == "review"
+            )
+            if is_worktree and (
+                delivery is None or not bool(delivery["required"])
+            ):
+                _append_event(
+                    conn,
+                    task_id,
+                    "completion_blocked_delivery",
+                    {
+                        "reason": "worktree Git delivery obligation is missing or disabled",
+                        "code": "delivery_obligation_missing",
+                    },
+                    run_id=(
+                        int(prior["current_run_id"])
+                        if prior["current_run_id"] is not None
+                        else None
+                    ),
+                )
+                return False
+            if is_worktree and not review_phase:
+                _append_event(
+                    conn,
+                    task_id,
+                    "completion_blocked_delivery",
+                    {
+                        "reason": "worktree completion requires the review lane",
+                        "code": "delivery_review_required",
+                    },
+                    run_id=(
+                        int(prior["current_run_id"])
+                        if prior["current_run_id"] is not None
+                        else None
+                    ),
+                )
+                return False
+            if delivery is not None and bool(delivery["required"]):
+                try:
+                    policy = json.loads(str(delivery["policy_json"] or ""))
+                    request = json.loads(str(delivery["request_json"] or ""))
+                    _, policy_fingerprint = _canonical_delivery_document(policy)
+                    _, request_fingerprint = _canonical_delivery_document(request)
+                    contract_intact = (
+                        isinstance(policy, Mapping)
+                        and isinstance(request, Mapping)
+                        and policy_fingerprint == delivery["policy_fingerprint"]
+                        and request_fingerprint == delivery["request_fingerprint"]
+                    )
+                except (TypeError, json.JSONDecodeError):
+                    contract_intact = False
+                if not contract_intact:
+                    _append_event(
+                        conn,
+                        task_id,
+                        "completion_blocked_delivery",
+                        {
+                            "reason": "sealed Git delivery policy or manifest changed",
+                            "code": "delivery_contract_tampered",
+                        },
+                        run_id=(
+                            int(prior["current_run_id"])
+                            if prior and prior["current_run_id"] is not None
+                            else None
+                        ),
+                    )
+                    return False
+            if delivery is not None and bool(delivery["required"]) and (
+                delivery["candidate_digest"] is None
+                or delivery["receipt_json"] is None
+                or delivery["verified_at"] is None
+            ):
+                _append_event(
+                    conn,
+                    task_id,
+                    "completion_blocked_delivery",
+                    {"reason": "verified Git delivery receipt is required"},
+                    run_id=(
+                        int(prior["current_run_id"])
+                        if prior and prior["current_run_id"] is not None
+                        else None
+                    ),
+                )
+                return False
+            if delivery is not None and bool(delivery["required"]):
+                from hermes_cli.git_delivery import (
+                    validate_persisted_git_delivery_receipt,
+                )
+
+                fence = validate_persisted_git_delivery_receipt(
+                    str(delivery["receipt_json"]),
+                    str(delivery["candidate_digest"]),
+                    receipt_fingerprint=str(
+                        delivery["receipt_fingerprint"] or ""
+                    ),
+                    sealed_verified_at=int(delivery["verified_at"] or 0),
+                    canonical_worktree=str(prior["workspace_path"] or ""),
+                    branch=str(prior["branch_name"] or ""),
+                )
+                if not fence.ok:
+                    _append_event(
+                        conn,
+                        task_id,
+                        "completion_blocked_delivery",
+                        {
+                            "reason": fence.message,
+                            "code": fence.code.value,
+                        },
+                        run_id=(
+                            int(prior["current_run_id"])
+                            if prior["current_run_id"] is not None
+                            else None
+                        ),
+                    )
+                    return False
         if expected_run_id is None:
             cur = conn.execute(
                 """
@@ -5214,6 +6903,37 @@ def complete_task(
             )
         if cur.rowcount != 1:
             return False
+        if delivery is not None and bool(delivery["required"]):
+            owner_pid = (
+                int(prior["worker_pid"])
+                if prior and prior["worker_pid"] is not None
+                else None
+            )
+            cleanup_json, cleanup_fingerprint, cleanup_payload = (
+                _build_cleanup_obligation(
+                    conn,
+                    task_id,
+                    receipt_json=str(delivery["receipt_json"] or ""),
+                    owner_pid=owner_pid,
+                )
+            )
+            conn.execute(
+                "UPDATE task_git_delivery SET cleanup_state = 'pending', "
+                "cleanup_attempts = 0, cleanup_last_error = NULL, "
+                "cleanup_updated_at = ?, cleanup_owner_pid = ?, "
+                "cleanup_owner_started_at = ?, cleanup_repo_path = ?, "
+                "cleanup_json = ?, cleanup_fingerprint = ? "
+                "WHERE task_id = ?",
+                (
+                    now,
+                    cleanup_payload["owner_pid"],
+                    cleanup_payload["owner_started_at"],
+                    cleanup_payload["repo_root"],
+                    cleanup_json,
+                    cleanup_fingerprint,
+                    task_id,
+                ),
+            )
         if isinstance(metadata, dict):
             _persist_scratch_completion_artifacts(conn, task_id, metadata)
             for stored_path in metadata.pop("_staged_artifacts", []):
@@ -5613,24 +7333,75 @@ def _is_managed_scratch_path(p: Path) -> bool:
     return is_managed
 
 
+def _record_git_cleanup_result(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    removed: bool,
+    error: Optional[str] = None,
+) -> None:
+    """Persist one idempotent cleanup attempt for a delivered worktree."""
+
+    now = int(time.time())
+    with write_txn(conn):
+        if removed:
+            updated = conn.execute(
+                "UPDATE task_git_delivery SET cleanup_state = 'complete', "
+                "cleanup_last_error = NULL, cleanup_updated_at = ? "
+                "WHERE task_id = ? AND cleanup_state = 'pending'",
+                (now, task_id),
+            )
+            if updated.rowcount == 1:
+                _append_event(
+                    conn,
+                    task_id,
+                    "workspace_cleanup_completed",
+                    {"kind": "worktree"},
+                )
+            return
+        message = (error or "worktree removal was not proven").strip()[:500]
+        updated = conn.execute(
+            "UPDATE task_git_delivery SET cleanup_attempts = cleanup_attempts + 1, "
+            "cleanup_last_error = ?, cleanup_updated_at = ? "
+            "WHERE task_id = ? AND cleanup_state = 'pending'",
+            (message, now, task_id),
+        )
+        if updated.rowcount == 1:
+            _append_event(
+                conn,
+                task_id,
+                "workspace_cleanup_pending",
+                {"kind": "worktree", "error": message},
+            )
+
+
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
 
     Called from :func:`complete_task` after the DB transaction commits.
-    Best-effort — any error is swallowed so cleanup never blocks task completion.
-    Only ``scratch`` workspaces are removed; ``worktree`` and ``dir`` workspaces
-    are intentionally preserved.
+    Cleanup never rolls task completion back, but a verified delivery cleanup
+    failure remains durably pending with an auditable error for dispatcher retry.
+    ``scratch`` workspaces are removed; ``worktree`` workspaces are removed only
+    when provably free of work (clean tree, every commit reachable from a
+    remote-tracking ref); ``dir`` workspaces are intentionally preserved.
     """
+    row: Optional[sqlite3.Row] = None
     try:
         row = conn.execute(
-            "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
+            "SELECT t.workspace_kind, t.workspace_path, t.branch_name, "
+            "d.candidate_digest, d.receipt_json, d.receipt_fingerprint, "
+            "d.cleanup_state, "
+            "d.cleanup_owner_pid, d.cleanup_owner_started_at, "
+            "d.cleanup_repo_path "
+            "FROM tasks t LEFT JOIN task_git_delivery d ON d.task_id = t.id "
+            "WHERE t.id = ?",
             (task_id,),
         ).fetchone()
         if not row:
             return
         kind: Optional[str] = row["workspace_kind"]
         path: Optional[str] = row["workspace_path"]
-        if kind != "scratch" or not path:
+        if kind not in ("scratch", "worktree") or not path:
             # This task's own workspace isn't a removable scratch dir, but its
             # completion may still unblock a deferred parent scratch cleanup
             # (e.g. a 'dir' child whose scratch parent was waiting on it). #33774
@@ -5638,7 +7409,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             return
         # Check if this task has children that still need the workspace.
         # If any child is not yet done/archived, defer cleanup so the
-        # child can read handoff artifacts from the scratch dir (#33774).
+        # child can read handoff artifacts from the workspace (#33774).
         _active_children = conn.execute(
             "SELECT 1 FROM task_links l "
             "JOIN tasks t ON t.id = l.child_id "
@@ -5648,10 +7419,96 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         ).fetchone()
         if _active_children:
             _log.debug(
-                "Deferring scratch workspace cleanup for task %s: "
+                "Deferring %s workspace cleanup for task %s: "
                 "active children still need workspace at %s",
-                task_id, path,
+                kind, task_id, path,
             )
+            return
+        if kind == "worktree":
+            cleanup_state = row["cleanup_state"]
+            cleanup_head_sha: Optional[str] = None
+            if cleanup_state == "complete":
+                reaped, _payload, reaped_error = _validate_cleanup_obligation(
+                    conn,
+                    task_id,
+                    require_reaped=True,
+                )
+                if reaped:
+                    return
+                # A bare state flip is not terminal proof. Put the obligation
+                # back into the retry lane while preserving the exact sealed
+                # authority; no deletion happens until the full seal validates.
+                with write_txn(conn):
+                    conn.execute(
+                        "UPDATE task_git_delivery SET cleanup_state = 'pending', "
+                        "cleanup_attempts = cleanup_attempts + 1, "
+                        "cleanup_last_error = ?, cleanup_updated_at = ? "
+                        "WHERE task_id = ? AND cleanup_state = 'complete'",
+                        (
+                            f"invalid cleanup completion: {reaped_error}"[:500],
+                            int(time.time()),
+                            task_id,
+                        ),
+                    )
+                cleanup_state = "pending"
+            if cleanup_state != "pending":
+                _log.info(
+                    "Preserving worktree for task %s: no verified delivery cleanup is pending",
+                    task_id,
+                )
+                return
+            if cleanup_state == "pending":
+                valid_cleanup, cleanup_payload, cleanup_error = (
+                    _validate_cleanup_obligation(
+                        conn,
+                        task_id,
+                        require_reaped=False,
+                    )
+                )
+                if not valid_cleanup or cleanup_payload is None:
+                    _record_git_cleanup_result(
+                        conn,
+                        task_id,
+                        removed=False,
+                        error=f"cleanup authority invalid: {cleanup_error}",
+                    )
+                    return
+                owner_pid = cleanup_payload.get("owner_pid")
+                owner_started_at = cleanup_payload.get("owner_started_at")
+                if owner_pid is not None:
+                    if owner_started_at is not None:
+                        owner_alive = _process_identity_matches(
+                            owner_pid, owner_started_at
+                        )
+                    else:
+                        owner_alive = _pid_alive(int(owner_pid))
+                    if owner_alive:
+                        return
+                cleanup_head_sha = str(cleanup_payload["head_sha"])
+                cleanup_repo_path = str(cleanup_payload["repo_root"])
+            # Kill the (dead) tmux worker session BEFORE removing the
+            # worktree so a lingering worker never has its cwd deleted out
+            # from under it. Both steps stay best-effort.
+            _cleanup_worker_tmux(conn, task_id)
+            removed, error = _cleanup_worktree_workspace(
+                task_id,
+                path,
+                row["branch_name"],
+                expected_head_sha=cleanup_head_sha,
+                repo_path=cleanup_repo_path,
+                expected_common_dir=str(cleanup_payload["git_common_dir"]),
+                expected_git_dir=str(cleanup_payload["git_dir"]),
+                quarantine_path=str(cleanup_payload["quarantine_path"]),
+            )
+            if cleanup_state == "pending":
+                _record_git_cleanup_result(
+                    conn,
+                    task_id,
+                    removed=removed,
+                    error=error,
+                )
+            if removed:
+                _try_cleanup_parent_workspaces(conn, task_id)
             return
         import shutil
         wp = Path(path)
@@ -5678,8 +7535,271 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         # tasks now have all children done — their deferred cleanup can
         # proceed (#33774).
         _try_cleanup_parent_workspaces(conn, task_id)
-    except Exception:
-        pass  # best-effort — never block completion
+    except Exception as exc:
+        if row is not None and row["cleanup_state"] == "pending":
+            try:
+                _record_git_cleanup_result(
+                    conn,
+                    task_id,
+                    removed=False,
+                    error=f"unexpected cleanup failure: {type(exc).__name__}: {exc}",
+                )
+            except Exception:
+                _log.exception(
+                    "Could not persist worktree cleanup failure for task %s",
+                    task_id,
+                )
+        else:
+            _log.exception("Workspace cleanup failed for task %s", task_id)
+
+
+def _cleanup_git(repo: Path, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    """Run one bounded, non-interactive Git cleanup probe with zero visible UI."""
+
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+        env=noninteractive_git_env(),
+        **windows_hidden_popen_kwargs(),
+    )
+
+
+def _cleanup_repository_for_worktree(path: Path) -> Optional[Path]:
+    """Resolve the main repository owning an existing linked worktree."""
+
+    if not path.is_dir():
+        return None
+    common = _cleanup_git(
+        path,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    )
+    if common.returncode != 0 or not common.stdout.strip():
+        return None
+    common_path = Path(common.stdout.strip()).expanduser().resolve(strict=False)
+    if common_path.name != ".git":
+        return None
+    repo_root = common_path.parent.resolve(strict=False)
+    return None if path.resolve(strict=False) == repo_root else repo_root
+
+
+def _task_owns_branch(task_id: str, branch: str) -> bool:
+    """Delegate to the verifier's single task-branch ownership rule."""
+
+    from hermes_cli.git_delivery import task_owns_delivery_branch
+
+    return task_owns_delivery_branch(task_id, branch)
+
+
+def _cleanup_worktree_workspace(
+    task_id: str,
+    path: str,
+    branch_name: Optional[str] = None,
+    *,
+    expected_head_sha: Optional[str] = None,
+    repo_path: Optional[str] = None,
+    expected_common_dir: Optional[str] = None,
+    expected_git_dir: Optional[str] = None,
+    quarantine_path: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
+    """Remove the exact delivered worktree and its task-owned local branch.
+
+    Required-delivery cleanup binds the local branch to the sealed receipt HEAD.
+    That receipt was persisted only after the verifier proved remote ancestry;
+    cleanup does not replace that immutable proof with a later mutable remote
+    ref. The worktree is removed without force; an owned branch is deleted with
+    ``update-ref``'s expected-old-OID fence. Any failure stays retryable.
+    """
+
+    try:
+        wp = Path(path).expanduser().resolve(strict=False)
+        branch = (branch_name or "").strip() or f"wt/{task_id}"
+        branch_ref = f"refs/heads/{branch}"
+
+        if not _task_owns_branch(task_id, branch):
+            return False, "worktree branch is not owned by this task"
+        if expected_head_sha is None:
+            return False, "owned branch cleanup requires a sealed delivery receipt"
+        if not all(
+            (repo_path, expected_common_dir, expected_git_dir, quarantine_path)
+        ):
+            return False, "sealed cleanup authority is incomplete"
+        repo_root = Path(str(repo_path)).expanduser().resolve(strict=False)
+        expected_common = _loose_path_identity(expected_common_dir)
+        expected_git = _loose_path_identity(expected_git_dir)
+        quarantine = Path(str(quarantine_path)).expanduser().resolve(strict=False)
+        if (
+            not repo_root.is_dir()
+            or expected_common is None
+            or expected_git is None
+            or quarantine == wp
+        ):
+            return False, "persisted cleanup repository identity is unavailable"
+        if wp.exists() and quarantine.exists():
+            return False, "both canonical worktree and cleanup quarantine exist"
+
+        def _prove_candidate(candidate: Path) -> Optional[str]:
+            if not candidate.is_dir() or not _is_linked_worktree_checkout(candidate):
+                return "cleanup candidate is not a linked worktree"
+            actual_common = _loose_path_identity(_git_common_dir(candidate))
+            actual_git = _loose_path_identity(_git_dir(candidate))
+            actual_branch = _git_current_branch(candidate)
+            actual_head = _cleanup_git(
+                candidate,
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            )
+            status = _cleanup_git(
+                candidate,
+                "status",
+                "--porcelain=v2",
+                "--untracked-files=all",
+            )
+            if (
+                actual_common != expected_common
+                or actual_git != expected_git
+                or actual_branch != branch
+                or actual_head.returncode != 0
+                or actual_head.stdout.strip().lower() != expected_head_sha.lower()
+            ):
+                return "cleanup candidate differs from sealed worktree identity"
+            if status.returncode != 0 or status.stdout:
+                return "worktree is dirty or its status could not be proven"
+            return None
+
+        active = quarantine if quarantine.exists() else wp
+        if active.exists():
+            mismatch = _prove_candidate(active)
+            if mismatch:
+                return False, mismatch
+            if active == wp:
+                quarantine.parent.mkdir(parents=True, exist_ok=True)
+                moved = _cleanup_git(
+                    repo_root,
+                    "worktree",
+                    "move",
+                    str(wp),
+                    str(quarantine),
+                    timeout=60,
+                )
+                if moved.returncode != 0:
+                    message = (
+                        moved.stderr or moved.stdout or "git worktree move failed"
+                    ).strip()
+                    return False, message
+                if wp.exists() or not quarantine.is_dir():
+                    return False, "git did not quarantine the exact worktree"
+                mismatch = _prove_candidate(quarantine)
+                if mismatch:
+                    recovery = None
+                    if not wp.exists():
+                        recovery = _cleanup_git(
+                            repo_root,
+                            "worktree",
+                            "move",
+                            str(quarantine),
+                            str(wp),
+                            timeout=60,
+                        )
+                    if recovery is not None and recovery.returncode == 0:
+                        return False, f"{mismatch}; checkout restored without deletion"
+                    return False, (
+                        f"{mismatch}; preserved at cleanup quarantine {quarantine}"
+                    )
+            removed = _cleanup_git(
+                repo_root,
+                "worktree",
+                "remove",
+                str(quarantine),
+                timeout=60,
+            )
+            if removed.returncode != 0:
+                message = (
+                    removed.stderr or removed.stdout or "git worktree remove failed"
+                ).strip()
+                return False, message
+            if quarantine.exists():
+                return False, "git reported success but cleanup quarantine still exists"
+            try:
+                quarantine.parent.rmdir()
+            except OSError:
+                pass
+
+        checked = _cleanup_git(repo_root, "check-ref-format", branch_ref)
+        if checked.returncode != 0:
+            return False, f"cleanup ref is invalid: {branch_ref}"
+
+        local_head = _cleanup_git(
+            repo_root,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{branch_ref}^{{commit}}",
+        )
+        branch_exists = local_head.returncode == 0
+        actual_head = local_head.stdout.strip().lower() if branch_exists else None
+
+        expected_head = expected_head_sha.lower()
+        if branch_exists and actual_head != expected_head:
+            return False, "owned branch no longer points at the sealed receipt HEAD"
+
+        if branch_exists:
+            deleted = _cleanup_git(
+                repo_root,
+                "update-ref",
+                "-d",
+                branch_ref,
+                expected_head_sha.lower(),
+            )
+            if deleted.returncode != 0:
+                message = (deleted.stderr or deleted.stdout or "owned branch delete failed").strip()
+                return False, message
+            still_exists = _cleanup_git(
+                repo_root,
+                "show-ref",
+                "--verify",
+                "--quiet",
+                branch_ref,
+            )
+            if still_exists.returncode == 0:
+                return False, "owned branch still exists after conditional deletion"
+            if still_exists.returncode not in (0, 1):
+                return False, "owned branch deletion could not be proven"
+
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _retry_pending_git_delivery_cleanups(conn: sqlite3.Connection) -> int:
+    """Retry delivered-worktree cleanup from the existing dispatcher tick."""
+
+    rows = conn.execute(
+        "SELECT d.task_id FROM task_git_delivery d "
+        "JOIN tasks t ON t.id = d.task_id "
+        "WHERE d.cleanup_state = 'pending' AND t.status IN ('done', 'archived') "
+        "ORDER BY d.cleanup_updated_at ASC, d.task_id ASC"
+    ).fetchall()
+    completed = 0
+    for row in rows:
+        task_id = str(row["task_id"])
+        _cleanup_workspace(conn, task_id)
+        state = conn.execute(
+            "SELECT cleanup_state FROM task_git_delivery WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if state is not None and state["cleanup_state"] == "complete":
+            completed += 1
+    return completed
 
 
 def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> None:
@@ -5697,10 +7817,14 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
         ).fetchall()
         for (parent_id,) in parents:
             row = conn.execute(
-                "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
+                "SELECT workspace_kind, workspace_path, branch_name FROM tasks WHERE id = ?",
                 (parent_id,),
             ).fetchone()
-            if not row or row["workspace_kind"] != "scratch" or not row["workspace_path"]:
+            if (
+                not row
+                or row["workspace_kind"] not in ("scratch", "worktree")
+                or not row["workspace_path"]
+            ):
                 continue
             # Check if ALL children of this parent are terminal
             active = conn.execute(
@@ -5712,12 +7836,11 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             ).fetchone()
             if active:
                 continue  # still has active children
-            # All children done — safe to clean up parent workspace
-            import shutil
-            wp = Path(row["workspace_path"])
-            if wp.is_dir() and _is_managed_scratch_path(wp):
-                shutil.rmtree(wp, ignore_errors=True)
-                _log.debug("Deferred cleanup: removed parent %s scratch workspace: %s", parent_id, wp)
+            # Re-enter the single cleanup boundary so delivered worktree
+            # parents still honor their receipt fence, live-PID deferral and
+            # durable retry state. Calling the remover directly here used to
+            # bypass all three protections.
+            _cleanup_workspace(conn, parent_id)
     except Exception:
         pass  # best-effort
 
@@ -5736,12 +7859,21 @@ def _cleanup_worker_tmux(conn: sqlite3.Connection, task_id: str) -> None:
         # Check if session exists and pane is dead before killing
         out = subprocess.run(
             ["tmux", "list-panes", "-t", session, "-F", "#{pane_dead}"],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            **windows_hidden_popen_kwargs(),
         )
         if out.stdout.strip() == "1":
             subprocess.run(
                 ["tmux", "kill-session", "-t", session],
-                capture_output=True, timeout=5,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=5,
+                **windows_hidden_popen_kwargs(),
             )
             _log.debug("Killed stale tmux session: %s", session)
     except Exception:
@@ -6151,6 +8283,7 @@ def request_review(
     summary: Optional[str] = None,
     metadata: Optional[dict] = None,
     reviewer: Optional[str] = None,
+    git_delivery_request: Optional[Mapping[str, Any]] = None,
     expected_run_id: Optional[int] = None,
     force: bool = False,
     with_reason: bool = False,
@@ -6184,11 +8317,80 @@ def request_review(
         if not _parents_satisfied(conn, task_id):
             return _ret(False, "parent dependencies are not satisfied")
         trow = conn.execute(
-            "SELECT assignee, status, claim_lock, current_run_id "
+            "SELECT assignee, status, claim_lock, current_run_id, "
+            "workspace_kind, workspace_path, branch_name "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if trow is None:
             return _ret(False, "task not found")
+        delivery = get_git_delivery_contract(conn, task_id)
+        request_json: Optional[str] = None
+        request_fingerprint: Optional[str] = None
+        policy_json: Optional[str] = None
+        policy_fingerprint: Optional[str] = None
+        if trow["workspace_kind"] == "worktree" and (
+            delivery is None or not delivery["required"]
+        ):
+            return _ret(
+                False,
+                "worktree Git delivery obligation is missing or disabled",
+            )
+        if delivery is not None and delivery["required"]:
+            if not isinstance(git_delivery_request, Mapping):
+                return _ret(
+                    False,
+                    "this board requires Git delivery; pass pull_request and "
+                    "declared_artifacts to kanban_request_review",
+                )
+            try:
+                from hermes_cli.git_delivery import (
+                    build_git_delivery_config_from_contract,
+                )
+
+                stored_policy = delivery["policy"]
+                policy: Mapping[str, Any]
+                if isinstance(stored_policy, Mapping):
+                    stored_json, stored_fingerprint = _canonical_delivery_document(
+                        stored_policy
+                    )
+                    if stored_fingerprint != delivery["policy_fingerprint"]:
+                        return _ret(
+                            False,
+                            "sealed git_delivery policy fingerprint mismatch",
+                        )
+                    if not _git_delivery_policy_has_required_shape(stored_policy):
+                        return _ret(
+                            False,
+                            "sealed git_delivery policy is incomplete; create "
+                            "the task after an administrator configures the board",
+                        )
+                    else:
+                        policy = stored_policy
+                        policy_json = stored_json
+                        policy_fingerprint = stored_fingerprint
+                else:
+                    return _ret(
+                        False,
+                        "Git delivery policy is missing; configure board.json "
+                        "git_delivery before creating the worktree task",
+                    )
+
+                build_git_delivery_config_from_contract(
+                    policy=policy,
+                    request=git_delivery_request,
+                    repo_path=str(trow["workspace_path"] or ""),
+                    canonical_worktree=str(trow["workspace_path"] or ""),
+                    branch=str(trow["branch_name"] or ""),
+                )
+                if policy_json is None or policy_fingerprint is None:
+                    policy_json, policy_fingerprint = _canonical_delivery_document(
+                        policy
+                    )
+                request_json, request_fingerprint = _canonical_delivery_document(
+                    git_delivery_request
+                )
+            except (TypeError, ValueError) as exc:
+                return _ret(False, f"invalid Git delivery manifest: {exc}")
         # Refuse to clear a live worker's claim without proof of ownership
         # (expected_run_id) or an explicit human override (force=True).
         if (
@@ -6274,6 +8476,43 @@ def request_review(
                 "task is not in running/ready (or expected_run_id did not "
                 "match the current run)",
             )
+        # Every review round proves a fresh candidate on this same card.  Clear
+        # any older receipt only after the status CAS succeeds, inside the same
+        # SQLite transaction, so a crash cannot expose review with stale proof.
+        if delivery is not None and delivery["required"]:
+            conn.execute(
+                "UPDATE task_git_delivery SET policy_json = ?, "
+                "policy_fingerprint = ?, request_json = ?, "
+                "request_fingerprint = ?, candidate_digest = NULL, "
+                "receipt_json = NULL, receipt_fingerprint = NULL, "
+                "verified_at = NULL, "
+                "cleanup_state = 'not_requested', cleanup_attempts = 0, "
+                "cleanup_last_error = NULL, cleanup_updated_at = NULL, "
+                "cleanup_owner_pid = NULL, cleanup_owner_started_at = NULL, "
+                "cleanup_repo_path = NULL, cleanup_json = NULL, "
+                "cleanup_fingerprint = NULL "
+                "WHERE task_id = ? AND required = 1",
+                (
+                    policy_json,
+                    policy_fingerprint,
+                    request_json,
+                    request_fingerprint,
+                    task_id,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE task_git_delivery SET candidate_digest = NULL, "
+                "receipt_json = NULL, receipt_fingerprint = NULL, "
+                "verified_at = NULL, "
+                "cleanup_state = 'not_requested', cleanup_attempts = 0, "
+                "cleanup_last_error = NULL, cleanup_updated_at = NULL, "
+                "cleanup_owner_pid = NULL, cleanup_owner_started_at = NULL, "
+                "cleanup_repo_path = NULL, cleanup_json = NULL, "
+                "cleanup_fingerprint = NULL "
+                "WHERE task_id = ?",
+                (task_id,),
+            )
         run_id = _end_run(
             conn,
             task_id,
@@ -6338,23 +8577,7 @@ def request_changes(
         if expected_run_id is not None and int(current_run_id) != int(expected_run_id):
             return False, "run_id mismatch"
 
-        claimed_event = conn.execute(
-            "SELECT payload FROM task_events "
-            "WHERE task_id = ? AND run_id = ? AND kind = 'claimed' "
-            "ORDER BY id DESC LIMIT 1",
-            (task_id, int(current_run_id)),
-        ).fetchone()
-        try:
-            claimed_payload = (
-                json.loads(claimed_event["payload"])
-                if claimed_event and claimed_event["payload"]
-                else {}
-            )
-        except (json.JSONDecodeError, TypeError):
-            claimed_payload = {}
-        if not isinstance(claimed_payload, dict):
-            claimed_payload = {}
-        if claimed_payload.get("source_status") != "review":
+        if _run_claim_source_status(conn, task_id, int(current_run_id)) != "review":
             return False, "active run was not claimed from review"
 
         requested_event = conn.execute(
@@ -6403,6 +8626,7 @@ def request_changes(
         )
         if cur.rowcount != 1:
             return False, "task changed during review handoff"
+        _invalidate_git_delivery_candidate(conn, task_id)
         run_id = _end_run(
             conn,
             task_id,
@@ -6661,6 +8885,7 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
         )
         if cur.rowcount != 1:
             return False
+        _invalidate_git_delivery_candidate(conn, task_id)
         payload: dict[str, Any] = {"status": new_status}
         if implementer:
             payload["implementer"] = implementer
@@ -6748,7 +8973,8 @@ def invalidate_descendants_for_parent_reopen(
                 FROM task_links l
                 JOIN descendants d ON d.id = l.parent_id
             )
-            SELECT t.id, t.status, t.current_run_id, t.worker_pid, t.claim_lock
+            SELECT t.id, t.status, t.current_run_id, t.worker_pid, t.claim_lock,
+                   t.workspace_kind
             FROM descendants d
             JOIN tasks t ON t.id = d.id
             ORDER BY t.id
@@ -6775,6 +9001,11 @@ def invalidate_descendants_for_parent_reopen(
                     status="todo",
                     summary=f"ancestor {task_id} reopened",
                 )
+            if row["workspace_kind"] == "worktree":
+                if previous_status in {"done", "archived"}:
+                    _invalidate_worktree_for_terminal_reopen(conn, row["id"])
+                else:
+                    _invalidate_git_delivery_candidate(conn, row["id"])
             # consecutive_failures = 0: deliberate operator reset — see
             # docstring for why this diverges from reopen_review_task.
             conn.execute(
@@ -7036,6 +9267,11 @@ def decompose_triage_task(
         if root_row["status"] != "triage":
             return None
         tenant = root_row["tenant"]
+        root_delivery = conn.execute(
+            "SELECT policy_json, policy_fingerprint FROM task_git_delivery "
+            "WHERE task_id = ? AND required = 1",
+            (task_id,),
+        ).fetchone()
         # Children inherit the root's workspace by default so a fan-out
         # of a code-gen task lands in the parent's project dir/worktree
         # rather than throwaway scratch tmp dirs. A child dict can still
@@ -7090,6 +9326,20 @@ def decompose_triage_task(
                     (author or "decomposer"),
                 ),
             )
+            if child_ws_kind == "worktree":
+                _insert_git_delivery_obligation(
+                    conn,
+                    new_id,
+                    now,
+                    policy_json=(
+                        root_delivery["policy_json"] if root_delivery else None
+                    ),
+                    policy_fingerprint=(
+                        root_delivery["policy_fingerprint"]
+                        if root_delivery
+                        else None
+                    ),
+                )
             _append_event(
                 conn, new_id, "created",
                 {"by": author or "decomposer", "from_decompose_of": task_id},
@@ -7168,12 +9418,39 @@ def decompose_triage_task(
 
 
 def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    termination_target: tuple[int, str, float | None] | None = None
     with write_txn(conn):
+        prior = conn.execute(
+            "SELECT status, worker_pid, worker_started_at, claim_lock "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if not prior or prior["status"] == "archived":
+            return False
+        if prior["worker_pid"] is not None and prior["claim_lock"]:
+            termination_target = (
+                int(prior["worker_pid"]),
+                str(prior["claim_lock"]),
+                (
+                    float(prior["worker_started_at"])
+                    if prior["worker_started_at"] is not None
+                    else None
+                ),
+            )
         cur = conn.execute(
             "UPDATE tasks SET status = 'archived', "
-            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+            "    claim_lock = CASE WHEN ? THEN claim_lock ELSE NULL END, "
+            "    claim_expires = NULL, "
+            "    worker_pid = CASE WHEN ? THEN worker_pid ELSE NULL END, "
+            "    worker_started_at = CASE WHEN ? THEN worker_started_at "
+            "        ELSE NULL END "
             "WHERE id = ? AND status != 'archived'",
-            (task_id,),
+            (
+                termination_target is not None,
+                termination_target is not None,
+                termination_target is not None,
+                task_id,
+            ),
         )
         if cur.rowcount != 1:
             return False
@@ -7185,12 +9462,174 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
             outcome="reclaimed", status="reclaimed",
             summary="task archived with run still active",
         )
-        _append_event(conn, task_id, "archived", None, run_id=run_id)
+        _append_event(
+            conn,
+            task_id,
+            "archived",
+            (
+                {
+                    "worker_termination_pending": True,
+                    "worker_pid": termination_target[0],
+                    "claim_lock": termination_target[1],
+                    "worker_started_at": termination_target[2],
+                }
+                if termination_target is not None
+                else None
+            ),
+            run_id=run_id,
+        )
     # ``archived`` parents no longer block children, same as ``done``.
-    # Promote newly-unblocked dependents immediately instead of waiting
-    # for a later dispatcher tick.
+    # Promote dependents as soon as the archive transaction commits; worker
+    # termination may retry independently and must not change graph semantics.
     recompute_ready(conn)
+    if termination_target is not None:
+        if not _terminate_archived_worker(
+            conn,
+            task_id,
+            termination_target[0],
+            termination_target[1],
+            termination_target[2],
+        ):
+            return True
+    # Reap the workspace on archive too — tasks archived without ever
+    # completing previously kept their scratch dir / worktree forever.
+    _cleanup_workspace(conn, task_id)
     return True
+
+
+def _terminate_archived_worker(
+    conn: sqlite3.Connection,
+    task_id: str,
+    worker_pid: int,
+    claim_lock: str,
+    worker_started_at: float | None,
+    *,
+    signal_fn=None,
+) -> bool:
+    """Terminate one archived worker and durably clear its ownership.
+
+    Archiving commits its audit event before this function signals the worker.
+    A failed or interrupted termination deliberately leaves ``worker_pid`` and
+    ``claim_lock`` on the archived row so the existing dispatcher can retry it
+    after a process restart; cleanup must not race a worker that may still own
+    the workspace.
+    """
+    try:
+        current_started_at = _process_start_time(worker_pid)
+        if not _pid_alive(worker_pid):
+            termination = {
+                "prev_pid": int(worker_pid),
+                "host_local": True,
+                "termination_attempted": False,
+                "terminated": True,
+                "already_exited": True,
+            }
+        elif worker_started_at is None or current_started_at is None:
+            termination = {
+                "prev_pid": int(worker_pid),
+                "host_local": True,
+                "termination_attempted": False,
+                "terminated": False,
+                "error": "worker process identity unavailable",
+            }
+        elif abs(current_started_at - worker_started_at) >= 0.01:
+            # The original worker is gone and its PID was reused.  Never
+            # signal the replacement process; clearing the archived owner is
+            # safe because the sealed worker identity no longer exists.
+            termination = {
+                "prev_pid": int(worker_pid),
+                "host_local": True,
+                "termination_attempted": False,
+                "terminated": True,
+                "pid_reused": True,
+            }
+        else:
+            base_signal = signal_fn if signal_fn is not None else os.kill
+
+            def _identity_guarded_signal(pid: int, sig: int) -> None:
+                observed = _process_start_time(pid)
+                if observed is None:
+                    raise OSError("worker process identity unavailable")
+                if abs(observed - worker_started_at) >= 0.01:
+                    raise ProcessLookupError("archived worker PID was reused")
+                base_signal(pid, sig)
+
+            termination = _terminate_reclaimed_worker(
+                worker_pid,
+                claim_lock,
+                signal_fn=_identity_guarded_signal,
+            )
+    except Exception as exc:
+        termination = {
+            "prev_pid": int(worker_pid),
+            "host_local": False,
+            "termination_attempted": False,
+            "terminated": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    with write_txn(conn):
+        current = conn.execute(
+            "SELECT status, worker_pid, worker_started_at, claim_lock "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if (
+            not current
+            or current["status"] != "archived"
+            or current["worker_pid"] != worker_pid
+            or current["claim_lock"] != claim_lock
+            or current["worker_started_at"] != worker_started_at
+        ):
+            return False
+        if termination.get("terminated"):
+            conn.execute(
+                "UPDATE tasks SET worker_pid = NULL, worker_started_at = NULL, "
+                "claim_lock = NULL "
+                "WHERE id = ? AND status = 'archived' "
+                "AND worker_pid = ? AND worker_started_at IS ? "
+                "AND claim_lock = ?",
+                (task_id, worker_pid, worker_started_at, claim_lock),
+            )
+            _append_event(
+                conn,
+                task_id,
+                "archived_worker_terminated",
+                termination,
+            )
+            return True
+        _append_event(
+            conn,
+            task_id,
+            "archived_worker_termination_pending",
+            termination,
+        )
+        return False
+
+
+def _retry_archived_worker_terminations(conn: sqlite3.Connection) -> int:
+    """Retry workers left audibly owned by archived tasks after a crash."""
+    rows = conn.execute(
+        "SELECT id, worker_pid, worker_started_at, claim_lock FROM tasks "
+        "WHERE status = 'archived' AND worker_pid IS NOT NULL "
+        "AND claim_lock IS NOT NULL ORDER BY id"
+    ).fetchall()
+    completed = 0
+    for row in rows:
+        if _terminate_archived_worker(
+            conn,
+            str(row["id"]),
+            int(row["worker_pid"]),
+            str(row["claim_lock"]),
+            (
+                float(row["worker_started_at"])
+                if row["worker_started_at"] is not None
+                else None
+            ),
+        ):
+            _cleanup_workspace(conn, str(row["id"]))
+            completed += 1
+    return completed
 
 
 def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -7202,11 +9641,42 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """
     with write_txn(conn):
         row = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?",
+            "SELECT t.status, t.workspace_kind, t.workspace_path, t.branch_name, "
+            "d.cleanup_state, d.ownership_json, d.ownership_fingerprint "
+            "FROM tasks t LEFT JOIN task_git_delivery d ON d.task_id = t.id "
+            "WHERE t.id = ?",
             (task_id,),
         ).fetchone()
         if not row or row["status"] != "archived":
             return False
+        if row["workspace_kind"] == "worktree":
+            ownership_present = (
+                row["ownership_json"] is not None
+                or row["ownership_fingerprint"] is not None
+            )
+            owned, _ownership, ownership_error = _validate_worktree_ownership(
+                conn,
+                task_id,
+                require_checkout=False,
+            )
+            if ownership_present and not owned:
+                return False
+            if owned:
+                reaped, _cleanup, _cleanup_error = _validate_cleanup_obligation(
+                    conn,
+                    task_id,
+                    require_reaped=True,
+                )
+                if not reaped:
+                    return False
+            if not owned:
+                _log.warning(
+                    "Deleting archived task %s metadata while preserving "
+                    "foreign/manual worktree checkout %s on branch %s",
+                    task_id,
+                    row["workspace_path"],
+                    row["branch_name"],
+                )
         conn.execute(
             "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
             (task_id, task_id),
@@ -7214,6 +9684,7 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
         conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM task_git_delivery WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ?", (task_id,))
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         return cur.rowcount == 1
@@ -7230,6 +9701,49 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
     if the task was not found.
     """
     with write_txn(conn):
+        row = conn.execute(
+            "SELECT t.status, t.workspace_kind, t.workspace_path, t.branch_name, "
+            "d.cleanup_state, d.ownership_json, d.ownership_fingerprint "
+            "FROM tasks t LEFT JOIN task_git_delivery d ON d.task_id = t.id "
+            "WHERE t.id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        # A worktree task owns a durable cleanup obligation.  Public hard
+        # delete must not erase that owner while active or before the cleanup
+        # dispatcher has proved both worktree and local branch removal.
+        if row["workspace_kind"] == "worktree":
+            if row["status"] != "archived":
+                return False
+            ownership_present = (
+                row["ownership_json"] is not None
+                or row["ownership_fingerprint"] is not None
+            )
+            owned, _ownership, ownership_error = _validate_worktree_ownership(
+                conn,
+                task_id,
+                require_checkout=False,
+            )
+            if ownership_present and not owned:
+                return False
+            if owned:
+                reaped, _cleanup, _cleanup_error = _validate_cleanup_obligation(
+                    conn,
+                    task_id,
+                    require_reaped=True,
+                )
+                if not reaped:
+                    return False
+            if not owned:
+                _log.warning(
+                    "Deleting archived task %s metadata while preserving "
+                    "foreign/manual worktree checkout %s on branch %s",
+                    task_id,
+                    row["workspace_path"],
+                    row["branch_name"],
+                )
+        conn.execute("DELETE FROM task_git_delivery WHERE task_id = ?", (task_id,))
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount != 1:
             return False
@@ -7249,13 +9763,7 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
 def _git_toplevel(path: Path) -> Optional[Path]:
     """Return the git toplevel containing ``path``, or ``None`` if not in a repo."""
     try:
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=30,
-            check=False,
-        )
+        result = _cleanup_git(path, "rev-parse", "--show-toplevel")
     except Exception:
         return None
     if result.returncode != 0:
@@ -7271,12 +9779,11 @@ def _git_toplevel(path: Path) -> Optional[Path]:
 
 def _git_branch_exists(repo_root: Path, branch_name: str) -> bool:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), "show-ref", "--verify", f"refs/heads/{branch_name}"],
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=30,
-            check=False,
+        result = _cleanup_git(
+            repo_root,
+            "show-ref",
+            "--verify",
+            f"refs/heads/{branch_name}",
         )
     except Exception:
         return False
@@ -7285,12 +9792,11 @@ def _git_branch_exists(repo_root: Path, branch_name: str) -> bool:
 
 def _git_common_dir(path: Path) -> Optional[Path]:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=30,
-            check=False,
+        result = _cleanup_git(
+            path,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
         )
     except Exception:
         return None
@@ -7304,12 +9810,11 @@ def _git_common_dir(path: Path) -> Optional[Path]:
 
 def _git_dir(path: Path) -> Optional[Path]:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-dir"],
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=30,
-            check=False,
+        result = _cleanup_git(
+            path,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
         )
     except Exception:
         return None
@@ -7323,13 +9828,7 @@ def _git_dir(path: Path) -> Optional[Path]:
 
 def _git_current_branch(path: Path) -> Optional[str]:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(path), "branch", "--show-current"],
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=30,
-            check=False,
-        )
+        result = _cleanup_git(path, "branch", "--show-current")
     except Exception:
         return None
     if result.returncode != 0:
@@ -7364,14 +9863,14 @@ def _repo_root_for_worktree_target(path: Path) -> Optional[Path]:
         current = current.parent
 
 
-def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> None:
+def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> bool:
     """Materialize ``target`` as a linked git worktree under ``repo_root``."""
     target = target.expanduser()
     repo_common = _git_common_dir(repo_root)
     if target.exists() and repo_common is not None:
         target_common = _git_common_dir(target)
         if target_common == repo_common:
-            return
+            return False
     target.parent.mkdir(parents=True, exist_ok=True)
     if _git_branch_exists(repo_root, branch_name):
         cmd = ["git", "-C", str(repo_root), "worktree", "add", str(target), branch_name]
@@ -7380,22 +9879,87 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
             "git", "-C", str(repo_root), "worktree", "add", "-b", branch_name,
             str(target), "HEAD",
         ]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True, encoding='utf-8', errors='replace',
-        timeout=60,
-        check=False,
-    )
+    result = _cleanup_git(repo_root, *cmd[3:], timeout=60)
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(
             f"git worktree add failed for {target} on branch {branch_name}: {stderr}"
         )
+    return True
+
+
+def _materialize_task_owned_worktree(
+    conn: Optional[sqlite3.Connection],
+    task: Task,
+    *,
+    repo_root: Path,
+    target: Path,
+    branch: str,
+) -> tuple[Path, str]:
+    """Create or reuse only a worktree with durable Hermes provenance."""
+
+    if conn is None:
+        raise RuntimeError(
+            "worktree materialization requires the task DB connection so ownership "
+            "can be sealed atomically"
+        )
+    existing = conn.execute(
+        "SELECT ownership_json, ownership_fingerprint FROM task_git_delivery "
+        "WHERE task_id = ?",
+        (task.id,),
+    ).fetchone()
+    has_receipt = bool(
+        existing
+        and (
+            existing["ownership_json"] is not None
+            or existing["ownership_fingerprint"] is not None
+        )
+    )
+    if has_receipt:
+        valid, payload, reason = _validate_worktree_ownership(
+            conn,
+            task.id,
+            require_checkout=True,
+        )
+        if not valid or payload is None:
+            raise RuntimeError(
+                f"sealed worktree ownership is no longer valid: {reason}"
+            )
+        return Path(str(payload["canonical_worktree"])), str(payload["branch"])
+
+    canonical_target = target.expanduser().resolve(strict=False)
+    if canonical_target.exists():
+        raise RuntimeError(
+            f"existing worktree {canonical_target} has no Hermes creation receipt; "
+            "it is treated as foreign and will not be reused or removed"
+        )
+    created = _ensure_git_worktree(repo_root, canonical_target, branch)
+    if not created:
+        raise RuntimeError(
+            f"worktree {canonical_target} existed without sealed Hermes ownership"
+        )
+    _seal_materialized_worktree_ownership(
+        conn,
+        task.id,
+        repo_root=repo_root,
+        worktree=canonical_target,
+        branch=branch,
+    )
+    valid, payload, reason = _validate_worktree_ownership(
+        conn,
+        task.id,
+        require_checkout=True,
+    )
+    if not valid or payload is None:
+        raise RuntimeError(f"new worktree ownership could not be validated: {reason}")
+    return Path(str(payload["canonical_worktree"])), str(payload["branch"])
 
 
 def _resolve_worktree_workspace(
-    task: Task, *, board: Optional[str] = None
+    task: Task,
+    *,
+    board: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> tuple[Path, str]:
     """Resolve + materialize a linked git worktree for ``task``.
 
@@ -7434,8 +9998,13 @@ def _resolve_worktree_workspace(
                 f"{board_slug!r} default_workdir {board_default!r} is not inside a git repo"
             )
         target = repo_root / ".worktrees" / task.id
-        _ensure_git_worktree(repo_root, target, branch_name)
-        return target, branch_name
+        return _materialize_task_owned_worktree(
+            conn,
+            task,
+            repo_root=repo_root,
+            target=target,
+            branch=branch_name,
+        )
 
     requested = Path(task.workspace_path).expanduser()
     if not requested.is_absolute():
@@ -7446,32 +10015,31 @@ def _resolve_worktree_workspace(
     requested_resolved = requested.resolve(strict=False)
 
     if requested.exists() and _is_linked_worktree_checkout(requested):
-        actual_branch = _git_current_branch(requested)
-        if actual_branch == branch_name:
-            return requested_resolved, actual_branch
-        # The requested path is an existing checkout of a DIFFERENT
-        # task's branch. Decompose children inherit the root's
-        # workspace_path verbatim, so siblings all point here; reusing
-        # the checkout as-is would run this task on the other task's
-        # branch — silent cross-task provenance corruption, and unsafe
-        # when siblings run concurrently. Fall back to a fresh worktree
-        # of our own under the same repo.
-        fallback_root = _repo_root_for_worktree_target(requested.parent)
-        if fallback_root is not None:
-            fallback = fallback_root / ".worktrees" / task.id
-            if fallback.resolve(strict=False) != requested_resolved:
-                _ensure_git_worktree(fallback_root, fallback, branch_name)
-                return fallback.resolve(strict=False), branch_name
-        # No repo to anchor a fallback on (or the occupied path IS this
-        # task's own canonical worktree): keep the legacy reuse rather
-        # than failing dispatch.
-        return requested_resolved, actual_branch or branch_name
+        common = _git_common_dir(requested)
+        if common is None or common.name != ".git":
+            raise ValueError(
+                f"task {task.id} existing worktree has no canonical repository owner"
+            )
+        repo_root = common.parent
+        target = repo_root / ".worktrees" / task.id
+        return _materialize_task_owned_worktree(
+            conn,
+            task,
+            repo_root=repo_root,
+            target=target,
+            branch=branch_name,
+        )
 
     repo_root = _git_toplevel(requested)
     if repo_root is not None and requested_resolved == repo_root:
         target = repo_root / ".worktrees" / task.id
-        _ensure_git_worktree(repo_root, target, branch_name)
-        return target, branch_name
+        return _materialize_task_owned_worktree(
+            conn,
+            task,
+            repo_root=repo_root,
+            target=target,
+            branch=branch_name,
+        )
 
     repo_root = _repo_root_for_worktree_target(requested.parent)
     if repo_root is None:
@@ -7479,11 +10047,22 @@ def _resolve_worktree_workspace(
             f"task {task.id} worktree path {task.workspace_path!r} is not inside a git repo "
             "and does not point at a git repo root"
         )
-    _ensure_git_worktree(repo_root, requested, branch_name)
-    return requested, branch_name
+    target = repo_root / ".worktrees" / task.id
+    return _materialize_task_owned_worktree(
+        conn,
+        task,
+        repo_root=repo_root,
+        target=target,
+        branch=branch_name,
+    )
 
 
-def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
+def resolve_workspace(
+    task: Task,
+    *,
+    board: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Path:
     """Resolve (and create if needed) the workspace for a task.
 
     - ``scratch``: a fresh dir under ``<board-root>/workspaces/<id>/``,
@@ -7540,7 +10119,11 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
         p.mkdir(parents=True, exist_ok=True)
         return p
     if kind == "worktree":
-        p, _branch_name = _resolve_worktree_workspace(task, board=board)
+        p, _branch_name = _resolve_worktree_workspace(
+            task,
+            board=board,
+            conn=conn,
+        )
         return p
     raise ValueError(f"unknown workspace_kind: {kind}")
 
@@ -7736,6 +10319,13 @@ class DispatchResult:
     DB writes this tick — the lock holder is making progress on the same
     board. This is the steady-state signal that a single-writer guard is
     actively preventing two dispatchers from racing on ``kanban.db``."""
+    memory_pressure: Optional[str] = None
+    """System memory pressure observed at spawn time when the memory guard
+    restricted this tick (OOF-30/OOF-77): ``"critical"`` — no new workers
+    were spawned this tick; ``"elevated"`` — at most one new worker was
+    spawned. ``None`` when memory was fine/unknown and the guard imposed
+    no restriction. Reclaim/promotion bookkeeping still ran either way;
+    deferred tasks stay queued for the next tick."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -8814,9 +11404,13 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # counter (see the post-txn loop below).
     crash_details: list[tuple[str, int, str, bool, str]] = []
     # (task_id, pid, claimer, protocol_violation, error_text)
+    # Worker-exit observer payloads (RFC #58548), collected inside the main
+    # txn and fired only after every reclaim/accounting txn has committed.
+    exited_hook_payloads: list[dict] = []
     with write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, claim_lock, started_at FROM tasks "
+            "SELECT id, worker_pid, claim_lock, started_at, assignee "
+            "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
         host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
@@ -8925,6 +11519,16 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     event_payload,
                     run_id=run_id,
                 )
+                exited_hook_payloads.append({
+                    "task_id": row["id"],
+                    "assignee": row["assignee"],
+                    "run_id": run_id,
+                    "worker_pid": pid,
+                    "exit_kind": kind,
+                    "exit_code": code,
+                    "outcome": _run_outcome,
+                    "retry_status": retry_status,
+                })
                 if rate_limited_exit:
                     # Stamp the failure-error column so ``check_respawn_guard``
                     # recognizes this as a quota blocker and defers the
@@ -9045,6 +11649,20 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # Same side-channel for rate-limited requeues — these did NOT count a
     # failure and are NOT crashes, so they stay out of the ``crashed`` return.
     detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
+    # Worker-lifecycle observer (RFC #58548): exit events are tick-derived
+    # from this reclaim pass — fired only now, after the main reclaim txn
+    # AND the breaker accounting above have committed, so subscribers always
+    # observe fully durable board state.
+    if exited_hook_payloads and _kanban_observer_consumed("on_kanban_worker_exited"):
+        _board = get_current_board()
+        for hook_fields in exited_hook_payloads:
+            hook_fields = dict(hook_fields)
+            _fire_kanban_lifecycle_hook(
+                "on_kanban_worker_exited",
+                hook_fields.pop("task_id"),
+                board=_board,
+                **hook_fields,
+            )
     return crashed
 
 
@@ -9249,10 +11867,12 @@ def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
     tail`` can correlate log lines with OS-level traces without opening
     the drawer.
     """
+    worker_started_at = _process_start_time(int(pid))
     with write_txn(conn):
         conn.execute(
-            "UPDATE tasks SET worker_pid = ? WHERE id = ?",
-            (int(pid), task_id),
+            "UPDATE tasks SET worker_pid = ?, worker_started_at = ? "
+            "WHERE id = ?",
+            (int(pid), worker_started_at, task_id),
         )
         run_id = _current_run_id(conn, task_id)
         if run_id is not None:
@@ -9260,7 +11880,13 @@ def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
                 "UPDATE task_runs SET worker_pid = ? WHERE id = ?",
                 (int(pid), run_id),
             )
-        _append_event(conn, task_id, "spawned", {"pid": int(pid)}, run_id=run_id)
+        _append_event(
+            conn,
+            task_id,
+            "spawned",
+            {"pid": int(pid), "worker_started_at": worker_started_at},
+            run_id=run_id,
+        )
 
 
 def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
@@ -9509,6 +12135,201 @@ def review_dispatch_enabled() -> bool:
         return True
 
 
+# ---------------------------------------------------------------------------
+# Memory-aware dispatch guard (OOF-30 / OOF-77)
+#
+# Two production incidents ("larrikin-lollies", "synclare-task-manager")
+# followed the same shape: no ``kanban.max_in_progress`` configured, a busy
+# board, and a 1 GiB VM — the dispatcher fanned out 26-31 concurrent workers,
+# the host went into swap-thrash/OOM, and the dashboard (and everything else
+# on the machine) became unreachable. Two complementary safeguards:
+#
+#   1. A memory-DERIVED default concurrency cap when the operator never set
+#      ``kanban.max_in_progress`` (``resolve_max_in_progress``) — sized from
+#      MemTotal so a 1 GiB VM defaults to 2 workers, not unlimited.
+#   2. A live memory-PRESSURE guard inside the dispatch tick itself
+#      (``_memory_pressure_level``) — even a correctly-sized static cap can't
+#      see other tenants of the box, so under real observed pressure the
+#      dispatcher stops adding workers regardless of configured caps.
+#
+# Both fail open: on non-Linux hosts or any read error the sample is empty,
+# the derived default is None (no cap — unchanged behaviour), and the
+# pressure level is "unknown" (no spawn restriction).
+# ---------------------------------------------------------------------------
+
+# Assumed per-worker memory footprint for the derived default cap. Hermes
+# workers are full agent processes (Python + model client + tool subprocesses);
+# ~512 MiB is a deliberately conservative planning number so the derived cap
+# errs toward fewer workers on small VMs.
+MEMORY_GUARD_MB_PER_WORKER = 512
+# Bounds for the derived default: never below 2 (a board must still make
+# progress on the smallest hosted VM) and never above 8 (operators who want
+# more fan-out on big iron should say so explicitly in config).
+DERIVED_MAX_IN_PROGRESS_FLOOR = 2
+DERIVED_MAX_IN_PROGRESS_CEILING = 8
+
+
+def _system_memory_sample() -> dict:
+    """Best-effort system memory snapshot (KiB values), ``{}`` when unknown.
+
+    Delegates to :func:`gateway.lifecycle_ledger.sample_memory` (pure /proc
+    reads, Linux-only, never raises). Local import keeps ``kanban_db``
+    importable in stripped-down environments without the gateway package.
+    Module-level indirection is also the test seam — the shared conftest
+    patches this to ``{}`` so suite results don't depend on the CI runner's
+    live memory state.
+    """
+    try:
+        from gateway.lifecycle_ledger import sample_memory
+        return sample_memory() or {}
+    except Exception:
+        return {}
+
+
+def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -> Optional[int]:
+    """Memory-derived default for ``kanban.max_in_progress`` when unset.
+
+    ``clamp(MemTotal / MEMORY_GUARD_MB_PER_WORKER, FLOOR, CEILING)`` — e.g.
+    a 1 GiB VM derives 2, a 4 GiB VM derives 8. Returns ``None`` (no cap,
+    pre-fix behaviour) when total memory can't be determined, so dev
+    machines on macOS/Windows are unaffected.
+    """
+    if sample is None:
+        sample = _system_memory_sample()
+    total_kib = sample.get("mem_total_kib")
+    if isinstance(total_kib, bool) or not isinstance(total_kib, int) or total_kib <= 0:
+        return None
+    workers = (total_kib // 1024) // MEMORY_GUARD_MB_PER_WORKER
+    return max(
+        DERIVED_MAX_IN_PROGRESS_FLOOR,
+        min(workers, DERIVED_MAX_IN_PROGRESS_CEILING),
+    )
+
+
+def resolve_max_in_progress(configured: Optional[int]) -> Optional[int]:
+    """Return the effective global concurrency cap for a dispatch tick.
+
+    An explicit operator-configured value always wins. When unset, fall back
+    to the memory-derived default (see :func:`derive_default_max_in_progress`).
+    Callers that parse config (gateway dispatcher, ``hermes kanban dispatch``)
+    should route through this so both paths agree.
+    """
+    if configured is not None:
+        return configured
+    return derive_default_max_in_progress()
+
+
+def configured_max_in_progress() -> Optional[int]:
+    """Read ``kanban.max_in_progress`` from config, or None when unset/invalid.
+
+    Small shared parser so every dispatch entry point (gateway watcher, CLI
+    dispatch, standalone daemon) agrees on what "explicitly configured"
+    means: a positive integer wins, anything else falls through to the
+    memory-derived default via :func:`resolve_max_in_progress`.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        raw = (load_config_readonly() or {}).get("kanban", {}).get(
+            "max_in_progress"
+        )
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        ival = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return ival if ival >= 1 else None
+
+
+def count_running_tasks(conn: sqlite3.Connection) -> int:
+    """Return the number of tasks currently in ``status='running'``.
+
+    Used by the gateway's multi-board sweep to account for workers on
+    OTHER boards against the host-level concurrency budget (OOF-30): the
+    memory-derived cap bounds the machine, so each board's tick must see
+    the machine's total, not just its own. Fails open to 0 — a broken
+    board must not brick dispatch on healthy ones (corruption is handled
+    separately by the watcher's quarantine logic).
+    """
+    try:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+            ).fetchone()[0]
+        )
+    except Exception:
+        return 0
+
+
+def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
+    """Total ``running`` tasks across every board EXCEPT ``board``.
+
+    The concurrency caps bound the HOST (workers are OS processes sharing
+    one machine's memory), but each board's dispatch tick only sees its own
+    DB. Without this, a memory-derived cap of N gets multiplied by the
+    number of active boards — reproduced in review of OOF-30: two boards
+    each spawned N workers on a derived N-worker host budget.
+
+    Boards are matched by resolved DB path, so the ``HERMES_KANBAN_DB``
+    override (which pins every board to one file) naturally yields 0.
+    Fails open per board: one broken/corrupt board must not brick dispatch
+    on the healthy ones.
+    """
+    try:
+        current_path = str(kanban_db_path(board=board).expanduser().resolve())
+    except Exception:
+        current_path = None
+    try:
+        boards = list_boards(include_archived=False)
+    except Exception:
+        return 0
+    total = 0
+    for meta in boards:
+        slug = meta.get("slug") or DEFAULT_BOARD
+        try:
+            path = kanban_db_path(board=slug).expanduser()
+            resolved = str(path.resolve())
+            if current_path is not None and resolved == current_path:
+                continue
+            if not path.exists():
+                continue
+            other = connect(board=slug)
+            try:
+                total += count_running_tasks(other)
+            finally:
+                try:
+                    other.close()
+                except Exception:
+                    pass
+        except Exception:
+            continue
+    return total
+
+
+def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
+    """Classify current system memory pressure: ok/elevated/critical/unknown.
+
+    Reuses :func:`gateway.memory_status.classify_pressure` so the dispatcher's
+    idea of "critical" matches the memory banner users see on the dashboard
+    and the lifecycle ledger's OOM-suspicion heuristics (NS-608/NS-656).
+    ``unknown`` (non-Linux, read failure) imposes no restriction — the guard
+    must never brick dispatch on hosts where /proc isn't available.
+    """
+    if sample is None:
+        sample = _system_memory_sample()
+    if not sample:
+        return "unknown"
+    try:
+        from gateway.memory_status import classify_pressure
+        return classify_pressure(
+            sample.get("mem_available_kib"), sample.get("mem_total_kib")
+        )
+    except Exception:
+        return "unknown"
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -9545,23 +12366,6 @@ def dispatch_once(
         # Path resolution should never fail, but if it somehow does we
         # must not lose the tick — fall through to an unguarded dispatch
         # rather than dropping work.
-        return _dispatch_once_locked(
-            conn,
-            spawn_fn=spawn_fn,
-            ttl_seconds=ttl_seconds,
-            dry_run=dry_run,
-            max_spawn=max_spawn,
-            max_in_progress=max_in_progress,
-            failure_limit=failure_limit,
-            stale_timeout_seconds=stale_timeout_seconds,
-            board=board,
-            default_assignee=default_assignee,
-            max_in_progress_per_profile=max_in_progress_per_profile,
-            reconcile_orphans=reconcile_orphans,
-        )
-    with _dispatch_tick_lock(db_path) as held:
-        if not held:
-            return DispatchResult(skipped_locked=True)
         result = _dispatch_once_locked(
             conn,
             spawn_fn=spawn_fn,
@@ -9576,10 +12380,36 @@ def dispatch_once(
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
         )
-        # Still under the dispatch lock: opportunistically truncate the WAL
-        # at a coarse interval so it cannot grow unbounded between restarts.
-        _maybe_checkpoint_wal(conn, db_path)
+        _fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
         return result
+    with _dispatch_tick_lock(db_path) as held:
+        if not held:
+            result = DispatchResult(skipped_locked=True)
+        else:
+            result = _dispatch_once_locked(
+                conn,
+                spawn_fn=spawn_fn,
+                ttl_seconds=ttl_seconds,
+                dry_run=dry_run,
+                max_spawn=max_spawn,
+                max_in_progress=max_in_progress,
+                failure_limit=failure_limit,
+                stale_timeout_seconds=stale_timeout_seconds,
+                board=board,
+                default_assignee=default_assignee,
+                max_in_progress_per_profile=max_in_progress_per_profile,
+                reconcile_orphans=reconcile_orphans,
+            )
+            # Still under the dispatch lock: run the periodic PASSIVE WAL
+            # checkpoint (see _maybe_checkpoint_wal; the -wal file size is
+            # bounded by journal_size_limit on the writer's natural reset).
+            _maybe_checkpoint_wal(conn, db_path)
+    # The dispatch lock has been released here. Fire the tick observer
+    # strictly OUTSIDE the single-writer critical section (#56066 sweeper
+    # finding / #64231 disposition): a slow subscriber must never extend
+    # the lock hold and stall a sibling dispatcher's tick.
+    _fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
+    return result
 
 
 def _dispatch_once_locked(
@@ -9621,6 +12451,13 @@ def _dispatch_once_locked(
     a 60-second tick interval could grow concurrency by N every minute on a
     busy board and accumulate without bound.
 
+    ``max_in_progress`` is a **host-level** concurrency cap (OOF-30): it
+    counts running tasks on every active board — not just this one — plus
+    this tick's spawns. Workers are OS processes sharing one machine's
+    memory, so a per-board interpretation would multiply the cap by the
+    number of active boards. ``max_spawn`` retains its historical per-board
+    semantics.
+
     ``spawn_fn`` defaults to ``_default_spawn``. Tests pass a stub.
     ``board`` pins workspace/log/db resolution for this tick to a specific
     board. When omitted, the current-board resolution chain is used.
@@ -9628,6 +12465,17 @@ def _dispatch_once_locked(
     # Reap zombie children from previously spawned workers. See
     # reap_worker_zombies() for the full rationale.
     reap_worker_zombies()
+    if not dry_run:
+        # An archive can commit immediately before process termination (or
+        # termination can fail transiently).  The archived row retains the
+        # exact PID/claim until a later tick proves the worker exited, so a
+        # restart resumes termination without inventing a second scheduler.
+        _retry_archived_worker_terminations(conn)
+        # Delivery cleanup is part of this existing single-writer lifecycle,
+        # not a second scheduler.  A live owner PID keeps the row pending;
+        # once the worker exits, a later tick proves and removes the exact
+        # canonical merged worktree, then seals cleanup_state='complete'.
+        _retry_pending_git_delivery_cleanups(conn)
 
     result = DispatchResult()
     result.reclaimed = release_stale_claims(conn)
@@ -9663,14 +12511,6 @@ def _dispatch_once_locked(
     # create a parallel writer beside an already-running task.
     _seed_running_workspace_leases(conn, result)
 
-    # Both knobs are total in-flight caps. Collapse them before either lane
-    # dispatches so ready and review workers consume the same budget without
-    # subtracting the already-running count twice.
-    if max_in_progress is not None and (
-        max_spawn is None or max_in_progress < max_spawn
-    ):
-        max_spawn = max_in_progress
-
     # Count tasks already running so max_spawn enforces concurrency rather
     # than a per-tick spawn budget. See the docstring above for the full
     # rationale; the short version is that a 60-second tick interval with a
@@ -9679,18 +12519,101 @@ def _dispatch_once_locked(
     # they sit in status='running' until the worker calls
     # kanban_complete/kanban_block (or the dispatcher TTL-reclaims them).
     running_count = 0
+    spawn_budget: Optional[int] = None
+    if max_spawn is not None or max_in_progress is not None:
+        running_count = count_running_tasks(conn)
+
+    # Convert any concurrency caps into a shared additional-spawns budget
+    # for this tick. Both ready and review loops consume from the same
+    # budget so the total number of new workers stays bounded.
     if max_spawn is not None:
-        running_count = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
-            ).fetchone()[0]
+        if running_count >= max_spawn:
+            return result
+        spawn_budget = max_spawn - running_count
+
+    # Honour kanban.max_in_progress across both ready and review queues: if
+    # the board already has enough running tasks, skip this tick entirely.
+    # When there is room left, intersect the remaining in-progress budget
+    # with any explicit max_spawn cap above.
+    #
+    # max_in_progress is a HOST-level cap, not a per-board one (OOF-30):
+    # workers are OS processes sharing one machine's memory, so running
+    # workers on every other board count against the same budget. Without
+    # this, N active boards multiply the cap by N — exactly the fan-out
+    # the memory-derived default exists to prevent.
+    if max_in_progress is not None:
+        total_running = running_count + count_running_tasks_other_boards(board)
+        if total_running >= max_in_progress:
+            return result
+        remaining = max_in_progress - total_running
+        if spawn_budget is None or spawn_budget > remaining:
+            spawn_budget = remaining
+
+    # Memory-pressure guard (OOF-30/OOF-77): even a well-chosen static cap
+    # can't see the host's actual memory state (other tenants, bloated
+    # long-lived workers, dashboard growth). Under observed pressure the
+    # dispatcher stops adding load: critical -> spawn nothing this tick;
+    # elevated -> at most one new worker. Reclaim/promotion above already
+    # ran, so board bookkeeping stays live either way, and deferred tasks
+    # simply wait for a later tick. "unknown" imposes no restriction.
+    pressure = _memory_pressure_level()
+    if pressure == "critical":
+        result.memory_pressure = pressure
+        _log.warning(
+            "kanban dispatch: system memory pressure is critical; "
+            "spawning no new workers this tick (deferred, not dropped)"
         )
+        return result
+    if pressure == "elevated":
+        result.memory_pressure = pressure
+        if spawn_budget is None or spawn_budget > 1:
+            _log.warning(
+                "kanban dispatch: system memory pressure is elevated; "
+                "limiting to at most 1 new worker this tick"
+            )
+            spawn_budget = 1
 
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
+    # Review rows are enumerated up front (not after the ready loop) so the
+    # budget split below can see whether review work exists at all.
+    review_rows = []
+    if review_dispatch_enabled():
+        review_rows = conn.execute(
+            "SELECT id, assignee FROM tasks "
+            "WHERE status = 'review' AND claim_lock IS NULL "
+            "ORDER BY priority DESC, created_at ASC"
+        ).fetchall()
+    # Review-lane reservation (OOF-30 review finding): the ready loop runs
+    # first and used to consume the ENTIRE shared budget, so a sustained
+    # ready backlog permanently starved autonomous reviews — completed work
+    # sat in 'review' forever while new work kept spawning. When spawnable
+    # review work exists and the tick has any budget, hold one slot back
+    # from the ready loop so the review lane always gets a spawn
+    # opportunity. The reservation is per-tick and self-releasing: with no
+    # spawnable review work (or no cap at all) the ready loop keeps the
+    # full budget. "Spawnable" mirrors the review loop's own gate
+    # (assigned + real profile) so a review column full of human-pulled
+    # control-plane lanes doesn't permanently tax ready throughput.
+    def _any_spawnable_review() -> bool:
+        if not review_rows:
+            return False
+        try:
+            from hermes_cli.profiles import profile_exists as _rpe
+        except Exception:
+            # Profiles module unavailable (test stubs, exotic envs) —
+            # assume spawnable, matching the review loop's own fallback.
+            return any(row["assignee"] for row in review_rows)
+        return any(
+            row["assignee"] and _rpe(row["assignee"]) for row in review_rows
+        )
+
+    ready_budget = spawn_budget
+    if spawn_budget is not None and spawn_budget > 0 and _any_spawnable_review():
+        ready_budget = max(spawn_budget - 1, 0)
     spawned = 0
     # Per-profile concurrency cap (#21582): when set, track how many
     # workers each assignee already has in flight, and refuse to spawn
@@ -9729,7 +12652,7 @@ def _dispatch_once_locked(
             # there, with the existing diagnostic.
             _default_assignee_resolved = True
     for row in ready_rows:
-        if max_spawn is not None and running_count + spawned >= max_spawn:
+        if ready_budget is not None and spawned >= ready_budget:
             break
         row_assignee = row["assignee"]
         if not row_assignee:
@@ -9850,7 +12773,11 @@ def _dispatch_once_locked(
         try:
             resolved_branch_name = None
             if candidate.workspace_kind == "worktree":
-                workspace, resolved_branch_name = _resolve_worktree_workspace(candidate, board=board)
+                workspace, resolved_branch_name = _resolve_worktree_workspace(
+                    candidate,
+                    board=board,
+                    conn=conn,
+                )
             else:
                 workspace = resolve_workspace(candidate, board=board)
         except Exception as exc:
@@ -9911,6 +12838,13 @@ def _dispatch_once_locked(
                     )
             else:
                 _release_workspace_lease(workspace_lease)
+            # Worker-lifecycle observer (RFC #58548): fires AFTER spawn_fn
+            # returned and the PID (when reported) is durably persisted,
+            # per the RFC timing contract. Best-effort — can never break
+            # the dispatch loop.
+            _fire_worker_spawned_hook(
+                conn, claimed, str(workspace), pid, board=board,
+            )
             # NOTE: we intentionally do NOT reset consecutive_failures
             # here. A successful spawn proves the worker can start but
             # doesn't prove the run will succeed. Under unified
@@ -9949,15 +12883,15 @@ def _dispatch_once_locked(
     # ``sdlc-review`` skill and reviewer workers can now approve, request
     # changes without block-loop accounting, or escalate a genuine blocker.
     # Human-only boards can disable it with ``kanban.review_dispatch``.
-    review_rows = []
-    if review_dispatch_enabled():
-        review_rows = conn.execute(
-            "SELECT id, assignee FROM tasks "
-            "WHERE status = 'review' AND claim_lock IS NULL "
-            "ORDER BY priority DESC, created_at ASC"
-        ).fetchall()
+    #
+    # ``review_rows`` was enumerated before the ready loop; when it is
+    # non-empty the ready loop ran against ``ready_budget`` (one slot held
+    # back) so this lane cannot be permanently starved by a sustained
+    # ready backlog. The review loop itself still checks the FULL shared
+    # ``spawn_budget`` — the reservation caps the ready lane, it does not
+    # grant the review lane extra capacity.
     for row in review_rows:
-        if max_spawn is not None and running_count + spawned >= max_spawn:
+        if spawn_budget is not None and spawned >= spawn_budget:
             break
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
@@ -10000,7 +12934,11 @@ def _dispatch_once_locked(
         try:
             resolved_branch_name = None
             if candidate.workspace_kind == "worktree":
-                workspace, resolved_branch_name = _resolve_worktree_workspace(candidate, board=board)
+                workspace, resolved_branch_name = _resolve_worktree_workspace(
+                    candidate,
+                    board=board,
+                    conn=conn,
+                )
             else:
                 workspace = resolve_workspace(candidate, board=board)
         except Exception as exc:
@@ -10066,6 +13004,11 @@ def _dispatch_once_locked(
                     )
             else:
                 _release_workspace_lease(workspace_lease)
+            # Worker-lifecycle observer (RFC #58548): same contract as the
+            # ready-lane fire above — after spawn + PID persistence.
+            _fire_worker_spawned_hook(
+                conn, claimed, str(workspace), pid, board=board,
+            )
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
             if _per_profile_cap is not None and claimed.assignee:
@@ -10626,6 +13569,11 @@ def run_daemon(
     on SIGINT / SIGTERM so ``hermes kanban daemon`` is systemd-friendly.
     ``stop_event`` (a :class:`threading.Event`) and ``on_tick`` (a
     callable receiving the :class:`DispatchResult`) are test hooks.
+
+    Each tick resolves ``kanban.max_in_progress`` (explicit config, else
+    the memory-derived default) exactly like the gateway-embedded
+    dispatcher and ``hermes kanban dispatch`` — the standalone daemon must
+    not be the one uncapped entry point (OOF-30).
     """
     import signal
     import threading
@@ -10649,10 +13597,22 @@ def run_daemon(
 
     while not stop_event.is_set():
         try:
+            # Resolve the global concurrency cap the same way the gateway
+            # dispatcher and `hermes kanban dispatch` do (OOF-30): explicit
+            # kanban.max_in_progress wins, otherwise the memory-derived
+            # default applies. The standalone daemon previously passed no
+            # cap at all — the shipped systemd path could still fan out an
+            # entire backlog in one tick even with the derived default in
+            # place everywhere else. Re-resolved every tick (config load is
+            # mtime-cached) so operator edits apply without a restart.
+            max_in_progress = resolve_max_in_progress(
+                configured_max_in_progress()
+            )
             with contextlib.closing(connect()) as conn:
                 res = dispatch_once(
                     conn,
                     max_spawn=max_spawn,
+                    max_in_progress=max_in_progress,
                     failure_limit=failure_limit,
                 )
             if on_tick is not None:
@@ -11009,6 +13969,14 @@ def task_age(task: Task) -> dict:
 # Notification subscriptions (used by the gateway kanban-notifier)
 # ---------------------------------------------------------------------------
 
+# How the gateway kanban-notifier reacts to a terminal event for a
+# subscription:
+#   "notify"       -> passive ``adapter.send`` only (default)
+#   "notify+wake"  -> passive send AND wake the destination gateway agent
+#   "wake"         -> wake the agent only; no passive message is sent
+_NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
+
+
 def _encode_notify_delivery_metadata(
     metadata: Optional[Mapping[str, Any]],
 ) -> Optional[str]:
@@ -11050,15 +14018,34 @@ def add_notify_sub(
     task_id: str,
     platform: str,
     chat_id: str,
-    chat_type: Optional[str] = None,
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    user_id_alt: Optional[str] = None,
+    chat_type: Optional[str] = None,
     notifier_profile: Optional[str] = None,
+    delivery_mode: Optional[str] = None,
     delivery_metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Register a gateway source that wants terminal-state notifications
     for ``task_id``. Idempotent on (task, platform, chat, thread).
 
+    ``user_id_alt`` records the originating source's platform-specific stable
+    alt ID (Signal UUID, Feishu union_id, ...) alongside ``user_id``. Active-wake
+    replay must reproduce it so the woken turn's ``build_session_key`` matches
+    the original event's — ``build_session_key`` prefers ``user_id_alt`` over
+    ``user_id`` (gateway/session.py), so replaying only ``user_id`` would key a
+    wake into a different session whenever the two diverge for this source.
+
+    ``chat_type`` records the originating source's chat type; the active-wake
+    delivery modes replay it so the woken turn resolves the operator's real
+    channel. ``None`` keeps an existing row's value.
+
+    ``delivery_mode`` (see ``_NOTIFY_DELIVERY_MODES``) selects how the
+    kanban-notifier reacts to a terminal event for this subscription. ``None``
+    leaves an existing row's mode untouched (and inserts the ``"notify"``
+    default for a fresh row); an explicit value is last-write-wins, so an
+    operator can intentionally re-subscribe to change the mode (e.g.
+    ``notify`` -> ``wake``). An unknown value falls back to ``"notify"``.
     New subscriptions start "caught up": ``last_event_id`` snaps to the
     task's current ``MAX(task_events.id)`` at creation instead of the
     schema default 0. A cursor of 0 on an already-active task made the
@@ -11068,44 +14055,66 @@ def add_notify_sub(
     AFTER they subscribe; the gateway/tool auto-subscribe paths run at
     task creation, where the snapshot is 0 anyway.
     """
+    insert_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else (
+        # api_server is stateless: the adapter has no send() — the wake
+        # self-post IS the delivery on that path (see gateway/wake.py and
+        # test_kanban_notifier_apiserver_wake). A plain-'notify' default
+        # would leave those subscriptions with no delivery mechanism at
+        # all, regressing the pre-delivery_mode behavior where a task
+        # carrying a session_id always woke. Explicit modes still win.
+        "notify+wake" if platform == "api_server" else "notify"
+    )
+    insert_chat_type = chat_type or "dm"
     now = int(time.time())
     metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
     with write_txn(conn):
         conn.execute(
             """
             INSERT OR IGNORE INTO kanban_notify_subs
-                (task_id, platform, chat_id, chat_type, thread_id, user_id,
-                 notifier_profile, delivery_metadata, created_at, last_event_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+                (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
+                 chat_type, notifier_profile, delivery_mode, delivery_metadata,
+                 created_at, last_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?), 0))
             """,
             (
                 task_id,
                 platform,
                 chat_id,
-                chat_type,
                 thread_id or "",
                 user_id,
+                user_id_alt,
+                insert_chat_type,
                 notifier_profile,
+                insert_mode,
                 metadata_json,
                 now,
                 task_id,
             ),
         )
         if chat_type:
-            # Self-heal rows created before chat_type was persisted.
+            # Explicit chat_type is last-write-wins on re-subscribe.
             conn.execute(
                 """
                 UPDATE kanban_notify_subs
                    SET chat_type = ?
                  WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
-                   AND (chat_type IS NULL OR chat_type = '')
                 """,
                 (chat_type, task_id, platform, chat_id, thread_id or ""),
             )
+        if user_id_alt:
+            # Self-heal legacy rows created before alternate IDs were tracked.
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET user_id_alt = ?
+                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                   AND (user_id_alt IS NULL OR user_id_alt = '')
+                """,
+                (user_id_alt, task_id, platform, chat_id, thread_id or ""),
+            )
         if notifier_profile:
-            # Self-heal legacy rows that predate notifier ownership by
-            # backfilling only when the existing value is unset.
+            # Self-heal legacy rows that predate notifier ownership.
             conn.execute(
                 """
                 UPDATE kanban_notify_subs
@@ -11115,10 +14124,18 @@ def add_notify_sub(
                 """,
                 (notifier_profile, task_id, platform, chat_id, thread_id or ""),
             )
+        if delivery_mode in _NOTIFY_DELIVERY_MODES:
+            # Explicit delivery_mode is last-write-wins on re-subscribe.
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET delivery_mode = ?
+                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                """,
+                (delivery_mode, task_id, platform, chat_id, thread_id or ""),
+            )
         if metadata_json:
-            # A duplicate subscribe from the same chat/thread should refresh
-            # the routing anchor. Telegram DM-topic notifications need the
-            # latest reply anchor to stay inside the visible topic lane.
+            # Refresh the routing anchor for duplicate subscriptions.
             conn.execute(
                 """
                 UPDATE kanban_notify_subs
@@ -11280,6 +14297,51 @@ def remove_notify_sub(
             (task_id, platform, chat_id, thread_id or ""),
         )
     return cur.rowcount > 0
+
+
+def purge_stale_done_notify_subs(
+    conn: sqlite3.Connection,
+    *,
+    max_age_days: int = 30,
+) -> int:
+    """Delete notify subscriptions whose task has sat in ``done`` untouched
+    for longer than ``max_age_days``.
+
+    The notifier keeps subscriptions alive through ``done`` because a
+    completed task can be reopened (review corrections, continuation) and
+    the reopened cycle must still notify its origin session. On boards
+    that never archive, that retention would otherwise accumulate
+    subscription rows forever — each one scanned every notifier tick.
+    This GC bounds that: a task that has been ``done`` with no new events
+    for the retention window is treated as settled and its subscriptions
+    are purged. Age is measured from the task's most recent event
+    (falling back to ``completed_at`` then ``created_at``), so ANY
+    activity — including a reopen, which also moves the task off
+    ``done`` — resets or exempts it.
+
+    ``max_age_days <= 0`` disables the sweep entirely. Returns the number
+    of subscription rows deleted.
+    """
+    try:
+        days = int(max_age_days)
+    except (TypeError, ValueError):
+        days = 30
+    if days <= 0:
+        return 0
+    cutoff = int(time.time()) - days * 86400
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM kanban_notify_subs WHERE task_id IN ("
+            " SELECT t.id FROM tasks t"
+            " WHERE t.status = 'done'"
+            " AND COALESCE("
+            "  (SELECT MAX(e.created_at) FROM task_events e"
+            "   WHERE e.task_id = t.id),"
+            "  t.completed_at, t.created_at, 0"
+            " ) < ?)",
+            (cutoff,),
+        )
+    return int(cur.rowcount or 0)
 
 
 def unseen_events_for_sub(
