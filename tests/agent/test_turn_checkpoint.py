@@ -1018,6 +1018,40 @@ def test_agent_restart_restores_pending_deliverable_and_unknown_tool(tmp_path):
     assert state["pending_tool"] is None
 
 
+def test_agent_checkpoint_uses_private_gateway_route_fields(tmp_path):
+    from types import SimpleNamespace
+
+    from agent.turn_checkpoint import initialize_agent_turn_checkpoint
+
+    class FakeSessionDB:
+        db_path = tmp_path / "state.db"
+
+        def get_messages(self, session_id, include_inactive=False):
+            return []
+
+    agent = SimpleNamespace(
+        session_id="nf-session",
+        _session_db=FakeSessionDB(),
+        platform="telegram",
+        _chat_id="-100-dovcrm",
+        _thread_id="kanban-topic",
+    )
+
+    state = initialize_agent_turn_checkpoint(
+        agent,
+        turn_id="nf-turn",
+        user_content="mostra o kanban",
+        messages=_messages("mostra o kanban"),
+    )
+
+    assert state["routing"] == {
+        "platform": "telegram",
+        "chat_id": "-100-dovcrm",
+        "thread_id": "kanban-topic",
+        "task_id": "",
+    }
+
+
 def test_synthetic_gateway_resume_restores_unfinished_checkpoint_despite_empty_event(tmp_path):
     store = _store(tmp_path)
     messages = _messages("perform the long operation")
