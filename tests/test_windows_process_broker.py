@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -120,6 +121,34 @@ def test_direct_child_uses_private_runner_and_exposes_real_target_pid():
     assert proc.returncode == 0, stderr
     assert int(stdout.strip()) == proc.pid
     assert proc.pid != proc._hermes_runner_pid
+
+
+def test_spawn_handshake_retries_transient_read_error(tmp_path, monkeypatch):
+    status_path = tmp_path / "spawn-status.json"
+    status_path.write_text(json.dumps({"child_pid": 4242}), encoding="utf-8")
+    original_read_text = Path.read_text
+    attempts = 0
+
+    def transient_read_text(path, *args, **kwargs):
+        nonlocal attempts
+        if path == status_path and attempts == 0:
+            attempts += 1
+            raise PermissionError("transient scanner lock")
+        return original_read_text(path, *args, **kwargs)
+
+    class LiveRunner:
+        pass
+
+    monkeypatch.setattr(Path, "read_text", transient_read_text)
+    monkeypatch.setattr(broker._original_popen, "poll", lambda _self: None)
+
+    child_pid = broker._consume_spawn_handshake(
+        LiveRunner(), str(status_path), required=True
+    )
+
+    assert child_pid == 4242
+    assert attempts == 1
+    assert not status_path.exists()
 
 
 def test_posix_branch_is_a_noop(monkeypatch):
