@@ -5,13 +5,13 @@
 - Mode: REPAIR
 - Risk Level: HIGH
 - Workspace: C:\Users\maiko\AppData\Local\hermes\hermes-agent
-- Target Branch: integrate/local-runtime-v2-20260820
-- Updated At: 2026-08-24T19:30:00-03:00
+- Target Branch: main via PR from integrate/local-runtime-v2-20260820
+- Updated At: 2026-08-25T02:30:00-03:00
 - Machine Runtime Authority: none: a controlled autonomous micro-loop is not required because each profile repair is a bounded reversible config or package operation with an explicit probe and no automatic retries
 - Event Evidence: focused tests, Honcho API probes, per-profile write/retrieve probes, service status, and sanitized gateway logs
 
 ## Requested Outcome
-- Restore persistent Honcho memory for every active Hermes profile on Windows and the VPS, fix profile-aware Honcho status resolution, and deploy the validated repair without changing bot routing or Telegram ownership.
+- Restore persistent Honcho memory for every active Hermes profile on Windows and the VPS, fix profile-aware Honcho status resolution, merge the validated repair into the fork's `main`, and remove only the proved-integrated delivery/checkpoint branches without changing bot routing or Telegram ownership.
 
 ## Acceptance Criteria
 - One self-hosted Honcho stack is reachable only through localhost on the VPS and an SSH localhost tunnel on Windows.
@@ -21,6 +21,9 @@
 - Every profile can write a unique conclusion/message and retrieve it through the real Honcho SDK path.
 - `hermes honcho status --all` resolves the same profile host keys as runtime configuration.
 - Existing Telegram gateways, bot tokens, topic bindings, sessions, and project state remain unchanged unless a bounded restart is needed to load the validated memory configuration.
+- A GitHub PR integrates the complete delivery into `maikolb/hermes-agent:main`; required checks are green before merge.
+- Local and remote `main` resolve to the merged commit, the exact delivery branch is removed locally/remotely, and the exact local checkpoint branch is removed after ancestry proof.
+- Uncommitted WhatsApp work remains byte-preserved throughout branch switching and cleanup.
 
 ## In Scope
 - `plugins/memory/honcho/cli.py`
@@ -31,10 +34,12 @@
 - VPS Hermes profile `config.yaml` and `honcho.json` files
 - Self-hosted Honcho, its local inference dependency, the localhost SSH tunnel, and the existing per-profile Honcho configuration
 - Active Windows and VPS Hermes Python environments
+- Git refs `integrate/local-runtime-v2-20260820`, `preserve/titan-recovery-pre-main-sync-20260825-015008`, and `main` in the `maikolb/hermes-agent` fork
 
 ## Out of Scope
 - New memory provider architecture, live config inheritance between profiles, changing Telegram bot identities, changing project repositories, or enabling inactive VPS profiles.
 - Public exposure of Honcho, deletion of existing sessions/memories, credential rotation, or destructive database migration.
+- Deletion or modification of any branch other than the two exact delivery/checkpoint refs declared in scope.
 
 ## Failure Signal / Repro
 - Evidence artifact: `C:\Users\maiko\AppData\Local\hermes\profiles\hermes-project-factory\logs\gateway.log` records the live profile's Honcho connection failures.
@@ -59,6 +64,7 @@
 - Do not change Telegram bot tokens, topic bindings, gateway ownership, or activate additional VPS bots.
 - Do not expose a local Honcho service on a public interface or print secrets in logs/output.
 - Do not reset, stash, discard, force-push, or overwrite unrelated work.
+- Do not merge while required GitHub checks are red or delete either branch before proving its tip is contained in the merged `main`.
 - Do not launch visible Windows UI.
 
 ## Loop Control
@@ -74,9 +80,10 @@
 - Execute sanitized SDK write/retrieve probes for all six Windows and three VPS profiles.
 - Compare gateway/service status and configuration hashes before and after any restart.
 - Run `git diff --check` and the canonical execution-contract validator before finalization.
+- Create the fork PR, wait for required checks, merge normally, prove ancestry, switch the dirty worktree to the equal merged tree without stashing, and remove only the two declared branches.
 
 ## Status
 - Contract preflight: green on all three canonical contracts.
 - Implementation: self-hosted stack, local inference, Windows tunnel, SDKs, profile mappings, ExoCortex provider selection, and status-key repair installed.
 - Validation: 68 focused tests green; health is green; all six Windows and three VPS identities passed SDK write/retrieve; the derived-memory queue completed 16/16 work units and produced 14 conclusions, including successful semantic retrieval of the self-hosted decision.
-- Completion: self-hosted Honcho repair is complete at `validated-target`; user interaction acceptance remains pending, and Vercel GitHub-App validation is separately deferred until Bernardo can supply the email code.
+- Completion: self-hosted Honcho repair is complete at `validated-target`; source integration/branch cleanup is in progress, user interaction acceptance remains pending, and Vercel GitHub-App validation is separately deferred until Bernardo can supply the email code.
