@@ -1,87 +1,104 @@
-# Hermes Runtime Recovery Execution Contract
+# Hermes Full-Access and Honcho Runtime Recovery Contract
 
 ## Contract Metadata
 - Contract Version: 2
 - Mode: REPAIR
 - Risk Level: HIGH
-- Workspace: C:\Users\maiko\AppData\Local\hermes\hermes-agent
-- Target Branch: main via PR from fix/nf-delivery-visible-activity-20260825
-- Updated At: 2026-08-25T10:45:00-03:00
-- Machine Runtime Authority: none: the repair consists of bounded source, configuration, restart, and delivery probes with immediate rollback on any failed target check
-- Event Evidence: VPS NF gateway log, profile configuration inventory, focused regression tests, process identity, and target delivery readback
+- Workspace: C:\Users\maiko\AppData\Local\hermes\worktrees\honcho-root-runtime-20260825
+- Target Branch: main via PR from fix/honcho-root-runtime-20260825
+- Updated At: 2026-08-25T15:00:00-03:00
+- Runtime Targets: Windows Titan default, VPS Titan Audit/default, VPS Hermes NexaFactory
+- Machine Runtime Authority: none: the repair uses bounded host service changes and direct target probes with an explicit rollback after any failed check
 
 ## Requested Outcome
-- Restore reliable Hermes delivery and the previously visible reasoning, skills, tools, and activity across active profiles, while preserving NF/PF worker parallelism and focus rotation; integrate by PR and leave the Hermes repository on `main` only.
+- Give the VPS `hermes` identity complete non-interactive root authority and make the self-hosted Honcho provider operational, exposed, and verified end-to-end in all three Hermes runtimes.
 
 ## Acceptance Criteria
-- A cached gateway agent refreshes platform, chat, thread, user, and session identity from every current message before checkpoint creation.
-- The NF durable delivery checkpoint binds to the real Telegram group route instead of an empty stale route.
-- The existing VPS `@hermes_nexafactory_bot` remains the NF identity and its working 2026-08-24 runtime remains the rollback baseline until a candidate passes target checks.
-- Every active Windows and VPS profile explicitly shows reasoning, commentary, interim activity, skills, tool progress, thinking progress, and background-process progress on its actually configured chat platforms.
-- NF and PF retain their working-time status, concurrent workers, worker-focus handoff, and focus rotation; they are not normalized into ordinary profiles.
-- Exocortex receives no Telegram-specific change because it has no Telegram route in this incident.
-- No bot token, chat/topic binding, session, Kanban state, memory, or project data is deleted or reassigned.
-- Focused and relevant repository tests, compilation, diff checks, and the canonical execution-contract validator pass before promotion.
-- A GitHub PR merges the repair into `maikolb/hermes-agent:main`; required checks are green before merge.
-- Local and remote `main` resolve to the merged commit, the repair branch is deleted after ancestry proof, and no stash is created.
+- `sudo -u hermes sudo -n id -u` returns `0`; no gateway needs to run as root and no `/root` ownership is weakened.
+- Active gateway processes use `/srv/hermes` as `HOME`, `HERMES_HOME`, and working directory; a normal consult/tool path no longer resolves `/root/.git`.
+- One private self-hosted Honcho backend is healthy on VPS loopback and survives restart.
+- Windows reaches that backend through a hidden, persistent SSH tunnel with no visible terminal window.
+- The default and NexaFactory profile configurations resolve the intended Honcho backend without copying or printing credentials.
+- `honcho_profile` and `honcho_context` are present and complete a real call in Windows Titan, VPS Titan Audit/default, and VPS Hermes NexaFactory.
+- Required gateways remain active after bounded restarts; no profile, session, memory, Kanban, project, bot binding, or credential is deleted.
+- Any source/documentation change is merged through a green PR; its branch is deleted locally and remotely after ancestry proof.
 
 ## In Scope
-- `gateway/run.py` cached-agent per-message route refresh.
-- `agent/turn_checkpoint.py` checkpoint routing from the AIAgent route fields.
-- Focused regression tests under `tests/agent/` and `tests/gateway/`.
-- `docs/regressions/REG-2026-08-25-002.md` and this contract.
-- Backed-up display/configuration normalization for active Windows and VPS Hermes profiles.
-- Bounded gateway restarts, process/config identity checks, zero-visible-window evidence, and delivery probes.
-- PR, merge, ancestry proof, and cleanup of the exact repair branch.
+- A validated `/etc/sudoers.d` grant for `hermes` with `NOPASSWD: ALL`.
+- Service environment correction for `HOME`, `HERMES_HOME`, and working directory if target evidence shows drift.
+- Existing self-hosted Honcho service, configuration, local-only binding, and runtime dependencies.
+- A zero-visible-UI Windows SSH tunnel and bounded gateway restarts required to reload the provider.
+- Focused provider/tool/runtime probes, regression record if a source defect is found, this contract, PR, merge, and branch cleanup.
 
 ## Out of Scope
-- Treating the Concursa/Japa message as an incident; the user confirmed the wrong bot was mentioned and that runtime is a working reference.
-- Replacing NF/PF identities, tokens, sessions, Kanban state, worker architecture, or project data.
-- Adding Telegram to Exocortex or altering dormant platform configuration unrelated to an active route.
-- New routing, memory, browser, or orchestration architecture.
-- Deleting unrelated uncommitted work, using stash, force-pushing, or rewriting Git history.
+- Running messaging gateways permanently as root, changing permissions or ownership under `/root`, or exposing Honcho unauthenticated to the public Internet.
+- Replacing Hermes profiles, Telegram bot identities, routes, sessions, Kanban state, memories, projects, or agent credentials.
+- New memory architecture, VPN, Kubernetes, public control plane, or unrelated AOF/AIRC work.
 
 ## Failure Signal / Repro
-- At 2026-08-25 12:15 UTC, the VPS NF composed the requested Kanban response but logged `checkpoint rejected delivery obligation binding` and suppressed its durable final.
-- The failed checkpoint route contained `platform=telegram` with an empty `chat_id`, while the delivery event contained the real Telegram group route.
-- The incident and prevention record exists at `docs/regressions/REG-2026-08-25-002.md`.
-- Profile inventory showed implicit Telegram defaults hiding tool progress and explicit visibility drift, including reasoning disabled and an invalid background-progress value.
+- Windows `honcho_profile` and `honcho_context` report `Honcho session could not be initialized`; `127.0.0.1:8500` refuses the connection.
+- VPS NexaFactory does not expose the Honcho tools in its session namespace.
+- VPS Titan Audit reached `Permission denied: '/root/.git'` before testing Honcho.
+- Before repair, `sudo -u hermes sudo -n id` requires a password.
+- Evidence-Absent: the failing tool responses exist in the user's Telegram runtime and current-session report; this bounded repair will capture new sanitized target probes without copying chat credentials or private session payloads into git.
 
 ## Root-Cause Hypothesis
-- Fact: AIAgent stores gateway route identity in `_chat_id` and `_thread_id`, while checkpoint initialization read only public field names and therefore serialized an empty route.
-- Fact: reused cached agents refreshed callbacks and model settings per message but did not refresh route identity.
-- Fact: visibility defaults and profile overrides drifted independently; NF/PF worker settings still exist and must be preserved.
-- Chosen repair: refresh route identity on every message, read the actual AIAgent route fields at checkpoint creation, cover both paths with regression tests, and normalize only the active platform visibility settings with backups and profile-specific invariants.
+- Windows has no local backend or persistent tunnel even though its profile points to `localhost:8500`.
+- VPS Honcho became healthy after gateway initialization, leaving provider tools absent until a controlled reload.
+- A runtime or administrative probe inherited root's home instead of `/srv/hermes`, causing the `/root/.git` path.
+- If a real provider call still fails with backend healthy, configuration/schema or package-version drift must be proven before source edits.
 
 ## Claim Discipline
-- `implemented` means the source/config delta exists.
-- `validated-local` requires focused tests, compilation, diff checks, and contract validation.
-- `validated-target` requires new process identity, loaded configuration evidence, zero visible windows, connected active platforms, and a real delivery probe.
-- `released` requires merged `main` and installation of that exact source/config candidate.
-- `accepted` requires the user's real interaction with the restored agents.
+- `implemented`: access/service/config delta exists.
+- `validated-local`: Windows tunnel, provider import, and direct client calls pass with `VisibleWindows=0`.
+- `validated-target`: real tool calls pass in each named gateway runtime after reload.
+- `released`: the exact merged source/config/service state is active.
+- `accepted`: Maikol interacts with the agents and confirms normal behavior.
 
 ## Forbidden Actions
-- Do not delete, overwrite, reset, or rewrite Hermes sessions, memories, Kanban state, project data, or bot credentials.
-- Do not change bot ownership, Telegram group/topic bindings, or add a Telegram route to Exocortex.
-- Do not promote the new Hermes release to the VPS before all pre-promotion checks pass; restore the 2026-08-24 symlinks immediately if any bounded target check fails.
-- Do not stash, force-push, reset unrelated work, or delete a branch before proving its tip is contained in merged `main`.
+- Do not print, rotate, overwrite, or transfer secrets as part of diagnostics.
+- Do not chmod/chown `/root`, run gateways as root, expose port 8500 publicly, delete runtime data, or restart an actively executing profile without first establishing an idle or recoverable boundary.
+- Do not stash, force-push, reset unrelated work, delete unmerged branches, or merge with failing required checks.
 - Do not launch a visible Windows terminal, browser, console, or dialog.
 
+## Rollback
+- Remove only the new sudoers drop-in after validating the remaining sudoers configuration.
+- Restore any changed systemd override from its timestamped copy, daemon-reload, and restart only the affected unit.
+- Stop/remove only the Honcho/tunnel service created or changed by this run; restore the prior profile configuration copy.
+- If a gateway restart fails health checks, restore its exact previous unit/config and restart once; then stop and report the exact failing gate.
+
 ## Loop Control
-- A controlled autonomous micro-loop is not required because each source/config/restart change has one deterministic probe and an explicit rollback; retries require changed evidence.
-- Maximum repair iterations: 3 for a given failing acceptance path.
-- Green condition: all local gates pass, active profile invariants are preserved, and bounded target delivery/runtime probes pass.
-- Escalation: stop on credential replacement, destructive data/schema action, a third identical failure without new evidence, or any target restart that does not recover through the declared rollback.
+- A controlled autonomous micro-loop is not required because every access, service, tunnel, and gateway change has one deterministic probe and an immediate explicit rollback; retries require changed evidence.
+- Maximum repair iterations: 3 for any identical failing target path, and every retry requires changed evidence.
+- Green condition: root authority, backend/tunnel health, real Honcho calls, tool exposure, gateway health, and zero-visible-UI checks all pass.
+- Escalation: stop on required credential replacement, destructive state/schema action, inability to establish an idle/recoverable gateway boundary, or a third identical failure without new evidence.
 
 ## Validation Plan
-- Run cached-agent, checkpoint, durable-delivery, display, and platform-focused tests; then compile checks, `git diff --check`, and the canonical contract validator.
-- Dry-run and apply backed-up visibility changes only to each profile's active platforms; compare NF/PF worker/activity invariants before and after.
-- Restart only bounded active gateways through the hidden launcher; prove new PIDs, actual executable/source/config identity, platform health, and `VisibleWindows=0`.
-- Exercise a real route/delivery probe without changing bot ownership or project data; retain the 2026-08-24 VPS release until the candidate is proven.
-- Open the PR, wait for required green checks, merge normally, prove ancestry, switch to merged `main`, and delete the exact repair branch locally/remotely without stash.
+- Validate this contract before the first mutation and again before finalization.
+- Validate the sudoers file with `visudo -cf`, then prove root authority from the `hermes` user.
+- Probe backend health and one direct Honcho SDK session/profile/context request from VPS and Windows.
+- Enumerate the actual tool schema in each profile, then exercise `honcho_profile` and `honcho_context` through the real runtime path.
+- Prove gateway PID/status/environment, private listener scope, persistent tunnel state, and `VisibleWindows=0`.
+- Run focused repository tests only if source changes are evidence-required; otherwise avoid unrelated suites.
+- Open PR, wait for required checks, merge, prove ancestry, update local main, and delete the repair branch locally/remotely.
 
 ## Status
-- Contract preflight: complete; the current bounded contract passed the canonical preflight validator.
-- Implementation: complete for the source route repair and backed-up visibility normalization on Windows and VPS profiles.
-- Validation: complete at validated-local with 84 focused tests, zero-visible-window execution, and active Windows gateway/AOF load probes; the VPS remains on the functional 2026-08-24 release while NF target promotion waits for idle.
-- Completion: source candidate complete at validated-local; PR integration and the deliberately deferred NF restart/target acceptance are not yet claimed complete.
+- Contract preflight: passed the canonical version-2 validator before the
+  privileged host and runtime changes.
+- Implementation: `/etc/sudoers.d/90-hermes-full-access` grants validated
+  `NOPASSWD: ALL` authority to `hermes`; the existing Honcho stack remains
+  loopback-only at `127.0.0.1:8500`; its API healthcheck now matches measured
+  startup latency; the persistent hidden Windows tunnel and dialogue bridge are
+  running; and the Project Factory Telegram toolset includes `memory`.
+- Validation: `sudo -u hermes -H sudo -n id -u` returned `0`; Honcho API,
+  database, Redis and Ollama are healthy; the Windows tunnel and restarted
+  Project Factory gateway report zero visible windows. Vigilia conversation
+  `47ef908b-7fbf-4689-a774-f81a6ddd3166` proves real `honcho_profile` and
+  `honcho_context` calls in Titan local, NexaFactory VPS and Titan Audit VPS.
+  Conversation `e8405c08-0808-4781-825c-279e9b03ebcb` additionally proves both
+  calls in the restarted Windows Project Factory profile.
+- Completion: complete at `released` for access, self-hosted backend, tool exposure and
+  cross-host runtime paths. The running VPS default gateway was not restarted
+  because it owns active Kanban worker `t_10aa848c`; full root authority is
+  already immediately available there through `sudo -n`, and no active work was
+  interrupted.
