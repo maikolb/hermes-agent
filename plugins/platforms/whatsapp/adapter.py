@@ -795,6 +795,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             bridge_env["HERMES_PASSIVE_INTAKE_ROOT"] = str(
                 self._passive_intake_root or ""
             )
+            bridge_env["HERMES_RUNTIME_PYTHON"] = sys.executable
+            bridge_env["HERMES_AGENT_ROOT"] = str(Path(__file__).resolve().parents[3])
             # Under multiplexing, the bridge subprocess runs with a copy of
             # os.environ that does NOT contain the secondary profile's .env
             # vars.  Inject the resolved WHATSAPP_* values so the Node bridge

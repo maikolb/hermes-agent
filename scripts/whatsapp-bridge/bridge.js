@@ -36,6 +36,7 @@ import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
 import { createReconnectCoordinator } from './reconnect_controller.js';
 import { createPassiveIntake } from './passive_intake.js';
+import { createPassiveIntakeWakeDispatcher } from './passive_intake_wake.js';
 import {
   buildPollPayload,
   createReconnectScheduler,
@@ -135,6 +136,10 @@ const PASSIVE_MEDIA_TIMEOUT_MS = Math.min(
 const passiveIntake = createPassiveIntake({
   rawConfig: process.env.WHATSAPP_PASSIVE_INTAKE_CONFIG || '',
   rootDir: process.env.HERMES_PASSIVE_INTAKE_ROOT || '',
+});
+const passiveIntakeWake = createPassiveIntakeWakeDispatcher({
+  pythonExecutable: process.env.HERMES_RUNTIME_PYTHON || '',
+  agentRoot: process.env.HERMES_AGENT_ROOT || '',
 });
 const deliveryAcks = createDeliveryAckTracker({ timeoutMs: DELIVERY_ACK_TIMEOUT_MS });
 
@@ -658,14 +663,17 @@ async function startSocket() {
             ? passiveIntake.captureMessage({ msg, chatId, senderId })
             : { persisted: false, reason: 'empty_protocol_message' };
           let mediaStatus;
+          let rawReadyPersisted = result.readyPersisted === true;
           if (result.hasMedia && result.eventId && passiveIntake.mediaState(result.project, result.eventId) === 'pending') {
             if (result.privacyRestricted) {
-              mediaStatus = passiveIntake.captureMediaFailure({
+              const mediaResult = passiveIntake.captureMediaFailure({
                 project: result.project,
                 eventId: result.eventId,
                 spoolPath: result.spoolPath,
                 code: 'media-privacy-restricted',
-              }).status;
+              });
+              mediaStatus = mediaResult.status;
+              rawReadyPersisted = mediaResult.readyPersisted === true;
             } else {
               let lastMediaError = null;
               for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -681,14 +689,16 @@ async function startSocket() {
                     }),
                   ]);
                   const metadata = result.mediaMetadata?.[0] || {};
-                  mediaStatus = passiveIntake.captureMedia({
+                  const mediaResult = passiveIntake.captureMedia({
                     project: result.project,
                     eventId: result.eventId,
                     spoolPath: result.spoolPath,
                     kind: metadata.kind,
                     mime: metadata.mime,
                     bytes: mediaBytes,
-                  }).status;
+                  });
+                  mediaStatus = mediaResult.status;
+                  rawReadyPersisted = mediaResult.readyPersisted === true;
                   lastMediaError = null;
                   break;
                 } catch (mediaError) {
@@ -704,15 +714,20 @@ async function startSocket() {
                 const code = lastMediaError?.code === 'MEDIA_TIMEOUT'
                   ? 'media-download-timeout'
                   : 'media-download-failed';
-                mediaStatus = passiveIntake.captureMediaFailure({
+                const mediaResult = passiveIntake.captureMediaFailure({
                   project: result.project,
                   eventId: result.eventId,
                   spoolPath: result.spoolPath,
                   code,
-                }).status;
+                });
+                mediaStatus = mediaResult.status;
+                rawReadyPersisted = mediaResult.readyPersisted === true;
               }
             }
           }
+          const wakeDispatched = rawReadyPersisted
+            ? passiveIntakeWake.dispatch(passiveRoute)
+            : false;
           console.log(JSON.stringify({
             event: 'passive_intake_consumed',
             project: passiveRoute.project,
@@ -720,6 +735,7 @@ async function startSocket() {
             duplicate: result.duplicate === true,
             reason: result.reason || undefined,
             media: mediaStatus,
+            wakeDispatched,
           }));
         } catch (error) {
           // Fail closed: persistence failure must never fall through into the
@@ -1346,6 +1362,7 @@ app.get('/health', (req, res) => {
       enabled: passiveIntake.enabled,
       routeCount: passiveIntake.routeCount,
       configHash: passiveIntake.configHash,
+      wakeRuntimeConfigured: passiveIntakeWake.runtimeConfigured,
     },
   });
 });

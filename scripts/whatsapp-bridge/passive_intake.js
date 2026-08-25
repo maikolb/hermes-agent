@@ -16,6 +16,8 @@ import { createHash, createHmac, randomBytes } from 'crypto';
 const PROJECT_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const GROUP_JID_PATTERN = /^[0-9][0-9-]{4,63}@g\.us$/;
 const EVENT_ID_PATTERN = /^[a-f0-9]{64}$/;
+const PROFILE_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62})$/;
+const CRON_JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{5,127}$/;
 const MAX_ROUTES = 32;
 const MAX_TEXT_LENGTH = 32_768;
 const MAX_FILENAME_LENGTH = 255;
@@ -88,7 +90,7 @@ export function parsePassiveIntakeConfig(rawConfig, rootDir) {
     if (!isPlainObject(route)) {
       throw new PassiveIntakeConfigError(`passive intake route ${index} must be an object`);
     }
-    assertOnlyKeys(route, new Set(['project', 'jid']), `passive intake route ${index}`);
+    assertOnlyKeys(route, new Set(['project', 'jid', 'wake']), `passive intake route ${index}`);
     const project = typeof route.project === 'string' ? route.project.trim() : '';
     const jid = typeof route.jid === 'string' ? route.jid.trim() : '';
     if (!PROJECT_PATTERN.test(project)) {
@@ -100,9 +102,31 @@ export function parsePassiveIntakeConfig(rawConfig, rootDir) {
     if (seenProjects.has(project) || seenJids.has(jid)) {
       throw new PassiveIntakeConfigError('passive intake projects and group JIDs must be unique');
     }
+    let wake = null;
+    if (route.wake !== undefined) {
+      if (!isPlainObject(route.wake)) {
+        throw new PassiveIntakeConfigError(`passive intake route ${index} wake must be an object`);
+      }
+      assertOnlyKeys(
+        route.wake,
+        new Set(['profile', 'cron_job_id']),
+        `passive intake route ${index} wake`,
+      );
+      const profile = typeof route.wake.profile === 'string' ? route.wake.profile.trim() : '';
+      const cronJobId = typeof route.wake.cron_job_id === 'string'
+        ? route.wake.cron_job_id.trim()
+        : '';
+      if (!PROFILE_PATTERN.test(profile)) {
+        throw new PassiveIntakeConfigError(`passive intake route ${index} wake has an invalid profile`);
+      }
+      if (!CRON_JOB_ID_PATTERN.test(cronJobId)) {
+        throw new PassiveIntakeConfigError(`passive intake route ${index} wake has an invalid cron job ID`);
+      }
+      wake = Object.freeze({ profile, cronJobId });
+    }
     seenProjects.add(project);
     seenJids.add(jid);
-    return Object.freeze({ project, jid });
+    return Object.freeze({ project, jid, wake });
   });
 
   return Object.freeze({
@@ -447,14 +471,15 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
     }
 
     const persisted = atomicWriteExclusive(paths.messagePath, rawMessageMarkdown(envelope));
-    if (attachments.length === 0) {
-      atomicWriteExclusive(paths.readyPath, readyMarkdown({ eventId, mediaState: 'none' }));
-    }
+    const readyPersisted = attachments.length === 0
+      ? atomicWriteExclusive(paths.readyPath, readyMarkdown({ eventId, mediaState: 'none' }))
+      : false;
     return {
       matched: true,
       project: route.project,
       eventId,
       persisted,
+      readyPersisted,
       duplicate: !persisted,
       spoolPath: paths.messagePath,
       hasMedia: attachments.length > 0,
@@ -478,7 +503,7 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
     const target = path.join(paths.eventRoot, fileName);
     const digest = createHash('sha256').update(bytes).digest('hex');
     const persisted = atomicWriteExclusive(target, bytes);
-    atomicWriteExclusive(paths.readyPath, readyMarkdown({
+    const readyPersisted = atomicWriteExclusive(paths.readyPath, readyMarkdown({
       eventId,
       mediaState: 'captured',
       attachmentPath: fileName,
@@ -487,7 +512,14 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
       bytes: bytes.length,
       sha256: digest,
     }));
-    return { persisted, duplicate: !persisted, status: 'captured', sha256: digest, path: target };
+    return {
+      persisted,
+      readyPersisted,
+      duplicate: !persisted && !readyPersisted,
+      status: 'captured',
+      sha256: digest,
+      path: target,
+    };
   }
 
   function captureMediaFailure({ project, eventId, spoolPath, code }) {
@@ -506,14 +538,26 @@ export function createPassiveIntake({ rawConfig, rootDir, now = () => Date.now()
         path.join(paths.eventRoot, 'media-error.md'),
         retryableMediaMarkdown({ eventId, error: reasonCode }),
       );
-      return { persisted, duplicate: !persisted, status: 'retryable', reasonCode };
+      return {
+        persisted,
+        readyPersisted: false,
+        duplicate: !persisted,
+        status: 'retryable',
+        reasonCode,
+      };
     }
     const persisted = atomicWriteExclusive(paths.readyPath, readyMarkdown({
       eventId,
       mediaState: 'failed',
       error: reasonCode,
     }));
-    return { persisted, duplicate: !persisted, status: 'failed', reasonCode };
+    return {
+      persisted,
+      readyPersisted: persisted,
+      duplicate: !persisted,
+      status: 'failed',
+      reasonCode,
+    };
   }
 
   function mediaState(project, eventId) {
