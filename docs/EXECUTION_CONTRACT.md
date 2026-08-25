@@ -79,4 +79,4 @@
 - Contract preflight: green on all three canonical contracts.
 - Implementation: self-hosted stack, local inference, Windows tunnel, SDKs, profile mappings, ExoCortex provider selection, and status-key repair installed.
 - Validation: 68 focused tests green; health is green; all six Windows and three VPS identities passed SDK write/retrieve; the derived-memory queue completed 16/16 work units and produced 14 conclusions, including successful semantic retrieval of the self-hosted decision.
-- Completion: user interaction acceptance remains pending; Vercel GitHub-App validation is separately deferred until Bernardo can supply the email code.
+- Completion: self-hosted Honcho repair is complete at `validated-target`; user interaction acceptance remains pending, and Vercel GitHub-App validation is separately deferred until Bernardo can supply the email code.
