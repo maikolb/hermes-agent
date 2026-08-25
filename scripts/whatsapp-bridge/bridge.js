@@ -35,8 +35,6 @@ import { assertOutboundDestination, createDeliveryAckTracker } from './delivery_
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
 import { createReconnectCoordinator } from './reconnect_controller.js';
-import { createPassiveIntake } from './passive_intake.js';
-import { createPassiveIntakeWakeDispatcher } from './passive_intake_wake.js';
 import {
   buildPollPayload,
   createReconnectScheduler,
@@ -129,18 +127,6 @@ const CHUNK_DELAY_MS = parseInt(process.env.WHATSAPP_CHUNK_DELAY_MS || '300', 10
 // fires. Fail fast instead so the gateway can surface a real error and retry.
 const SEND_TIMEOUT_MS = parseInt(process.env.WHATSAPP_SEND_TIMEOUT_MS || '60000', 10);
 const DELIVERY_ACK_TIMEOUT_MS = parseInt(process.env.WHATSAPP_DELIVERY_ACK_TIMEOUT_MS || '10000', 10);
-const PASSIVE_MEDIA_TIMEOUT_MS = Math.min(
-  Math.max(parseInt(process.env.WHATSAPP_PASSIVE_MEDIA_TIMEOUT_MS || '60000', 10), 5000),
-  120000,
-);
-const passiveIntake = createPassiveIntake({
-  rawConfig: process.env.WHATSAPP_PASSIVE_INTAKE_CONFIG || '',
-  rootDir: process.env.HERMES_PASSIVE_INTAKE_ROOT || '',
-});
-const passiveIntakeWake = createPassiveIntakeWakeDispatcher({
-  pythonExecutable: process.env.HERMES_RUNTIME_PYTHON || '',
-  agentRoot: process.env.HERMES_AGENT_ROOT || '',
-});
 const deliveryAcks = createDeliveryAckTracker({ timeoutMs: DELIVERY_ACK_TIMEOUT_MS });
 
 // --- Send queue: serialise all sock.sendMessage() calls across concurrent
@@ -161,7 +147,6 @@ function sleep(ms) {
 }
 
 function sendWithTimeout(chatId, payload, options = {}, timeoutMs = SEND_TIMEOUT_MS) {
-  passiveIntake.assertEgressAllowed(chatId, 'send');
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(
@@ -573,25 +558,8 @@ async function startSocket() {
   });
 
   sock.ev.on('messages.update', async (updates) => {
-    // Delivery ACK bookkeeping is process-local and does not create a
-    // conversation, memory entry, tool call, or WhatsApp egress.
     deliveryAcks.observeUpdates(updates);
-    const ordinaryUpdates = [];
-    for (const entry of updates || []) {
-      const updateChatId = entry?.key?.remoteJid
-        || entry?.update?.pollUpdates?.[0]?.pollUpdateMessageKey?.remoteJid
-        || '';
-      const passiveRoute = passiveIntake.routeFor(updateChatId);
-      if (passiveRoute) {
-        console.log(JSON.stringify({
-          event: 'passive_intake_update_consumed',
-          project: passiveRoute.project,
-        }));
-        continue;
-      }
-      ordinaryUpdates.push(entry);
-    }
-    for (const { key, update } of ordinaryUpdates) {
+    for (const { key, update } of updates || []) {
       if (!update?.pollUpdates) continue;
       const pollCreationId = key?.id || update.pollUpdates?.[0]?.pollCreationMessageKey?.id;
       const pollCreation = messageStore.get(pollCreationId);
@@ -652,110 +620,13 @@ async function startSocket() {
     ].filter(Boolean)));
 
     for (const msg of messages) {
-      const chatId = msg?.key?.remoteJid || '';
+      deliveryAcks.observeMessage(msg);
+      if (!msg.message) continue;
+
+      const chatId = msg.key.remoteJid;
       const senderId = msg.key.participant || chatId;
       const isGroup = chatId.endsWith('@g.us');
       const senderNumber = senderId.replace(/@.*/, '');
-      const passiveRoute = passiveIntake.routeFor(chatId);
-      if (passiveRoute) {
-        try {
-          const result = msg.message
-            ? passiveIntake.captureMessage({ msg, chatId, senderId })
-            : { persisted: false, reason: 'empty_protocol_message' };
-          let mediaStatus;
-          let rawReadyPersisted = result.readyPersisted === true;
-          if (result.hasMedia && result.eventId && passiveIntake.mediaState(result.project, result.eventId) === 'pending') {
-            if (result.privacyRestricted) {
-              const mediaResult = passiveIntake.captureMediaFailure({
-                project: result.project,
-                eventId: result.eventId,
-                spoolPath: result.spoolPath,
-                code: 'media-privacy-restricted',
-              });
-              mediaStatus = mediaResult.status;
-              rawReadyPersisted = mediaResult.readyPersisted === true;
-            } else {
-              let lastMediaError = null;
-              for (let attempt = 1; attempt <= 2; attempt += 1) {
-                let timeout;
-                try {
-                  const mediaBytes = await Promise.race([
-                    downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage }),
-                    new Promise((_, reject) => {
-                      timeout = setTimeout(
-                        () => reject(Object.assign(new Error('passive media timeout'), { code: 'MEDIA_TIMEOUT' })),
-                        PASSIVE_MEDIA_TIMEOUT_MS,
-                      );
-                    }),
-                  ]);
-                  const metadata = result.mediaMetadata?.[0] || {};
-                  const mediaResult = passiveIntake.captureMedia({
-                    project: result.project,
-                    eventId: result.eventId,
-                    spoolPath: result.spoolPath,
-                    kind: metadata.kind,
-                    mime: metadata.mime,
-                    bytes: mediaBytes,
-                  });
-                  mediaStatus = mediaResult.status;
-                  rawReadyPersisted = mediaResult.readyPersisted === true;
-                  lastMediaError = null;
-                  break;
-                } catch (mediaError) {
-                  lastMediaError = mediaError;
-                  if (attempt < 2) {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                  }
-                } finally {
-                  if (timeout) clearTimeout(timeout);
-                }
-              }
-              if (lastMediaError) {
-                const code = lastMediaError?.code === 'MEDIA_TIMEOUT'
-                  ? 'media-download-timeout'
-                  : 'media-download-failed';
-                const mediaResult = passiveIntake.captureMediaFailure({
-                  project: result.project,
-                  eventId: result.eventId,
-                  spoolPath: result.spoolPath,
-                  code,
-                });
-                mediaStatus = mediaResult.status;
-                rawReadyPersisted = mediaResult.readyPersisted === true;
-              }
-            }
-          }
-          const wakeDispatched = rawReadyPersisted
-            ? passiveIntakeWake.dispatch(passiveRoute)
-            : false;
-          console.log(JSON.stringify({
-            event: 'passive_intake_consumed',
-            project: passiveRoute.project,
-            persisted: result.persisted === true,
-            duplicate: result.duplicate === true,
-            reason: result.reason || undefined,
-            media: mediaStatus,
-            wakeDispatched,
-          }));
-        } catch (error) {
-          // Fail closed: persistence failure must never fall through into the
-          // ordinary Titan queue, session, memory, tools, or model path.
-          console.error(JSON.stringify({
-            event: 'passive_intake_persist_failed',
-            project: passiveRoute.project,
-            code: error?.code || 'PASSIVE_INTAKE_PERSIST_FAILED',
-          }));
-          // A message must never be silently acknowledged after raw
-          // persistence failed.  Fail the bridge so the gateway's existing
-          // retryable-adapter supervisor reconnects and WhatsApp can replay.
-          setImmediate(() => process.exit(70));
-          return;
-        }
-        continue;
-      }
-
-      deliveryAcks.observeMessage(msg);
-      if (!msg.message) continue;
       emitDebugEvent({
         stage: 'upsert',
         type,
@@ -998,21 +869,7 @@ function startSocketWithRetry() {
 
 // HTTP server
 const app = express();
-app.use(express.json({ limit: '1mb' }));
-
-function rejectPassiveIntakeEgress(res, chatId, action) {
-  try {
-    passiveIntake.assertEgressAllowed(chatId, action);
-    return false;
-  } catch (error) {
-    if (error?.code !== 'PASSIVE_INTAKE_EGRESS_DENIED') throw error;
-    res.status(403).json({
-      error: 'Passive intake routes are receive-only',
-      code: error.code,
-    });
-    return true;
-  }
-}
+app.use(express.json());
 
 // Host-header validation — defends against DNS rebinding.
 // The bridge binds loopback-only (127.0.0.1) but a victim browser on
@@ -1061,7 +918,6 @@ app.post('/send', async (req, res) => {
   if (!chatId || !message) {
     return res.status(400).json({ error: 'chatId and message are required' });
   }
-  if (rejectPassiveIntakeEgress(res, chatId, 'send')) return;
 
   try {
     const chunks = splitLongMessage(formatOutgoingMessage(message));
@@ -1106,7 +962,6 @@ app.post('/edit', async (req, res) => {
   if (!chatId || !messageId || !message) {
     return res.status(400).json({ error: 'chatId, messageId, and message are required' });
   }
-  if (rejectPassiveIntakeEgress(res, chatId, 'edit')) return;
 
   try {
     const key = { id: messageId, fromMe: true, remoteJid: chatId };
@@ -1141,7 +996,6 @@ app.post('/send-media', async (req, res) => {
   if (!chatId || !filePath) {
     return res.status(400).json({ error: 'chatId and filePath are required' });
   }
-  if (rejectPassiveIntakeEgress(res, chatId, 'send-media')) return;
 
   try {
     if (!existsSync(filePath)) {
@@ -1243,7 +1097,6 @@ app.post('/send-poll', async (req, res) => {
   if (!chatId || !question || !Array.isArray(options)) {
     return res.status(400).json({ error: 'chatId, question, and options are required' });
   }
-  if (rejectPassiveIntakeEgress(res, chatId, 'send-poll')) return;
 
   try {
     const payload = buildPollPayload({ question, options, selectableCount });
@@ -1266,7 +1119,6 @@ app.post('/send-location', async (req, res) => {
   if (!chatId || latitude === undefined || longitude === undefined) {
     return res.status(400).json({ error: 'chatId, latitude, and longitude are required' });
   }
-  if (rejectPassiveIntakeEgress(res, chatId, 'send-location')) return;
 
   try {
     const payload = buildLocationPayload({ latitude, longitude, name, address });
@@ -1287,7 +1139,6 @@ app.post('/typing', async (req, res) => {
 
   const { chatId } = req.body;
   if (!chatId) return res.status(400).json({ error: 'chatId required' });
-  if (rejectPassiveIntakeEgress(res, chatId, 'typing')) return;
 
   try {
     await sock.sendPresenceUpdate('composing', chatId);
@@ -1303,9 +1154,6 @@ app.post('/read', async (req, res) => {
   if (!sock || connectionState !== 'connected') {
     return res.status(503).json({ error: 'Not connected' });
   }
-
-  const readChatId = req.body?.key?.remoteJid || '';
-  if (rejectPassiveIntakeEgress(res, readChatId, 'read')) return;
 
   const receiptKeys = inboundReadReceiptKeys({
     key: req.body?.key,
@@ -1327,7 +1175,6 @@ app.post('/read', async (req, res) => {
 // Chat info
 app.get('/chat/:id', async (req, res) => {
   const chatId = req.params.id;
-  if (rejectPassiveIntakeEgress(res, chatId, 'metadata')) return;
   const isGroup = chatId.endsWith('@g.us');
 
   if (isGroup && sock) {
@@ -1358,12 +1205,6 @@ app.get('/health', (req, res) => {
     uptime: process.uptime(),
     scriptHash: SCRIPT_HASH,
     sendReadReceipts: SEND_READ_RECEIPTS,
-    passiveIntake: {
-      enabled: passiveIntake.enabled,
-      routeCount: passiveIntake.routeCount,
-      configHash: passiveIntake.configHash,
-      wakeRuntimeConfigured: passiveIntakeWake.runtimeConfigured,
-    },
   });
 });
 
