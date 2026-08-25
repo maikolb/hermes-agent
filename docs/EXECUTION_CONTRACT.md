@@ -30,6 +30,7 @@
 - Focused Honcho CLI tests under `tests/`
 - `docs/EXECUTION_CONTRACT.md`
 - `docs/regressions/REG-2026-08-25-001.md`
+- `contributors/emails/maikol.botelho@gmail.com`
 - Windows Hermes profile `config.yaml` and `honcho.json` files
 - VPS Hermes profile `config.yaml` and `honcho.json` files
 - Self-hosted Honcho, its local inference dependency, the localhost SSH tunnel, and the existing per-profile Honcho configuration
