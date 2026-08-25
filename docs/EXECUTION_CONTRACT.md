@@ -1,92 +1,90 @@
-# Execution Contract
+# Hermes Runtime Repair Execution Contract
 
 ## Contract Metadata
 - Contract Version: 2
-- Mode: RELEASE
+- Mode: REPAIR
 - Risk Level: HIGH
-- Workspace: `C:\Users\maiko\Projetos\hermes-main-consolidation-20260824`
-- Updated At: 2026-08-24T11:52:00-03:00
-- Machine Runtime Authority: none: Git and GitHub mutations are issued explicitly by the root agent; no autonomous code-edit loop is authorized
+- Workspace: C:\Users\maiko\AppData\Local\hermes\hermes-agent
+- Target Branch: main via PR from integrate/local-runtime-v2-20260820
+- Updated At: 2026-08-25T02:30:00-03:00
+- Machine Runtime Authority: none: a controlled autonomous micro-loop is not required because each profile repair is a bounded reversible config or package operation with an explicit probe and no automatic retries
+- Event Evidence: focused tests, Honcho API probes, per-profile write/retrieve probes, service status, and sanitized gateway logs
 
 ## Requested Outcome
-- Confirm that the personal Hermes fork `main` contains the completed consolidation and current official upstream, remove only obsolete clean branches/worktrees whose work is already represented or deliberately superseded, and install a fail-closed repository-native automation that keeps the fork synchronized with upstream.
+- Restore persistent Honcho memory for every active Hermes profile on Windows and the VPS, fix profile-aware Honcho status resolution, merge the validated repair into the fork's `main`, and remove only the proved-integrated delivery/checkpoint branches without changing bot routing or Telegram ownership.
 
 ## Acceptance Criteria
-- Fresh fetches prove `main == maikolb/main` and `origin/main` is an ancestor of that exact fork commit before any cleanup.
-- The completed consolidation branch and installed integration lineage are ancestors of `main`; older non-ancestral local branches are deleted only when the existing 42/42 audit and release ledger identify their work as retained or superseded.
-- Every removed worktree is clean, resolves to an exact path under `C:\Users\maiko\Projetos`, and belongs to this repository's common Git directory.
-- The open quarantine PR #1 (`feature/project-ops-core`) and all four stashes remain preserved because their contents were explicitly excluded from the consolidation.
-- A private control repository `maikolb/hermes-upstream-sync` owns a bounded scheduled/manual workflow with `permissions: {}`, no third-party action, explicit source `NousResearch/hermes-agent:main` and target `maikolb/hermes-agent:main`, ordinary conflict-detecting Git merge/push, and fail-closed behavior on conflict or concurrent target update.
-- The write credential is a new Ed25519 deploy key dedicated to the fork. Its private half is stored only as the control repository secret `HERMES_FORK_DEPLOY_KEY`; the public fork contains no matching private secret, personal token, reusable account SSH key, or credential with access to another repository.
-- Workflow syntax and merge behavior pass local validation, the change is merged into the fork through a PR, and a manual target run finishes successfully.
-- After remote verification, obsolete auxiliary worktrees and local/remote delivery branches are gone. The canonical checkout moves to `main` only if no live Hermes process holds that installed tree; otherwise its exact clean runtime branch remains pinned and recoverable without changing live files.
-- The Windows no-visible-UI verifier reports `VisibleWindows=0` for the real operational command path.
+- One self-hosted Honcho stack is reachable only through localhost on the VPS and an SSH localhost tunnel on Windows.
+- Honcho text generation and embeddings use local models on the existing KVM8; no Honcho Cloud subscription or paid model API is used.
+- `honcho-ai` is installed in both active Hermes runtimes.
+- The six Windows profiles and three VPS profiles use explicit, stable workspace, human-peer, and AI-peer mappings.
+- Every profile can write a unique conclusion/message and retrieve it through the real Honcho SDK path.
+- `hermes honcho status --all` resolves the same profile host keys as runtime configuration.
+- Existing Telegram gateways, bot tokens, topic bindings, sessions, and project state remain unchanged unless a bounded restart is needed to load the validated memory configuration.
+- A GitHub PR integrates the complete delivery into `maikolb/hermes-agent:main`; required checks are green before merge.
+- Local and remote `main` resolve to the merged commit, the exact delivery branch is removed locally/remotely, and the exact local checkpoint branch is removed after ancestry proof.
+- Uncommitted WhatsApp work remains byte-preserved throughout branch switching and cleanup.
 
 ## In Scope
-- `C:\Users\maiko\Projetos\hermes-main-consolidation-20260824\docs\EXECUTION_CONTRACT.md`
-- Isolated build/operations checkout `C:\Users\maiko\Projetos\hermes-upstream-sync-control-20260824\**`, retained clean after private control-repository publication.
-- Git refs and worktree metadata in `C:\Users\maiko\AppData\Local\hermes\hermes-agent\.git\**`.
-- A no-runtime safety gate for `C:\Users\maiko\AppData\Local\hermes\hermes-agent\**`; checkout transition to the already-validated fork `main` is allowed only when no live Hermes process uses that tree.
-- Registered auxiliary worktrees `C:\Users\maiko\Projetos\hermes-bug-intake-20260821\**`, `C:\Users\maiko\Projetos\hermes-tool-guardrail-fix-20260821\**`, `C:\Users\maiko\Projetos\hermes-workspace-api-worktree\**`, and `C:\Users\maiko\Projetos\hermes-main-consolidation-20260824\**`.
-- Personal remote `maikolb`: PR publication/merge, creation of the private control repository, one repository-scoped write deploy key on the fork, one matching Actions secret in the control repository, workflow dispatch, and deletion of only the obsolete delivery branches proven safe by this contract.
-- Official remote `origin`: fetch/read-only ancestry comparison only.
+- `plugins/memory/honcho/cli.py`
+- Focused Honcho CLI tests under `tests/`
+- `docs/EXECUTION_CONTRACT.md`
+- `docs/regressions/REG-2026-08-25-001.md`
+- `contributors/emails/maikol.botelho@gmail.com`
+- Windows Hermes profile `config.yaml` and `honcho.json` files
+- VPS Hermes profile `config.yaml` and `honcho.json` files
+- Self-hosted Honcho, its local inference dependency, the localhost SSH tunnel, and the existing per-profile Honcho configuration
+- Active Windows and VPS Hermes Python environments
+- Git refs `integrate/local-runtime-v2-20260820`, `preserve/titan-recovery-pre-main-sync-20260825-015008`, and `main` in the `maikolb/hermes-agent` fork
 
 ## Out of Scope
-- Any edit to Hermes product code, tests, runtime configuration, profiles, credentials, data, cron jobs, gateways, or external integrations.
-- Starting, stopping, restarting, deploying, canarying, or otherwise exercising the live Hermes runtime.
-- Writing to `NousResearch/hermes-agent` or changing any upstream branch, setting, issue, PR, or workflow.
-- Force-push, destructive reset, `git clean`, recursive shell deletion, rebase, or automatic conflict resolution.
-- Deleting or modifying any stash.
-- Closing, merging, rebasing, or deleting `feature/project-ops-core` / PR #1; its audited quarantine remains recoverable.
-- Changing repository-wide Actions defaults, branch protection, visibility, collaborators, or any secret/credential other than the one dedicated deploy-key pair named in scope.
-- Persisting or exposing the deploy key outside the private control repository's encrypted Actions secret after target validation.
+- New memory provider architecture, live config inheritance between profiles, changing Telegram bot identities, changing project repositories, or enabling inactive VPS profiles.
+- Public exposure of Honcho, deletion of existing sessions/memories, credential rotation, or destructive database migration.
+- Deletion or modification of any branch other than the two exact delivery/checkpoint refs declared in scope.
 
 ## Failure Signal / Repro
-- The completed merge is present at fork `main`, but four auxiliary worktrees and multiple completed/superseded branches still remain registered.
-- The fork has custom commits on top of official history, so a simple fast-forward-only sync cannot keep it current after the next upstream commit; no scheduled upstream merge workflow currently exists. GitHub's native `GITHUB_TOKEN` also cannot update workflow files introduced by a future upstream delta because that conditional operation requires a permission the token cannot request.
+- Evidence artifact: `C:\Users\maiko\AppData\Local\hermes\profiles\hermes-project-factory\logs\gateway.log` records the live profile's Honcho connection failures.
+- Windows profile logs contain repeated connection refusals to `localhost:8500`; no listener exists there.
+- VPS profile logs report that `honcho-ai` is not installed; no listener exists on `localhost:8500`.
+- The current `--all` status path composes profile host keys with a dot while runtime resolution uses the canonical underscore form.
 
 ## Root-Cause Hypothesis
-- Facts: PRs #2 and #3 merged the consolidation as `1f4b3c1e5a`; current fresh refs show `main == maikolb/main`; `origin/main` is its ancestor; the primary and three obsolete auxiliary worktrees are clean, while the isolated delivery worktree contains only this contract update; PR #1 remains open and intentionally quarantined.
-- Assumptions: the personal fork `maikolb/hermes-agent` is the only writable authority, while official upstream `NousResearch/hermes-agent` remains read-only.
-- Chosen fix point: isolate a scheduled GitHub Actions workflow in a private control repository so upstream-synchronized workflows cannot read its fork-scoped deploy key, then remove only the delivery residue made obsolete by the confirmed main.
+- Facts: all configured profiles point to a nonexistent backend; the VPS runtime lacked the client SDK; one profile has a stale/mis-scoped host mapping; ExoCortex does not currently select the Honcho provider; the status CLI uses a different host-key format from runtime resolution; and the KVM8 has sufficient free memory and disk for a bounded local model stack.
+- User decision: Honcho must be self-hosted without Honcho Cloud or paid model APIs.
+- Chosen repair: deploy the official Honcho Docker stack and a local OpenAI-compatible inference service on the KVM8, bind both to localhost, align explicit profile mappings, install the SDKs, and correct the status-key composition with a focused regression test.
 
 ## Claim Discipline
-- Facts already established: local and fork main are identical at `7e51ba5476`; official upstream `057dcdf236f8` is reachable from that commit; all obsolete cleanup candidates were clean and recovered before deletion. During cleanup, the active runtime branch gained unmerged commit `986c77afbd`; it was retained and protected remotely by `archive/hermes-20260824-active-runtime-986c77afbd` instead of being misclassified as obsolete.
-- Inferences that still require validation: a future genuine upstream merge conflict will exercise the already-reviewed fail-closed path; manufacturing such a remote conflict is prohibited.
-- Highest readiness state allowed by current evidence: released for the synchronization automation; the live Hermes runtime remains on its existing pinned checkout.
-- Target readiness checklist or equivalent: both contracts green; control workflow syntax/behavior green; private repository and isolated secret verified; PR #4 merged; local/remote main confirmed; manual control run green; recovery tags and retained refs inventoried; final window verifier green.
+- `implemented` means code/config/runtime exists.
+- `validated-local` requires focused tests and Windows SDK write/retrieve.
+- `validated-target` requires write/retrieve for all nine profiles plus healthy VPS service and tunnel after restart.
+- `released` requires the Hermes source repair to be pushed and the validated runtime/config installed.
+- `accepted` requires Maikol's real interaction with the agents.
 
 ## Forbidden Actions
-- No scope expansion beyond the requested outcome.
-- No hidden side effects.
-- No behavior changes outside the declared scope.
-- No placeholders, fake values, temporary keys, or config overrides unless explicitly requested.
-- Do not remove a worktree unless its status is clean and its resolved path matches the exact in-scope path.
-- Do not delete a branch unless its release decision is documented and its recovery/retention condition is satisfied.
-- Do not touch the open quarantined PR #1 branch or any stash.
-- Do not start or restart Hermes to validate this Git-only maintenance task.
-- Do not print, log, commit, reuse, or retain a local copy of the private deploy key after the Actions secret and target push are verified.
+- Do not delete, overwrite, or regex-rewrite existing Hermes session databases or memories.
+- Do not change Telegram bot tokens, topic bindings, gateway ownership, or activate additional VPS bots.
+- Do not expose a local Honcho service on a public interface or print secrets in logs/output.
+- Do not reset, stash, discard, force-push, or overwrite unrelated work.
+- Do not merge while required GitHub checks are red or delete either branch before proving its tip is contained in the merged `main`.
+- Do not launch visible Windows UI.
 
 ## Loop Control
-- Controlled micro-loop is not required because no autonomous edit runner is used; the root agent will perform at most three explicit patch-validate-review iterations.
-- Qualification: bounded manual spec -> build -> review -> green maintenance release.
-- Maximum build/test/fix iterations: 3.
-- Stop condition: workflow validation and target run are green, remote `main` is confirmed, obsolete auxiliary refs/worktrees are removed, and any branch retained solely by an active runtime is exact, clean and protected by a rollback tag.
-- Escalation rule: stop before push or deletion on any unexplained commit, dirty worktree, merge conflict, failed ancestry gate, or third repeated validation failure.
-- Runtime authority path: none.
-- Append-only evidence path: not applicable; no autonomous loop is used, and Git/GitHub refs plus the workflow run are the delivery evidence.
+- A controlled autonomous micro-loop is not required because this repair uses one bounded change and one explicit verification per profile; failures stop for changed evidence instead of iterating autonomously.
+- Maximum repair iterations: 3 per failing acceptance path.
+- Green condition: all nine profile probes pass and the status-key regression is green.
+- Escalation: stop on missing required provider credential, destructive schema change, repeated identical failure twice without new evidence, or a required user-controlled authentication step.
+- Retry requires a changed config, code delta, runtime state, or new diagnostic evidence.
 
 ## Validation Plan
-- Analyze/lint: canonical validation of both execution contracts, `git diff --check`, control-workflow YAML/Bash parse, secret-isolation/host-key/permission review, and exact branch/worktree inventory.
-- Unit tests: not applicable; no product code is changed.
-- Integration/contract tests: local structural assertions cover exact source/target, empty native-token permissions and forbidden-operation absence; an ephemeral target branch proves the dedicated deploy key can update `.github/workflows/**` and is then deleted; a manual private-control dispatch exercises the real no-op sync, while conflict handling remains fail-closed without manufacturing a destructive remote conflict.
-- Build/install/deploy checks: not applicable; install/deploy is prohibited.
-- Target or environment checks: fresh fetch/`ls-remote`, deploy-key-authenticated ephemeral workflow-branch push/delete, fork evidence PR merge hash verification, and one manual private-control GitHub Actions dispatch.
-- Delivery pipeline checks: PR status/mergeability plus resulting remote `main` and branch inventory.
-- Manual smoke checks: Windows window verifier must report `VisibleWindows=0`; no Hermes UI/runtime smoke is authorized.
+- Run focused Hermes Honcho tests through `scripts/run_tests.sh` in the supported runtime.
+- Validate self-hosted Honcho and local inference health from the VPS and through the Windows localhost SSH tunnel.
+- Execute sanitized SDK write/retrieve probes for all six Windows and three VPS profiles.
+- Compare gateway/service status and configuration hashes before and after any restart.
+- Run `git diff --check` and the canonical execution-contract validator before finalization.
+- Create the fork PR, wait for required checks, merge normally, prove ancestry, switch the dirty worktree to the equal merged tree without stashing, and remove only the two declared branches.
 
 ## Status
-- Contract preflight: validated by the canonical global validator (phase `Preflight`) on 2026-08-24.
-- Implementation: private `maikolb/hermes-upstream-sync` is published and active with target-only deploy key `161167502` and isolated secret; seven archive tags are remote; four obsolete auxiliary worktrees, nine obsolete local branches and fourteen obsolete remote branches were removed; no product code changed.
-- Validation: both contracts, workflow YAML/Bash and independent structural/security review are green; ephemeral workflow-write probe `aa3febd867` was pushed/deleted; manual run `32739966897` succeeded in 14 seconds; PR #4 merged as `7e51ba5476`; local/fork main match and contain upstream; only PR #1 and four stashes remain quarantined. Live Hermes-linked processes triggered the safety gate; a concurrent unmerged commit advanced the clean runtime checkout to `986c77afbd`, so it was archived and retained rather than overwritten. Final zero-UI verification reported `VisibleWindows=0` and no shell descendants.
-- Completion: completed at `released` for automatic synchronization and `validated-local` for Git cleanup. The transient closeout worktree exists only to publish this terminal record and is removed immediately after its commit reaches remote main; no Hermes runtime-release or acceptance claim is made.
+- Contract preflight: green on all three canonical contracts.
+- Implementation: self-hosted stack, local inference, Windows tunnel, SDKs, profile mappings, ExoCortex provider selection, and status-key repair installed.
+- Validation: 68 focused tests green; health is green; all six Windows and three VPS identities passed SDK write/retrieve; the derived-memory queue completed 16/16 work units and produced 14 conclusions, including successful semantic retrieval of the self-hosted decision.
+- Completion: self-hosted Honcho repair is complete at `validated-target`; source integration/branch cleanup is in progress, user interaction acceptance remains pending, and Vercel GitHub-App validation is separately deferred until Bernardo can supply the email code.

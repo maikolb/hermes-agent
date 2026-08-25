@@ -103,6 +103,38 @@ class TestCmdSetupLocalJwt:
 
 
 class TestCmdStatus:
+    def test_status_all_uses_canonical_profile_host_keys(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        monkeypatch.setattr(
+            "hermes_cli.profiles.list_profiles",
+            lambda: [
+                SimpleNamespace(name="default"),
+                SimpleNamespace(name="hermes-project-factory"),
+            ],
+        )
+        monkeypatch.setattr(
+            honcho_cli,
+            "_read_config",
+            lambda: {
+                "hosts": {
+                    "hermes": {"enabled": True},
+                    "hermes_hermes-project-factory": {
+                        "enabled": True,
+                        "aiPeer": "hermes-nexafactory",
+                    },
+                }
+            },
+        )
+
+        rows = honcho_cli._all_profile_host_configs()
+
+        assert rows[1] == (
+            "hermes-project-factory",
+            "hermes_hermes-project-factory",
+            {"enabled": True, "aiPeer": "hermes-nexafactory"},
+        )
+
     def test_reports_connection_failure_when_session_setup_fails(self, monkeypatch, capsys, tmp_path):
         import plugins.memory.honcho.cli as honcho_cli
 

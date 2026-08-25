@@ -2565,6 +2565,25 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 task_id: str = "default") -> str:
     """Search for content or files."""
     try:
+        # Preflight the content-search regex with the same check the AOF
+        # route policy applies (re.compile). Failing locally returns an
+        # instructive error instead of a guardrail block, so the model can
+        # pick the right alternative on the first attempt.
+        if target == "content":
+            import re as _re
+            try:
+                _re.compile(pattern)
+            except _re.error as exc:
+                return tool_error(
+                    f"INVALID REGEX for content search: {exc}. Do not put "
+                    "Windows paths or globs in 'pattern'. Options: literal "
+                    "text -> escape regex metacharacters; find files by "
+                    "name -> target='files' with a glob; known file -> "
+                    "read_file; complex traversal -> execute_code with "
+                    "pathlib/os.walk.",
+                    pattern=pattern,
+                )
+
         offset, limit = normalize_search_pagination(offset, limit)
 
         # Track searches to detect *consecutive* repeated search loops.
@@ -2761,11 +2780,11 @@ PATCH_SCHEMA = {
 
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.",
+    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nContent search (target='content', the DEFAULT): 'pattern' is a REGEX and is compiled before dispatch. A Windows path (backslashes) or a bare glob like '*.py' is NOT a valid regex; such calls are rejected before they run. For literal text, escape regex metacharacters first. Never put a filesystem path in 'pattern'; the search root belongs in 'path'.\n\nFile search (target='files'): 'pattern' is a GLOB (e.g., '*.py', '*config*'). Use this mode to find files by name, and instead of ls; results sorted by modification time.\n\nPick the right approach on the FIRST attempt: known file path -> read_file directly; find files by name -> target='files' with a glob; literal text -> escaped regex with target='content'; complex traversal or matching -> execute_code with pathlib/os.walk.",
     "parameters": {
         "type": "object",
         "properties": {
-            "pattern": {"type": "string", "description": "Regex pattern for content search, or glob pattern (e.g., '*.py') for file search"},
+            "pattern": {"type": "string", "description": "target='content': a regex (validated with re.compile; Windows paths, backslashes and bare globs are invalid and rejected). target='files': a glob like '*.py'. Never a filesystem path; the root directory belongs in 'path'."},
             "target": {"type": "string", "enum": ["content", "files"], "description": "'content' searches inside file contents, 'files' searches for files by name", "default": "content"},
             "path": {"type": "string", "description": "Directory or file to search in (default: current working directory)", "default": "."},
             "file_glob": {"type": "string", "description": "Filter files by pattern in grep mode (e.g., '*.py' to only search Python files)"},
