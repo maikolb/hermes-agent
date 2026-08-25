@@ -15,6 +15,40 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def test_cached_agent_route_identity_is_refreshed_per_message():
+    from types import SimpleNamespace
+
+    from gateway.run import _refresh_agent_message_identity
+
+    agent = SimpleNamespace(
+        platform="telegram",
+        _chat_id="",
+        _thread_id="",
+        _gateway_session_key="old",
+    )
+    source = SimpleNamespace(
+        user_id="user-1",
+        user_id_alt="stable-user-1",
+        user_name="Maikol",
+        chat_id="-100-dovcrm",
+        chat_name="DOVCRM",
+        chat_type="group",
+        thread_id="kanban-topic",
+    )
+
+    _refresh_agent_message_identity(
+        agent,
+        source,
+        platform_key="telegram",
+        session_key="telegram:-100-dovcrm:kanban-topic:user-1",
+    )
+
+    assert agent._chat_id == "-100-dovcrm"
+    assert agent._thread_id == "kanban-topic"
+    assert agent._gateway_session_key.endswith(":user-1")
+    assert agent._user_id == "user-1"
+
+
 def _make_runner():
     """Create a minimal GatewayRunner with just the cache infrastructure."""
     from gateway.run import GatewayRunner
@@ -1061,4 +1095,3 @@ class TestCrossProcessInvalidationDefersCleanup:
         # Stale entry was popped, hard-teardown path never used.
         assert "telegram:s1" not in runner._agent_cache
         runner._cleanup_agent_resources.assert_not_called()
-

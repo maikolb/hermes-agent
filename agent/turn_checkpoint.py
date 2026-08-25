@@ -1600,11 +1600,26 @@ def initialize_agent_turn_checkpoint(
     if store is None:
         agent._turn_checkpoint_state = None
         return None
+    # AIAgent stores gateway identity in private instance fields
+    # (``_chat_id``/``_thread_id``); the former public-name lookup silently
+    # emitted empty routes even for freshly constructed gateway agents.
     routing = {
         "platform": str(getattr(agent, "platform", None) or ""),
-        "chat_id": str(getattr(agent, "chat_id", None) or ""),
-        "thread_id": str(getattr(agent, "thread_id", None) or ""),
-        "task_id": str(getattr(agent, "task_id", None) or ""),
+        "chat_id": str(
+            getattr(agent, "_chat_id", None)
+            or getattr(agent, "chat_id", None)
+            or ""
+        ),
+        "thread_id": str(
+            getattr(agent, "_thread_id", None)
+            or getattr(agent, "thread_id", None)
+            or ""
+        ),
+        "task_id": str(
+            getattr(agent, "_task_id", None)
+            or getattr(agent, "task_id", None)
+            or ""
+        ),
     }
     resume_existing = bool(getattr(agent, "_resume_turn_from_checkpoint", False))
     try:

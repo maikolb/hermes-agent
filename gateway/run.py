@@ -135,6 +135,31 @@ _DELIVERY_CHECKPOINT_FENCE_KEYS = (
 )
 
 
+def _refresh_agent_message_identity(
+    agent: Any,
+    source: Any,
+    *,
+    platform_key: str,
+    session_key: str,
+) -> None:
+    """Refresh route identity on both fresh and cached agents.
+
+    Agent instances are cached by gateway session.  Route fields therefore
+    cannot be treated as constructor-only state: older cached instances may
+    predate route-aware checkpoints, and topic/chat metadata can be enriched
+    after construction.  Checkpoint creation reads these private fields.
+    """
+    agent.platform = platform_key
+    agent._user_id = source.user_id
+    agent._user_id_alt = source.user_id_alt
+    agent._user_name = source.user_name
+    agent._chat_id = source.chat_id
+    agent._chat_name = source.chat_name
+    agent._chat_type = source.chat_type
+    agent._thread_id = source.thread_id
+    agent._gateway_session_key = session_key
+
+
 def _validated_turn_delivery_metadata(
     agent_result: Any,
     *,
@@ -6626,8 +6651,18 @@ class TurnRunner:
                     self._runner._enforce_agent_cache_cap()
             logger.debug("Created new agent for session %s (sig=%s)", ctx.session_key, _sig)
 
-        # Per-message state — callbacks and reasoning config change every
-        # turn and must not be baked into the cached agent constructor.
+        # Per-message state — route identity, callbacks and reasoning config
+        # change every turn and must not be baked into the cached constructor.
+        # This also upgrades cached agents created before route-aware durable
+        # checkpoints; otherwise a correct final is suppressed when its blank
+        # checkpoint route cannot bind to the real delivery route.
+        _refresh_agent_message_identity(
+            agent,
+            ctx.source,
+            platform_key=platform_key,
+            session_key=ctx.session_key,
+        )
+
         # Gate on needs_progress_queue (tool_progress OR thinking_progress)
         # rather than tool_progress alone: the progress_callback also relays
         # _thinking assistant scratch text, which is gated on
