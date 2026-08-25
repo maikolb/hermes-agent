@@ -1,104 +1,85 @@
-# Hermes Full-Access and Honcho Runtime Recovery Contract
+# Hermes NF Worker Focus Live Output Execution Contract
 
 ## Contract Metadata
 - Contract Version: 2
 - Mode: REPAIR
 - Risk Level: HIGH
-- Workspace: C:\Users\maiko\AppData\Local\hermes\worktrees\honcho-root-runtime-20260825
-- Target Branch: main via PR from fix/honcho-root-runtime-20260825
-- Updated At: 2026-08-25T15:00:00-03:00
-- Runtime Targets: Windows Titan default, VPS Titan Audit/default, VPS Hermes NexaFactory
-- Machine Runtime Authority: none: the repair uses bounded host service changes and direct target probes with an explicit rollback after any failed check
+- Workspace: C:\Users\maiko\Documents\Codex\2026-08-25\corre-o-no-hermes-nf-da-2\work\hermes-agent
+- Target Branch: main via PR from fix/nf-worker-focus-live-output-20260825
+- Updated At: 2026-08-25T19:50:00-03:00
+- Machine Runtime Authority: none: the root agent may promote only after local gates and an explicit NF idle proof; the current 2026-08-24 release remains the rollback authority
+- Event Evidence: VPS NF worker log for t_c3923c5d, gateway/profile configuration, focused notifier tests, process identity, and target Telegram delivery evidence
 
 ## Requested Outcome
-- Give the VPS `hermes` identity complete non-interactive root authority and make the self-hosted Honcho provider operational, exposed, and verified end-to-end in all three Hermes runtimes.
+- When the NF principal turn ends while subscribed Kanban workers remain active, make `kanban.worker_focus_handoff: true` show the selected worker's live activity, tool progress, and available reasoning in the originating Telegram topic instead of only the static `Now following worker` card.
 
 ## Acceptance Criteria
-- `sudo -u hermes sudo -n id -u` returns `0`; no gateway needs to run as root and no `/root` ownership is weakened.
-- Active gateway processes use `/srv/hermes` as `HOME`, `HERMES_HOME`, and working directory; a normal consult/tool path no longer resolves `/root/.git`.
-- One private self-hosted Honcho backend is healthy on VPS loopback and survives restart.
-- Windows reaches that backend through a hidden, persistent SSH tunnel with no visible terminal window.
-- The default and NexaFactory profile configurations resolve the intended Honcho backend without copying or printing credentials.
-- `honcho_profile` and `honcho_context` are present and complete a real call in Windows Titan, VPS Titan Audit/default, and VPS Hermes NexaFactory.
-- Required gateways remain active after bounded restarts; no profile, session, memory, Kanban, project, bot binding, or credential is deleted.
-- Any source/documentation change is merged through a green PR; its branch is deleted locally and remotely after ancestry proof.
+- Focus handoff remains opt-in and inactive while the originating gateway session is running.
+- Once the principal session is idle, the existing focus message includes the configured activity-indicator text and a bounded, redacted view of the current worker attempt's CLI output.
+- Worker tool lines and available reasoning are reflected by editing one existing message, never by sending one message per log line.
+- A retried worker shows only its latest attempt; output from older attempts is not replayed.
+- Missing, unreadable, binary, oversized, or rotating worker logs fail soft and never stop the notifier tick.
+- Existing multi-worker selection, rotation, retry cleanup, terminal cleanup, profile authorization, thread routing, and passive-notification behavior remain unchanged.
+- No worker process, Kanban row, subscription, session, memory, credential, Telegram binding, project data, or user workspace is modified by the follower.
+- Focused tests, compilation, diff checks, contract validation, PR checks, and an idle-gated target probe pass before release is claimed.
 
 ## In Scope
-- A validated `/etc/sudoers.d` grant for `hermes` with `NOPASSWD: ALL`.
-- Service environment correction for `HOME`, `HERMES_HOME`, and working directory if target evidence shows drift.
-- Existing self-hosted Honcho service, configuration, local-only binding, and runtime dependencies.
-- A zero-visible-UI Windows SSH tunnel and bounded gateway restarts required to reload the provider.
-- Focused provider/tool/runtime probes, regression record if a source defect is found, this contract, PR, merge, and branch cleanup.
+- `gateway/kanban_watchers.py` worker-focus rendering and bounded reads through the existing `hermes_cli.kanban_db.read_worker_log()` accessor.
+- `tests/gateway/test_kanban_notifier.py` regressions for activity text, current-attempt isolation, reasoning/tool rendering, redaction, and fail-soft log reads.
+- `docs/regressions/REG-2026-08-25-003.md` and this contract.
+- Read-only inspection of the NF profile configuration, worker logs, Kanban state, and gateway logs.
+- PR/merge to `maikolb/hermes-agent:main` and an idle-gated NF release cutover with exact rollback to the current release on a failed target check.
 
 ## Out of Scope
-- Running messaging gateways permanently as root, changing permissions or ownership under `/root`, or exposing Honcho unauthenticated to the public Internet.
-- Replacing Hermes profiles, Telegram bot identities, routes, sessions, Kanban state, memories, projects, or agent credentials.
-- New memory architecture, VPN, Kubernetes, public control plane, or unrelated AOF/AIRC work.
+- Changing worker scheduling, claims, concurrency, assignees, task lifecycle, Kanban schemas, notifier subscriptions, or focus selection policy.
+- Streaming raw model/provider events, adding a new IPC service, socket, daemon, database, plugin, tool, or configuration property.
+- Changing NF/PF identities, tokens, Telegram routes, sessions, memory, skills, project data, worker workspaces, or user repositories.
+- Modifying the default/Titan, bench-supervisor, Windows PF, Exocortex, CEOGame, or unrelated profiles.
+- Restarting the NF gateway while any principal turn, Kanban worker, pending resume, or unrelated release activity is active.
 
 ## Failure Signal / Repro
-- Windows `honcho_profile` and `honcho_context` report `Honcho session could not be initialized`; `127.0.0.1:8500` refuses the connection.
-- VPS NexaFactory does not expose the Honcho tools in its session namespace.
-- VPS Titan Audit reached `Permission denied: '/root/.git'` before testing Honcho.
-- Before repair, `sudo -u hermes sudo -n id` requires a password.
-- Evidence-Absent: the failing tool responses exist in the user's Telegram runtime and current-session report; this bounded repair will capture new sanitized target probes without copying chat credentials or private session payloads into git.
+- At 2026-08-25 22:17 UTC, Telegram displayed `Now following worker` for board `hermes-project-facto-786f51f34a055368--infotributos`, task `t_c3923c5d`, run 6, but displayed no worker activity, reasoning, or tool progress afterward.
+- The exact worker log grew to 10,983 bytes through 22:25:58 UTC and contained many tool-progress lines plus a `Reasoning` block, proving the worker produced displayable output while the gateway showed none of it.
+- Current `GatewayKanbanWatchersMixin._kanban_refresh_worker_focus()` renders only task metadata; it never calls the existing worker-log accessor or any worker output source.
+- Evidence artifact: `docs/regressions/REG-2026-08-25-003.md` records the exact task, timestamp, observed output gap, and prevention surface.
 
 ## Root-Cause Hypothesis
-- Windows has no local backend or persistent tunnel even though its profile points to `localhost:8500`.
-- VPS Honcho became healthy after gateway initialization, leaving provider tools absent until a controlled reload.
-- A runtime or administrative probe inherited root's home instead of `/srv/hermes`, causing the `/root/.git` path.
-- If a real provider call still fails with backend healthy, configuration/schema or package-version drift must be proven before source edits.
+- Fact: `worker_focus_handoff` tracks claimed workers and sends/edits a static focus message after `_is_session_running()` becomes false.
+- Fact: dispatcher workers run as detached CLI subprocesses and already write their visible tools/reasoning to a per-task log through `read_worker_log()`'s canonical path.
+- Fact: the focus implementation neither reads nor renders that log; its tests assert only the static counter/title behavior.
+- Chosen repair: extend the existing focus-message edit loop to render a bounded, current-attempt-only, force-redacted projection of the existing worker log plus the configured activity-indicator text.
 
 ## Claim Discipline
-- `implemented`: access/service/config delta exists.
-- `validated-local`: Windows tunnel, provider import, and direct client calls pass with `VisibleWindows=0`.
-- `validated-target`: real tool calls pass in each named gateway runtime after reload.
-- `released`: the exact merged source/config/service state is active.
-- `accepted`: Maikol interacts with the agents and confirms normal behavior.
+- `implemented` means the source, regression record, and focused tests contain the bounded follower behavior.
+- `validated-local` requires focused tests, compilation, diff checks, and both execution-contract validators.
+- `validated-target` requires an idle-gated NF cutover, exact loaded-release identity, healthy gateway, unchanged profile/board invariants, and a real principal-to-worker Telegram probe showing activity plus worker output.
+- `released` requires merged `main` and the NF service running the exact merged release.
+- `accepted` requires Maikol's natural use or explicit confirmation after the target probe.
 
 ## Forbidden Actions
-- Do not print, rotate, overwrite, or transfer secrets as part of diagnostics.
-- Do not chmod/chown `/root`, run gateways as root, expose port 8500 publicly, delete runtime data, or restart an actively executing profile without first establishing an idle or recoverable boundary.
-- Do not stash, force-push, reset unrelated work, delete unmerged branches, or merge with failing required checks.
-- Do not launch a visible Windows terminal, browser, console, or dialog.
-
-## Rollback
-- Remove only the new sudoers drop-in after validating the remaining sudoers configuration.
-- Restore any changed systemd override from its timestamped copy, daemon-reload, and restart only the affected unit.
-- Stop/remove only the Honcho/tunnel service created or changed by this run; restore the prior profile configuration copy.
-- If a gateway restart fails health checks, restore its exact previous unit/config and restart once; then stop and report the exact failing gate.
+- Do not read or forward `.env`, credentials, raw provider payloads, full transcripts, historical worker attempts, or unbounded logs.
+- Do not add a second worker-output transport or bypass the existing profile authorization/thread-routing chokepoints.
+- Do not delete, rewrite, repair, or migrate Kanban/session/memory/project data.
+- Do not restart or promote while the NF has an active principal turn, worker, pending resume, or another release operation.
+- Do not stash, force-push, reset unrelated work, mutate the live checkout in place, or delete a branch before proving its tip is contained in merged `main`.
 
 ## Loop Control
-- A controlled autonomous micro-loop is not required because every access, service, tunnel, and gateway change has one deterministic probe and an immediate explicit rollback; retries require changed evidence.
-- Maximum repair iterations: 3 for any identical failing target path, and every retry requires changed evidence.
-- Green condition: root authority, backend/tunnel health, real Honcho calls, tool exposure, gateway health, and zero-visible-UI checks all pass.
-- Escalation: stop on required credential replacement, destructive state/schema action, inability to establish an idle/recoverable gateway boundary, or a third identical failure without new evidence.
+- A controlled autonomous micro-loop is not required because this repair has one bounded source patch, one focused test path, and one idle-gated release probe with an immediate immutable-release rollback.
+- Maximum implementation/test/fix iterations: 3 for the focused worker-follow path.
+- Green condition: the red test reproduces the missing output, the fix passes all focused gates, the PR merges normally, and the idle-gated target probe shows the configured activity tag plus bounded worker output without duplicate messages or invariant drift.
+- Rollback: if the candidate gateway fails readiness, changes worker/board/profile invariants, or the target probe does not show live output, switch the NF service back to `/usr/local/lib/hermes-agent.release-20260824-986c77af` and record the failed evidence without retrying unchanged code.
+- Escalation: stop on a third repeated failure, any need for schema/state/credential mutation, inability to prove idle, or a solution that requires new IPC/architecture.
 
 ## Validation Plan
-- Validate this contract before the first mutation and again before finalization.
-- Validate the sudoers file with `visudo -cf`, then prove root authority from the `hermes` user.
-- Probe backend health and one direct Honcho SDK session/profile/context request from VPS and Windows.
-- Enumerate the actual tool schema in each profile, then exercise `honcho_profile` and `honcho_context` through the real runtime path.
-- Prove gateway PID/status/environment, private listener scope, persistent tunnel state, and `VisibleWindows=0`.
-- Run focused repository tests only if source changes are evidence-required; otherwise avoid unrelated suites.
-- Open PR, wait for required checks, merge, prove ancestry, update local main, and delete the repair branch locally/remotely.
+- Add focused unit/integration coverage for configured `Trabalhando` text, tool/reasoning projection, latest-attempt isolation, forced secret redaction, bounded rendering, and unreadable/missing-log fail-soft behavior.
+- Run the worker-focus/notifier tests plus directly adjacent activity/display tests, `py_compile`, `git diff --check`, and both canonical execution-contract validators.
+- Inspect the final diff against the declared paths and verify no profile/config/state files changed.
+- Push the branch, open a PR, wait for required checks, merge normally, and prove branch ancestry before cleanup.
+- On the VPS, prove NF principal/worker/pending-resume idle, build/install the exact merged commit as a new immutable release, restart only `hermes-gateway@hermes-project-factory`, and verify process/source/config identity and health.
+- Run one bounded real Telegram principal-to-worker probe; confirm one focus message shows the configured activity text and subsequent worker tool/reasoning output, then verify no duplicate flood, no gateway errors, and unchanged Kanban/profile invariants.
 
 ## Status
-- Contract preflight: passed the canonical version-2 validator before the
-  privileged host and runtime changes.
-- Implementation: `/etc/sudoers.d/90-hermes-full-access` grants validated
-  `NOPASSWD: ALL` authority to `hermes`; the existing Honcho stack remains
-  loopback-only at `127.0.0.1:8500`; its API healthcheck now matches measured
-  startup latency; the persistent hidden Windows tunnel and dialogue bridge are
-  running; and the Project Factory Telegram toolset includes `memory`.
-- Validation: `sudo -u hermes -H sudo -n id -u` returned `0`; Honcho API,
-  database, Redis and Ollama are healthy; the Windows tunnel and restarted
-  Project Factory gateway report zero visible windows. Vigilia conversation
-  `47ef908b-7fbf-4689-a774-f81a6ddd3166` proves real `honcho_profile` and
-  `honcho_context` calls in Titan local, NexaFactory VPS and Titan Audit VPS.
-  Conversation `e8405c08-0808-4781-825c-279e9b03ebcb` additionally proves both
-  calls in the restarted Windows Project Factory profile.
-- Completion: complete at `released` for access, self-hosted backend, tool exposure and
-  cross-host runtime paths. The running VPS default gateway was not restarted
-  because it owns active Kanban worker `t_10aa848c`; full root authority is
-  already immediately available there through `sudo -n`, and no active work was
-  interrupted.
+- Contract preflight: complete; this task's updated contract passed both canonical validators before the product-code edit.
+- Implementation: complete for the bounded source path, regression tests, and incident-prevention record.
+- Validation: `validated-local` with 51 focused/adjacent tests, compilation, Ruff, diff checks, and both canonical contract validators; PR and target validation remain pending.
+- Completion: not claimed; merge, idle-gated NF release, and the real Telegram principal-to-worker probe remain pending.

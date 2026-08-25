@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 import time
 from contextvars import Context
@@ -24,6 +25,15 @@ from agent.i18n import t
 # Match the logger run.py uses (logging.getLogger(__name__) where __name__ ==
 # "gateway.run") so extracted log records keep their original logger name.
 logger = logging.getLogger("gateway.run")
+
+_WORKER_FOCUS_LOG_TAIL_BYTES = 64 * 1024
+_WORKER_FOCUS_MAX_ITEMS = 10
+_WORKER_FOCUS_MAX_LINE_CHARS = 280
+_WORKER_FOCUS_MAX_REASONING_CHARS = 800
+_WORKER_FOCUS_MAX_OUTPUT_CHARS = 2800
+_WORKER_FOCUS_ANSI_RE = re.compile(
+    r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"
+)
 
 
 def _resolve_auto_decompose_settings(
@@ -106,6 +116,76 @@ def _render_kanban_worker_focus(task: Any, *, board: str, active_count: int) -> 
         f"{board_tag}{owner}{title}\n"
         f"Kanban {getattr(task, 'id', '')}{run}"
     )
+
+
+def _render_kanban_worker_focus_output(raw_log: Any, *, task_id: str) -> str:
+    """Project the latest worker attempt into one bounded, redacted message."""
+    if not raw_log:
+        return ""
+    text = _WORKER_FOCUS_ANSI_RE.sub("", str(raw_log))
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    attempt_marker = f"Query: work kanban task {task_id}"
+    marker_at = text.rfind(attempt_marker)
+    if marker_at >= 0:
+        text = text[marker_at + len(attempt_marker):]
+
+    items: list[str] = []
+    reasoning_lines: list[str] = []
+    in_reasoning = False
+
+    def _flush_reasoning() -> None:
+        nonlocal reasoning_lines
+        if not reasoning_lines:
+            return
+        reasoning = " ".join(reasoning_lines).strip()
+        if len(reasoning) > _WORKER_FOCUS_MAX_REASONING_CHARS:
+            reasoning = reasoning[:_WORKER_FOCUS_MAX_REASONING_CHARS].rstrip() + "..."
+        items.append(f"Reasoning: {reasoning}")
+        reasoning_lines = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if (line.startswith("┌") and "Reasoning" in line) or line == "Reasoning":
+            _flush_reasoning()
+            in_reasoning = True
+            continue
+        if in_reasoning:
+            if line.startswith("└"):
+                _flush_reasoning()
+                in_reasoning = False
+                continue
+            cleaned = line.strip(" │┌┐└┘─")
+            if cleaned and cleaned != "Reasoning":
+                reasoning_lines.append(cleaned)
+            continue
+        if line.startswith("┊") or line.startswith("⚠"):
+            if len(line) > _WORKER_FOCUS_MAX_LINE_CHARS:
+                line = line[:_WORKER_FOCUS_MAX_LINE_CHARS].rstrip() + "..."
+            items.append(line)
+    _flush_reasoning()
+
+    if not items:
+        return ""
+    output = "\n".join(items[-_WORKER_FOCUS_MAX_ITEMS:])
+    try:
+        from agent.redact import redact_sensitive_text
+
+        output = redact_sensitive_text(
+            output,
+            force=True,
+            redact_url_credentials=True,
+        )
+    except Exception:
+        logger.warning("kanban worker focus redaction failed; suppressing worker output")
+        return ""
+    if len(output) > _WORKER_FOCUS_MAX_OUTPUT_CHARS:
+        output = output[-_WORKER_FOCUS_MAX_OUTPUT_CHARS:]
+        first_newline = output.find("\n")
+        if first_newline >= 0:
+            output = output[first_newline + 1:]
+    return output.strip()
 
 
 def _kanban_dispatch_allowed() -> bool:
@@ -284,10 +364,16 @@ class GatewayKanbanWatchersMixin:
                 active.pop(key, None)
 
     async def _kanban_refresh_worker_focus(self) -> None:
-        """Render local counter state; with count zero this is an immediate no-op."""
+        """Render live worker state; with count zero this is an immediate no-op."""
         from gateway.config import Platform as _Platform
         from gateway.platforms.base import BasePlatformAdapter
+        from gateway.run import (
+            _render_activity_indicator_template,
+            _resolve_activity_indicator_settings,
+        )
         from gateway.session import SessionSource, build_session_key
+        from hermes_cli import kanban_db as _kb
+        from hermes_cli.config import load_config as _load_config
 
         active: dict[tuple, dict[str, dict]] = getattr(
             self, "_kanban_worker_focus_active", {}
@@ -296,6 +382,12 @@ class GatewayKanbanWatchersMixin:
         self._kanban_worker_focus_states = states
         if not active and not states:
             return
+
+        try:
+            user_config = _load_config()
+        except Exception:
+            logger.debug("kanban worker focus config load failed", exc_info=True)
+            user_config = {}
 
         for key, bucket in list(active.items()):
             if not bucket:
@@ -338,11 +430,77 @@ class GatewayKanbanWatchersMixin:
                 logger.debug("kanban worker focus session probe failed", exc_info=True)
                 continue
 
-            content = _render_kanban_worker_focus(
-                task, board=board, active_count=len(bucket)
-            )
             state = states.get(key)
+            attempt_id = (task.id, getattr(task, "current_run_id", None))
+            attempt_changed = not state or state.get("attempt_id") != attempt_id
+            now = time.time()
+            started_at = float(getattr(task, "started_at", None) or now)
+            elapsed_seconds = max(0.0, now - started_at)
+            indicator = _resolve_activity_indicator_settings(
+                user_config,
+                platform.value,
+                180.0,
+            )
+            activity_text = (
+                str(state.get("activity_text") or "")
+                if state and not attempt_changed
+                else ""
+            )
+            activity_updated_at = (
+                float(state.get("activity_updated_at") or 0.0)
+                if state and not attempt_changed
+                else 0.0
+            )
+            if attempt_changed or not activity_text:
+                activity_text = (
+                    _render_activity_indicator_template(
+                        indicator,
+                        first_update=True,
+                        elapsed_seconds=elapsed_seconds,
+                    )
+                    or f"⏳ Working — {int(elapsed_seconds // 60)} min"
+                )
+                activity_updated_at = now
+            elif now - activity_updated_at >= indicator.update_interval_seconds:
+                activity_text = (
+                    _render_activity_indicator_template(
+                        indicator,
+                        first_update=False,
+                        elapsed_seconds=elapsed_seconds,
+                    )
+                    or f"⏳ Working — {int(elapsed_seconds // 60)} min"
+                )
+                activity_updated_at = now
+
+            try:
+                raw_log = await asyncio.to_thread(
+                    _kb.read_worker_log,
+                    task.id,
+                    tail_bytes=_WORKER_FOCUS_LOG_TAIL_BYTES,
+                    board=board,
+                )
+            except Exception:
+                logger.debug("kanban worker focus log read failed", exc_info=True)
+                raw_log = None
+            worker_output = _render_kanban_worker_focus_output(
+                raw_log,
+                task_id=task.id,
+            )
+            content_parts = [
+                _render_kanban_worker_focus(
+                    task, board=board, active_count=len(bucket)
+                ),
+                activity_text,
+            ]
+            if worker_output:
+                content_parts.append(worker_output)
+            content = "\n\n".join(content_parts)
             if state and state.get("content") == content:
+                state.update(
+                    activity_text=activity_text,
+                    activity_updated_at=activity_updated_at,
+                    attempt_id=attempt_id,
+                )
                 continue
             message_id = state.get("message_id") if state else None
             if message_id:
@@ -354,7 +512,13 @@ class GatewayKanbanWatchersMixin:
                     logger.debug("kanban worker focus edit failed", exc_info=True)
                     continue
                 if getattr(result, "success", False):
-                    state.update(content=content, task_id=task.id)
+                    state.update(
+                        content=content,
+                        task_id=task.id,
+                        attempt_id=attempt_id,
+                        activity_text=activity_text,
+                        activity_updated_at=activity_updated_at,
+                    )
                     continue
                 if result is None or getattr(result, "retryable", False):
                     continue
@@ -368,6 +532,9 @@ class GatewayKanbanWatchersMixin:
                     "message_id": str(result.message_id),
                     "content": content,
                     "task_id": task.id,
+                    "attempt_id": attempt_id,
+                    "activity_text": activity_text,
+                    "activity_updated_at": activity_updated_at,
                     "sub": sub,
                 }
 
