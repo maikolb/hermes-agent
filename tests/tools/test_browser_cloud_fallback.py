@@ -1,9 +1,8 @@
-"""Tests for cloud browser provider runtime fallback to local Chromium.
+"""Tests for fail-closed cloud browser provider runtime behavior.
 
-Covers the fallback logic in _get_session_info() when a cloud provider
-is configured but fails at runtime (issue #10883).
+Covers _get_session_info() when a cloud provider is configured but fails at
+runtime. An explicit cloud route must never launch local Chromium implicitly.
 """
-import logging
 from unittest.mock import Mock
 
 import pytest
@@ -21,24 +20,23 @@ def _reset_session_state(monkeypatch):
 
 
 class TestCloudProviderRuntimeFallback:
-    """Tests for _get_session_info cloud → local fallback."""
+    """Tests for _get_session_info cloud-route failure handling."""
 
-    def test_cloud_failure_falls_back_to_local(self, monkeypatch):
-        """When cloud provider.create_session raises, fall back to local."""
+    def test_cloud_failure_fails_closed_without_local_browser(self, monkeypatch):
+        """A cloud provider exception must not launch local Chromium."""
         _reset_session_state(monkeypatch)
 
         provider = Mock()
         provider.create_session.side_effect = RuntimeError("401 Unauthorized")
+        local_session = Mock(side_effect=AssertionError("local browser was launched"))
         monkeypatch.setattr(browser_tool, "_get_cloud_provider", lambda: provider)
         monkeypatch.setattr(browser_tool, "_get_cdp_override", lambda: None)
+        monkeypatch.setattr(browser_tool, "_create_local_session", local_session)
 
-        session = browser_tool._get_session_info("task-1")
+        with pytest.raises(RuntimeError, match="implicit local browser fallback is disabled"):
+            browser_tool._get_session_info("task-1")
 
-        assert session["fallback_from_cloud"] is True
-        assert "401 Unauthorized" in session["fallback_reason"]
-        assert session["fallback_provider"] == "Mock"
-        assert session["features"]["local"] is True
-        assert session["cdp_url"] is None
+        local_session.assert_not_called()
 
 
     def test_no_provider_uses_local_directly(self, monkeypatch):
@@ -54,16 +52,18 @@ class TestCloudProviderRuntimeFallback:
         assert "fallback_from_cloud" not in session
 
 
-    def test_cloud_returns_invalid_session_triggers_fallback(self, monkeypatch):
-        """Cloud provider returning None or empty dict triggers fallback."""
+    def test_cloud_returns_invalid_session_fails_closed(self, monkeypatch):
+        """An invalid cloud session must not trigger local Chromium."""
         _reset_session_state(monkeypatch)
 
         provider = Mock()
         provider.create_session.return_value = None
+        local_session = Mock(side_effect=AssertionError("local browser was launched"))
         monkeypatch.setattr(browser_tool, "_get_cloud_provider", lambda: provider)
         monkeypatch.setattr(browser_tool, "_get_cdp_override", lambda: None)
+        monkeypatch.setattr(browser_tool, "_create_local_session", local_session)
 
-        session = browser_tool._get_session_info("task-7")
+        with pytest.raises(RuntimeError, match="implicit local browser fallback is disabled"):
+            browser_tool._get_session_info("task-7")
 
-        assert session["fallback_from_cloud"] is True
-        assert "invalid session" in session["fallback_reason"]
+        local_session.assert_not_called()
