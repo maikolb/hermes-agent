@@ -1,87 +1,85 @@
-# Hermes Runtime Recovery Execution Contract
+# Hermes NF Worker Focus Live Output Execution Contract
 
 ## Contract Metadata
 - Contract Version: 2
 - Mode: REPAIR
 - Risk Level: HIGH
-- Workspace: C:\Users\maiko\AppData\Local\hermes\hermes-agent
-- Target Branch: main via PR from fix/nf-delivery-visible-activity-20260825
-- Updated At: 2026-08-25T10:45:00-03:00
-- Machine Runtime Authority: none: the repair consists of bounded source, configuration, restart, and delivery probes with immediate rollback on any failed target check
-- Event Evidence: VPS NF gateway log, profile configuration inventory, focused regression tests, process identity, and target delivery readback
+- Workspace: C:\Users\maiko\Documents\Codex\2026-08-25\corre-o-no-hermes-nf-da-2\work\hermes-agent
+- Target Branch: main via PR from fix/nf-worker-focus-live-output-20260825
+- Updated At: 2026-08-25T19:50:00-03:00
+- Machine Runtime Authority: none: the root agent may promote only after local gates and an explicit NF idle proof; the current 2026-08-24 release remains the rollback authority
+- Event Evidence: VPS NF worker log for t_c3923c5d, gateway/profile configuration, focused notifier tests, process identity, and target Telegram delivery evidence
 
 ## Requested Outcome
-- Restore reliable Hermes delivery and the previously visible reasoning, skills, tools, and activity across active profiles, while preserving NF/PF worker parallelism and focus rotation; integrate by PR and leave the Hermes repository on `main` only.
+- When the NF principal turn ends while subscribed Kanban workers remain active, make `kanban.worker_focus_handoff: true` show the selected worker's live activity, tool progress, and available reasoning in the originating Telegram topic instead of only the static `Now following worker` card.
 
 ## Acceptance Criteria
-- A cached gateway agent refreshes platform, chat, thread, user, and session identity from every current message before checkpoint creation.
-- The NF durable delivery checkpoint binds to the real Telegram group route instead of an empty stale route.
-- The existing VPS `@hermes_nexafactory_bot` remains the NF identity and its working 2026-08-24 runtime remains the rollback baseline until a candidate passes target checks.
-- Every active Windows and VPS profile explicitly shows reasoning, commentary, interim activity, skills, tool progress, thinking progress, and background-process progress on its actually configured chat platforms.
-- NF and PF retain their working-time status, concurrent workers, worker-focus handoff, and focus rotation; they are not normalized into ordinary profiles.
-- Exocortex receives no Telegram-specific change because it has no Telegram route in this incident.
-- No bot token, chat/topic binding, session, Kanban state, memory, or project data is deleted or reassigned.
-- Focused and relevant repository tests, compilation, diff checks, and the canonical execution-contract validator pass before promotion.
-- A GitHub PR merges the repair into `maikolb/hermes-agent:main`; required checks are green before merge.
-- Local and remote `main` resolve to the merged commit, the repair branch is deleted after ancestry proof, and no stash is created.
+- Focus handoff remains opt-in and inactive while the originating gateway session is running.
+- Once the principal session is idle, the existing focus message includes the configured activity-indicator text and a bounded, redacted view of the current worker attempt's CLI output.
+- Worker tool lines and available reasoning are reflected by editing one existing message, never by sending one message per log line.
+- A retried worker shows only its latest attempt; output from older attempts is not replayed.
+- Missing, unreadable, binary, oversized, or rotating worker logs fail soft and never stop the notifier tick.
+- Existing multi-worker selection, rotation, retry cleanup, terminal cleanup, profile authorization, thread routing, and passive-notification behavior remain unchanged.
+- No worker process, Kanban row, subscription, session, memory, credential, Telegram binding, project data, or user workspace is modified by the follower.
+- Focused tests, compilation, diff checks, contract validation, PR checks, and an idle-gated target probe pass before release is claimed.
 
 ## In Scope
-- `gateway/run.py` cached-agent per-message route refresh.
-- `agent/turn_checkpoint.py` checkpoint routing from the AIAgent route fields.
-- Focused regression tests under `tests/agent/` and `tests/gateway/`.
-- `docs/regressions/REG-2026-08-25-002.md` and this contract.
-- Backed-up display/configuration normalization for active Windows and VPS Hermes profiles.
-- Bounded gateway restarts, process/config identity checks, zero-visible-window evidence, and delivery probes.
-- PR, merge, ancestry proof, and cleanup of the exact repair branch.
+- `gateway/kanban_watchers.py` worker-focus rendering and bounded reads through the existing `hermes_cli.kanban_db.read_worker_log()` accessor.
+- `tests/gateway/test_kanban_notifier.py` regressions for activity text, current-attempt isolation, reasoning/tool rendering, redaction, and fail-soft log reads.
+- `docs/regressions/REG-2026-08-25-003.md` and this contract.
+- Read-only inspection of the NF profile configuration, worker logs, Kanban state, and gateway logs.
+- PR/merge to `maikolb/hermes-agent:main` and an idle-gated NF release cutover with exact rollback to the current release on a failed target check.
 
 ## Out of Scope
-- Treating the Concursa/Japa message as an incident; the user confirmed the wrong bot was mentioned and that runtime is a working reference.
-- Replacing NF/PF identities, tokens, sessions, Kanban state, worker architecture, or project data.
-- Adding Telegram to Exocortex or altering dormant platform configuration unrelated to an active route.
-- New routing, memory, browser, or orchestration architecture.
-- Deleting unrelated uncommitted work, using stash, force-pushing, or rewriting Git history.
+- Changing worker scheduling, claims, concurrency, assignees, task lifecycle, Kanban schemas, notifier subscriptions, or focus selection policy.
+- Streaming raw model/provider events, adding a new IPC service, socket, daemon, database, plugin, tool, or configuration property.
+- Changing NF/PF identities, tokens, Telegram routes, sessions, memory, skills, project data, worker workspaces, or user repositories.
+- Modifying the default/Titan, bench-supervisor, Windows PF, Exocortex, CEOGame, or unrelated profiles.
+- Restarting the NF gateway while any principal turn, Kanban worker, pending resume, or unrelated release activity is active.
 
 ## Failure Signal / Repro
-- At 2026-08-25 12:15 UTC, the VPS NF composed the requested Kanban response but logged `checkpoint rejected delivery obligation binding` and suppressed its durable final.
-- The failed checkpoint route contained `platform=telegram` with an empty `chat_id`, while the delivery event contained the real Telegram group route.
-- The incident and prevention record exists at `docs/regressions/REG-2026-08-25-002.md`.
-- Profile inventory showed implicit Telegram defaults hiding tool progress and explicit visibility drift, including reasoning disabled and an invalid background-progress value.
+- At 2026-08-25 22:17 UTC, Telegram displayed `Now following worker` for board `hermes-project-facto-786f51f34a055368--infotributos`, task `t_c3923c5d`, run 6, but displayed no worker activity, reasoning, or tool progress afterward.
+- The exact worker log grew to 10,983 bytes through 22:25:58 UTC and contained many tool-progress lines plus a `Reasoning` block, proving the worker produced displayable output while the gateway showed none of it.
+- Current `GatewayKanbanWatchersMixin._kanban_refresh_worker_focus()` renders only task metadata; it never calls the existing worker-log accessor or any worker output source.
+- Evidence artifact: `docs/regressions/REG-2026-08-25-003.md` records the exact task, timestamp, observed output gap, and prevention surface.
 
 ## Root-Cause Hypothesis
-- Fact: AIAgent stores gateway route identity in `_chat_id` and `_thread_id`, while checkpoint initialization read only public field names and therefore serialized an empty route.
-- Fact: reused cached agents refreshed callbacks and model settings per message but did not refresh route identity.
-- Fact: visibility defaults and profile overrides drifted independently; NF/PF worker settings still exist and must be preserved.
-- Chosen repair: refresh route identity on every message, read the actual AIAgent route fields at checkpoint creation, cover both paths with regression tests, and normalize only the active platform visibility settings with backups and profile-specific invariants.
+- Fact: `worker_focus_handoff` tracks claimed workers and sends/edits a static focus message after `_is_session_running()` becomes false.
+- Fact: dispatcher workers run as detached CLI subprocesses and already write their visible tools/reasoning to a per-task log through `read_worker_log()`'s canonical path.
+- Fact: the focus implementation neither reads nor renders that log; its tests assert only the static counter/title behavior.
+- Chosen repair: extend the existing focus-message edit loop to render a bounded, current-attempt-only, force-redacted projection of the existing worker log plus the configured activity-indicator text.
 
 ## Claim Discipline
-- `implemented` means the source/config delta exists.
-- `validated-local` requires focused tests, compilation, diff checks, and contract validation.
-- `validated-target` requires new process identity, loaded configuration evidence, zero visible windows, connected active platforms, and a real delivery probe.
-- `released` requires merged `main` and installation of that exact source/config candidate.
-- `accepted` requires the user's real interaction with the restored agents.
+- `implemented` means the source, regression record, and focused tests contain the bounded follower behavior.
+- `validated-local` requires focused tests, compilation, diff checks, and both execution-contract validators.
+- `validated-target` requires an idle-gated NF cutover, exact loaded-release identity, healthy gateway, unchanged profile/board invariants, and a real principal-to-worker Telegram probe showing activity plus worker output.
+- `released` requires merged `main` and the NF service running the exact merged release.
+- `accepted` requires Maikol's natural use or explicit confirmation after the target probe.
 
 ## Forbidden Actions
-- Do not delete, overwrite, reset, or rewrite Hermes sessions, memories, Kanban state, project data, or bot credentials.
-- Do not change bot ownership, Telegram group/topic bindings, or add a Telegram route to Exocortex.
-- Do not promote the new Hermes release to the VPS before all pre-promotion checks pass; restore the 2026-08-24 symlinks immediately if any bounded target check fails.
-- Do not stash, force-push, reset unrelated work, or delete a branch before proving its tip is contained in merged `main`.
-- Do not launch a visible Windows terminal, browser, console, or dialog.
+- Do not read or forward `.env`, credentials, raw provider payloads, full transcripts, historical worker attempts, or unbounded logs.
+- Do not add a second worker-output transport or bypass the existing profile authorization/thread-routing chokepoints.
+- Do not delete, rewrite, repair, or migrate Kanban/session/memory/project data.
+- Do not restart or promote while the NF has an active principal turn, worker, pending resume, or another release operation.
+- Do not stash, force-push, reset unrelated work, mutate the live checkout in place, or delete a branch before proving its tip is contained in merged `main`.
 
 ## Loop Control
-- A controlled autonomous micro-loop is not required because each source/config/restart change has one deterministic probe and an explicit rollback; retries require changed evidence.
-- Maximum repair iterations: 3 for a given failing acceptance path.
-- Green condition: all local gates pass, active profile invariants are preserved, and bounded target delivery/runtime probes pass.
-- Escalation: stop on credential replacement, destructive data/schema action, a third identical failure without new evidence, or any target restart that does not recover through the declared rollback.
+- A controlled autonomous micro-loop is not required because this repair has one bounded source patch, one focused test path, and one idle-gated release probe with an immediate immutable-release rollback.
+- Maximum implementation/test/fix iterations: 3 for the focused worker-follow path.
+- Green condition: the red test reproduces the missing output, the fix passes all focused gates, the PR merges normally, and the idle-gated target probe shows the configured activity tag plus bounded worker output without duplicate messages or invariant drift.
+- Rollback: if the candidate gateway fails readiness, changes worker/board/profile invariants, or the target probe does not show live output, switch the NF service back to `/usr/local/lib/hermes-agent.release-20260824-986c77af` and record the failed evidence without retrying unchanged code.
+- Escalation: stop on a third repeated failure, any need for schema/state/credential mutation, inability to prove idle, or a solution that requires new IPC/architecture.
 
 ## Validation Plan
-- Run cached-agent, checkpoint, durable-delivery, display, and platform-focused tests; then compile checks, `git diff --check`, and the canonical contract validator.
-- Dry-run and apply backed-up visibility changes only to each profile's active platforms; compare NF/PF worker/activity invariants before and after.
-- Restart only bounded active gateways through the hidden launcher; prove new PIDs, actual executable/source/config identity, platform health, and `VisibleWindows=0`.
-- Exercise a real route/delivery probe without changing bot ownership or project data; retain the 2026-08-24 VPS release until the candidate is proven.
-- Open the PR, wait for required green checks, merge normally, prove ancestry, switch to merged `main`, and delete the exact repair branch locally/remotely without stash.
+- Add focused unit/integration coverage for configured `Trabalhando` text, tool/reasoning projection, latest-attempt isolation, forced secret redaction, bounded rendering, and unreadable/missing-log fail-soft behavior.
+- Run the worker-focus/notifier tests plus directly adjacent activity/display tests, `py_compile`, `git diff --check`, and both canonical execution-contract validators.
+- Inspect the final diff against the declared paths and verify no profile/config/state files changed.
+- Push the branch, open a PR, wait for required checks, merge normally, and prove branch ancestry before cleanup.
+- On the VPS, prove NF principal/worker/pending-resume idle, build/install the exact merged commit as a new immutable release, restart only `hermes-gateway@hermes-project-factory`, and verify process/source/config identity and health.
+- Run one bounded real Telegram principal-to-worker probe; confirm one focus message shows the configured activity text and subsequent worker tool/reasoning output, then verify no duplicate flood, no gateway errors, and unchanged Kanban/profile invariants.
 
 ## Status
-- Contract preflight: complete; the current bounded contract passed the canonical preflight validator.
-- Implementation: complete for the source route repair and backed-up visibility normalization on Windows and VPS profiles.
-- Validation: complete at validated-local with 84 focused tests, zero-visible-window execution, and active Windows gateway/AOF load probes; the VPS remains on the functional 2026-08-24 release while NF target promotion waits for idle.
-- Completion: source candidate complete at validated-local; PR integration and the deliberately deferred NF restart/target acceptance are not yet claimed complete.
+- Contract preflight: complete; this task's updated contract passed both canonical validators before the product-code edit.
+- Implementation: complete for the bounded source path, regression tests, and incident-prevention record.
+- Validation: `validated-local` with 51 focused/adjacent tests, compilation, Ruff, diff checks, and both canonical contract validators; PR and target validation remain pending.
+- Completion: not claimed; merge, idle-gated NF release, and the real Telegram principal-to-worker probe remain pending.

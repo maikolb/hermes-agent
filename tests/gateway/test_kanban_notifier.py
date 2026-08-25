@@ -8,6 +8,7 @@ from gateway.config import Platform
 from gateway.kanban_watchers import (
     _acquire_singleton_lock,
     _render_kanban_worker_focus,
+    _render_kanban_worker_focus_output,
     _release_singleton_lock,
     _resolve_agent_wake_on_events,
     _resolve_worker_focus_handoff,
@@ -278,7 +279,31 @@ def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypa
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
-        lambda: {"kanban": {"worker_focus_handoff": True}},
+        lambda: {
+            "kanban": {"worker_focus_handoff": True},
+            "display": {
+                "platforms": {
+                    "telegram": {
+                        "activity_indicator": {
+                            "update_interval_seconds": 60,
+                            "initial_text": "⏳ Trabalhando…",
+                            "elapsed_text": "⏳ Trabalhando há {elapsed_human}…",
+                        }
+                    }
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        kb,
+        "read_worker_log",
+        lambda task_id, **_kwargs: (
+            f"Query: work kanban task {task_id}\n"
+            "┊ Tool: read current worker file\n"
+            "┌─ Reasoning\n"
+            "│ Inspecting the current worker attempt\n"
+            "└\n"
+        ),
     )
     kb.init_db()
     conn = kb.connect()
@@ -324,6 +349,9 @@ def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypa
     assert len(focus_messages) == 1
     assert "worker 1/2" in focus_messages[0]["text"]
     assert "first worker" in focus_messages[0]["text"]
+    assert "⏳ Trabalhando…" in focus_messages[0]["text"]
+    assert "┊ Tool: read current worker file" in focus_messages[0]["text"]
+    assert "Reasoning: Inspecting the current worker attempt" in focus_messages[0]["text"]
     focus_message_id = focus_messages[0]["message_id"]
 
     conn = kb.connect()
@@ -435,6 +463,11 @@ def test_worker_focus_rehydrates_once_after_gateway_restart(tmp_path, monkeypatc
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"worker_focus_handoff": True}},
     )
+
+    def _unreadable_worker_log(*_args, **_kwargs):
+        raise OSError("rotating")
+
+    monkeypatch.setattr(kb, "read_worker_log", _unreadable_worker_log)
     kb.init_db()
     conn = kb.connect()
     try:
@@ -481,6 +514,35 @@ def test_worker_focus_text_contains_only_event_owned_state():
     assert "worker 1/2" in rendered
     assert "run 7" in rendered
     assert "Heartbeat" not in rendered
+
+
+def test_worker_focus_output_is_latest_attempt_redacted_and_bounded():
+    secret = "sk-proj-A1B2C3D4E5F6G7H8I9J0aA"
+    old_attempt = (
+        "Query: work kanban task t_focus\n"
+        "┊ Tool: obsolete worker command\n"
+        "┌─ Reasoning\n│ Obsolete reasoning\n└\n"
+    )
+    current_lines = "\n".join(
+        f"┊ Tool: current step {index} api_key={secret}"
+        for index in range(20)
+    )
+    raw_log = (
+        old_attempt
+        + "Query: work kanban task t_focus\n"
+        + current_lines
+        + "\n┌─ Reasoning\n│ Finalizing the current attempt\n└\n"
+    )
+
+    rendered = _render_kanban_worker_focus_output(raw_log, task_id="t_focus")
+
+    assert "obsolete worker command" not in rendered
+    assert "Obsolete reasoning" not in rendered
+    assert "current step 0" not in rendered
+    assert "current step 19" in rendered
+    assert "Reasoning: Finalizing the current attempt" in rendered
+    assert secret not in rendered
+    assert len(rendered) <= 2800
 
 
 def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):
