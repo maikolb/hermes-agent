@@ -72,6 +72,17 @@ test('invalid enabled configuration fails closed at initialization', () => {
     }),
     /exact WhatsApp group JID/,
   );
+  assert.throws(
+    () => createPassiveIntake({
+      rawConfig: config([{
+        project: 'concursa-ai',
+        jid: CONCURSA_JID,
+        wake: { profile: '../escape', cron_job_id: 'b87b386b5cd5' },
+      }]),
+      rootDir: root,
+    }),
+    /invalid profile/,
+  );
 });
 
 test('routes only the exact configured JID and denies its egress', () => {
@@ -87,6 +98,26 @@ test('routes only the exact configured JID and denies its egress', () => {
     assert.throws(() => intake.assertEgressAllowed(CONCURSA_JID, action), PassiveIntakeEgressError);
   }
   assert.doesNotThrow(() => intake.assertEgressAllowed(DOV_JID, 'send'));
+});
+
+test('validates and exposes only a bounded cross-profile wake target', () => {
+  const root = path.resolve(os.tmpdir(), 'hermes-passive-wake-route-test');
+  const intake = createPassiveIntake({
+    rawConfig: config([{
+      project: 'concursa-ai',
+      jid: CONCURSA_JID,
+      wake: {
+        profile: 'hermes-project-factory',
+        cron_job_id: 'b87b386b5cd5',
+      },
+    }]),
+    rootDir: root,
+  });
+
+  assert.deepEqual(intake.routeFor(CONCURSA_JID)?.wake, {
+    profile: 'hermes-project-factory',
+    cronJobId: 'b87b386b5cd5',
+  });
 });
 
 test('persists readable raw markdown, idempotent IDs and project isolation', () => {
@@ -117,6 +148,7 @@ test('persists readable raw markdown, idempotent IDs and project isolation', () 
     });
     assert.equal(first.matched, true);
     assert.equal(first.persisted, true);
+    assert.equal(first.readyPersisted, true);
     assert.equal(replay.duplicate, true);
     assert.equal(first.eventId, replay.eventId);
     assert.ok(first.spoolPath.startsWith(path.join(root, 'concursa-ai', 'raw')));
@@ -188,6 +220,7 @@ test('captures original media bytes beside raw markdown and binds them by hash',
       bytes,
     });
     assert.equal(media.status, 'captured');
+    assert.equal(media.readyPersisted, true);
     assert.equal(intake.mediaState('concursa-ai', captured.eventId), 'captured');
     const eventRoot = path.dirname(captured.spoolPath);
     const recordPath = path.join(eventRoot, 'evidence.png');
