@@ -316,8 +316,16 @@ def _consume_spawn_handshake(
                 break
             time.sleep(0.01)
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            # Antivirus/indexing and the writer's atomic replace can make a
+            # newly-published status file transiently unreadable on Windows.
+            # The filename is unique per spawn, so retrying until the bounded
+            # deadline cannot accept stale data.  Failing immediately here
+            # made otherwise valid child launches intermittently abort with
+            # ``invalid-handshake`` on the live WhatsApp bridge.
             error_code = "invalid-handshake"
-            break
+            if _original_popen.poll(popen) is not None:
+                break
+            time.sleep(0.01)
     try:
         path.unlink()
     except OSError:
