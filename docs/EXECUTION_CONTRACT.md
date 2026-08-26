@@ -6,11 +6,14 @@
 - Risk Level: HIGH
 - Canonical Runtime Checkout: `C:\Users\maiko\AppData\Local\hermes\hermes-agent`
 - Isolated Candidate Clone: `C:\Users\maiko\AppData\Local\hermes\scratch\fix-ceogame-delivery`
-- Target Branch: `main` via `fix/media-checkpoint-exact-text`
+- Target Branch: `main` via PR `#17`
 - Updated At: 2026-08-25
-- Active Target Before Repair: shared Windows checkout at `f67c919480`, CeoGame gateway PID 19636
-- Accepted Baseline: `maikolb/main` at `c7015aadf8`
-- Machine Runtime Authority: none: this bounded repair uses deterministic tests, a single profile-scoped restart, and direct Telegram/checkpoint/ledger readback rather than an autonomous implementation loop
+- Active Target Before Repair: shared Windows checkout at `f67c919480`, CeoGame gateway PID `94124`
+- Accepted Baseline Before Repair: `maikolb/main` at `c7015aadf8` during preflight; it advanced and was reconciled before merge
+- Final Accepted Baseline: `maikolb/main` merge commit `fcd4794c22ed24d2662bd8a8e0ee0ca42774879f`
+- Immutable Target Release: `C:\Users\maiko\AppData\Local\hermes\releases\hermes-agent-fcd4794c22`
+- Target Evidence Artifact: `C:\Users\maiko\AppData\Local\hermes\profiles\hermes-ceogame\repair-media-delivery-result.json`
+- Machine Runtime Authority: none: this bounded repair used deterministic tests and a single profile-scoped recovery/restart rather than an AOF autonomous implementation loop
 
 ## Requested Outcome
 Restore the CeoGame Telegram bot so a generated response containing native image attachments is delivered as text plus images, without weakening exact-once text delivery or changing unrelated profiles.
@@ -51,7 +54,7 @@ Restore the CeoGame Telegram bot so a generated response containing native image
 - `implemented` means the isolated candidate contains the shared reseal helper, platform-boundary call, and regression test.
 - `validated-local` requires focused and adjacent tests, Ruff, diff checks, and the AOF execution-contract validator.
 - `validated-target` requires a new CeoGame gateway PID, connected Telegram adapter, zero visible descendant windows, successful text/image receipts, and checkpoint/ledger delivery readback.
-- `released` requires the committed candidate integrated into the canonical runtime checkout and loaded by the restarted CeoGame gateway.
+- `released` requires the committed candidate merged into `main`, materialized as an immutable release, and loaded by the restarted CeoGame gateway.
 - `accepted` requires natural user confirmation or later normal use after target validation.
 
 ## Forbidden Actions
@@ -71,14 +74,17 @@ Restore the CeoGame Telegram bot so a generated response containing native image
 ## Validation Plan
 - Run focused delivery/checkpoint tests and adjacent completion/media tests.
 - Run Ruff, `git diff --check`, and the canonical AOF execution-contract validator.
-- Preserve and compare the live checkout's unrelated modified/untracked files before integration.
-- Commit and push the isolated candidate; integrate only the candidate commit into the canonical checkout with unrelated changes preserved.
+- Preserve the live checkout's unrelated modified/untracked files by releasing from an isolated accepted commit rather than rewriting the live shared checkout.
+- Commit, push, review, and merge the candidate into `main`; materialize the exact merge commit as an immutable release.
 - Repair the stranded checkpoint using the proven no-send/no-ledger evidence.
-- Restart only `hermes-ceogame` through the canonical zero-UI gateway restart script.
+- Restart only `hermes-ceogame` through the canonical base-`pythonw.exe`/WMI/Scheduled Task path.
 - Verify new PID, Telegram connection, zero visible descendant windows, delivery receipts, checkpoint `delivered`, and ledger `delivered`.
 
 ## Status
 - Preflight: complete.
-- Implementation: complete in isolated candidate.
+- Implementation: complete and merged through PR `#17`.
 - Validation: `validated-local`; 92 focused/adjacent tests passed, Ruff passed, and diff check passed.
-- Completion: not claimed; contract validation, commit/integration, profile-scoped restart, and Telegram target validation remain pending.
+- Contract validation: passed with the canonical AOF validator before release; final contract revalidation passed after closeout.
+- Release: `released` from accepted `main` commit `fcd4794c22ed24d2662bd8a8e0ee0ca42774879f` through the immutable release path.
+- Target validation: `validated-target`; CeoGame restarted from PID `94124` to PID `48496`, Telegram is `connected`, visible descendant windows are empty, the checkpoint and ledger both report `delivered`, the previous digest error did not recur, and the Telegram adapter completed the three-photo media-group path without an attachment error.
+- Acceptance: pending natural confirmation in the Telegram topic.
