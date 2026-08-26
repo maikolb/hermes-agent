@@ -1,85 +1,84 @@
-# Hermes NF Worker Focus Live Output Execution Contract
+# Hermes Native-Media Durable Delivery Repair Execution Contract
 
 ## Contract Metadata
 - Contract Version: 2
 - Mode: REPAIR
 - Risk Level: HIGH
-- Workspace: C:\Users\maiko\Documents\Codex\2026-08-25\corre-o-no-hermes-nf-da-2\work\hermes-agent
-- Target Branch: main via PR from fix/nf-worker-focus-live-output-20260825
-- Updated At: 2026-08-25T19:50:00-03:00
-- Machine Runtime Authority: none: the root agent may promote only after local gates and an explicit NF idle proof; the current 2026-08-24 release remains the rollback authority
-- Event Evidence: VPS NF worker log for t_c3923c5d, gateway/profile configuration, focused notifier tests, process identity, and target Telegram delivery evidence
+- Canonical Runtime Checkout: `C:\Users\maiko\AppData\Local\hermes\hermes-agent`
+- Isolated Candidate Clone: `C:\Users\maiko\AppData\Local\hermes\scratch\fix-ceogame-delivery`
+- Target Branch: `main` via `fix/media-checkpoint-exact-text`
+- Updated At: 2026-08-25
+- Active Target Before Repair: shared Windows checkout at `f67c919480`, CeoGame gateway PID 19636
+- Accepted Baseline: `maikolb/main` at `c7015aadf8`
+- Machine Runtime Authority: none: this bounded repair uses deterministic tests, a single profile-scoped restart, and direct Telegram/checkpoint/ledger readback rather than an autonomous implementation loop
 
 ## Requested Outcome
-- When the NF principal turn ends while subscribed Kanban workers remain active, make `kanban.worker_focus_handoff: true` show the selected worker's live activity, tool progress, and available reasoning in the originating Telegram topic instead of only the static `Now following worker` card.
+Restore the CeoGame Telegram bot so a generated response containing native image attachments is delivered as text plus images, without weakening exact-once text delivery or changing unrelated profiles.
 
 ## Acceptance Criteria
-- Focus handoff remains opt-in and inactive while the originating gateway session is running.
-- Once the principal session is idle, the existing focus message includes the configured activity-indicator text and a bounded, redacted view of the current worker attempt's CLI output.
-- Worker tool lines and available reasoning are reflected by editing one existing message, never by sending one message per log line.
-- A retried worker shows only its latest attempt; output from older attempts is not replayed.
-- Missing, unreadable, binary, oversized, or rotating worker logs fail soft and never stop the notifier tick.
-- Existing multi-worker selection, rotation, retry cleanup, terminal cleanup, profile authorization, thread routing, and passive-notification behavior remain unchanged.
-- No worker process, Kanban row, subscription, session, memory, credential, Telegram binding, project data, or user workspace is modified by the follower.
-- Focused tests, compilation, diff checks, contract validation, PR checks, and an idle-gated target probe pass before release is claimed.
+- The exact user message at 22:03 BRT remains present in the CeoGame session source.
+- A response containing `MEDIA:` directives is resealed to the exact post-extraction text before a delivery obligation is bound.
+- Text delivery, native image delivery, ledger completion, and checkpoint digest/status all succeed in regression coverage.
+- Stale or already-bound checkpoint rewrites remain fail-closed.
+- The stranded CeoGame checkpoint is repaired only after proving no Telegram send and no ledger row occurred.
+- Only the CeoGame gateway is restarted for target validation; no visible Windows UI is created.
+- The recovered text and three original PNGs are delivered to Telegram topic `2` and confirmed by transport receipts/readback evidence.
 
 ## In Scope
-- `gateway/kanban_watchers.py` worker-focus rendering and bounded reads through the existing `hermes_cli.kanban_db.read_worker_log()` accessor.
-- `tests/gateway/test_kanban_notifier.py` regressions for activity text, current-attempt isolation, reasoning/tool rendering, redaction, and fail-soft log reads.
-- `docs/regressions/REG-2026-08-25-003.md` and this contract.
-- Read-only inspection of the NF profile configuration, worker logs, Kanban state, and gateway logs.
-- PR/merge to `maikolb/hermes-agent:main` and an idle-gated NF release cutover with exact rollback to the current release on a failed target check.
+- `agent/turn_checkpoint.py`
+- `gateway/run.py`
+- `gateway/platforms/base.py`
+- `tests/gateway/test_delivery_ledger_producer.py`
+- `docs/regressions/REG-2026-08-25-004.md`
+- This execution contract
+- The exact CeoGame checkpoint and gateway process required for recovery
 
 ## Out of Scope
-- Changing worker scheduling, claims, concurrency, assignees, task lifecycle, Kanban schemas, notifier subscriptions, or focus selection policy.
-- Streaming raw model/provider events, adding a new IPC service, socket, daemon, database, plugin, tool, or configuration property.
-- Changing NF/PF identities, tokens, Telegram routes, sessions, memory, skills, project data, worker workspaces, or user repositories.
-- Modifying the default/Titan, bench-supervisor, Windows PF, Exocortex, CEOGame, or unrelated profiles.
-- Restarting the NF gateway while any principal turn, Kanban worker, pending resume, or unrelated release activity is active.
+- Telegram bindings, bot identity, credentials, model/provider settings, sessions other than the affected CeoGame session, other Hermes profiles, Project Ops implementations, architecture, authentication, and unrelated working-tree changes.
 
 ## Failure Signal / Repro
-- At 2026-08-25 22:17 UTC, Telegram displayed `Now following worker` for board `hermes-project-facto-786f51f34a055368--infotributos`, task `t_c3923c5d`, run 6, but displayed no worker activity, reasoning, or tool progress afterward.
-- The exact worker log grew to 10,983 bytes through 22:25:58 UTC and contained many tool-progress lines plus a `Reasoning` block, proving the worker produced displayable output while the gateway showed none of it.
-- Current `GatewayKanbanWatchersMixin._kanban_refresh_worker_focus()` renders only task metadata; it never calls the existing worker-log accessor or any worker output source.
-- Evidence artifact: `docs/regressions/REG-2026-08-25-003.md` records the exact task, timestamp, observed output gap, and prevention surface.
+- Telegram update `620925243` was received and the model generated a 458-character reply in 8.4 seconds, but the gateway logged `delivery obligation content does not match its checkpoint digest`; no text or image reached the topic.
+- Automatic recovery repeated the same failure because the checkpoint had been bound without a ledger row.
+- The durable incident evidence and exact prevention surface are recorded in `docs/regressions/REG-2026-08-25-004.md`.
 
 ## Root-Cause Hypothesis
-- Fact: `worker_focus_handoff` tracks claimed workers and sends/edits a static focus message after `_is_session_running()` becomes false.
-- Fact: dispatcher workers run as detached CLI subprocesses and already write their visible tools/reasoning to a per-task log through `read_worker_log()`'s canonical path.
-- Fact: the focus implementation neither reads nor renders that log; its tests assert only the static counter/title behavior.
-- Chosen repair: extend the existing focus-message edit loop to render a bounded, current-attempt-only, force-redacted projection of the existing worker log plus the configured activity-indicator text.
+- Fact: the checkpoint sealed the full response containing three `MEDIA:` directives.
+- Fact: platform extraction reduced the text obligation to 241 characters.
+- Fact: `record_obligation` rejected the SHA-256 mismatch after the checkpoint had been bound; no ledger row or network send existed, and attachments were suppressed.
+- Confirmed root cause: the durable text boundary was sealed before platform media extraction instead of to the exact text actually passed to the transport.
 
 ## Claim Discipline
-- `implemented` means the source, regression record, and focused tests contain the bounded follower behavior.
-- `validated-local` requires focused tests, compilation, diff checks, and both execution-contract validators.
-- `validated-target` requires an idle-gated NF cutover, exact loaded-release identity, healthy gateway, unchanged profile/board invariants, and a real principal-to-worker Telegram probe showing activity plus worker output.
-- `released` requires merged `main` and the NF service running the exact merged release.
-- `accepted` requires Maikol's natural use or explicit confirmation after the target probe.
+- `implemented` means the isolated candidate contains the shared reseal helper, platform-boundary call, and regression test.
+- `validated-local` requires focused and adjacent tests, Ruff, diff checks, and the AOF execution-contract validator.
+- `validated-target` requires a new CeoGame gateway PID, connected Telegram adapter, zero visible descendant windows, successful text/image receipts, and checkpoint/ledger delivery readback.
+- `released` requires the committed candidate integrated into the canonical runtime checkout and loaded by the restarted CeoGame gateway.
+- `accepted` requires natural user confirmation or later normal use after target validation.
 
 ## Forbidden Actions
-- Do not read or forward `.env`, credentials, raw provider payloads, full transcripts, historical worker attempts, or unbounded logs.
-- Do not add a second worker-output transport or bypass the existing profile authorization/thread-routing chokepoints.
-- Do not delete, rewrite, repair, or migrate Kanban/session/memory/project data.
-- Do not restart or promote while the NF has an active principal turn, worker, pending resume, or another release operation.
-- Do not stash, force-push, reset unrelated work, mutate the live checkout in place, or delete a branch before proving its tip is contained in merged `main`.
+- Do not weaken or disable the durable delivery ledger.
+- Do not restart another Hermes profile or mutate another session, binding, credential, workspace, or bot.
+- Do not discard, stash, reset, or overwrite unrelated modified/untracked files in the canonical checkout.
+- Do not send a fabricated substitute response or regenerate the three existing image artifacts.
+- Do not use either rejected Hermes Project Ops implementation or introduce new authentication, services, databases, routes, or protocols.
 
 ## Loop Control
-- A controlled autonomous micro-loop is not required because this repair has one bounded source patch, one focused test path, and one idle-gated release probe with an immediate immutable-release rollback.
-- Maximum implementation/test/fix iterations: 3 for the focused worker-follow path.
-- Green condition: the red test reproduces the missing output, the fix passes all focused gates, the PR merges normally, and the idle-gated target probe shows the configured activity tag plus bounded worker output without duplicate messages or invariant drift.
-- Rollback: if the candidate gateway fails readiness, changes worker/board/profile invariants, or the target probe does not show live output, switch the NF service back to `/usr/local/lib/hermes-agent.release-20260824-986c77af` and record the failed evidence without retrying unchanged code.
-- Escalation: stop on a third repeated failure, any need for schema/state/credential mutation, inability to prove idle, or a solution that requires new IPC/architecture.
+- A controlled autonomous micro-loop is not required because this repair has one deterministic failing delivery boundary, one bounded source change, one focused regression, and one profile-scoped target probe with exact rollback.
+- Maximum implementation/test iterations: 3.
+- Green condition: local gates pass and the recovered CeoGame turn reaches delivered text plus three native image receipts with matching checkpoint/ledger state.
+- Stop condition: any evidence of a prior external send, divergent checkpoint/ledger ownership, failure to preserve unrelated work, or inability to isolate the CeoGame restart.
+- Rollback: revert the repair commit, restore the checkpoint backup, and restart only CeoGame.
 
 ## Validation Plan
-- Add focused unit/integration coverage for configured `Trabalhando` text, tool/reasoning projection, latest-attempt isolation, forced secret redaction, bounded rendering, and unreadable/missing-log fail-soft behavior.
-- Run the worker-focus/notifier tests plus directly adjacent activity/display tests, `py_compile`, `git diff --check`, and both canonical execution-contract validators.
-- Inspect the final diff against the declared paths and verify no profile/config/state files changed.
-- Push the branch, open a PR, wait for required checks, merge normally, and prove branch ancestry before cleanup.
-- On the VPS, prove NF principal/worker/pending-resume idle, build/install the exact merged commit as a new immutable release, restart only `hermes-gateway@hermes-project-factory`, and verify process/source/config identity and health.
-- Run one bounded real Telegram principal-to-worker probe; confirm one focus message shows the configured activity text and subsequent worker tool/reasoning output, then verify no duplicate flood, no gateway errors, and unchanged Kanban/profile invariants.
+- Run focused delivery/checkpoint tests and adjacent completion/media tests.
+- Run Ruff, `git diff --check`, and the canonical AOF execution-contract validator.
+- Preserve and compare the live checkout's unrelated modified/untracked files before integration.
+- Commit and push the isolated candidate; integrate only the candidate commit into the canonical checkout with unrelated changes preserved.
+- Repair the stranded checkpoint using the proven no-send/no-ledger evidence.
+- Restart only `hermes-ceogame` through the canonical zero-UI gateway restart script.
+- Verify new PID, Telegram connection, zero visible descendant windows, delivery receipts, checkpoint `delivered`, and ledger `delivered`.
 
 ## Status
-- Contract preflight: complete; this task's updated contract passed both canonical validators before the product-code edit.
-- Implementation: complete for the bounded source path, regression tests, and incident-prevention record.
-- Validation: `validated-local` with 51 focused/adjacent tests, compilation, Ruff, diff checks, and both canonical contract validators; PR and target validation remain pending.
-- Completion: not claimed; merge, idle-gated NF release, and the real Telegram principal-to-worker probe remain pending.
+- Preflight: complete.
+- Implementation: complete in isolated candidate.
+- Validation: `validated-local`; 92 focused/adjacent tests passed, Ruff passed, and diff check passed.
+- Completion: not claimed; contract validation, commit/integration, profile-scoped restart, and Telegram target validation remain pending.

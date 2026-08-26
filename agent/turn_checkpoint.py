@@ -1853,6 +1853,45 @@ def checkpoint_delivery_fence(
     return fence if all(fence.values()) else None
 
 
+def reseal_checkpoint_deliverable(
+    session_id: str,
+    content: str,
+    *,
+    expected_fence: Mapping[str, Any],
+    checkpoint_root: str | os.PathLike[str],
+    storage_home: str | os.PathLike[str],
+    verification_kind: str,
+) -> dict[str, str]:
+    """CAS-reseal the exact outbound text and its recovery artifact.
+
+    Gateway and platform transforms may legitimately change the bytes produced
+    by the agent finalizer. The durable delivery ledger must fence the exact
+    text handed to the transport, not a pre-extraction envelope containing
+    ``MEDIA:`` directives. This helper keeps the checkpoint and inactive
+    recovery artifact in one lock ordering and refuses stale or already-bound
+    delivery state.
+    """
+    from hermes_state import SessionDB
+
+    store = TurnCheckpointStore(checkpoint_root)
+    with SessionDB(Path(storage_home) / "state.db") as session_db:
+        state = store.mark_deliverable(
+            str(session_id),
+            content,
+            verification_pending=False,
+            verification_kind=str(verification_kind),
+            expected_fence=expected_fence,
+            require_unbound_delivery=True,
+            precommit=lambda: session_db.append_delivery_recovery_artifact(
+                str(session_id), content
+            ),
+        )
+    fence = checkpoint_delivery_fence(state)
+    if fence is None:
+        raise CheckpointIntegrityError("resealed checkpoint fence is missing")
+    return fence
+
+
 def checkpoint_delivery_fence_matches(
     session_id: str,
     *,
