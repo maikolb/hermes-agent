@@ -139,6 +139,64 @@ class TestProducerHook:
         assert rows[0][2] == "final answer"
 
     @pytest.mark.asyncio
+    async def test_media_envelope_reseals_exact_text_before_binding(
+        self, tmp_path, monkeypatch
+    ):
+        """MEDIA directives are attachments, never part of the text ledger.
+
+        Regression: the gateway sealed the full response, the platform removed
+        MEDIA directives, then bound an obligation before record_obligation
+        rejected the text/checkpoint digest mismatch. The reply and all files
+        were silently withheld and restart recovery repeated the same failure.
+        """
+        from agent.turn_checkpoint import (
+            TurnCheckpointStore,
+            checkpoint_delivery_fence,
+        )
+
+        media_root = tmp_path / "media"
+        media_root.mkdir()
+        image = media_root / "proposal.png"
+        image.write_bytes(b"png")
+        monkeypatch.setattr(
+            "gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+            (media_root,),
+        )
+        response = f"Here is the proposal.\n\nMEDIA:{image}"
+        event = _event()
+        store = TurnCheckpointStore(event.delivery_checkpoint_root)
+        state = store.mark_deliverable(
+            "session-1",
+            response,
+            verification_pending=False,
+            verification_kind="ordinary_final_gateway_transform",
+            expected_fence=event.delivery_checkpoint_fence,
+            require_unbound_delivery=True,
+        )
+        from hermes_state import SessionDB
+
+        with SessionDB(Path(event.delivery_storage_home) / "state.db") as db:
+            db.create_session("session-1", source="gateway")
+        event.delivery_checkpoint_fence = checkpoint_delivery_fence(state)
+        adapter = _Adapter()
+        adapter.send_multiple_images = AsyncMock(
+            return_value=SendResult(success=True, message_id="img-1")
+        )
+
+        await _run(adapter, event, response=response)
+
+        assert adapter.sent == ["Here is the proposal."]
+        adapter.send_multiple_images.assert_awaited_once()
+        rows = _rows()
+        assert len(rows) == 1
+        assert rows[0][1:] == ("delivered", "Here is the proposal.")
+        checkpoint = store.load("session-1")
+        assert checkpoint["delivery"]["status"] == "delivered"
+        assert checkpoint["pending_deliverable"]["content"] == (
+            "Here is the proposal."
+        )
+
+    @pytest.mark.asyncio
     async def test_send_failure_leaves_failed_row(self):
         adapter = _Adapter()
         adapter.send = AsyncMock(

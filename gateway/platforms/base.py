@@ -6,6 +6,7 @@ and implement the required methods.
 """
 
 import asyncio
+import hashlib
 import inspect
 import ipaddress
 import logging
@@ -6665,6 +6666,7 @@ class BasePlatformAdapter(ABC):
                     try:
                         from agent.turn_checkpoint import (
                             bind_checkpoint_delivery_obligation,
+                            reseal_checkpoint_deliverable,
                             update_checkpoint_delivery,
                         )
                         from gateway.delivery_ledger import (
@@ -6676,6 +6678,22 @@ class BasePlatformAdapter(ABC):
                             raise RuntimeError(
                                 "durable final is missing its checkpoint namespace/fence"
                             )
+                        _text_sha256 = hashlib.sha256(
+                            text_content.encode("utf-8", "replace")
+                        ).hexdigest()
+                        if _text_sha256 != _checkpoint_fence["content_sha256"]:
+                            _checkpoint_fence = await asyncio.to_thread(
+                                reseal_checkpoint_deliverable,
+                                _checkpoint_session_id,
+                                text_content,
+                                expected_fence=_checkpoint_fence,
+                                checkpoint_root=_checkpoint_root,
+                                storage_home=_delivery_storage_home,
+                                verification_kind=(
+                                    "ordinary_final_platform_text_extraction"
+                                ),
+                            )
+                            event.delivery_checkpoint_fence = _checkpoint_fence
                         _obligation_id = compute_obligation_id(
                             session_key,
                             "checkpoint:"

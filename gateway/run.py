@@ -244,31 +244,16 @@ def _reseal_gateway_delivery_response(
     if response_sha256 == metadata["fence"]["content_sha256"]:
         return metadata
 
-    from agent.turn_checkpoint import TurnCheckpointStore, checkpoint_delivery_fence
+    from agent.turn_checkpoint import reseal_checkpoint_deliverable
 
-    store = TurnCheckpointStore(metadata["checkpoint_root"])
-    # Persist the exact transformed bytes inside the checkpoint CAS, before
-    # publishing their hash.  This inactive row is excluded from model replay
-    # but included by checkpoint recovery.  A stale/bound fence is rejected
-    # before the callback runs, so an old turn cannot leave an orphan artifact
-    # or overwrite the current turn's deliverable.
-    from hermes_state import SessionDB
-
-    with SessionDB(Path(metadata["storage_home"]) / "state.db") as session_db:
-        state = store.mark_deliverable(
-            metadata["session_id"],
-            response,
-            verification_pending=False,
-            verification_kind="ordinary_final_gateway_transform",
-            expected_fence=metadata["fence"],
-            require_unbound_delivery=True,
-            precommit=lambda: session_db.append_delivery_recovery_artifact(
-                metadata["session_id"], response
-            ),
-        )
-    fence = checkpoint_delivery_fence(state)
-    if fence is None:
-        raise RuntimeError("gateway-transformed checkpoint fence is missing")
+    fence = reseal_checkpoint_deliverable(
+        metadata["session_id"],
+        response,
+        expected_fence=metadata["fence"],
+        checkpoint_root=metadata["checkpoint_root"],
+        storage_home=metadata["storage_home"],
+        verification_kind="ordinary_final_gateway_transform",
+    )
     agent_result["turn_checkpoint_fence"] = fence
     return _validated_turn_delivery_metadata(
         agent_result,
