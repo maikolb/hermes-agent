@@ -50,6 +50,21 @@ class TestResolveDisplaySetting:
         assert resolve_display_setting(config, "slack", "tool_progress") == "off"
         assert resolve_display_setting(config, "telegram", "tool_progress") == "all"
 
+    def test_worker_rotation_defaults_off_and_resolves_per_platform(self):
+        from gateway.display_config import resolve_display_setting
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["display"]["worker_rotation"] is False
+        assert resolve_display_setting({}, "telegram", "worker_rotation") is False
+        config = {
+            "display": {
+                "worker_rotation": True,
+                "platforms": {"telegram": {"worker_rotation": "false"}},
+            }
+        }
+        assert resolve_display_setting(config, "telegram", "worker_rotation") is False
+        assert resolve_display_setting(config, "discord", "worker_rotation") is True
+
 
 # ---------------------------------------------------------------------------
 # Backward compatibility: tool_progress_overrides
@@ -300,5 +315,3 @@ class TestLiveStatusSetting:
         from gateway.display_config import resolve_display_setting
 
         assert resolve_display_setting({}, "slack", "live_status") == "full"
-
-

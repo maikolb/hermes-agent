@@ -789,6 +789,7 @@ display:
       interim_assistant_messages: false
       busy_ack_detail: false
       long_running_notifications: true
+      worker_rotation: true
       cleanup_progress: true
       activity_indicator:
         initial_delay_seconds: 10
@@ -805,6 +806,13 @@ bubbles. Supported placeholders in `elapsed_text` are `{elapsed_human}`,
 existing `agent.gateway_notify_interval` controls both delays and the legacy
 heartbeat text remains unchanged. Setting `agent.gateway_notify_interval: 0`
 still disables long-running notifications.
+
+With `worker_rotation: true`, the principal heartbeat adds the number of
+active Kanban workers. When the principal turn ends, the same chat follows the
+oldest worker, updates at `update_interval_seconds`, rotates on completion, and
+stops after the last worker. A new user turn suspends worker focus while the
+principal owns the chat again. Set the key to `false` globally or for the
+platform to keep the pre-rotation behavior.
 
 Custom text owns the complete heartbeat content, so tool and iteration details
 are not appended. The final answer is delivered through the normal path;

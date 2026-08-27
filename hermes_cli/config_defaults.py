@@ -1466,6 +1466,10 @@ DEFAULT_CONFIG = {
             "last_lines": 2,
         },
         "interim_assistant_messages": True,  # Gateway: send natural mid-turn assistant status messages. Desktop: keep mid-turn narration between tool calls instead of collapsing to the final message.
+        # Gateway: after the principal turn ends, follow the oldest active
+        # Kanban worker in the same chat and rotate until the queue is empty.
+        # Orchestration profiles opt in globally or under display.platforms.
+        "worker_rotation": False,
         # Codex Responses models narrate progress in a dedicated commentary
         # channel. When true (default), completed commentary messages are
         # delivered as visible mid-turn updates via the interim message path.

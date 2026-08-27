@@ -1400,6 +1400,7 @@ class _ActivityIndicatorSettings:
     update_interval_seconds: float
     initial_text: Optional[str] = None
     elapsed_text: Optional[str] = None
+    worker_rotation: bool = False
 
 
 def _activity_indicator_seconds(
@@ -1425,6 +1426,47 @@ def _activity_indicator_template(value: Any) -> Optional[str]:
         return None
     value = value.strip()
     return value or None
+
+
+def _resolve_worker_rotation_enabled(
+    user_config: dict,
+    platform_key: str,
+) -> bool:
+    """Resolve the display gate, with the deployed Kanban key as fallback.
+
+    ``kanban.worker_focus_handoff`` shipped first on orchestration profiles.
+    Keep it as an exact-boolean compatibility default only while the new
+    global/per-platform display key is absent. An explicit
+    ``display.worker_rotation: false`` always restores the old behavior.
+    """
+    display_cfg = user_config.get("display") if isinstance(user_config, dict) else None
+    display_cfg = display_cfg if isinstance(display_cfg, dict) else {}
+    platform_cfg: dict = {}
+    platforms_cfg = display_cfg.get("platforms")
+    if isinstance(platforms_cfg, dict):
+        candidate = platforms_cfg.get(platform_key)
+        if isinstance(candidate, dict):
+            platform_cfg = candidate
+    explicitly_configured = (
+        "worker_rotation" in display_cfg or "worker_rotation" in platform_cfg
+    )
+    if explicitly_configured:
+        from gateway.display_config import resolve_display_setting
+
+        return bool(
+            resolve_display_setting(
+                user_config,
+                platform_key,
+                "worker_rotation",
+                False,
+            )
+        )
+
+    kanban_cfg = user_config.get("kanban") if isinstance(user_config, dict) else None
+    return (
+        isinstance(kanban_cfg, dict)
+        and kanban_cfg.get("worker_focus_handoff") is True
+    )
 
 
 def _resolve_activity_indicator_settings(
@@ -1467,7 +1509,49 @@ def _resolve_activity_indicator_settings(
         ),
         initial_text=_activity_indicator_template(merged.get("initial_text")),
         elapsed_text=_activity_indicator_template(merged.get("elapsed_text")),
+        worker_rotation=_resolve_worker_rotation_enabled(
+            user_config,
+            platform_key,
+        ),
     )
+
+
+def _append_worker_rotation_summary(content: str, worker_count: int) -> str:
+    """Append the principal-plus-workers workload without changing templates."""
+    try:
+        count = max(0, int(worker_count))
+    except (TypeError, ValueError):
+        count = 0
+    if count == 0:
+        return content
+    noun = "worker" if count == 1 else "workers"
+    return f"{content} · principal + {count} {noun}"
+
+
+def _append_principal_worker_activity(
+    runner: Any,
+    source: Any,
+    content: str,
+    *,
+    board: str = "",
+    project_id: str = "",
+    session_id: str = "",
+) -> str:
+    """Add the scoped active-worker count to one principal heartbeat."""
+    try:
+        worker_count = runner._kanban_active_worker_count(
+            source,
+            board=board,
+            project_id=project_id,
+            session_id=session_id,
+        )
+    except Exception:
+        logger.debug(
+            "worker rotation: active-worker count failed",
+            exc_info=True,
+        )
+        worker_count = 0
+    return _append_worker_rotation_summary(content, worker_count)
 
 
 def _render_activity_indicator_template(
@@ -20947,6 +21031,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
+        _pcfg: dict = {}
         persist_user_message = None
         persist_user_timestamp = None
         # Synthetic self-injected turns (async-delegation batch completions,
@@ -20965,6 +21050,50 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _redact_pii = bool((_pcfg.get("privacy") or {}).get("redact_pii", False))
         except Exception:
             pass
+
+        # A real user turn claims the chat's single work-display lane now,
+        # rather than waiting for the Kanban notifier poll. This both removes
+        # a stale worker bubble for short turns and pins the project scope that
+        # the post-principal rotation is allowed to follow.
+        if not getattr(event, "internal", False):
+            try:
+                _rotation_config = _pcfg
+                if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+                    _rotation_config = _load_gateway_config(
+                        self._resolve_profile_home_for_source(source) / "config.yaml"
+                    )
+                _rotation_settings = _resolve_activity_indicator_settings(
+                    _rotation_config,
+                    _platform_config_key(source.platform),
+                    _float_env("HERMES_AGENT_NOTIFY_INTERVAL", 180),
+                )
+                if _rotation_settings.worker_rotation:
+                    _rotation_board = (
+                        ""
+                        if project_context is None or project_context.is_management
+                        else str(project_context.board_slug or "")
+                    )
+                    await self._kanban_claim_worker_display(
+                        source,
+                        board=_rotation_board,
+                        project_id=(
+                            str(project_context.project_id or "")
+                            if project_context is not None
+                            else ""
+                        ),
+                        session_id=str(session_entry.session_id or ""),
+                        # The pending sentinel was claimed under _quick_key
+                        # before Telegram topic recovery and session lookup.
+                        # Use that actual ownership key so worker focus cannot
+                        # reappear during the pre-agent await window.
+                        principal_session_key=_quick_key,
+                        run_generation=run_generation,
+                    )
+            except Exception:
+                logger.debug(
+                    "worker rotation: principal display claim failed",
+                    exc_info=True,
+                )
 
         # Build the context prompt to inject.  The render is pinned per
         # session, keyed by a hash of the exact renderer inputs
@@ -31630,6 +31759,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         else f"⏳ Working — {_elapsed_mins} min{_status_detail}"
                     )
                 )
+                if _activity_indicator.worker_rotation:
+                    from gateway.session_context import get_session_env
+
+                    _heartbeat_text = _append_principal_worker_activity(
+                        self,
+                        source,
+                        _heartbeat_text,
+                        board=get_session_env("HERMES_PROJECT_BOARD", ""),
+                        project_id=get_session_env("HERMES_PROJECT_ID", ""),
+                        session_id=session_id,
+                    )
                 _heartbeat_msg_id, _created_msg_id = (
                     await _upsert_activity_indicator_message(
                         _notify_adapter,

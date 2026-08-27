@@ -1608,6 +1608,13 @@ display:
   # than a single edit-in-place heartbeat).
   long_running_notifications: true
 
+  # Continue the chat's work display after the principal turn ends by
+  # following the oldest active Kanban worker, then rotating in spawn order.
+  # Worker output respects tool_progress/show_reasoning and uses the activity
+  # indicator's edit cadence. May also be enabled only for one platform under
+  # display.platforms.<platform>.worker_rotation.
+  worker_rotation: false
+
   # Include detailed iteration/tool/status context in busy acknowledgments
   # and long-running heartbeats. When true, busy acks show "iteration 21/60,
   # terminal, 10 min" and the heartbeat shows "⏳ Working — 12 min,

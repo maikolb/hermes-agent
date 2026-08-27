@@ -49,6 +49,10 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # Optional global/per-platform heartbeat tuning. An empty mapping keeps the
     # legacy gateway_notify_interval cadence and English elapsed text.
     "activity_indicator": {},
+    # When enabled, a chat keeps showing work after its principal turn ends by
+    # following the oldest active Kanban worker, then rotating in spawn order.
+    # Off by default; orchestration profiles opt in globally or per platform.
+    "worker_rotation": False,
     "busy_ack_detail": True,
     # Whether busy_input_mode=steer sends a visible "Steered into current run"
     # acknowledgment after successfully injecting the user's mid-turn message.
@@ -277,6 +281,7 @@ def _normalise(setting: str, value: Any) -> Any:
         "busy_ack_detail",
         "busy_steer_ack_enabled",
         "thinking_progress",
+        "worker_rotation",
     }:
         if isinstance(value, str):
             val = value.strip().lower()

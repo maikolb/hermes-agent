@@ -2,11 +2,14 @@ import asyncio
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 
 from gateway.config import Platform
 from gateway.kanban_watchers import (
     _acquire_singleton_lock,
+    _kanban_worker_spawn_order,
+    _load_worker_focus_config,
     _render_kanban_worker_focus,
     _render_kanban_worker_focus_output,
     _release_singleton_lock,
@@ -14,6 +17,7 @@ from gateway.kanban_watchers import (
     _resolve_worker_focus_handoff,
 )
 from gateway.run import GatewayRunner
+from gateway.session import SessionSource
 from hermes_cli import kanban_db as kb
 
 
@@ -60,10 +64,8 @@ class EditableRecordingAdapter(RecordingAdapter):
         return SendResult(success=True, message_id=str(message_id))
 
     async def delete_message(self, chat_id, message_id, **kwargs):
-        from gateway.platforms.base import SendResult
-
         self.deleted.append({"chat_id": chat_id, "message_id": str(message_id)})
-        return SendResult(success=True, message_id=str(message_id))
+        return True
 
 
 class DisconnectedAdapters(dict):
@@ -272,6 +274,68 @@ def test_worker_focus_handoff_config_requires_literal_true():
     assert _resolve_worker_focus_handoff(
         lambda: {"kanban": {"worker_focus_handoff": True}}
     ) is True
+    assert _resolve_worker_focus_handoff(
+        lambda: {
+            "display": {
+                "worker_rotation": True,
+                "platforms": {"telegram": {"worker_rotation": False}},
+            }
+        },
+        "telegram",
+    ) is False
+    assert _resolve_worker_focus_handoff(
+        lambda: {"display": {"worker_rotation": True}},
+        "discord",
+    ) is True
+
+
+def test_worker_focus_config_preserves_absent_new_key_for_legacy_fallback(
+    tmp_path, monkeypatch,
+):
+    from gateway import run as gateway_run
+
+    raw = {"kanban": {"worker_focus_handoff": True}}
+    merged = {
+        "display": {"worker_rotation": False},
+        "kanban": {"worker_focus_handoff": True},
+    }
+    original_load_gateway_config = gateway_run._load_gateway_config
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: raw)
+
+    resolved = _load_worker_focus_config(None, lambda: merged)
+
+    assert resolved is raw
+    assert _resolve_worker_focus_handoff(lambda: resolved) is True
+
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_profile_dir",
+        lambda _profile: tmp_path / "missing-profile",
+    )
+    assert _load_worker_focus_config("profile-a", lambda: raw) == {}
+
+    profile_dir = tmp_path / "profile-a"
+    profile_dir.mkdir()
+    (profile_dir / "config.yaml").write_text(
+        "display:\n"
+        "  platforms:\n"
+        "    telegram:\n"
+        "      worker_rotation: true\n"
+        "      show_reasoning: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_profile_dir",
+        lambda _profile: profile_dir,
+    )
+    monkeypatch.setattr(
+        "gateway.run._load_gateway_config",
+        original_load_gateway_config,
+    )
+    profile_config = _load_worker_focus_config("profile-a", lambda: {})
+    assert _resolve_worker_focus_handoff(
+        lambda: profile_config,
+        "telegram",
+    ) is True
 
 
 def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypatch):
@@ -280,10 +344,12 @@ def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypa
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {
-            "kanban": {"worker_focus_handoff": True},
             "display": {
+                "worker_rotation": True,
                 "platforms": {
                     "telegram": {
+                        "tool_progress": "all",
+                        "show_reasoning": True,
                         "activity_indicator": {
                             "update_interval_seconds": 60,
                             "initial_text": "⏳ Trabalhando…",
@@ -308,9 +374,28 @@ def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypa
     kb.init_db()
     conn = kb.connect()
     try:
-        first = kb.create_task(conn, title="first worker", assignee="worker-a")
-        second = kb.create_task(conn, title="second worker", assignee="worker-b")
-        for task_id in (first, second):
+        first = kb.create_task(
+            conn,
+            title="first worker",
+            assignee="worker-a",
+            project_id="project-a",
+            session_id="session-a",
+        )
+        second = kb.create_task(
+            conn,
+            title="second worker",
+            assignee="worker-b",
+            project_id="project-a",
+            session_id="session-a",
+        )
+        other_project = kb.create_task(
+            conn,
+            title="other project worker",
+            assignee="worker-other",
+            project_id="project-b",
+            session_id="session-b",
+        )
+        for task_id in (first, second, other_project):
             kb.add_notify_sub(
                 conn,
                 task_id=task_id,
@@ -329,15 +414,53 @@ def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypa
         conn.execute(
             "UPDATE tasks SET started_at = ? WHERE id = ?", (now - 60, second)
         )
+        conn.execute(
+            "UPDATE tasks SET started_at = ? WHERE id = ?",
+            (now - 180, other_project),
+        )
         conn.commit()
     finally:
         conn.close()
 
     adapter = EditableRecordingAdapter()
     runner = _make_runner(adapter)
-    runner._is_session_running = lambda _key: True
+    runner.config = SimpleNamespace(
+        multiplex_profiles=True,
+        group_sessions_per_user=True,
+        thread_sessions_per_user=False,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_active_profile_name",
+        lambda: "hermes-project-factory",
+    )
+    display_source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+        thread_id="topic-7",
+    )
+    asyncio.run(
+        runner._kanban_claim_worker_display(
+            display_source,
+            project_id="project-a",
+            session_id="session-a",
+            run_generation=1,
+        )
+    )
+    probed_session_keys = []
+
+    def _main_is_running(session_key):
+        probed_session_keys.append(session_key)
+        return True
+
+    runner._is_session_running = _main_is_running
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
-    assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 2
+    assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 3
+    assert probed_session_keys
+    assert all(
+        key.startswith("agent:hermes-project-factory:")
+        for key in probed_session_keys
+    )
     assert not any("Now following worker" in item["text"] for item in adapter.sent)
 
     runner._running = True
@@ -349,19 +472,55 @@ def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypa
     assert len(focus_messages) == 1
     assert "worker 1/2" in focus_messages[0]["text"]
     assert "first worker" in focus_messages[0]["text"]
+    assert "other project worker" not in focus_messages[0]["text"]
     assert "⏳ Trabalhando…" in focus_messages[0]["text"]
     assert "┊ Tool: read current worker file" in focus_messages[0]["text"]
     assert "Reasoning: Inspecting the current worker attempt" in focus_messages[0]["text"]
     focus_message_id = focus_messages[0]["message_id"]
 
+    # A new user turn immediately reclaims the presentation lane. The workers
+    # remain queued and the oldest one resumes after the principal finishes.
+    asyncio.run(
+        runner._kanban_claim_worker_display(
+            display_source,
+            project_id="project-a",
+            session_id="session-a",
+            run_generation=2,
+        )
+    )
+    assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 3
+    assert runner._kanban_worker_focus_states == {}
+    assert adapter.deleted[-1] == {
+        "chat_id": "chat-1",
+        "message_id": focus_message_id,
+    }
+
+    runner._running = True
+    runner._is_session_running = lambda _key: False
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    resumed_focus = [
+        item for item in adapter.sent if "Now following worker" in item["text"]
+    ][-1]
+    assert "first worker" in resumed_focus["text"]
+    focus_message_id = resumed_focus["message_id"]
+
     conn = kb.connect()
     try:
         kb.complete_task(conn, first, summary="first done")
+        kb.complete_task(conn, other_project, summary="other project done")
     finally:
         conn.close()
     runner._running = True
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 1
+    assert not any(
+        "second worker" in item["content"] for item in adapter.edited
+    )
+
+    state = next(iter(runner._kanban_worker_focus_states.values()))
+    state["last_sent_at"] = time.time() - 61
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert adapter.edited[-1]["message_id"] == focus_message_id
     assert "second worker" in adapter.edited[-1]["content"]
 
@@ -370,9 +529,28 @@ def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypa
         kb.complete_task(conn, second, summary="second done")
     finally:
         conn.close()
+
+    from gateway.platforms.base import SendResult
+
+    real_delete_message = adapter.delete_message
+    delete_attempts = 0
+
+    async def _retry_last_cleanup(chat_id, message_id, **kwargs):
+        nonlocal delete_attempts
+        delete_attempts += 1
+        if delete_attempts == 1:
+            return SendResult(success=False, retryable=True, error="temporary")
+        return await real_delete_message(chat_id, message_id, **kwargs)
+
+    adapter.delete_message = _retry_last_cleanup
     runner._running = True
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert runner._kanban_worker_focus_active == {}
+    assert runner._kanban_worker_focus_states
+
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert runner._kanban_worker_focus_states == {}
     assert adapter.deleted[-1] == {
         "chat_id": "chat-1",
         "message_id": focus_message_id,
@@ -393,6 +571,112 @@ def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypa
     assert runner._kanban_worker_focus_active == {}
 
 
+def test_worker_rotation_respects_display_flags_and_indicator_edit_cadence(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / "worker-focus-flags.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    config = {
+        "display": {
+            "platforms": {
+                "telegram": {
+                    "worker_rotation": True,
+                    "tool_progress": "all",
+                    "show_reasoning": False,
+                    "activity_indicator": {
+                        "update_interval_seconds": 60,
+                        "initial_text": "⏳ Trabalhando…",
+                        "elapsed_text": "⏳ Trabalhando há {elapsed_human}…",
+                    },
+                }
+            }
+        }
+    }
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
+    worker_log = {
+        "text": (
+            "Query: work kanban task t_placeholder\n"
+            "┊ Tool: first visible step\n"
+            "┌─ Reasoning\n"
+            "│ Hidden reasoning\n"
+            "└\n"
+        )
+    }
+
+    def _read_worker_log(task_id, **_kwargs):
+        return worker_log["text"].replace("t_placeholder", task_id)
+
+    monkeypatch.setattr(kb, "read_worker_log", _read_worker_log)
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="flagged worker",
+            assignee="worker",
+            session_id="principal-session",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform="telegram",
+            chat_id="chat-1",
+            thread_id="topic-7",
+            chat_type="group",
+        )
+        assert kb.claim_task(conn, task_id, claimer="worker:flags") is not None
+    finally:
+        conn.close()
+
+    adapter = EditableRecordingAdapter()
+    runner = _make_runner(adapter)
+    runner._is_session_running = lambda _key: False
+    asyncio.run(
+        runner._kanban_claim_worker_display(
+            SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id="chat-1",
+                chat_type="group",
+                thread_id="topic-7",
+            ),
+            session_id="principal-session",
+            principal_session_key="principal-key",
+        )
+    )
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    focus = [item for item in adapter.sent if "Now following worker" in item["text"]][-1]
+    assert "┊ Tool: first visible step" in focus["text"]
+    assert "Hidden reasoning" not in focus["text"]
+
+    worker_log["text"] = worker_log["text"].replace(
+        "first visible step", "second throttled step"
+    )
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert adapter.edited == []
+
+    state = next(iter(runner._kanban_worker_focus_states.values()))
+    state["last_sent_at"] = time.time() - 61
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert "second throttled step" in adapter.edited[-1]["content"]
+
+    platform_display = config["display"]["platforms"]["telegram"]
+    platform_display["tool_progress"] = "off"
+    platform_display["show_reasoning"] = True
+    state["last_sent_at"] = time.time() - 61
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert "second throttled step" not in adapter.edited[-1]["content"]
+    assert "Reasoning: Hidden reasoning" in adapter.edited[-1]["content"]
+
+    platform_display["worker_rotation"] = False
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert runner._kanban_worker_focus_states == {}
+    assert adapter.deleted[-1]["message_id"] == focus["message_id"]
+
+
 def test_worker_focus_retry_boundary_decrements_without_chat_noise(
     tmp_path, monkeypatch,
 ):
@@ -405,7 +689,12 @@ def test_worker_focus_retry_boundary_decrements_without_chat_noise(
     kb.init_db()
     conn = kb.connect()
     try:
-        task_id = kb.create_task(conn, title="retry worker", assignee="worker")
+        task_id = kb.create_task(
+            conn,
+            title="retry worker",
+            assignee="worker",
+            session_id="principal-session",
+        )
         kb.add_notify_sub(
             conn,
             task_id=task_id,
@@ -421,6 +710,18 @@ def test_worker_focus_retry_boundary_decrements_without_chat_noise(
     adapter = EditableRecordingAdapter()
     runner = _make_runner(adapter)
     runner._is_session_running = lambda _key: False
+    asyncio.run(
+        runner._kanban_claim_worker_display(
+            SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id="chat-1",
+                chat_type="group",
+                thread_id="topic-7",
+            ),
+            session_id="principal-session",
+            principal_session_key="principal-key",
+        )
+    )
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 1
 
@@ -456,7 +757,55 @@ def test_worker_focus_retry_boundary_decrements_without_chat_noise(
     )
 
 
-def test_worker_focus_rehydrates_once_after_gateway_restart(tmp_path, monkeypatch):
+def test_worker_focus_status_event_converges_from_current_task_state():
+    runner = _make_runner(EditableRecordingAdapter())
+    task = SimpleNamespace(
+        id="t_status",
+        title="status worker",
+        assignee="worker",
+        status="running",
+        current_run_id=1,
+        started_at=1,
+    )
+    sub = {
+        "platform": "telegram",
+        "chat_id": "chat-1",
+        "thread_id": "",
+        "notifier_profile": "",
+    }
+    row = {
+        "task": task,
+        "sub": sub,
+        "board": "board-a",
+        "bootstrap": True,
+        "events": [],
+    }
+
+    runner._kanban_focus_apply_rows([row])
+    assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 1
+
+    runner._kanban_focus_apply_rows(
+        [{**row, "bootstrap": False, "events": [SimpleNamespace(kind="status")]}]
+    )
+    assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 1
+
+    task.status = "ready"
+    task.current_run_id = None
+    runner._kanban_focus_apply_rows(
+        [{**row, "bootstrap": False, "events": [SimpleNamespace(kind="status")]}]
+    )
+    assert runner._kanban_worker_focus_active == {}
+
+    task.status = "running"
+    runner._kanban_focus_apply_rows(
+        [{**row, "bootstrap": False, "events": [SimpleNamespace(kind="status")]}]
+    )
+    assert runner._kanban_worker_focus_active == {}
+
+
+def test_worker_focus_rehydrates_fail_closed_until_principal_claim(
+    tmp_path, monkeypatch,
+):
     db_path = tmp_path / "worker-focus-rehydrate.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     monkeypatch.setattr(
@@ -471,7 +820,13 @@ def test_worker_focus_rehydrates_once_after_gateway_restart(tmp_path, monkeypatc
     kb.init_db()
     conn = kb.connect()
     try:
-        task_id = kb.create_task(conn, title="survives restart", assignee="worker")
+        task_id = kb.create_task(
+            conn,
+            title="survives restart",
+            assignee="worker",
+            project_id="project-a",
+            session_id="principal-session",
+        )
         kb.add_notify_sub(
             conn,
             task_id=task_id,
@@ -498,7 +853,192 @@ def test_worker_focus_rehydrates_once_after_gateway_restart(tmp_path, monkeypatc
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert runner._kanban_worker_focus_rehydrated is True
     assert sum(len(bucket) for bucket in runner._kanban_worker_focus_active.values()) == 1
+    assert not any("survives restart" in item["text"] for item in adapter.sent)
+    assert runner._kanban_worker_focus_states == {}
+
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+        thread_id="topic-7",
+    )
+    asyncio.run(
+        runner._kanban_claim_worker_display(
+            source,
+            project_id="project-a",
+            session_id="principal-session",
+            principal_session_key="agent:main:telegram:group:chat-1:topic-7",
+        )
+    )
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert any("survives restart" in item["text"] for item in adapter.sent)
+
+
+def test_worker_focus_reclaim_fences_inflight_send_and_uses_latest_principal(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"display": {"worker_rotation": True}},
+    )
+    monkeypatch.setattr(
+        kb,
+        "read_worker_log",
+        lambda *_args, **_kwargs: "",
+    )
+
+    class BlockingFocusAdapter(EditableRecordingAdapter):
+        def __init__(self):
+            super().__init__()
+            self.send_started = asyncio.Event()
+            self.release_send = asyncio.Event()
+            self.edit_started = asyncio.Event()
+            self.release_edit = asyncio.Event()
+
+        async def send(self, chat_id, text, metadata=None):
+            if "Now following worker" in text:
+                self.send_started.set()
+                await self.release_send.wait()
+            return await super().send(chat_id, text, metadata=metadata)
+
+        async def edit_message(self, chat_id, message_id, content, **kwargs):
+            self.edit_started.set()
+            await self.release_edit.wait()
+            return await super().edit_message(
+                chat_id, message_id, content, **kwargs
+            )
+
+    adapter = BlockingFocusAdapter()
+    runner = _make_runner(adapter)
+    runner._active_profile_name = lambda: "default"
+    running_sessions = {
+        "session:main-a": False,
+        "session:main-b": False,
+        "session:main-c": False,
+    }
+    probed_session_keys = []
+
+    def _is_session_running(session_key):
+        probed_session_keys.append(session_key)
+        return running_sessions.get(session_key, False)
+
+    runner._is_session_running = _is_session_running
+    task = SimpleNamespace(
+        id="t_race",
+        title="racing worker",
+        assignee="worker",
+        project_id="project-a",
+        session_id="worker-session",
+        current_run_id=1,
+        started_at=time.time() - 30,
+    )
+    sub = {
+        "platform": "telegram",
+        "chat_id": "chat-1",
+        "thread_id": "",
+        "chat_type": "group",
+        "user_id": "worker-owner",
+        "notifier_profile": "",
+    }
+    runner._kanban_worker_focus_active = {
+        ("board-a", "telegram", "chat-1", "", ""): {
+            task.id: {"task": task, "sub": sub, "board": "board-a"},
+        }
+    }
+    source_a = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+        user_id="main-a",
+    )
+    source_b = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+        user_id="main-b",
+    )
+    source_c = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+        user_id="main-c",
+    )
+
+    async def scenario():
+        await runner._kanban_claim_worker_display(
+            source_a,
+            board="board-a",
+            project_id="project-a",
+            session_id="principal-a",
+            principal_session_key="session:main-a",
+        )
+        refresh = asyncio.create_task(runner._kanban_refresh_worker_focus())
+        await asyncio.wait_for(adapter.send_started.wait(), timeout=2)
+
+        running_sessions["session:main-b"] = True
+        await runner._kanban_claim_worker_display(
+            source_b,
+            board="board-a",
+            project_id="project-a",
+            session_id="principal-b",
+            principal_session_key="session:main-b",
+        )
+        adapter.release_send.set()
+        await asyncio.wait_for(refresh, timeout=2)
+
+    asyncio.run(scenario())
+
+    # A following refresh uses the latest claiming user's canonical session,
+    # not the user id persisted on the worker subscription.
+    asyncio.run(runner._kanban_refresh_worker_focus())
+
+    focus = [item for item in adapter.sent if "Now following worker" in item["text"]]
+    assert len(focus) == 1
+    assert adapter.deleted[-1] == {
+        "chat_id": "chat-1",
+        "message_id": focus[0]["message_id"],
+    }
+    assert runner._kanban_worker_focus_states == {}
+    lane = ("telegram", "chat-1", "", "default")
+    assert runner._kanban_worker_display_scopes[lane]["principal_session_key"] == (
+        "session:main-b"
+    )
+    assert probed_session_keys[-1] == "session:main-b"
+
+    # The same fence applies when a reclaim lands while an edit is in flight.
+    running_sessions["session:main-b"] = False
+    asyncio.run(runner._kanban_refresh_worker_focus())
+    resumed = [
+        item for item in adapter.sent if "Now following worker" in item["text"]
+    ][-1]
+    task.title = "racing worker updated"
+    state = next(iter(runner._kanban_worker_focus_states.values()))
+    state["last_sent_at"] = time.time() - 181
+
+    async def edit_scenario():
+        refresh = asyncio.create_task(runner._kanban_refresh_worker_focus())
+        await asyncio.wait_for(adapter.edit_started.wait(), timeout=2)
+        running_sessions["session:main-c"] = True
+        await runner._kanban_claim_worker_display(
+            source_c,
+            board="board-a",
+            project_id="project-a",
+            session_id="principal-c",
+            principal_session_key="session:main-c",
+        )
+        adapter.release_edit.set()
+        await asyncio.wait_for(refresh, timeout=2)
+
+    asyncio.run(edit_scenario())
+    assert runner._kanban_worker_focus_states == {}
+    assert sum(
+        deleted["message_id"] == resumed["message_id"]
+        for deleted in adapter.deleted
+    ) >= 2
+
+    asyncio.run(runner._kanban_refresh_worker_focus())
+    assert probed_session_keys[-1] == "session:main-c"
 
 
 def test_worker_focus_text_contains_only_event_owned_state():
@@ -514,6 +1054,26 @@ def test_worker_focus_text_contains_only_event_owned_state():
     assert "worker 1/2" in rendered
     assert "run 7" in rendered
     assert "Heartbeat" not in rendered
+
+
+def test_worker_focus_orders_retried_attempt_by_current_spawn_run():
+    already_active = SimpleNamespace(
+        id="t_active",
+        started_at=200,
+        current_run_id=10,
+    )
+    retried_later = SimpleNamespace(
+        id="t_retry",
+        started_at=100,
+        current_run_id=20,
+    )
+
+    ordered = sorted(
+        [retried_later, already_active],
+        key=_kanban_worker_spawn_order,
+    )
+
+    assert [task.id for task in ordered] == ["t_active", "t_retry"]
 
 
 def test_worker_focus_output_is_latest_attempt_redacted_and_bounded():

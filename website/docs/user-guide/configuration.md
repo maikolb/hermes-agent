@@ -1962,11 +1962,20 @@ display:
       tool_progress: 'off'    # Signal cannot currently display tool-progress bubbles
     telegram:
       tool_progress: verbose  # detailed progress on Telegram
+      worker_rotation: true   # follow active Kanban workers after the principal ends
     slack:
       tool_progress: 'off'    # quiet in shared Slack workspace
 ```
 
 Platforms without an override fall back to the global `tool_progress` value. Valid platform keys: `telegram`, `discord`, `slack`, `signal`, `whatsapp`, `matrix`, `mattermost`, `email`, `sms`, `homeassistant`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`. The legacy `display.tool_progress_overrides` key still loads for backward compatibility but is deprecated and migrated into `display.platforms` on first load.
+
+`worker_rotation` is gateway-only and defaults to `false`. When enabled, the
+principal heartbeat includes the active-worker count; after the principal
+finishes, Hermes follows the oldest active Kanban worker and rotates until the
+queue is empty. The worker projection respects the destination profile's
+`tool_progress` and `show_reasoning` settings. The older
+`kanban.worker_focus_handoff: true` remains a compatibility fallback only when
+`display.worker_rotation` is not set.
 
 Signal is listed as a valid platform key because the setting can be saved per platform, but the current Signal adapter cannot edit sent messages and does not render tool-progress bubbles. Keep Signal `tool_progress` set to `off`; use the CLI or an editing-capable messaging platform if you need to watch each tool call live.
 
