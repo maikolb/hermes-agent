@@ -1,0 +1,165 @@
+"""Kanban mirror card for long principal turns.
+
+Delegated children get mirror cards (``delegation_kanban``) and dispatcher
+workers own real cards, but the principal's own inline work on a
+board-bound topic was invisible: the Telegram display showed a turn hard at
+work while the board showed nothing running, so read-only views (Vigília)
+and the chat told different stories (27/08 DOVCRM resume incident).
+
+One mirror card per qualifying turn: created once the turn proves
+non-trivial (``_START_THRESHOLD_SECONDS`` of wall clock, i.e. from the
+second activity-indicator wake onward), heartbeat on every subsequent wake,
+completed when the turn tears down. A gateway crash leaves the card claimed
+with the delegation TTL, the same orphan semantics as delegated mirrors.
+
+Behaviour contract mirrors ``delegation_kanban``: strictly best-effort.
+Every entry point catches everything; a mirror failure must never break the
+turn. All SQLite writes run off the event loop (``asyncio.to_thread`` /
+daemon thread) so the mirror never contributes to the gateway congestion it
+exists to make visible.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+import time
+from typing import Optional
+
+from tools.delegation_kanban import (
+    _BODY_MAX,
+    _CLAIM_TTL_SECONDS,
+    _SUMMARY_MAX,
+    _TITLE_MAX,
+    _author,
+    mirror_principal_turns_enabled,
+    resolve_delegation_board,
+)
+
+logger = logging.getLogger(__name__)
+
+_START_THRESHOLD_SECONDS = 60.0
+
+
+class PrincipalTurnMirror:
+    """Mirror card lifecycle for one principal turn (create/beat/finish)."""
+
+    def __init__(self, board: str, title_hint: str) -> None:
+        self._board = board
+        self._title_hint = (title_hint or "").strip()
+        self._task_id: Optional[str] = None
+        self._started = False
+        self._finished = False
+
+    async def tick(self, elapsed_seconds: float) -> None:
+        """Called from each activity-indicator wake while the turn runs."""
+        if self._finished:
+            return
+        try:
+            if not self._started:
+                if elapsed_seconds < _START_THRESHOLD_SECONDS:
+                    return
+                self._started = True
+                await asyncio.to_thread(self._start_sync)
+            elif self._task_id:
+                await asyncio.to_thread(self._beat_sync)
+        except Exception as exc:  # noqa: BLE001 - never break the turn
+            logger.debug("principal mirror: tick failed: %s", exc)
+
+    def finish(self, elapsed_seconds: float) -> None:
+        """Complete the mirror card without blocking turn teardown."""
+        if self._finished:
+            return
+        self._finished = True
+        if not self._task_id:
+            return
+        task_id = self._task_id
+        board = self._board
+        minutes = max(1, int(elapsed_seconds // 60))
+
+        def _close() -> None:
+            try:
+                from hermes_cli import kanban_db as kb
+
+                with kb.connect_closing(board=board) as conn:
+                    kb.complete_task(
+                        conn,
+                        task_id,
+                        result=(
+                            f"Principal turn finished after ~{minutes} min."
+                        )[:_SUMMARY_MAX],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("principal mirror: close failed: %s", exc)
+
+        try:
+            threading.Thread(
+                target=_close, name="principal-mirror-close", daemon=True
+            ).start()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("principal mirror: close spawn failed: %s", exc)
+
+    def _start_sync(self) -> None:
+        try:
+            from hermes_cli import kanban_db as kb
+
+            author = _author()
+            hint = self._title_hint or time.strftime("%H:%M")
+            title = f"Principal: {hint}"[:_TITLE_MAX]
+            body = (
+                "Mirror card for the principal's own inline turn on this "
+                "board-bound topic. Created automatically once the turn "
+                "crossed the non-trivial threshold "
+                f"({int(_START_THRESHOLD_SECONDS)}s)."
+            )
+            if self._title_hint:
+                body += f"\n\nTurn prompt (truncated):\n{self._title_hint}"
+            with kb.connect_closing(board=self._board) as conn:
+                task_id = kb.create_task(
+                    conn,
+                    title=title,
+                    body=body[:_BODY_MAX],
+                    created_by=author,
+                    board=self._board,
+                )
+                claimed = kb.claim_task(
+                    conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
+                )
+                if claimed is None:
+                    logger.debug(
+                        "principal mirror: card %s not claimable", task_id
+                    )
+                kb.add_comment(
+                    conn,
+                    task_id,
+                    author,
+                    f"Principal inline turn mirror, spawned by {author} "
+                    "(delegation.mirror_principal_turns).",
+                )
+            self._task_id = task_id
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("principal mirror: start failed: %s", exc)
+
+    def _beat_sync(self) -> None:
+        try:
+            from hermes_cli import kanban_db as kb
+
+            with kb.connect_closing(board=self._board) as conn:
+                kb.heartbeat_worker(conn, self._task_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("principal mirror: beat failed: %s", exc)
+
+
+def create_principal_turn_mirror(title_hint: str) -> Optional[PrincipalTurnMirror]:
+    """Mirror for the current session's turn, or None when not applicable."""
+    try:
+        if not mirror_principal_turns_enabled():
+            return None
+        board = resolve_delegation_board()
+        if not board:
+            return None
+        return PrincipalTurnMirror(board, (title_hint or "")[:200])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("principal mirror: create failed: %s", exc)
+        return None

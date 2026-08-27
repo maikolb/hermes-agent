@@ -31734,6 +31734,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     break
                 _elapsed_seconds = time.monotonic() - _notify_start
                 _elapsed_mins = int(_elapsed_seconds // 60)
+                if _principal_mirror is not None:
+                    await _principal_mirror.tick(_elapsed_seconds)
                 # Legacy heartbeat detail remains available when no custom
                 # template owns the full user-facing text.
                 _agent_ref = agent_holder[0]
@@ -31800,6 +31802,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _created_msg_id and _cleanup_progress:
                     _cleanup_msg_ids.append(_created_msg_id)
                 _first_heartbeat = False
+
+        # Principal turn mirror: on board-bound topics, a long inline turn
+        # gets its own claimed running card with heartbeat so the board (and
+        # read-only views) never hides the principal's work. Piggybacks on
+        # the activity-indicator wakes; see tools/principal_turn_mirror.py.
+        from tools.principal_turn_mirror import create_principal_turn_mirror
+
+        _principal_mirror = create_principal_turn_mirror(message)
 
         _notify_task = asyncio.create_task(_notify_long_running())
 
@@ -32593,6 +32603,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 log_task.cancel()
             interrupt_monitor.cancel()
             _notify_task.cancel()
+            try:
+                if _principal_mirror is not None:
+                    _principal_mirror.finish(time.monotonic() - _notify_start)
+            except NameError:
+                pass
 
             # Wait for stream consumer to finish its final edit
             if stream_task:
