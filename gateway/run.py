@@ -1584,6 +1584,31 @@ def _render_activity_indicator_template(
         return None
 
 
+def _lost_steer_notice(agent: Any) -> str:
+    """Notice for steers that die un-consumed when a turn errors out.
+
+    A steer accepted mid-turn ("arrives after the next tool call") used to
+    vanish SILENTLY when the turn aborted — the author kept waiting for
+    work that would never happen (27/08, Concursa: two queued requests
+    lost for over an hour). Empty string when there is nothing pending.
+    """
+    lost = ""
+    try:
+        if agent is not None and hasattr(agent, "_drain_pending_steer"):
+            lost = agent._drain_pending_steer() or ""
+    except Exception:
+        return ""
+    if not lost:
+        return ""
+    preview = " ".join(lost.strip().split())
+    if len(preview) > 180:
+        preview = preview[:179] + "…"
+    return (
+        "\n⚠️ Queued message(s) from this turn were NOT processed: "
+        f"«{preview}». Please resend them."
+    )
+
+
 # Consecutive transient edit failures per (chat_id, message_id). A network
 # flap used to defer the edit forever — the turn display went mute for the
 # whole outage while work kept running (27/08: ~15 min of silence, content
@@ -23166,9 +23191,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 elif status_code == 400:
                     status_hint = " The request was rejected by the API."
+            # A steer accepted mid-turn ("arrives after the next tool call")
+            # dies with the turn on this path and used to vanish SILENTLY:
+            # the author kept waiting for work that would never happen
+            # (27/08, Concursa: two queued requests lost for over an hour).
+            # Drain the un-consumed steer and say so explicitly.
+            try:
+                _err_turn_agent = self._session_state(session_key).turn.agent
+            except Exception:
+                _err_turn_agent = None
+            _steer_note = _lost_steer_notice(_err_turn_agent)
             return (
                 f"Sorry, I encountered an unexpected error.{status_hint}\n"
                 "Try again or use /reset to start a fresh session."
+                f"{_steer_note}"
             )
         finally:
             # Restore session context variables to their pre-handler state
