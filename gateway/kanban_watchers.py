@@ -914,6 +914,88 @@ class GatewayKanbanWatchersMixin:
                 counted.add((str(key_board or ""), str(task_id)))
         return len(counted)
 
+    def _kanban_board_display_targets(
+        self, notifier_profiles: set
+    ) -> dict[str, list[dict]]:
+        """``board_slug → display targets`` from persisted topic bindings.
+
+        Worker-rotation focus used to be fed exclusively by task-level notify
+        subscriptions, so a board whose cards were created outside the
+        subscribe path (CLI, dispatcher, reconciler) never rotated its
+        workers into the topic display even while they ran (27/08 DOVCRM
+        incident — the zero-subscription early exit made it permanent). The
+        project router DB persists exactly the binding the focus key needs:
+        (platform, chat_id, thread_id) per board, per profile.
+        """
+        targets: dict[str, list[dict]] = {}
+        try:
+            from hermes_cli.profiles import get_profile_dir
+
+            router_config = getattr(
+                getattr(self, "config", None), "project_router", None
+            )
+            if not getattr(router_config, "enabled", False):
+                return targets
+            configured = getattr(router_config, "db_path", None)
+            for profile in sorted(str(p or "").strip() for p in notifier_profiles):
+                if not profile:
+                    continue
+                try:
+                    base = Path(get_profile_dir(profile))
+                except Exception:
+                    continue
+                candidate = (
+                    Path(configured) if configured else Path("project_router.db")
+                )
+                if not candidate.is_absolute():
+                    candidate = base / candidate
+                if not candidate.is_file():
+                    continue
+                try:
+                    conn = sqlite3.connect(
+                        f"file:{candidate.as_posix()}?mode=ro",
+                        uri=True,
+                        timeout=2,
+                    )
+                    conn.row_factory = sqlite3.Row
+                    try:
+                        rows = conn.execute(
+                            "SELECT b.platform, b.chat_id, b.thread_id, "
+                            "       p.board_slug "
+                            "FROM topic_bindings AS b "
+                            "JOIN projects AS p "
+                            "  ON p.profile = b.profile "
+                            " AND p.project_id = b.project_id "
+                            "WHERE b.profile = ? AND b.is_management = 0 "
+                            "  AND b.is_closed = 0",
+                            (profile,),
+                        ).fetchall()
+                    finally:
+                        conn.close()
+                except sqlite3.Error as exc:
+                    logger.debug(
+                        "kanban notifier: router bindings unreadable for "
+                        "profile %s: %s",
+                        profile,
+                        exc,
+                    )
+                    continue
+                for row in rows:
+                    board = str(row["board_slug"] or "").strip()
+                    if not board:
+                        continue
+                    targets.setdefault(board, []).append({
+                        "platform": str(row["platform"] or "").lower(),
+                        "chat_id": str(row["chat_id"] or ""),
+                        "thread_id": str(row["thread_id"] or ""),
+                        "notifier_profile": profile,
+                    })
+        except Exception as exc:  # noqa: BLE001 - display feed is best-effort
+            logger.debug(
+                "kanban notifier: board display targets unavailable: %s", exc
+            )
+        return targets
+
     def _kanban_focus_apply_rows(self, rows: list[dict]) -> None:
         """Apply one-time bootstrap rows and lifecycle deltas to local counters."""
         active: dict[tuple, dict[str, dict]] = getattr(
@@ -1365,6 +1447,12 @@ class GatewayKanbanWatchersMixin:
             self, "_kanban_sub_fail_counts", {}
         )
         self._kanban_sub_fail_counts = sub_fail_counts
+        # Board-level focus cursors (per slug, in-memory): the display feed
+        # below reads task_events independently of notify subscriptions.
+        focus_cursors: dict[str, int] = getattr(
+            self, "_kanban_focus_event_cursors", {}
+        )
+        self._kanban_focus_event_cursors = focus_cursors
         notifier_profile = getattr(self, "_kanban_notifier_profile", None)
         if not notifier_profile:
             notifier_profile = self._active_profile_name()
@@ -1447,6 +1535,9 @@ class GatewayKanbanWatchersMixin:
                     if not active_platforms:
                         logger.debug("kanban notifier: no connected adapters; skipping tick")
                         return deliveries, focus_rows, False
+                    display_targets = self._kanban_board_display_targets(
+                        notifier_profiles
+                    )
 
                     # Enumerate every board on disk, but poll each resolved DB
                     # path once. Multiple slugs can point at the same DB when
@@ -1474,6 +1565,85 @@ class GatewayKanbanWatchersMixin:
                             )
                             continue
                         seen_db_paths.add(resolved_db_path)
+                        # Board-level focus feed: worker rotation must see
+                        # lifecycle on every topic-bound board even with zero
+                        # notify subscriptions — the skip below only silences
+                        # CHAT delivery. Cheap read-only probe per tick; a
+                        # writable task fetch happens only when new focus
+                        # events actually exist.
+                        board_targets = display_targets.get(slug) or []
+                        if board_targets:
+                            try:
+                                focus_cursor = focus_cursors.get(slug)
+                                new_events_by_task: dict[str, list] = {}
+                                bootstrap_feed = focus_cursor is None
+                                ro_conn = sqlite3.connect(
+                                    f"file:{Path(resolved_db_path).as_posix()}?mode=ro",
+                                    uri=True,
+                                    timeout=2,
+                                )
+                                ro_conn.row_factory = sqlite3.Row
+                                try:
+                                    max_row = ro_conn.execute(
+                                        "SELECT COALESCE(MAX(id), 0) AS id "
+                                        "FROM task_events"
+                                    ).fetchone()
+                                    latest_focus_event_id = int(max_row["id"] or 0)
+                                    if bootstrap_feed:
+                                        running_rows = ro_conn.execute(
+                                            "SELECT id FROM tasks "
+                                            "WHERE status = 'running' "
+                                            "  AND current_run_id IS NOT NULL"
+                                        ).fetchall()
+                                        for task_row in running_rows:
+                                            new_events_by_task[str(task_row["id"])] = []
+                                    elif latest_focus_event_id > focus_cursor:
+                                        placeholders = ",".join("?" * len(FOCUS_KINDS))
+                                        event_rows = ro_conn.execute(
+                                            "SELECT id, task_id, kind "
+                                            "FROM task_events WHERE id > ? "
+                                            f"AND kind IN ({placeholders}) "
+                                            "ORDER BY id",
+                                            (focus_cursor, *FOCUS_KINDS),
+                                        ).fetchall()
+                                        for event_row in event_rows:
+                                            new_events_by_task.setdefault(
+                                                str(event_row["task_id"]), []
+                                            ).append(event_row)
+                                finally:
+                                    ro_conn.close()
+                                focus_cursors[slug] = latest_focus_event_id
+                                if new_events_by_task:
+                                    from types import SimpleNamespace as _NS
+
+                                    with _kb.connect_closing(board=slug) as focus_conn:
+                                        for task_id, task_events in new_events_by_task.items():
+                                            focus_task = _kb.get_task(focus_conn, task_id)
+                                            if focus_task is None:
+                                                continue
+                                            feed_events = [
+                                                _NS(
+                                                    kind=str(ev["kind"]),
+                                                    id=int(ev["id"]),
+                                                    created_at=0.0,
+                                                )
+                                                for ev in task_events
+                                            ]
+                                            for target in board_targets:
+                                                focus_rows.append({
+                                                    "sub": dict(target),
+                                                    "task": focus_task,
+                                                    "board": slug,
+                                                    "bootstrap": bootstrap_feed,
+                                                    "events": feed_events,
+                                                })
+                            except Exception as focus_exc:  # noqa: BLE001
+                                logger.debug(
+                                    "kanban notifier: board focus feed failed "
+                                    "for %s: %s",
+                                    slug,
+                                    focus_exc,
+                                )
                         # Zero-subscription early exit: probe the board with a
                         # cheap read-only connection BEFORE the writable
                         # `connect()`. A board with no subscriptions has

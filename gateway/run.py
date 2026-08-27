@@ -1584,6 +1584,15 @@ def _render_activity_indicator_template(
         return None
 
 
+# Consecutive transient edit failures per (chat_id, message_id). A network
+# flap used to defer the edit forever — the turn display went mute for the
+# whole outage while work kept running (27/08: ~15 min of silence, content
+# then arriving in one stale batch). After the streak cap the indicator falls
+# back to a NEW message so the display recovers on the next healthy send.
+_ACTIVITY_EDIT_FAIL_STREAKS: dict[tuple, int] = {}
+_ACTIVITY_EDIT_FAIL_FALLBACK = 3
+
+
 async def _upsert_activity_indicator_message(
     adapter: Any,
     *,
@@ -1593,20 +1602,45 @@ async def _upsert_activity_indicator_message(
     metadata: Optional[dict],
 ) -> tuple[Optional[str], Optional[str]]:
     """Edit one owned heartbeat, replacing it only after a permanent failure."""
+    if len(_ACTIVITY_EDIT_FAIL_STREAKS) > 1024:
+        _ACTIVITY_EDIT_FAIL_STREAKS.clear()
     if message_id:
+        streak_key = (str(chat_id), str(message_id))
         try:
             edit_result = await adapter.edit_message(chat_id, message_id, content)
         except Exception as exc:
-            logger.debug("Activity-indicator edit failed transiently: %s", exc)
-            return message_id, None
-        if edit_result and getattr(edit_result, "success", False):
-            return message_id, None
-        if edit_result is None or getattr(edit_result, "retryable", False):
-            logger.debug(
-                "Activity-indicator edit deferred after retryable failure: %s",
-                getattr(edit_result, "error", None),
+            streak = _ACTIVITY_EDIT_FAIL_STREAKS.get(streak_key, 0) + 1
+            if streak < _ACTIVITY_EDIT_FAIL_FALLBACK:
+                _ACTIVITY_EDIT_FAIL_STREAKS[streak_key] = streak
+                logger.debug("Activity-indicator edit failed transiently: %s", exc)
+                return message_id, None
+            _ACTIVITY_EDIT_FAIL_STREAKS.pop(streak_key, None)
+            logger.info(
+                "Activity-indicator edit failed %d consecutive times; "
+                "falling back to a new message.",
+                streak,
             )
-            return message_id, None
+        else:
+            if edit_result and getattr(edit_result, "success", False):
+                _ACTIVITY_EDIT_FAIL_STREAKS.pop(streak_key, None)
+                return message_id, None
+            if edit_result is None or getattr(edit_result, "retryable", False):
+                streak = _ACTIVITY_EDIT_FAIL_STREAKS.get(streak_key, 0) + 1
+                if streak < _ACTIVITY_EDIT_FAIL_FALLBACK:
+                    _ACTIVITY_EDIT_FAIL_STREAKS[streak_key] = streak
+                    logger.debug(
+                        "Activity-indicator edit deferred after retryable failure: %s",
+                        getattr(edit_result, "error", None),
+                    )
+                    return message_id, None
+                _ACTIVITY_EDIT_FAIL_STREAKS.pop(streak_key, None)
+                logger.info(
+                    "Activity-indicator edit deferred %d consecutive times; "
+                    "falling back to a new message.",
+                    streak,
+                )
+            else:
+                _ACTIVITY_EDIT_FAIL_STREAKS.pop(streak_key, None)
 
     try:
         send_result = await adapter.send(chat_id, content, metadata=metadata)
