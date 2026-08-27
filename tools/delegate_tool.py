@@ -3835,6 +3835,23 @@ def delegate_task(
         task_list, context, model=creds.get("model"), provider=creds.get("provider")
     )
 
+    # Kanban mirror cards: when this session is bound to a project board,
+    # materialise one card per delegated child so the board stays the
+    # authority over in-process fan-out too. Resolved HERE (still on the
+    # request path, where the session env is readable) and threaded through
+    # to the aggregate closer. Best-effort side-channel like the live
+    # transcripts — see tools/delegation_kanban.py.
+    from tools.delegation_kanban import (
+        close_delegation_cards,
+        create_delegation_cards,
+        resolve_delegation_board,
+    )
+
+    kanban_board = resolve_delegation_board()
+    kanban_card_ids = create_delegation_cards(
+        task_list, live_deleg_id, kanban_board, live_paths=live_paths
+    )
+
     # Capture the ORIGINATING session's wake target BEFORE any child agent is
     # constructed: _build_child_agent() -> AIAgent() -> agent_init calls
     # set_current_session_id(child.session_id), which clobbers the
@@ -4105,6 +4122,11 @@ def delegate_task(
                 if _idx < len(live_paths):
                     entry["live_transcript"] = live_paths[_idx]
         update_manifest_statuses(live_deleg_id, results)
+        close_delegation_cards(kanban_board, kanban_card_ids, results)
+        for entry in results:
+            _card_idx = entry.get("task_index")
+            if isinstance(_card_idx, int) and _card_idx in kanban_card_ids:
+                entry["kanban_card"] = kanban_card_ids[_card_idx]
 
         combined: Dict[str, Any] = {
             "results": results,
@@ -4332,6 +4354,15 @@ def delegate_task(
                     "children, action='steer' with subagent_id + message to "
                     "redirect one, action='stop' with subagent_id to end one "
                     "early."
+                )
+            if kanban_card_ids:
+                payload["kanban_cards"] = {
+                    str(i): tid for i, tid in sorted(kanban_card_ids.items())
+                }
+                payload["kanban_cards_hint"] = (
+                    "Each delegated task has a mirror card on the project's "
+                    "kanban board (running now; closed automatically when the "
+                    "child finishes). Reference these card ids when reporting."
                 )
             if live_paths:
                 payload["live_transcripts"] = list(live_paths)
