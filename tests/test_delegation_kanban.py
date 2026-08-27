@@ -154,7 +154,10 @@ def test_mirror_heartbeat_none_without_board_or_cards(kanban_env):
     assert dk.start_mirror_heartbeat("default", {}) is None
 
 
-def test_route_flag_inherits_worker_rotation(monkeypatch):
+def test_route_is_strictly_opt_in_but_mirror_inherits(monkeypatch):
+    """TARGET_ARCHITECTURE gap 9: routing changes delegation semantics, so it
+    never turns itself on by inheritance; the principal-turn mirror is pure
+    visibility and may keep inheriting worker_rotation."""
     from tools import delegation_kanban as dk
 
     monkeypatch.setattr(
@@ -163,15 +166,15 @@ def test_route_flag_inherits_worker_rotation(monkeypatch):
     monkeypatch.setattr(
         dk, "_display_worker_rotation", lambda: True, raising=True
     )
-    assert dk.route_to_dispatcher_enabled() is True
+    assert dk.route_to_dispatcher_enabled() is False
     assert dk.mirror_principal_turns_enabled() is True
 
     monkeypatch.setattr(
         "tools.delegate_tool._load_config",
-        lambda: {"route_to_dispatcher": False, "mirror_principal_turns": False},
+        lambda: {"route_to_dispatcher": True, "mirror_principal_turns": False},
         raising=True,
     )
-    assert dk.route_to_dispatcher_enabled() is False
+    assert dk.route_to_dispatcher_enabled() is True
     assert dk.mirror_principal_turns_enabled() is False
 
 
