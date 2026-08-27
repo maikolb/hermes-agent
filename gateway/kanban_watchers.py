@@ -846,6 +846,50 @@ class GatewayKanbanWatchersMixin:
                 return scope
         return None
 
+    async def _kanban_finalize_worker_focus_state(
+        self,
+        state_key: tuple,
+        adapter: Any,
+    ) -> None:
+        """Edit one finished worker bubble into a short completion trace.
+
+        Retryable edit failures keep the state so the next teardown pass
+        retries; success and permanent failures drop it. The message itself
+        is never deleted on this path.
+        """
+        states: dict[tuple, dict] = getattr(self, "_kanban_worker_focus_states", {})
+        state = states.get(state_key)
+        if not state or not state.get("message_id"):
+            states.pop(state_key, None)
+            return
+        sub = state.get("sub") or {}
+        task_id = str(state.get("task_id") or "").strip()
+        title = str(state.get("task_title") or "").strip()
+        board = str(state.get("board") or "").strip()
+        attempt = state.get("attempt_id")
+        run_id = None
+        if isinstance(attempt, (tuple, list)) and len(attempt) > 1:
+            run_id = attempt[1]
+        first_line = "✅ Worker concluído"
+        if title:
+            first_line += f": {title}"
+        second_line = f"Kanban {task_id}" if task_id else ""
+        if run_id is not None:
+            second_line += f" · run {run_id}"
+        if board and second_line:
+            second_line = f"[{board}] {second_line}"
+        content = first_line if not second_line else f"{first_line}\n{second_line}"
+        try:
+            result = await adapter.edit_message(
+                sub.get("chat_id"), str(state["message_id"]), content
+            )
+        except Exception:
+            logger.debug("kanban worker focus trace edit failed", exc_info=True)
+            return
+        if result is None or getattr(result, "retryable", False):
+            return
+        states.pop(state_key, None)
+
     async def _kanban_discard_worker_focus_state(
         self,
         state_key: tuple,
@@ -1074,6 +1118,14 @@ class GatewayKanbanWatchersMixin:
             self, "_kanban_worker_focus_active", {}
         )
         self._kanban_worker_focus_active = active
+        # Why each worker left its bucket, per lane. The teardown's trace
+        # path may only say "concluído" for a worker that actually
+        # completed; a retry/reclaim/crash exit must keep the silent delete
+        # (the worker will be back, or failed — either way no false trace).
+        exits: dict[tuple, dict[str, str]] = getattr(
+            self, "_kanban_worker_focus_exits", {}
+        )
+        self._kanban_worker_focus_exits = exits
         terminal_kinds = {
             "completed", "blocked", "gave_up", "review_requested",
             "changes_requested", "archived", "timed_out", "crashed",
@@ -1107,6 +1159,7 @@ class GatewayKanbanWatchersMixin:
                         bucket.pop(task.id, None)
                 elif event.kind in terminal_kinds:
                     bucket.pop(task.id, None)
+                    exits.setdefault(key, {})[str(task.id)] = str(event.kind)
                 elif event.kind in {"status", "unblocked"}:
                     # Dashboard/direct status changes do not emit a dedicated
                     # terminal event.  Converge from the fetched task state so
@@ -1141,6 +1194,10 @@ class GatewayKanbanWatchersMixin:
             self, "_kanban_worker_display_scopes", {}
         )
         self._kanban_worker_display_scopes = scopes
+        exits: dict[tuple, dict[str, str]] = getattr(
+            self, "_kanban_worker_focus_exits", {}
+        )
+        self._kanban_worker_focus_exits = exits
         if not active and not states:
             return
 
@@ -1372,6 +1429,8 @@ class GatewayKanbanWatchersMixin:
                     state.update(
                         content=content,
                         task_id=task.id,
+                        task_title=str(getattr(task, "title", "") or "")[:96],
+                        board=board,
                         attempt_id=attempt_id,
                         activity_text=activity_text,
                         activity_updated_at=activity_updated_at,
@@ -1391,6 +1450,8 @@ class GatewayKanbanWatchersMixin:
                     "message_id": str(result.message_id),
                     "content": content,
                     "task_id": task.id,
+                    "task_title": str(getattr(task, "title", "") or "")[:96],
+                    "board": board,
                     "attempt_id": attempt_id,
                     "activity_text": activity_text,
                     "activity_updated_at": activity_updated_at,
@@ -1424,7 +1485,32 @@ class GatewayKanbanWatchersMixin:
             adapter = self._authorization_adapter(platform, profile)
             if adapter is None:
                 continue
-            await self._kanban_discard_worker_focus_state(key, adapter, sub)
+            # Worker actually COMPLETED (lane still presentable): leave a
+            # short completion trace instead of erasing every sign of work —
+            # a topic opened later used to look like nothing ever ran. Any
+            # other exit (retry/reclaim/crash/blocked) keeps the silent
+            # delete, and so does a principal claim owning the lane.
+            exit_key = (str(state.get("board") or ""), *key)
+            exit_kind = (exits.pop(exit_key, None) or {}).get(
+                str(state.get("task_id") or "")
+            )
+            trace_enabled = bool(
+                resolve_display_setting(
+                    _config_for_profile(profile),
+                    str(getattr(platform, "value", platform)).lower(),
+                    "worker_rotation_trace",
+                    True,
+                )
+            )
+            state_sequence = int(state.get("claim_sequence") or 0)
+            if (
+                trace_enabled
+                and exit_kind == "completed"
+                and self._kanban_worker_display_available(key, state_sequence)
+            ):
+                await self._kanban_finalize_worker_focus_state(key, adapter)
+            else:
+                await self._kanban_discard_worker_focus_state(key, adapter, sub)
 
         for lane in list(scopes):
             if lane not in all_active_lanes and lane not in states:
