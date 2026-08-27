@@ -472,3 +472,46 @@ def test_trace_includes_full_log_link_when_template_set(tmp_path, monkeypatch):
     final = adapter.edits[-1]["content"]
     assert "Log completo" in final
     assert f"https://vigilia.example/#kanban/dovcrm/{task.id}" in final
+
+
+def test_trace_includes_result_summary(tmp_path, monkeypatch):
+    import asyncio
+    import sqlite3 as _sqlite3
+
+    from gateway.run import GatewayRunner
+    from hermes_cli import kanban_db as kb
+
+    runner, adapter, task, target = _trace_runner(monkeypatch, tmp_path)
+
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE tasks SET result = ? WHERE id = ?",
+            ("Mapeei as rotas: 12 endpoints, 3 sem autenticação, relatório no card.", task.id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    GatewayRunner._kanban_focus_apply_rows(
+        runner,
+        [{"sub": dict(target), "task": task, "board": "dovcrm", "bootstrap": True, "events": []}],
+    )
+    asyncio.run(GatewayRunner._kanban_refresh_worker_focus(runner))
+    GatewayRunner._kanban_focus_apply_rows(
+        runner,
+        [
+            {
+                "sub": dict(target),
+                "task": task,
+                "board": "dovcrm",
+                "bootstrap": False,
+                "events": [SimpleNamespace(kind="completed", id=9, created_at=0.0)],
+            }
+        ],
+    )
+    asyncio.run(GatewayRunner._kanban_refresh_worker_focus(runner))
+
+    final = adapter.edits[-1]["content"]
+    assert "Worker concluído" in final
+    assert "Mapeei as rotas" in final
