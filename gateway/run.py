@@ -1584,6 +1584,15 @@ def _render_activity_indicator_template(
         return None
 
 
+# Consecutive transient edit failures per (chat_id, message_id). A network
+# flap used to defer the edit forever — the turn display went mute for the
+# whole outage while work kept running (27/08: ~15 min of silence, content
+# then arriving in one stale batch). After the streak cap the indicator falls
+# back to a NEW message so the display recovers on the next healthy send.
+_ACTIVITY_EDIT_FAIL_STREAKS: dict[tuple, int] = {}
+_ACTIVITY_EDIT_FAIL_FALLBACK = 3
+
+
 async def _upsert_activity_indicator_message(
     adapter: Any,
     *,
@@ -1593,20 +1602,45 @@ async def _upsert_activity_indicator_message(
     metadata: Optional[dict],
 ) -> tuple[Optional[str], Optional[str]]:
     """Edit one owned heartbeat, replacing it only after a permanent failure."""
+    if len(_ACTIVITY_EDIT_FAIL_STREAKS) > 1024:
+        _ACTIVITY_EDIT_FAIL_STREAKS.clear()
     if message_id:
+        streak_key = (str(chat_id), str(message_id))
         try:
             edit_result = await adapter.edit_message(chat_id, message_id, content)
         except Exception as exc:
-            logger.debug("Activity-indicator edit failed transiently: %s", exc)
-            return message_id, None
-        if edit_result and getattr(edit_result, "success", False):
-            return message_id, None
-        if edit_result is None or getattr(edit_result, "retryable", False):
-            logger.debug(
-                "Activity-indicator edit deferred after retryable failure: %s",
-                getattr(edit_result, "error", None),
+            streak = _ACTIVITY_EDIT_FAIL_STREAKS.get(streak_key, 0) + 1
+            if streak < _ACTIVITY_EDIT_FAIL_FALLBACK:
+                _ACTIVITY_EDIT_FAIL_STREAKS[streak_key] = streak
+                logger.debug("Activity-indicator edit failed transiently: %s", exc)
+                return message_id, None
+            _ACTIVITY_EDIT_FAIL_STREAKS.pop(streak_key, None)
+            logger.info(
+                "Activity-indicator edit failed %d consecutive times; "
+                "falling back to a new message.",
+                streak,
             )
-            return message_id, None
+        else:
+            if edit_result and getattr(edit_result, "success", False):
+                _ACTIVITY_EDIT_FAIL_STREAKS.pop(streak_key, None)
+                return message_id, None
+            if edit_result is None or getattr(edit_result, "retryable", False):
+                streak = _ACTIVITY_EDIT_FAIL_STREAKS.get(streak_key, 0) + 1
+                if streak < _ACTIVITY_EDIT_FAIL_FALLBACK:
+                    _ACTIVITY_EDIT_FAIL_STREAKS[streak_key] = streak
+                    logger.debug(
+                        "Activity-indicator edit deferred after retryable failure: %s",
+                        getattr(edit_result, "error", None),
+                    )
+                    return message_id, None
+                _ACTIVITY_EDIT_FAIL_STREAKS.pop(streak_key, None)
+                logger.info(
+                    "Activity-indicator edit deferred %d consecutive times; "
+                    "falling back to a new message.",
+                    streak,
+                )
+            else:
+                _ACTIVITY_EDIT_FAIL_STREAKS.pop(streak_key, None)
 
     try:
         send_result = await adapter.send(chat_id, content, metadata=metadata)
@@ -31734,6 +31768,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     break
                 _elapsed_seconds = time.monotonic() - _notify_start
                 _elapsed_mins = int(_elapsed_seconds // 60)
+                if _principal_mirror is not None:
+                    await _principal_mirror.tick(_elapsed_seconds)
                 # Legacy heartbeat detail remains available when no custom
                 # template owns the full user-facing text.
                 _agent_ref = agent_holder[0]
@@ -31800,6 +31836,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _created_msg_id and _cleanup_progress:
                     _cleanup_msg_ids.append(_created_msg_id)
                 _first_heartbeat = False
+
+        # Principal turn mirror: on board-bound topics, a long inline turn
+        # gets its own claimed running card with heartbeat so the board (and
+        # read-only views) never hides the principal's work. The idempotency
+        # key (platform message id, stable across crash + auto-resume) makes
+        # a resumed turn reclaim the SAME card the interrupted turn left.
+        # Piggybacks on the activity-indicator wakes; see
+        # tools/principal_turn_mirror.py.
+        from tools.principal_turn_mirror import create_principal_turn_mirror
+
+        _principal_mirror = create_principal_turn_mirror(
+            message,
+            idempotency_key=(
+                f"principal:{source.platform.value}:{source.chat_id}:"
+                f"{event_message_id}"
+                if event_message_id
+                else None
+            ),
+        )
 
         _notify_task = asyncio.create_task(_notify_long_running())
 
@@ -32593,6 +32648,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 log_task.cancel()
             interrupt_monitor.cancel()
             _notify_task.cancel()
+            try:
+                if _principal_mirror is not None:
+                    _principal_mirror.finish(time.monotonic() - _notify_start)
+            except NameError:
+                pass
 
             # Wait for stream consumer to finish its final edit
             if stream_task:

@@ -3820,6 +3820,57 @@ def delegate_task(
     # Track goal labels for progress display (truncated for readability)
     task_labels = [t["goal"][:40] for t in task_list]
 
+    # Route-to-dispatcher: on board-bound sessions with the flag on, the
+    # delegation does NOT spawn in-process subagents at all. Each task becomes
+    # a READY card an isolated dispatcher worker picks up — its own process,
+    # heartbeat, and board-log transcript. In-process children share the
+    # gateway event loop and starve under congestion until the child timeout
+    # kills them (27/08 DOVCRM: tools stuck 31-67s, both children dead at
+    # 600s, while dispatcher workers sailed through the same window).
+    from tools.delegation_kanban import (
+        close_delegation_cards,
+        create_delegation_cards,
+        create_dispatch_cards,
+        resolve_delegation_board,
+        route_to_dispatcher_enabled,
+        start_mirror_heartbeat,
+    )
+
+    kanban_board = resolve_delegation_board()
+    if kanban_board and route_to_dispatcher_enabled():
+        dispatch_cards = create_dispatch_cards(task_list, kanban_board)
+        if dispatch_cards:
+            routed_results = [
+                {
+                    "task_index": index,
+                    "goal": task_labels[index],
+                    "status": "dispatched",
+                    "kanban_card": dispatch_cards[index],
+                }
+                for index in sorted(dispatch_cards)
+            ]
+            return json.dumps(
+                {
+                    "routed_to_dispatcher": True,
+                    "board": kanban_board,
+                    "results": routed_results,
+                    "note": (
+                        "delegation.route_to_dispatcher is on: no in-process "
+                        "subagent was spawned. Each task is a ready kanban "
+                        "card that an isolated dispatcher worker will claim "
+                        "and execute. Track progress on the board (statuses, "
+                        "comments, results) and continue your own work; do "
+                        "NOT wait synchronously for these cards."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        logger.warning(
+            "delegate_task: route_to_dispatcher is on but no dispatch card "
+            "was created (board=%s); falling back to in-process delegation.",
+            kanban_board,
+        )
+
     # Live transcripts: one pre-headered append-only log per task under
     # cache/delegation/live/<delegation_id>/task-<n>.log so the caller can
     # tail each child's operations while it runs (side-channel only — zero
@@ -3841,16 +3892,12 @@ def delegate_task(
     # request path, where the session env is readable) and threaded through
     # to the aggregate closer. Best-effort side-channel like the live
     # transcripts — see tools/delegation_kanban.py.
-    from tools.delegation_kanban import (
-        close_delegation_cards,
-        create_delegation_cards,
-        resolve_delegation_board,
-    )
-
-    kanban_board = resolve_delegation_board()
     kanban_card_ids = create_delegation_cards(
         task_list, live_deleg_id, kanban_board, live_paths=live_paths
     )
+    # Mirror cards hold a claim with no live worker_pid, so without a beat
+    # every read-only view renders them dead while the children work.
+    kanban_heartbeat = start_mirror_heartbeat(kanban_board, kanban_card_ids)
 
     # Capture the ORIGINATING session's wake target BEFORE any child agent is
     # constructed: _build_child_agent() -> AIAgent() -> agent_init calls
@@ -4122,6 +4169,8 @@ def delegate_task(
                 if _idx < len(live_paths):
                     entry["live_transcript"] = live_paths[_idx]
         update_manifest_statuses(live_deleg_id, results)
+        if kanban_heartbeat is not None:
+            kanban_heartbeat.stop()
         close_delegation_cards(kanban_board, kanban_card_ids, results)
         for entry in results:
             _card_idx = entry.get("task_index")

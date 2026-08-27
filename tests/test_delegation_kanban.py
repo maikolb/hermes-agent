@@ -105,6 +105,146 @@ def test_close_cards_interrupted_blocks_for_human(kanban_env):
     assert task.status == "blocked"
 
 
+def test_dispatch_cards_are_ready_and_unclaimed(kanban_env):
+    from tools import delegation_kanban as dk
+
+    cards = dk.create_dispatch_cards(
+        [{"goal": "Analisar backlog", "context": "rota dispatcher"}],
+        "default",
+        delegation_id="deleg_route01",
+    )
+
+    assert sorted(cards) == [0]
+    task = _get_task(cards[0])
+    assert task.status == "ready"
+    assert not task.claim_lock
+
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect_closing() as conn:
+        comments = kb.list_comments(conn, cards[0])
+    assert any("route_to_dispatcher" in c.body for c in comments)
+
+
+def test_mirror_heartbeat_beats_running_cards(kanban_env):
+    import time as _time
+
+    from tools import delegation_kanban as dk
+
+    cards = dk.create_delegation_cards([{"goal": "G"}], "deleg_hb", "default")
+    beat = dk.start_mirror_heartbeat("default", cards, interval=1.0)
+    assert beat is not None
+    try:
+        deadline = _time.time() + 5
+        heartbeat = None
+        while _time.time() < deadline:
+            heartbeat = _get_task(cards[0]).last_heartbeat_at
+            if heartbeat:
+                break
+            _time.sleep(0.2)
+        assert heartbeat, "mirror heartbeat must touch last_heartbeat_at"
+    finally:
+        beat.stop()
+
+
+def test_mirror_heartbeat_none_without_board_or_cards(kanban_env):
+    from tools import delegation_kanban as dk
+
+    assert dk.start_mirror_heartbeat(None, {0: "t_x"}) is None
+    assert dk.start_mirror_heartbeat("default", {}) is None
+
+
+def test_route_flag_inherits_worker_rotation(monkeypatch):
+    from tools import delegation_kanban as dk
+
+    monkeypatch.setattr(
+        "tools.delegate_tool._load_config", lambda: {}, raising=True
+    )
+    monkeypatch.setattr(
+        dk, "_display_worker_rotation", lambda: True, raising=True
+    )
+    assert dk.route_to_dispatcher_enabled() is True
+    assert dk.mirror_principal_turns_enabled() is True
+
+    monkeypatch.setattr(
+        "tools.delegate_tool._load_config",
+        lambda: {"route_to_dispatcher": False, "mirror_principal_turns": False},
+        raising=True,
+    )
+    assert dk.route_to_dispatcher_enabled() is False
+    assert dk.mirror_principal_turns_enabled() is False
+
+
+def test_principal_mirror_lifecycle(kanban_env):
+    import asyncio
+    import time as _time
+
+    from tools.principal_turn_mirror import PrincipalTurnMirror
+
+    mirror = PrincipalTurnMirror("default", "auditar fluxo de pagamentos")
+
+    asyncio.run(mirror.tick(30.0))
+    assert mirror._task_id is None, "below threshold must not create a card"
+
+    asyncio.run(mirror.tick(61.0))
+    assert mirror._task_id, "past threshold must create the mirror card"
+    task = _get_task(mirror._task_id)
+    assert task.status == "running"
+    assert task.claim_lock
+    assert task.title.startswith("Principal: ")
+
+    asyncio.run(mirror.tick(121.0))
+    assert _get_task(mirror._task_id).last_heartbeat_at
+
+    mirror.finish(180.0)
+    deadline = _time.time() + 5
+    status = None
+    while _time.time() < deadline:
+        status = _get_task(mirror._task_id).status
+        if status == "done":
+            break
+        _time.sleep(0.2)
+    assert status == "done"
+
+
+def test_principal_mirror_resume_reclaims_same_card(kanban_env):
+    import asyncio
+    import time as _time
+
+    from hermes_cli import kanban_db as kb
+    from tools.principal_turn_mirror import PrincipalTurnMirror
+
+    key = "principal:telegram:-1001:m42"
+    interrupted = PrincipalTurnMirror("default", "corrigir pipeline", idempotency_key=key)
+    asyncio.run(interrupted.tick(61.0))
+    orphan_id = interrupted._task_id
+    assert orphan_id
+    assert _get_task(orphan_id).status == "running"
+    # No finish(): the gateway died here and left the claim in place.
+
+    resumed = PrincipalTurnMirror("default", "corrigir pipeline", idempotency_key=key)
+    asyncio.run(resumed.tick(61.0))
+
+    assert resumed._task_id == orphan_id, "resume must land on the SAME card"
+    assert resumed.resumed is True
+    task = _get_task(orphan_id)
+    assert task.status == "running"
+    assert task.claim_lock
+    with kb.connect_closing() as conn:
+        comments = kb.list_comments(conn, orphan_id)
+    assert any("RESUMED" in c.body for c in comments)
+
+    resumed.finish(240.0)
+    deadline = _time.time() + 5
+    status = None
+    while _time.time() < deadline:
+        status = _get_task(orphan_id).status
+        if status == "done":
+            break
+        _time.sleep(0.2)
+    assert status == "done"
+
+
 def test_no_board_creates_nothing(kanban_env):
     from tools import delegation_kanban as dk
 

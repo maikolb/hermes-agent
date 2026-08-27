@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,64 @@ def _cards_enabled() -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"true", "1", "yes", "on"}
     return True
+
+
+def _display_worker_rotation() -> bool:
+    """``display.worker_rotation`` from the full config (default False)."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        display = load_config_readonly().get("display") or {}
+        value = display.get("worker_rotation", False)
+    except Exception:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on"}
+    return False
+
+
+def _delegation_flag(key: str) -> Optional[bool]:
+    """Read one boolean from the delegation config section, or None if unset."""
+    try:
+        from tools.delegate_tool import _load_config
+
+        value = _load_config().get(key)
+    except Exception:
+        return None
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if not stripped:
+            return None
+        return stripped in {"true", "1", "yes", "on"}
+    return bool(value)
+
+
+def route_to_dispatcher_enabled() -> bool:
+    """``delegation.route_to_dispatcher``; unset inherits display.worker_rotation.
+
+    When on, delegations from board-bound sessions become ready cards executed
+    by isolated dispatcher workers instead of in-process subagents sharing the
+    gateway event loop (which starve under gateway congestion and die on the
+    child timeout — the 27/08 DOVCRM incident).
+    """
+    explicit = _delegation_flag("route_to_dispatcher")
+    if explicit is not None:
+        return explicit
+    return _display_worker_rotation()
+
+
+def mirror_principal_turns_enabled() -> bool:
+    """``delegation.mirror_principal_turns``; unset inherits display.worker_rotation."""
+    explicit = _delegation_flag("mirror_principal_turns")
+    if explicit is not None:
+        return explicit
+    return _display_worker_rotation()
 
 
 def resolve_delegation_board() -> Optional[str]:
@@ -155,6 +214,130 @@ def create_delegation_cards(
     except Exception as exc:  # noqa: BLE001
         logger.debug("delegation kanban: batch create failed: %s", exc)
     return cards
+
+
+def create_dispatch_cards(
+    task_list: List[Dict[str, Any]],
+    board: Optional[str],
+    delegation_id: Optional[str] = None,
+) -> Dict[int, str]:
+    """Create one READY (unclaimed) card per task for dispatcher pickup.
+
+    The route-to-dispatcher path: no in-process subagent runs, so the card
+    must stay claimable — a real dispatcher worker (isolated process, its own
+    heartbeat, board log transcript) executes the goal. Same best-effort
+    contract as ``create_delegation_cards``.
+    """
+    if not board or not task_list:
+        return {}
+    cards: Dict[int, str] = {}
+    try:
+        from hermes_cli import kanban_db as kb
+
+        author = _author()
+        with kb.connect_closing(board=board) as conn:
+            for index, task in enumerate(task_list):
+                try:
+                    goal = str(task.get("goal") or "").strip()
+                    if not goal:
+                        goal = f"delegated task {index}"
+                    context = str(task.get("context") or "").strip()
+                    body = goal if not context else f"{goal}\n\n{context}"
+                    task_id = kb.create_task(
+                        conn,
+                        title=goal[:_TITLE_MAX],
+                        body=body[:_BODY_MAX],
+                        created_by=author,
+                        board=board,
+                        idempotency_key=(
+                            f"{delegation_id}:{index}" if delegation_id else None
+                        ),
+                    )
+                    kb.add_comment(
+                        conn,
+                        task_id,
+                        author,
+                        f"Routed to dispatcher by {author} "
+                        f"(delegation.route_to_dispatcher): an isolated "
+                        f"worker will pick this card up from ready.",
+                    )
+                    cards[index] = task_id
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "delegation kanban: dispatch card create failed "
+                        "(task %s): %s",
+                        index,
+                        exc,
+                    )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("delegation kanban: dispatch batch create failed: %s", exc)
+    return cards
+
+
+class MirrorHeartbeat:
+    """Daemon thread beating ``last_heartbeat_at`` on live mirror cards.
+
+    Mirror cards used to sit claimed with no heartbeat, so read-only views
+    (Vigília) rendered every in-process delegated child as dead while it
+    worked. Beats every ``interval`` seconds until ``stop()``; a card whose
+    beat fails ``_MAX_CARD_FAILURES`` times in a row (closed, reclaimed,
+    board gone) is dropped from the rotation so the thread winds down alone.
+    """
+
+    _MAX_CARD_FAILURES = 3
+
+    def __init__(self, board: str, task_ids: List[str], interval: float) -> None:
+        self._board = board
+        self._interval = max(1.0, float(interval))
+        self._failures: Dict[str, int] = {task_id: 0 for task_id in task_ids}
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="delegation-mirror-heartbeat", daemon=True
+        )
+
+    def start(self) -> "MirrorHeartbeat":
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                from hermes_cli import kanban_db as kb
+
+                with kb.connect_closing(board=self._board) as conn:
+                    for task_id in list(self._failures):
+                        try:
+                            ok = kb.heartbeat_worker(conn, task_id)
+                        except Exception:  # noqa: BLE001
+                            ok = False
+                        if ok:
+                            self._failures[task_id] = 0
+                        else:
+                            self._failures[task_id] += 1
+                            if self._failures[task_id] >= self._MAX_CARD_FAILURES:
+                                del self._failures[task_id]
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("delegation kanban: heartbeat pass failed: %s", exc)
+            if not self._failures:
+                return
+
+
+def start_mirror_heartbeat(
+    board: Optional[str],
+    cards: Dict[int, str],
+    interval: float = 45.0,
+) -> Optional[MirrorHeartbeat]:
+    """Start the mirror heartbeat thread, or None when there is nothing to beat."""
+    if not board or not cards:
+        return None
+    try:
+        return MirrorHeartbeat(board, list(cards.values()), interval).start()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("delegation kanban: heartbeat start failed: %s", exc)
+        return None
 
 
 def close_delegation_cards(

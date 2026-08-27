@@ -2040,6 +2040,16 @@ DEFAULT_CONFIG = {
                                      # (API, tools, iteration budget), never a delegation
                                      # stopwatch. Set a positive number of seconds
                                      # (floor 30s) to enforce a hard cap.
+        "route_to_dispatcher": None,  # board-bound delegations become READY kanban cards
+                                      # executed by isolated dispatcher workers instead of
+                                      # in-process subagents (which share the gateway event
+                                      # loop and starve under congestion). None (default)
+                                      # inherits display.worker_rotation; set true/false to
+                                      # pin explicitly.
+        "mirror_principal_turns": None,  # mirror long principal turns on board-bound
+                                         # sessions as claimed running cards with heartbeat,
+                                         # so the board stays the authority over ALL work.
+                                         # None (default) inherits display.worker_rotation.
         "reasoning_effort": "",  # subagent effort: "ultra", "max", "xhigh", "high",
                                  # "medium", "low", "minimal", "none" (empty = inherit)
         "max_concurrent_children": 10,  # unified concurrency cap: max parallel children per batch

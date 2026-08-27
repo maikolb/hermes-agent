@@ -426,3 +426,69 @@ def test_activity_indicator_three_topics_keep_independent_message_ids():
         "202",
         "303",
     }
+
+
+def test_activity_indicator_falls_back_to_new_message_after_edit_failure_streak():
+    """A network flap must not mute the display forever (27/08 incident)."""
+    from gateway.run import _ACTIVITY_EDIT_FAIL_STREAKS
+
+    _ACTIVITY_EDIT_FAIL_STREAKS.clear()
+    adapter = _FakeAdapter(
+        edit_results=[
+            TimeoutError("flap 1"),
+            TimeoutError("flap 2"),
+            TimeoutError("flap 3"),
+        ],
+        send_results=[_result(success=True, message_id="909")],
+    )
+
+    async def scenario():
+        owned = "101"
+        for _ in range(2):
+            owned, created = await _upsert_activity_indicator_message(
+                adapter,
+                chat_id="-1001",
+                message_id=owned,
+                content="⏳ Trabalhando…",
+                metadata=None,
+            )
+            assert (owned, created) == ("101", None)
+        owned, created = await _upsert_activity_indicator_message(
+            adapter,
+            chat_id="-1001",
+            message_id=owned,
+            content="⏳ Trabalhando…",
+            metadata=None,
+        )
+        assert (owned, created) == ("909", "909")
+        assert len(adapter.sends) == 1
+
+    asyncio.run(scenario())
+
+
+def test_activity_indicator_edit_success_resets_failure_streak():
+    from gateway.run import _ACTIVITY_EDIT_FAIL_STREAKS
+
+    _ACTIVITY_EDIT_FAIL_STREAKS.clear()
+    adapter = _FakeAdapter(
+        edit_results=[
+            TimeoutError("flap 1"),
+            TimeoutError("flap 2"),
+            _result(success=True),
+            TimeoutError("flap 3"),
+        ],
+    )
+
+    async def scenario():
+        for expected_created in (None, None, None, None):
+            owned, created = await _upsert_activity_indicator_message(
+                adapter,
+                chat_id="-1001",
+                message_id="101",
+                content="⏳ Trabalhando…",
+                metadata=None,
+            )
+            assert (owned, created) == ("101", expected_created)
+        assert not adapter.sends
+
+    asyncio.run(scenario())
