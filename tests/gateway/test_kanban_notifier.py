@@ -361,6 +361,9 @@ def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypa
         },
     )
     monkeypatch.setattr(
+        "gateway.run._load_gateway_config", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(
         kb,
         "read_worker_log",
         lambda task_id, **_kwargs: (
@@ -593,6 +596,9 @@ def test_worker_rotation_respects_display_flags_and_indicator_edit_cadence(
         }
     }
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
+    monkeypatch.setattr(
+        "gateway.run._load_gateway_config", lambda *a, **k: {}
+    )
     worker_log = {
         "text": (
             "Query: work kanban task t_placeholder\n"
@@ -685,6 +691,9 @@ def test_worker_focus_retry_boundary_decrements_without_chat_noise(
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"worker_focus_handoff": True}},
+    )
+    monkeypatch.setattr(
+        "gateway.run._load_gateway_config", lambda *a, **k: {}
     )
     kb.init_db()
     conn = kb.connect()
@@ -812,6 +821,9 @@ def test_worker_focus_rehydrates_fail_closed_until_principal_claim(
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"worker_focus_handoff": True}},
     )
+    monkeypatch.setattr(
+        "gateway.run._load_gateway_config", lambda *a, **k: {}
+    )
 
     def _unreadable_worker_log(*_args, **_kwargs):
         raise OSError("rotating")
@@ -881,6 +893,9 @@ def test_worker_focus_reclaim_fences_inflight_send_and_uses_latest_principal(
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"display": {"worker_rotation": True}},
+    )
+    monkeypatch.setattr(
+        "gateway.run._load_gateway_config", lambda *a, **k: {}
     )
     monkeypatch.setattr(
         kb,
@@ -1490,6 +1505,9 @@ def test_notifier_wakeup_uses_subscription_chat_type(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"agent_wake_on_events": True}},
+    )
+    monkeypatch.setattr(
+        "gateway.run._load_gateway_config", lambda *a, **k: {}
     )
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
 
