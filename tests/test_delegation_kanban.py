@@ -63,14 +63,17 @@ def test_create_cards_idempotent_per_delegation(kanban_env):
     assert first[0] == second[0]
 
 
-def test_close_cards_ok_completes_with_summary(kanban_env):
+def test_close_cards_completed_becomes_done_with_summary(kanban_env):
     from tools import delegation_kanban as dk
 
     cards = dk.create_delegation_cards([{"goal": "G"}], "deleg_ok", "default")
     dk.close_delegation_cards(
         "default",
         cards,
-        [{"task_index": 0, "status": "ok", "summary": "entreguei X e Y"}],
+        # "completed" is the real terminal status stamped by
+        # _execute_and_aggregate (regression: the smoke on the dovcrm board
+        # blocked both cards because the closer only accepted "ok").
+        [{"task_index": 0, "status": "completed", "summary": "entreguei X e Y"}],
     )
     task = _get_task(cards[0])
     assert task.status == "done"
@@ -83,7 +86,20 @@ def test_close_cards_failure_blocks_for_human(kanban_env):
     dk.close_delegation_cards(
         "default",
         cards,
-        [{"task_index": 0, "status": "error", "error": "boom", "summary": ""}],
+        [{"task_index": 0, "status": "failed", "error": "boom", "summary": ""}],
+    )
+    task = _get_task(cards[0])
+    assert task.status == "blocked"
+
+
+def test_close_cards_interrupted_blocks_for_human(kanban_env):
+    from tools import delegation_kanban as dk
+
+    cards = dk.create_delegation_cards([{"goal": "G"}], "deleg_int", "default")
+    dk.close_delegation_cards(
+        "default",
+        cards,
+        [{"task_index": 0, "status": "interrupted", "summary": "parcial"}],
     )
     task = _get_task(cards[0])
     assert task.status == "blocked"
@@ -94,4 +110,4 @@ def test_no_board_creates_nothing(kanban_env):
 
     assert dk.create_delegation_cards([{"goal": "G"}], "deleg_x", None) == {}
     # Closing with no cards is a no-op rather than an error.
-    dk.close_delegation_cards(None, {}, [{"task_index": 0, "status": "ok"}])
+    dk.close_delegation_cards(None, {}, [{"task_index": 0, "status": "completed"}])
