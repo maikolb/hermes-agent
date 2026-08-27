@@ -561,6 +561,7 @@ function NewTaskDialog({
   const boardDefaultKind = currentBoard?.default_workspace_kind || 'scratch'
   const boardDefaultDir = currentBoard?.default_workdir || ''
 
+  const isBacklog = target === 'backlog'
   const isTriage = target === 'triage'
   const [title, setTitle] = useState('')
   const [bodyText, setBodyText] = useState('')
@@ -629,8 +630,8 @@ function NewTaskDialog({
         .map(s => s.trim())
         .filter(Boolean)
 
-      // create() derives status (triage flag → 'triage', else 'ready'); move to
-      // the requested column when they differ, so a per-column add lands right.
+      // create() derives the approval-gated intake statuses atomically; other
+      // requested columns still use the existing post-create move path.
       const { task, warning } = await createTask({
         assignee: assignee === PARKED ? undefined : assignee || resolvedDefault,
         body: bodyText.trim() || undefined,
@@ -639,6 +640,7 @@ function NewTaskDialog({
         priority: Number(priority) || 0,
         skills: skillList.length ? skillList : undefined,
         title: trimmed,
+        backlog: isBacklog,
         triage: isTriage,
         workspace_kind: workspaceKind,
         ...overrideCreateFields(modelOverride),
@@ -1356,7 +1358,7 @@ export function KanbanBoardPage() {
               <Codicon name="organization" size="0.85rem" />
             </Button>
           </Tip>
-          <Button onClick={() => setAddStatus('triage')} size="sm">
+          <Button onClick={() => setAddStatus('backlog')} size="sm">
             <Codicon name="add" size="0.8rem" />
             {k.newTask}
           </Button>
@@ -1380,7 +1382,7 @@ export function KanbanBoardPage() {
           <div className="flex flex-col items-center gap-2">
             <Codicon className="text-(--ui-text-quaternary)" name="project" size="1.25rem" />
             <p className="text-xs text-(--ui-text-tertiary)">{search || tenant || assignee ? k.noMatch : k.noTasks}</p>
-            <Button className="mt-0.5" onClick={() => setAddStatus('triage')} size="sm" variant="outline">
+            <Button className="mt-0.5" onClick={() => setAddStatus('backlog')} size="sm" variant="outline">
               <Codicon name="add" size="0.75rem" />
               {k.newTask}
             </Button>

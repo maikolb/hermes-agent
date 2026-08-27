@@ -193,6 +193,7 @@ export interface KanbanProfile {
  *  the backend's BOARD_COLUMNS; anything the backend adds renders via the
  *  fallback. */
 export const COLUMN_META: Record<string, { codicon: string; tone: string }> = {
+  backlog: { codicon: 'list-unordered', tone: 'var(--ui-text-quaternary)' },
   triage: { codicon: 'inbox', tone: 'var(--ui-text-tertiary)' },
   todo: { codicon: 'circle-outline', tone: 'var(--ui-text-secondary)' },
   scheduled: { codicon: 'watch', tone: '#a78bfa' },

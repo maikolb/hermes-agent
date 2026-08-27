@@ -344,8 +344,17 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "deterministic branch. See `hermes project list`.")
     p_create.add_argument("--tenant", default=None, help="Tenant namespace")
     p_create.add_argument("--priority", type=int, default=0, help="Priority tiebreaker")
-    p_create.add_argument("--triage", action="store_true",
-                          help="Park in triage — a specifier will flesh out the spec and promote to todo")
+    create_intake = p_create.add_mutually_exclusive_group()
+    create_intake.add_argument(
+        "--backlog",
+        action="store_true",
+        help="Park in backlog awaiting human approval; no automation touches it",
+    )
+    create_intake.add_argument(
+        "--triage",
+        action="store_true",
+        help="Park in triage — a specifier will flesh out the spec and promote to todo",
+    )
     p_create.add_argument("--idempotency-key", default=None,
                           help="Dedup key. If a non-archived task with this key exists, "
                                "its id is returned instead of creating a duplicate.")
@@ -1577,6 +1586,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             priority=args.priority,
             parents=tuple(args.parent or ()),
             triage=bool(getattr(args, "triage", False)),
+            backlog=bool(getattr(args, "backlog", False)),
             idempotency_key=getattr(args, "idempotency_key", None),
             max_runtime_seconds=max_runtime,
             skills=getattr(args, "skills", None) or None,
@@ -1594,7 +1604,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
 
         # Warn when the task would sit in `ready` because no dispatcher is
-        # present. Only warn on ready+assigned tasks — triage/todo are
+        # present. Only warn on ready+assigned tasks — backlog/triage/todo are
         # expected to sit idle until promoted, and unassigned tasks
         # can't be dispatched. Skipped in --json mode so the stdout
         # stream stays strictly machine-parseable for callers (the JSON
@@ -2924,7 +2934,10 @@ def _cmd_stats(args: argparse.Namespace) -> int:
         print(json.dumps(stats, indent=2, ensure_ascii=False))
         return 0
     print("By status:")
-    for k in ("triage", "todo", "scheduled", "ready", "running", "blocked", "done"):
+    for k in (
+        "backlog", "triage", "todo", "scheduled", "ready",
+        "running", "blocked", "review", "done",
+    ):
         print(f"  {k:8s}  {stats['by_status'].get(k, 0)}")
     if stats["by_assignee"]:
         print("\nBy assignee:")

@@ -24,6 +24,7 @@ def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     return home
@@ -111,6 +112,18 @@ def _run_cli(*argv: str) -> int:
 
 
 
+def test_cli_create_backlog(kanban_home, capsys):
+    assert _run_cli("create", "needs approval", "--backlog", "--json") == 0
+    created = jsonlib.loads(capsys.readouterr().out)
+    assert created["status"] == "backlog"
+
+
+def test_cli_create_rejects_backlog_with_triage():
+    with pytest.raises(SystemExit) as exc:
+        _run_cli("create", "ambiguous", "--backlog", "--triage")
+    assert exc.value.code == 2
+
+
 def test_cli_specify_tenant_filter(kanban_home, capsys):
     with kb.connect() as conn:
         outside = kb.create_task(conn, title="outside", triage=True)
@@ -138,3 +151,21 @@ def test_cli_specify_tenant_filter(kanban_home, capsys):
         assert kb.get_task(conn, inside).status in {"todo", "ready"}
 
 
+def test_cli_specify_all_triage_does_not_touch_backlog(kanban_home, capsys):
+    with kb.connect() as conn:
+        triage_id = kb.create_task(conn, title="needs a spec", triage=True)
+        backlog_id = kb.create_task(conn, title="not approved", backlog=True)
+
+    content = jsonlib.dumps({"title": "specified", "body": "body"})
+    patcher, _ = _patch_aux_client(content)
+    with patcher:
+        assert _run_cli("specify", "--all", "--json") == 0
+
+    rows = [
+        jsonlib.loads(line)
+        for line in capsys.readouterr().out.strip().splitlines()
+        if line
+    ]
+    assert {row["task_id"] for row in rows} == {triage_id}
+    with kb.connect() as conn:
+        assert kb.get_task(conn, backlog_id).status == "backlog"

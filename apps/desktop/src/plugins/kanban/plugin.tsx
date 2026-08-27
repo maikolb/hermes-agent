@@ -99,7 +99,7 @@ const plugin: HermesPlugin = {
     // `alt` only for the `mod+alt+1…9` profile slots, never with a letter. That
     // makes ⌘⌥<letter> the natural namespace for plugin commands.
     const newTask = () => {
-      $newTaskLane.set('triage')
+      $newTaskLane.set('backlog')
       host.navigate('/kanban')
     }
 
@@ -139,7 +139,7 @@ const plugin: HermesPlugin = {
           id: 'kanban.newTask',
           action: 'kanban.newTask',
           label: ctx.i18n.t('newTaskCommand'),
-          keywords: ['kanban', 'task', 'new', 'create', 'triage'],
+          keywords: ['kanban', 'task', 'new', 'create', 'backlog'],
           run: newTask
         } satisfies PaletteContribution
       },

@@ -149,7 +149,8 @@ def _conn(board: Optional[str] = None):
 # tasks into ``todo`` and makes the dashboard look like the Scheduled column
 # disappeared.
 BOARD_COLUMNS: list[str] = [
-    "triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done",
+    "backlog", "triage", "todo", "scheduled", "ready",
+    "running", "blocked", "review", "done",
 ]
 
 
@@ -605,6 +606,7 @@ class CreateTaskBody(BaseModel):
     workspace_kind: str = "scratch"
     workspace_path: Optional[str] = None
     parents: list[str] = Field(default_factory=list)
+    backlog: bool = False
     triage: bool = False
     idempotency_key: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
@@ -637,6 +639,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             tenant=payload.tenant,
             priority=payload.priority,
             parents=payload.parents,
+            backlog=payload.backlog,
             triage=payload.triage,
             idempotency_key=payload.idempotency_key,
             max_runtime_seconds=payload.max_runtime_seconds,
@@ -654,7 +657,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
         # Surface a dispatcher-presence warning so the UI can show a
         # banner when a `ready` task would otherwise sit idle because no
         # gateway is running (or dispatch_in_gateway=false). Only emit
-        # for ready+assigned tasks; triage/todo are expected to wait,
+        # for ready+assigned tasks; backlog/triage/todo are expected to wait,
         # and unassigned tasks can't be dispatched regardless.
         if task and task.status == "ready" and task.assignee:
             try:
@@ -941,9 +944,9 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     status_code=400,
                     detail="Cannot set status to 'running' directly; use the dispatcher/claim path",
                 )
-            elif s in ("todo", "triage", "scheduled"):
+            elif s in ("backlog", "todo", "triage", "scheduled"):
                 # Only a review task moving to 'todo' needs the reopen
-                # transition; fetch lazily so triage/scheduled skip the query.
+                # transition; fetch lazily so backlog/triage/scheduled skip the query.
                 current = kanban_db.get_task(conn, task_id) if s == "todo" else None
                 reopened = _reopen_if_review(conn, task_id, current)
                 ok = reopened if reopened is not None else _set_status_direct(conn, task_id, s)
@@ -1384,7 +1387,7 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                         continue
                     elif s == "scheduled":
                         ok = kanban_db.schedule_task(conn, tid)
-                    elif s in {"todo", "triage"}:
+                    elif s in {"backlog", "todo", "triage"}:
                         # Fetch lazily: only review->todo needs reopen.
                         cur = kanban_db.get_task(conn, tid) if s == "todo" else None
                         reopened = _reopen_if_review(conn, tid, cur)

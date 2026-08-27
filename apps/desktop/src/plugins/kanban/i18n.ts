@@ -16,7 +16,16 @@ type KanbanMessages = {
   newTaskCommand: string
   countTip: (running: number, ready: number) => string
   col: Record<
-    'archived' | 'blocked' | 'done' | 'ready' | 'review' | 'running' | 'scheduled' | 'todo' | 'triage',
+    | 'archived'
+    | 'backlog'
+    | 'blocked'
+    | 'done'
+    | 'ready'
+    | 'review'
+    | 'running'
+    | 'scheduled'
+    | 'todo'
+    | 'triage',
     { label: string; help: string }
   >
   locked: { review: string; running: string; scheduled: string }
@@ -204,6 +213,7 @@ export const en: KanbanMessages = {
   newTaskCommand: 'Kanban: New task',
   countTip: (running, ready) => `Kanban — ${running} running, ${ready} ready`,
   col: {
+    backlog: { label: 'Backlog', help: 'Registered tasks awaiting human approval; automation leaves them untouched.' },
     triage: { label: 'Triage', help: 'Raw ideas — a specifier fleshes out the spec.' },
     todo: { label: 'Todo', help: 'Waiting on dependencies, or unassigned.' },
     scheduled: { label: 'Scheduled', help: 'Waiting for a scheduled time to arrive.' },
@@ -406,6 +416,7 @@ const ja: KanbanMessages = {
   newTaskCommand: 'カンバン: 新しいタスク',
   countTip: (running, ready) => `カンバン — 実行中 ${running}、待機 ${ready}`,
   col: {
+    backlog: { label: 'Backlog', help: '人間の承認待ちとして登録されたタスク。自動処理の対象外です。' },
     triage: { label: 'トリアージ', help: '生のアイデア — スペシファイアが仕様に整えます。' },
     todo: { label: 'Todo', help: '依存関係の待ち、または未割り当て。' },
     scheduled: { label: 'スケジュール', help: '予定時刻を待っています。' },
@@ -607,6 +618,7 @@ const zh: KanbanMessages = {
   newTaskCommand: '看板：新建任务',
   countTip: (running, ready) => `看板 — 运行中 ${running}、就绪 ${ready}`,
   col: {
+    backlog: { label: 'Backlog', help: '已登记但等待人工批准的任务；自动化不会处理。' },
     triage: { label: '分诊', help: '原始想法 — 由细化代理整理出规格。' },
     todo: { label: '待办', help: '等待依赖，或未分配。' },
     scheduled: { label: '已排期', help: '等待预定时间到来。' },
@@ -805,6 +817,7 @@ const zhHant: KanbanMessages = {
   newTaskCommand: '看板：新增任務',
   countTip: (running, ready) => `看板 — 執行中 ${running}、就緒 ${ready}`,
   col: {
+    backlog: { label: 'Backlog', help: '已登記但等待人工核准的任務；自動化不會處理。' },
     triage: { label: '分類', help: '原始想法 — 由細化代理整理出規格。' },
     todo: { label: '待辦', help: '等待相依項目，或未指派。' },
     scheduled: { label: '已排程', help: '等待預定時間到來。' },
@@ -997,8 +1010,19 @@ const zhHant: KanbanMessages = {
   }
 }
 
+const ptBR: KanbanMessages = {
+  ...en,
+  col: {
+    ...en.col,
+    backlog: {
+      label: 'Backlog',
+      help: 'Tarefas registradas aguardando aprovação humana; nenhuma automação as processa.'
+    }
+  }
+}
+
 /** Registered via `ctx.i18n.register` at plugin load (disposer tracked). */
-export const KANBAN_LOCALES: PluginLocaleBundles = { en, ja, zh, 'zh-hant': zhHant }
+export const KANBAN_LOCALES: PluginLocaleBundles = { en, ja, zh, 'zh-hant': zhHant, 'pt-BR': ptBR }
 
 // Bind the message SHAPE to a plugin translator: string leaves resolve now,
 // function leaves forward their args through t(path, …). One tiny generic
