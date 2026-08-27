@@ -565,6 +565,51 @@ class TestCallbackPortReservation:
         assert result.code == "flowA"
         assert result.state == "sA"
 
+    def test_waiter_reentry_shares_live_listener(self, monkeypatch):
+        """Retrying the same flow's waiter must not bind its port again.
+
+        The first pass consumes the reservation and starts a live listener;
+        an MCP-client retry re-enters the waiter with the same port. Before
+        the fix, the second pass called ``server_bind()`` against its own
+        live socket and aborted with ``[Errno 98] Address already in use``
+        on Linux (observed twice on the headless VPS on 2026-08-26; Windows
+        masks the self-collision via SO_REUSEADDR). Re-entry now shares the
+        live listener and result, so both callers resolve with the same
+        authorization code and the flow deregisters cleanly.
+        """
+        import asyncio
+        import threading
+        import tools.mcp_oauth as mod
+
+        monkeypatch.setattr(mod, "_is_interactive", lambda: False)
+        monkeypatch.setattr(mod, "_raise_if_non_interactive", lambda lead: None)
+
+        cfg: dict = {"cimd": False}
+        port = mod._configure_callback_port(cfg)
+        waiter = mod._make_callback_waiter(port)
+
+        async def drive():
+            first = asyncio.create_task(waiter())
+            await asyncio.sleep(1.0)  # first pass is listening
+            assert port in mod._active_callback_flows
+            second = asyncio.create_task(waiter())  # retry — must not collide
+            await asyncio.sleep(0.5)
+            threading.Thread(
+                target=_hit_callback_when_ready,
+                args=(f"http://127.0.0.1:{port}/callback?code=retry42&state=sR",),
+                daemon=True,
+            ).start()
+            return await asyncio.wait_for(
+                asyncio.gather(first, second), timeout=20
+            )
+
+        res_first, res_second = asyncio.run(drive())
+        assert res_first.code == res_second.code == "retry42"
+        assert res_first.state == res_second.state == "sR"
+        # The owning waiter deregistered the flow on exit.
+        assert port not in mod._active_callback_flows
+        assert port not in mod._reserved_sockets
+
 
 # ---------------------------------------------------------------------------
 # remove_oauth_tokens
