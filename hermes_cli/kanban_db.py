@@ -103,7 +103,10 @@ _log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
+VALID_STATUSES = {
+    "backlog", "triage", "todo", "scheduled", "ready",
+    "running", "blocked", "review", "done", "archived",
+}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
 # Typed block reasons. Distinguishes the two fundamentally different things a
@@ -3732,6 +3735,7 @@ def create_task(
     priority: int = 0,
     parents: Iterable[str] = (),
     triage: bool = False,
+    backlog: bool = False,
     idempotency_key: Optional[str] = None,
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
@@ -3753,7 +3757,9 @@ def create_task(
     parents (or all parents already ``done``), otherwise ``todo``.
     If ``triage=True``, status is forced to ``triage`` regardless of
     parents — a specifier/triager is expected to promote the task to
-    ``todo`` once the spec is fleshed out.
+    ``todo`` once the spec is fleshed out. If ``backlog=True``, status is
+    forced to ``backlog`` so no automation touches the task before a human
+    approves it by moving it to ``todo`` or ``triage``.
 
     If ``idempotency_key`` is provided and a non-archived task with the
     same key already exists, returns the existing task's id instead of
@@ -3789,6 +3795,8 @@ def create_task(
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
+    if triage and backlog:
+        raise ValueError("triage and backlog are mutually exclusive")
     if provider_override and not model_override:
         raise ValueError("provider_override requires a model_override")
     assignee = _canonical_assignee(assignee)
@@ -4005,14 +4013,16 @@ def create_task(
             # dispatcher can never observe a partially constructed graph.
             with write_txn(conn, allow_nested=True):
                 # Determine task status from parent status, unless the caller
-                # parks it directly in blocked for human-ops review or in
-                # triage for a specifier.
+                # parks it directly in blocked for human-ops review, backlog
+                # pending approval, or triage for a specifier.
                 if initial_status == "blocked":
                     task_status = "blocked"
                     if parents:
                         missing = _find_missing_parents(conn, parents)
                         if missing:
                             raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
+                elif backlog:
+                    task_status = "backlog"
                 elif triage:
                     task_status = "triage"
                 else:
@@ -4029,9 +4039,9 @@ def create_task(
                         ).fetchall()
                         if any(r["status"] != "done" for r in rows):
                             task_status = "todo"
-                # Even in triage mode we still need to validate parent ids
-                # so the eventual link rows don't dangle.
-                if triage and parents:
+                # Even in backlog/triage mode we still need to validate parent
+                # ids so the eventual link rows don't dangle.
+                if (backlog or triage) and parents:
                     missing = _find_missing_parents(conn, parents)
                     if missing:
                         raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
@@ -5704,7 +5714,8 @@ def reclaim_task(
     reclaimable state (not running, or doesn't exist).
     """
     row = conn.execute(
-        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
+        "SELECT status, claim_lock, worker_pid FROM tasks "
+        "WHERE id = ? AND status IN ('running', 'ready', 'blocked')",
         (task_id,),
     ).fetchone()
     if not row:
@@ -8074,7 +8085,8 @@ def block_task(
     recurrences = 0
     with write_txn(conn):
         cur_row = conn.execute(
-            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
+            "SELECT status, block_kind, block_recurrences FROM tasks "
+            "WHERE id = ? AND status IN ('running', 'ready')",
             (task_id,),
         ).fetchone()
         if cur_row is None:
@@ -8781,7 +8793,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     now = int(time.time())
     with write_txn(conn):
         current = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?",
+            "SELECT status FROM tasks WHERE id = ? "
+            "AND status IN ('blocked', 'scheduled')",
             (task_id,),
         ).fetchone()
         resume_status = (
@@ -9259,7 +9272,7 @@ def decompose_triage_task(
     with write_txn(conn):
         root_row = conn.execute(
             "SELECT id, status, tenant, workspace_kind, workspace_path "
-            "FROM tasks WHERE id = ?",
+            "FROM tasks WHERE id = ? AND status = 'triage'",
             (task_id,),
         ).fetchone()
         if root_row is None:

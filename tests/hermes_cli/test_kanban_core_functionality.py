@@ -22,6 +22,28 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli import kanban_db as kb
+
+
+def test_valid_statuses_include_backlog():
+    assert "backlog" in kb.VALID_STATUSES
+
+
+def test_automation_paths_ignore_backlog(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="awaiting approval",
+            assignee="worker",
+            backlog=True,
+        )
+
+        kb.recompute_ready(conn)
+        assert kb.claim_task(conn, task_id) is None
+        assert kb.block_task(conn, task_id, reason="must remain untouched") is False
+        assert kb.schedule_task(conn, task_id) is False
+        assert kb.reclaim_task(conn, task_id) is False
+        assert kb.unblock_task(conn, task_id) is False
+        assert kb.get_task(conn, task_id).status == "backlog"
 from hermes_cli.kanban import run_slash
 
 
@@ -34,6 +56,7 @@ def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     # Existing crash-detection tests pre-date the grace window; pin to 0
     # so they keep their immediate-reclaim semantics.
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
@@ -1406,5 +1429,3 @@ def test_notify_sub_starts_caught_up_on_active_task(kanban_home):
         assert events == [], "historical events must not replay to a new sub"
     finally:
         conn.close()
-
-

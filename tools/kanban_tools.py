@@ -1683,6 +1683,11 @@ def _handle_create(args: dict, **kw) -> str:
     triage, bool_error = _parse_bool_arg(args, "triage")
     if bool_error:
         return tool_error(bool_error)
+    backlog, bool_error = _parse_bool_arg(args, "backlog")
+    if bool_error:
+        return tool_error(bool_error)
+    if triage and backlog:
+        return tool_error("'triage' and 'backlog' are mutually exclusive")
     idempotency_key = args.get("idempotency_key")
     if idempotency_key is None or not str(idempotency_key).strip():
         from gateway.session_context import get_session_env
@@ -1789,6 +1794,7 @@ def _handle_create(args: dict, **kw) -> str:
                 project_id=project_id,
                 project_source_task_id=project_source_task_id,
                 triage=triage,
+                backlog=backlog,
                 idempotency_key=idempotency_key,
                 max_runtime_seconds=(
                     int(max_runtime_seconds)
@@ -2082,8 +2088,8 @@ KANBAN_LIST_SCHEMA = {
             "status": {
                 "type": "string",
                 "enum": [
-                    "triage", "todo", "ready", "running",
-                    "blocked", "done", "archived",
+                    "backlog", "triage", "todo", "scheduled", "ready",
+                    "running", "blocked", "review", "done", "archived",
                 ],
                 "description": "Optional task status filter.",
             },
@@ -2593,12 +2599,22 @@ KANBAN_CREATE_SCHEMA = {
                     "worktree inside a bound project Topic; otherwise false."
                 ),
             },
+            "backlog": {
+                "type": "boolean",
+                "description": (
+                    "If true, task lands in 'backlog' awaiting human approval. "
+                    "No dispatcher, specifier, decomposer, scheduler, or reclaim "
+                    "automation touches backlog tasks. Mutually exclusive with "
+                    "'triage'."
+                ),
+            },
             "triage": {
                 "type": "boolean",
                 "description": (
                     "If true, task lands in 'triage' instead of 'todo' "
                     "— a specifier profile is expected to flesh out "
-                    "the body before work starts."
+                    "the body before work starts. Mutually exclusive with "
+                    "'backlog'."
                 ),
             },
             "idempotency_key": {

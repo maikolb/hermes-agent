@@ -153,12 +153,14 @@ def specify_task(
     ``--all`` sweep can continue past individual failures.
     """
     with kb.connect_closing() as conn:
-        task = kb.get_task(conn, task_id)
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ? AND status = 'triage'",
+            (task_id,),
+        ).fetchone()
+        task = kb.Task.from_row(row) if row else None
     if task is None:
-        return SpecifyOutcome(task_id, False, "unknown task id")
-    if task.status != "triage":
         return SpecifyOutcome(
-            task_id, False, f"task is not in triage (status={task.status!r})"
+            task_id, False, "task is not in triage or does not exist"
         )
 
     try:
