@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 from gateway.run import (
     GatewayRunner,
+    _append_principal_worker_activity,
+    _append_worker_rotation_summary,
     _resolve_activity_indicator_settings,
     _render_activity_indicator_template,
     _upsert_activity_indicator_message,
@@ -72,6 +74,93 @@ def test_activity_indicator_defaults_preserve_existing_cadence():
     assert settings.update_interval_seconds == 180
     assert settings.initial_text is None
     assert settings.elapsed_text is None
+    assert settings.worker_rotation is False
+
+
+def test_worker_rotation_resolves_global_platform_and_legacy_fallbacks():
+    config = {
+        "display": {
+            "worker_rotation": "true",
+            "platforms": {"telegram": {"worker_rotation": "off"}},
+        },
+        "kanban": {"worker_focus_handoff": True},
+    }
+
+    assert (
+        _resolve_activity_indicator_settings(config, "telegram", 180).worker_rotation
+        is False
+    )
+    assert (
+        _resolve_activity_indicator_settings(config, "discord", 180).worker_rotation
+        is True
+    )
+    assert _resolve_activity_indicator_settings(
+        {"kanban": {"worker_focus_handoff": True}},
+        "telegram",
+        180,
+    ).worker_rotation is True
+    assert _resolve_activity_indicator_settings(
+        {
+            "display": {"worker_rotation": False},
+            "kanban": {"worker_focus_handoff": True},
+        },
+        "telegram",
+        180,
+    ).worker_rotation is False
+
+
+def test_principal_activity_aggregates_only_same_project_workers():
+    runner = object.__new__(GatewayRunner)
+    runner._active_profile_name = lambda: "hermes-project-factory"
+    destination = (
+        "project-factory",
+        "telegram",
+        "-1001",
+        "77",
+        "hermes-project-factory",
+    )
+
+    def row(task_id, *, project="project-a", session="session-a"):
+        return {
+            "task": SimpleNamespace(
+                id=task_id,
+                project_id=project,
+                session_id=session,
+            )
+        }
+
+    runner._kanban_worker_focus_active = {
+        destination: {
+            "t_oldest": row("t_oldest"),
+            "t_next": row("t_next"),
+            "t_other_project": row("t_other_project", project="project-b"),
+        },
+        (
+            "other-board",
+            "telegram",
+            "-1001",
+            "77",
+            "hermes-project-factory",
+        ): {"t_other_board": row("t_other_board")},
+    }
+    source = SimpleNamespace(
+        platform=SimpleNamespace(value="telegram"),
+        chat_id="-1001",
+        thread_id="77",
+        profile=None,
+    )
+
+    rendered = _append_principal_worker_activity(
+        runner,
+        source,
+        "⏳ Trabalhando há 12 min",
+        board="project-factory",
+        project_id="project-a",
+        session_id="session-a",
+    )
+
+    assert rendered == "⏳ Trabalhando há 12 min · principal + 2 workers"
+    assert _append_worker_rotation_summary("unchanged", 0) == "unchanged"
 
 
 def test_activity_indicator_platform_config_overrides_global_config():

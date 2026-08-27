@@ -14,8 +14,10 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import sqlite3
 import time
+import unicodedata
 from contextvars import Context
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -34,6 +36,84 @@ _WORKER_FOCUS_MAX_OUTPUT_CHARS = 2800
 _WORKER_FOCUS_ANSI_RE = re.compile(
     r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"
 )
+
+_PARALLEL_TASK_PREFIX_RE = re.compile(
+    r"^(?:por\s+favor\s+)?(?:"
+    r"investig(?:a|ar|ue)|implemente?|implementa|implementar|crie?|criar|"
+    r"analise?|analisar|pesquise?|pesquisar|revise?|revisar|"
+    r"teste?|testar|documente?|documentar|prepare?|preparar|"
+    r"corrija?|corrigir|conserte?|consertar|"
+    r"investigate|implement|create|analy[sz]e|research|review|"
+    r"test|document|prepare|fix|build|add"
+    r")\b",
+    re.IGNORECASE,
+)
+_PARALLEL_EXPLICIT_RE = re.compile(
+    r"\b(?:nova\s+tarefa|outra\s+tarefa|em\s+paralelo|parallel(?:ly)?|"
+    r"separate\s+task|new\s+task)\b",
+    re.IGNORECASE,
+)
+_STEER_REFERENCE_RE = re.compile(
+    r"\b(?:isso|isto|esse|essa|esses|essas|aquilo|"
+    r"o\s+que\s+voce|que\s+voce|que\s+acabou|acabou\s+de|"
+    r"ultima\s+(?:mudanca|alteracao)|mudanca\s+anterior|"
+    r"this|that|what\s+you|you\s+just|last\s+change|previous\s+change)\b",
+    re.IGNORECASE,
+)
+_STEER_ACTION_RE = re.compile(
+    r"^(?:por\s+favor\s+)?(?:"
+    r"reverta?|reverter|desfaca?|desfazer|volte?|voltar|"
+    r"ajuste?|ajustar|mude?|mudar|troque?|trocar|"
+    r"continue?|continuar|pare?|parar|ignore?|ignorar|"
+    r"undo|revert|roll\s+back|change|adjust|continue|stop|ignore"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _fold_parallel_intake_text(value: Any) -> str:
+    """Normalize accents/case without changing the user text persisted to Kanban."""
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch)).strip()
+
+
+def _classify_parallel_intake_message(text: Any) -> str:
+    """Classify a busy follow-up as ``new_task`` or ``steer``.
+
+    The classifier is deliberately deterministic and conservative: explicit
+    parallel/new-task language wins, deictic corrections stay attached to the
+    current run, and otherwise only action-oriented task requests fan out.
+    Unknown conversational follow-ups retain the established steer behavior.
+    """
+    folded = _fold_parallel_intake_text(text)
+    if not folded or folded.startswith("/"):
+        return "steer"
+    if _PARALLEL_EXPLICIT_RE.search(folded):
+        return "new_task"
+    if _STEER_ACTION_RE.search(folded) and _STEER_REFERENCE_RE.search(folded):
+        return "steer"
+    if _STEER_REFERENCE_RE.search(folded) and re.match(
+        r"^(?:corrija?|corrigir|fix|conserte?|consertar)\b",
+        folded,
+        re.IGNORECASE,
+    ):
+        return "steer"
+    return "new_task" if _PARALLEL_TASK_PREFIX_RE.search(folded) else "steer"
+
+
+def _resolve_parallel_by_default(config: Any, platform_key: str = "telegram") -> bool:
+    """Resolve the profile gate, preserving an explicit false.
+
+    Profiles that already opted into Part 1 worker rotation inherit the Part 2
+    default until they explicitly set ``dispatch.parallel_by_default``. This
+    makes the NF/PF rollout cohesive while every other profile keeps the old
+    busy-input behavior.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    dispatch_cfg = cfg.get("dispatch")
+    if isinstance(dispatch_cfg, dict) and "parallel_by_default" in dispatch_cfg:
+        return dispatch_cfg.get("parallel_by_default") is True
+    return _resolve_worker_focus_handoff(lambda: cfg, platform_key)
 
 
 def _resolve_auto_decompose_settings(
@@ -83,14 +163,72 @@ def _resolve_agent_wake_on_events(load_config: Callable[[], Any]) -> bool:
     return kcfg.get("agent_wake_on_events") is True
 
 
-def _resolve_worker_focus_handoff(load_config: Callable[[], Any]) -> bool:
-    """Opt-in, local-only focus handoff; false on missing or invalid config."""
+def _resolve_worker_focus_handoff(
+    load_config: Callable[[], Any],
+    platform_key: str = "telegram",
+) -> bool:
+    """Compatibility wrapper for the profile/platform worker-rotation gate."""
     try:
         cfg = load_config()
     except Exception:
         return False
-    kcfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-    return kcfg.get("worker_focus_handoff") is True
+    try:
+        from gateway.run import _resolve_activity_indicator_settings
+
+        return _resolve_activity_indicator_settings(
+            cfg if isinstance(cfg, dict) else {},
+            platform_key,
+            180.0,
+        ).worker_rotation
+    except Exception:
+        return False
+
+
+def _load_worker_focus_config(
+    profile_name: Optional[str],
+    load_default: Callable[[], Any],
+) -> dict:
+    """Load raw display config for the subscription's owning profile."""
+    profile = str(profile_name or "").strip()
+    if profile:
+        try:
+            from gateway.run import _load_gateway_config
+            from hermes_cli.profiles import get_profile_dir
+
+            config_path = get_profile_dir(profile) / "config.yaml"
+            if config_path.exists():
+                config = _load_gateway_config(config_path)
+                return config if isinstance(config, dict) else {}
+        except Exception:
+            logger.debug(
+                "kanban worker rotation: profile config read failed for %s",
+                profile,
+                exc_info=True,
+            )
+        # A multiplexed subscription must never inherit another profile's
+        # display authority when its own config is absent or unreadable.
+        return {}
+    else:
+        # ``load_config()`` includes DEFAULT_CONFIG.  Reading the raw gateway
+        # config first preserves the distinction between an explicit
+        # ``display.worker_rotation: false`` and an absent key that should
+        # still honor the legacy ``kanban.worker_focus_handoff: true`` gate.
+        try:
+            from gateway.run import _load_gateway_config
+
+            config = _load_gateway_config()
+            if isinstance(config, dict) and config:
+                return config
+        except Exception:
+            logger.debug(
+                "kanban worker rotation: default raw config read failed",
+                exc_info=True,
+            )
+    try:
+        config = load_default()
+    except Exception:
+        return {}
+    return config if isinstance(config, dict) else {}
 
 
 def _kanban_worker_focus_key(board: str, sub: dict) -> tuple[str, str, str, str, str]:
@@ -101,6 +239,42 @@ def _kanban_worker_focus_key(board: str, sub: dict) -> tuple[str, str, str, str,
         str(sub.get("thread_id") or ""),
         str(sub.get("notifier_profile") or ""),
     )
+
+
+def _kanban_worker_spawn_order(task: Any) -> tuple[int, int, float, str]:
+    """Order current attempts by their canonical run/spawn id."""
+    try:
+        run_id = int(getattr(task, "current_run_id", 0) or 0)
+    except (TypeError, ValueError):
+        run_id = 0
+    try:
+        started_at = float(getattr(task, "started_at", 0) or 0)
+    except (TypeError, ValueError):
+        started_at = 0.0
+    if run_id > 0:
+        return (0, run_id, started_at, str(getattr(task, "id", "") or ""))
+    return (1, 0, started_at, str(getattr(task, "id", "") or ""))
+
+
+def _kanban_worker_matches_scope(
+    task: Any,
+    *,
+    project_id: str = "",
+    session_id: str = "",
+    session_only: bool = False,
+) -> bool:
+    """Match a worker to proven project/session ownership, failing closed."""
+    wanted_project = str(project_id or "")
+    wanted_session = str(session_id or "")
+    task_project = str(getattr(task, "project_id", "") or "")
+    task_session = str(getattr(task, "session_id", "") or "")
+    if wanted_project:
+        if task_project:
+            return task_project == wanted_project
+        return bool(wanted_session and task_session == wanted_session)
+    if session_only:
+        return bool(wanted_session and task_session == wanted_session)
+    return True
 
 
 def _render_kanban_worker_focus(task: Any, *, board: str, active_count: int) -> str:
@@ -118,7 +292,13 @@ def _render_kanban_worker_focus(task: Any, *, board: str, active_count: int) -> 
     )
 
 
-def _render_kanban_worker_focus_output(raw_log: Any, *, task_id: str) -> str:
+def _render_kanban_worker_focus_output(
+    raw_log: Any,
+    *,
+    task_id: str,
+    include_tool_progress: bool = True,
+    include_reasoning: bool = True,
+) -> str:
     """Project the latest worker attempt into one bounded, redacted message."""
     if not raw_log:
         return ""
@@ -140,7 +320,8 @@ def _render_kanban_worker_focus_output(raw_log: Any, *, task_id: str) -> str:
         reasoning = " ".join(reasoning_lines).strip()
         if len(reasoning) > _WORKER_FOCUS_MAX_REASONING_CHARS:
             reasoning = reasoning[:_WORKER_FOCUS_MAX_REASONING_CHARS].rstrip() + "..."
-        items.append(f"Reasoning: {reasoning}")
+        if include_reasoning:
+            items.append(f"Reasoning: {reasoning}")
         reasoning_lines = []
 
     for raw_line in text.splitlines():
@@ -160,7 +341,9 @@ def _render_kanban_worker_focus_output(raw_log: Any, *, task_id: str) -> str:
             if cleaned and cleaned != "Reasoning":
                 reasoning_lines.append(cleaned)
             continue
-        if line.startswith("┊") or line.startswith("⚠"):
+        if include_tool_progress and (
+            line.startswith("┊") or line.startswith("⚠")
+        ):
             if len(line) > _WORKER_FOCUS_MAX_LINE_CHARS:
                 line = line[:_WORKER_FOCUS_MAX_LINE_CHARS].rstrip() + "..."
             items.append(line)
@@ -328,6 +511,409 @@ class GatewayKanbanWatchersMixin:
         self._kanban_dispatcher_lock_handle = None
         _release_singleton_lock(handle)
 
+    def _kanban_parallel_dispatch_config(self, source: Any) -> dict:
+        """Load the raw config owned by the inbound message's profile."""
+        profile = str(getattr(source, "profile", "") or "").strip() or None
+        try:
+            from gateway.run import _load_gateway_config
+
+            return _load_worker_focus_config(profile, _load_gateway_config)
+        except Exception:
+            logger.debug(
+                "parallel intake: profile config read failed",
+                exc_info=True,
+            )
+            return {}
+
+    def _kanban_parallel_dispatch_assignee(
+        self,
+        source: Any,
+        config: dict,
+    ) -> str:
+        """Resolve the existing dispatcher route for a new parallel card."""
+        kanban_cfg = config.get("kanban") if isinstance(config, dict) else None
+        if isinstance(kanban_cfg, dict):
+            configured = str(kanban_cfg.get("default_assignee") or "").strip()
+            if configured:
+                return configured
+        routed = str(getattr(source, "profile", "") or "").strip()
+        if routed:
+            return routed
+        try:
+            return str(self._active_profile_name() or "default")
+        except Exception:
+            return "default"
+
+    @staticmethod
+    def _kanban_parallel_queue_state(
+        board: str,
+        task_id: str,
+        assignee: str,
+        config: dict,
+    ) -> tuple[bool, int]:
+        """Return ``(capacity_reached, ready_position)`` for one new card."""
+        from hermes_cli import kanban_db as _kb
+
+        kcfg = config.get("kanban") if isinstance(config, dict) else None
+        kcfg = kcfg if isinstance(kcfg, dict) else {}
+
+        def _positive_int(value: Any) -> Optional[int]:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed > 0 else None
+
+        conn = _kb.connect(board=board or None)
+        try:
+            ready = conn.execute(
+                "SELECT id FROM tasks WHERE status = 'ready' "
+                "AND claim_lock IS NULL ORDER BY priority DESC, created_at ASC"
+            ).fetchall()
+            position = next(
+                (index for index, row in enumerate(ready, start=1) if row["id"] == task_id),
+                0,
+            )
+            running = _kb.count_running_tasks(conn)
+            at_capacity = False
+            max_spawn = _positive_int(kcfg.get("max_spawn"))
+            if max_spawn is not None and running >= max_spawn:
+                at_capacity = True
+
+            configured_max = _positive_int(kcfg.get("max_in_progress"))
+            effective_max = _kb.resolve_max_in_progress(configured_max)
+            if effective_max is not None:
+                host_running = running + _kb.count_running_tasks_other_boards(
+                    board or None
+                )
+                if host_running >= effective_max:
+                    at_capacity = True
+
+            per_profile = _positive_int(kcfg.get("max_in_progress_per_profile"))
+            if per_profile is not None and assignee:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM tasks "
+                    "WHERE status = 'running' AND assignee = ?",
+                    (assignee,),
+                ).fetchone()
+                if int(row["n"] if row else 0) >= per_profile:
+                    at_capacity = True
+            return at_capacity, position
+        finally:
+            conn.close()
+
+    async def _kanban_parallel_dispatch_busy_message(
+        self,
+        event: Any,
+        session_key: str,
+    ) -> bool:
+        """Turn an independent busy-topic request into a subscribed Kanban card."""
+        source = getattr(event, "source", None)
+        if source is None or getattr(event, "internal", False):
+            return False
+        if not str(getattr(source, "thread_id", "") or "").strip():
+            return False
+        text = str(getattr(event, "text", "") or "").strip()
+        if _classify_parallel_intake_message(text) != "new_task":
+            return False
+
+        config = self._kanban_parallel_dispatch_config(source)
+        platform = getattr(getattr(source, "platform", None), "value", None)
+        platform_key = str(platform or getattr(source, "platform", "") or "").lower()
+        if not _resolve_parallel_by_default(config, platform_key):
+            return False
+
+        project_context, project_denial = await asyncio.to_thread(
+            self._resolve_project_context_for_message,
+            event,
+            source,
+        )
+        if (
+            project_denial is not None
+            or project_context is None
+            or bool(getattr(project_context, "is_management", False))
+        ):
+            return False
+        board = str(getattr(project_context, "board_slug", "") or "").strip()
+        if not board:
+            return False
+
+        assignee = self._kanban_parallel_dispatch_assignee(source, config)
+        args = [
+            "kanban",
+            "create",
+            text,
+            "--assignee",
+            assignee,
+            "--created-by",
+            "gateway-parallel-intake",
+        ]
+        original_text = event.text
+        try:
+            event.text = "/" + shlex.join(args)
+            output = await self._handle_kanban_command(event)
+        except Exception:
+            logger.warning(
+                "parallel intake: Kanban create failed for session %s",
+                session_key,
+                exc_info=True,
+            )
+            return False
+        finally:
+            event.text = original_text
+
+        match = re.search(r"Created\s+(t_[0-9a-f]+)\b", str(output or ""))
+        if match is None:
+            logger.warning(
+                "parallel intake: Kanban create returned no task id for session %s",
+                session_key,
+            )
+            return False
+        task_id = match.group(1)
+        try:
+            at_capacity, position = await asyncio.to_thread(
+                self._kanban_parallel_queue_state,
+                board,
+                task_id,
+                assignee,
+                config,
+            )
+        except Exception:
+            logger.debug("parallel intake: queue-state read failed", exc_info=True)
+            at_capacity, position = False, 0
+
+        if at_capacity:
+            suffix = f" Ready queue position: {position}." if position else ""
+            message = (
+                f"🧩 Parallel task created: {task_id}. Worker capacity is full; "
+                f"the card remains ready.{suffix}"
+            )
+        else:
+            message = (
+                f"🧩 Parallel task created: {task_id}. "
+                "The dispatcher will start it on its next tick."
+            )
+
+        adapter = self._adapter_for_source(source)
+        if adapter is not None:
+            reply_anchor = self._reply_anchor_for_event(event)
+            try:
+                await adapter._send_with_retry(
+                    chat_id=source.chat_id,
+                    content=message,
+                    reply_to=(
+                        reply_anchor
+                        if platform_key == "telegram"
+                        and getattr(source, "chat_type", "") == "dm"
+                        and getattr(source, "thread_id", None)
+                        else (
+                            None
+                            if platform_key == "telegram"
+                            and getattr(source, "thread_id", None)
+                            else getattr(event, "message_id", None)
+                        )
+                    ),
+                    metadata=self._thread_metadata_for_source(source, reply_anchor),
+                )
+            except Exception:
+                # The card is already durable. Never fall back to steering the
+                # same request merely because its confirmation could not send.
+                logger.warning(
+                    "parallel intake: confirmation failed for %s",
+                    task_id,
+                    exc_info=True,
+                )
+        logger.info(
+            "Parallel intake created %s on board %s for session %s (queued=%s position=%s)",
+            task_id,
+            board,
+            session_key,
+            at_capacity,
+            position,
+        )
+        return True
+
+    def _kanban_worker_display_lane(self, source: Any) -> tuple[str, str, str, str]:
+        """Return the profile-aware presentation lane for one chat source."""
+        try:
+            active_profile = str(self._active_profile_name() or "default")
+        except Exception:
+            active_profile = "default"
+        platform_value = getattr(getattr(source, "platform", None), "value", None)
+        if platform_value is None:
+            platform_value = getattr(source, "platform", "")
+        return (
+            str(platform_value or "").lower(),
+            str(getattr(source, "chat_id", "") or ""),
+            str(getattr(source, "thread_id", "") or ""),
+            str(getattr(source, "profile", "") or active_profile),
+        )
+
+    def _kanban_worker_display_available(
+        self,
+        lane: tuple[str, str, str, str],
+        claim_sequence: int,
+    ) -> bool:
+        """Return whether one captured claim may currently project a worker."""
+        scopes: dict[tuple, dict] = getattr(
+            self, "_kanban_worker_display_scopes", {}
+        )
+        scope = scopes.get(lane)
+        if not scope:
+            return False
+        if int(scope.get("claim_sequence") or 0) != int(claim_sequence or 0):
+            return False
+        principal_session_key = str(
+            scope.get("principal_session_key") or ""
+        ).strip()
+        if not principal_session_key:
+            return False
+        try:
+            return not self._is_session_running(principal_session_key)
+        except Exception:
+            logger.debug("kanban worker focus session probe failed", exc_info=True)
+            return False
+
+    async def _kanban_discard_worker_focus_state(
+        self,
+        state_key: tuple,
+        adapter: Any,
+        sub: dict,
+    ) -> bool:
+        """Delete one focus bubble, retaining state when deletion may retry."""
+        states: dict[tuple, dict] = getattr(self, "_kanban_worker_focus_states", {})
+        state = states.get(state_key)
+        if not state or not state.get("message_id"):
+            states.pop(state_key, None)
+            return True
+        try:
+            result = await adapter.delete_message(
+                sub.get("chat_id") or state.get("sub", {}).get("chat_id"),
+                str(state["message_id"]),
+            )
+        except Exception:
+            logger.debug("kanban worker focus suspension failed", exc_info=True)
+            return False
+        if result is None or result is True or getattr(result, "success", False):
+            states.pop(state_key, None)
+            return True
+        return False
+
+    async def _kanban_claim_worker_display(
+        self,
+        source: Any,
+        *,
+        board: str = "",
+        project_id: str = "",
+        session_id: str = "",
+        principal_session_key: Optional[str] = None,
+        run_generation: Optional[int] = None,
+    ) -> None:
+        """Give a new principal turn ownership and pin its project scope."""
+        lane = self._kanban_worker_display_lane(source)
+        if principal_session_key is None:
+            try:
+                principal_session_key = self._session_key_for_source(source)
+            except Exception:
+                logger.debug(
+                    "kanban worker rotation: principal session key failed",
+                    exc_info=True,
+                )
+                principal_session_key = ""
+        scopes: dict[tuple, dict] = getattr(
+            self, "_kanban_worker_display_scopes", {}
+        )
+        self._kanban_worker_display_scopes = scopes
+        claim_sequence = int(
+            getattr(self, "_kanban_worker_display_claim_sequence", 0) or 0
+        ) + 1
+        self._kanban_worker_display_claim_sequence = claim_sequence
+        scopes[lane] = {
+            "board": str(board or ""),
+            "project_id": str(project_id or ""),
+            "session_id": str(session_id or ""),
+            "principal_session_key": str(principal_session_key or ""),
+            "run_generation": run_generation,
+            "claim_sequence": claim_sequence,
+        }
+
+        # Do not wait for the notifier poll to notice a short principal turn.
+        # Delete any worker bubble now; a transient failure retains state and
+        # the watcher retries before it can resume that worker.
+        states: dict[tuple, dict] = getattr(self, "_kanban_worker_focus_states", {})
+        if not states:
+            return
+        adapter = self._adapter_for_source(source)
+        if adapter is None:
+            return
+        for state_key, state in list(states.items()):
+            normalized_key = state_key[1:] if len(state_key) == 5 else state_key
+            if normalized_key != lane:
+                continue
+            await self._kanban_discard_worker_focus_state(
+                state_key,
+                adapter,
+                state.get("sub") or {},
+            )
+
+    def _kanban_active_worker_count(
+        self,
+        source: Any,
+        *,
+        board: str = "",
+        project_id: str = "",
+        session_id: str = "",
+    ) -> int:
+        """Count active workers owned by this chat/project presentation lane."""
+        active: dict[tuple, dict[str, dict]] = getattr(
+            self, "_kanban_worker_focus_active", {}
+        )
+        if not active:
+            return 0
+        try:
+            active_profile = str(self._active_profile_name() or "default")
+        except Exception:
+            active_profile = "default"
+        platform_value = getattr(getattr(source, "platform", None), "value", None)
+        if platform_value is None:
+            platform_value = getattr(source, "platform", "")
+        destination = (
+            str(platform_value or "").lower(),
+            str(getattr(source, "chat_id", "") or ""),
+            str(getattr(source, "thread_id", "") or ""),
+            str(getattr(source, "profile", "") or active_profile),
+        )
+        wanted_board = str(board or "")
+        wanted_project = str(project_id or "")
+        wanted_session = str(session_id or "")
+        use_session_scope = bool(wanted_session and not wanted_board and not wanted_project)
+        counted: set[tuple[str, str]] = set()
+        for key, bucket in active.items():
+            if len(key) != 5:
+                continue
+            key_board, key_platform, key_chat, key_thread, key_profile = key
+            normalized_key_destination = (
+                str(key_platform or "").lower(),
+                str(key_chat or ""),
+                str(key_thread or ""),
+                str(key_profile or active_profile),
+            )
+            if normalized_key_destination != destination:
+                continue
+            if wanted_board and str(key_board or "") != wanted_board:
+                continue
+            for task_id, row in bucket.items():
+                task = row.get("task") if isinstance(row, dict) else None
+                if not _kanban_worker_matches_scope(
+                    task,
+                    project_id=wanted_project,
+                    session_id=wanted_session,
+                    session_only=use_session_scope,
+                ):
+                    continue
+                counted.add((str(key_board or ""), str(task_id)))
+        return len(counted)
+
     def _kanban_focus_apply_rows(self, rows: list[dict]) -> None:
         """Apply one-time bootstrap rows and lifecycle deltas to local counters."""
         active: dict[tuple, dict[str, dict]] = getattr(
@@ -343,7 +929,7 @@ class GatewayKanbanWatchersMixin:
             rows,
             key=lambda row: (
                 0 if row.get("bootstrap") else 1,
-                int(getattr(row.get("task"), "started_at", 0) or 0),
+                _kanban_worker_spawn_order(row.get("task")),
             ),
         )
         for row in rows:
@@ -353,13 +939,30 @@ class GatewayKanbanWatchersMixin:
                 continue
             key = _kanban_worker_focus_key(row.get("board") or "", sub)
             bucket = active.setdefault(key, {})
-            if row.get("bootstrap") and task.status == "running":
+            has_current_attempt = (
+                task.status == "running"
+                and getattr(task, "current_run_id", None) is not None
+            )
+            if row.get("bootstrap") and has_current_attempt:
                 bucket[task.id] = row
             for event in row.get("events") or []:
                 if event.kind == "claimed":
-                    bucket[task.id] = row
+                    if has_current_attempt:
+                        bucket[task.id] = row
+                    else:
+                        bucket.pop(task.id, None)
                 elif event.kind in terminal_kinds:
                     bucket.pop(task.id, None)
+                elif event.kind in {"status", "unblocked"}:
+                    # Dashboard/direct status changes do not emit a dedicated
+                    # terminal event.  Converge from the fetched task state so
+                    # running -> ready/other cannot leave a ghost worker. A
+                    # direct ready -> running move has no worker/run, so it may
+                    # refresh existing membership but never create it.
+                    if has_current_attempt and task.id in bucket:
+                        bucket[task.id] = row
+                    else:
+                        bucket.pop(task.id, None)
             if not bucket:
                 active.pop(key, None)
 
@@ -367,11 +970,11 @@ class GatewayKanbanWatchersMixin:
         """Render live worker state; with count zero this is an immediate no-op."""
         from gateway.config import Platform as _Platform
         from gateway.platforms.base import BasePlatformAdapter
+        from gateway.display_config import resolve_display_setting
         from gateway.run import (
             _render_activity_indicator_template,
             _resolve_activity_indicator_settings,
         )
-        from gateway.session import SessionSource, build_session_key
         from hermes_cli import kanban_db as _kb
         from hermes_cli.config import load_config as _load_config
 
@@ -380,20 +983,78 @@ class GatewayKanbanWatchersMixin:
         )
         states: dict[tuple, dict] = getattr(self, "_kanban_worker_focus_states", {})
         self._kanban_worker_focus_states = states
+        scopes: dict[tuple, dict] = getattr(
+            self, "_kanban_worker_display_scopes", {}
+        )
+        self._kanban_worker_display_scopes = scopes
         if not active and not states:
             return
 
-        try:
-            user_config = _load_config()
-        except Exception:
-            logger.debug("kanban worker focus config load failed", exc_info=True)
-            user_config = {}
+        config_cache: dict[str, dict] = {}
 
+        def _config_for_profile(profile: Optional[str]) -> dict:
+            cache_key = str(profile or "")
+            if cache_key not in config_cache:
+                config_cache[cache_key] = _load_worker_focus_config(
+                    profile,
+                    _load_config,
+                )
+            return config_cache[cache_key]
+
+        try:
+            active_profile = str(self._active_profile_name() or "default")
+        except Exception:
+            active_profile = "default"
+        all_active_lanes: set[tuple[str, str, str, str]] = set()
+        lane_candidates: dict[tuple[str, str, str, str], list[dict]] = {}
         for key, bucket in list(active.items()):
             if not bucket:
                 active.pop(key, None)
                 continue
-            chosen = next(iter(bucket.values()))
+            if len(key) != 5:
+                continue
+            key_board, key_platform, key_chat, key_thread, key_profile = key
+            lane = (
+                str(key_platform or "").lower(),
+                str(key_chat or ""),
+                str(key_thread or ""),
+                str(key_profile or active_profile),
+            )
+            all_active_lanes.add(lane)
+            # Active rows can be reconstructed after a gateway restart, but
+            # the chat/project ownership claim is process-local.  Without a
+            # fresh principal claim we cannot safely choose among projects
+            # sharing one presentation lane, so rehydrate fail-closed.
+            scope = scopes.get(lane)
+            if scope is None:
+                continue
+            scope_board = str(scope.get("board") or "")
+            scope_project = str(scope.get("project_id") or "")
+            scope_session = str(scope.get("session_id") or "")
+            use_session_scope = bool(
+                scope_session and not scope_board and not scope_project
+            )
+            for row in bucket.values():
+                task = row.get("task") if isinstance(row, dict) else None
+                if task is None:
+                    continue
+                row_board = str(row.get("board") or key_board or "")
+                if scope_board and row_board != scope_board:
+                    continue
+                if not _kanban_worker_matches_scope(
+                    task,
+                    project_id=scope_project,
+                    session_id=scope_session,
+                    session_only=use_session_scope,
+                ):
+                    continue
+                lane_candidates.setdefault(lane, []).append(row)
+
+        for lane, candidates in lane_candidates.items():
+            candidates.sort(
+                key=lambda row: _kanban_worker_spawn_order(row.get("task"))
+            )
+            chosen = candidates[0]
             task = chosen["task"]
             sub = chosen["sub"]
             board = chosen.get("board") or ""
@@ -402,8 +1063,24 @@ class GatewayKanbanWatchersMixin:
             except ValueError:
                 continue
             profile = str(sub.get("notifier_profile") or "").strip() or None
+            user_config = _config_for_profile(profile)
+            indicator = _resolve_activity_indicator_settings(
+                user_config,
+                platform.value,
+                180.0,
+            )
             adapter = self._authorization_adapter(platform, profile)
             if adapter is None:
+                continue
+            if not indicator.worker_rotation:
+                await self._kanban_discard_worker_focus_state(lane, adapter, sub)
+                continue
+            state = states.get(lane)
+            claim_sequence = int(
+                (scopes.get(lane) or {}).get("claim_sequence") or 0
+            )
+            if state and int(state.get("claim_sequence") or 0) != claim_sequence:
+                await self._kanban_discard_worker_focus_state(lane, adapter, sub)
                 continue
             adapter_edit = getattr(type(adapter), "edit_message", None)
             if adapter_edit is None or adapter_edit is BasePlatformAdapter.edit_message:
@@ -415,32 +1092,19 @@ class GatewayKanbanWatchersMixin:
             )
             if sub.get("thread_id") and not metadata.get("thread_id"):
                 metadata["thread_id"] = sub["thread_id"]
-            source = SessionSource(
-                platform=platform,
-                chat_id=sub["chat_id"],
-                chat_type=str(sub.get("chat_type") or metadata.get("chat_type") or "group"),
-                thread_id=sub.get("thread_id") or None,
-                user_id=sub.get("user_id"),
-                profile=profile,
-            )
-            try:
-                if self._is_session_running(build_session_key(source)):
-                    continue
-            except Exception:
-                logger.debug("kanban worker focus session probe failed", exc_info=True)
+            if not self._kanban_worker_display_available(lane, claim_sequence):
+                # A fresh user turn owns the presentation lane immediately.
+                # Keep the active worker queue, but remove its stale focus
+                # bubble so the principal heartbeat/progress is unambiguous.
+                await self._kanban_discard_worker_focus_state(lane, adapter, sub)
                 continue
 
-            state = states.get(key)
+            state = states.get(lane)
             attempt_id = (task.id, getattr(task, "current_run_id", None))
             attempt_changed = not state or state.get("attempt_id") != attempt_id
             now = time.time()
             started_at = float(getattr(task, "started_at", None) or now)
             elapsed_seconds = max(0.0, now - started_at)
-            indicator = _resolve_activity_indicator_settings(
-                user_config,
-                platform.value,
-                180.0,
-            )
             activity_text = (
                 str(state.get("activity_text") or "")
                 if state and not attempt_changed
@@ -482,13 +1146,33 @@ class GatewayKanbanWatchersMixin:
             except Exception:
                 logger.debug("kanban worker focus log read failed", exc_info=True)
                 raw_log = None
+            if not self._kanban_worker_display_available(lane, claim_sequence):
+                await self._kanban_discard_worker_focus_state(lane, adapter, sub)
+                continue
             worker_output = _render_kanban_worker_focus_output(
                 raw_log,
                 task_id=task.id,
+                include_tool_progress=(
+                    resolve_display_setting(
+                        user_config,
+                        platform.value,
+                        "tool_progress",
+                        "off",
+                    )
+                    not in {"off", "log"}
+                ),
+                include_reasoning=bool(
+                    resolve_display_setting(
+                        user_config,
+                        platform.value,
+                        "show_reasoning",
+                        False,
+                    )
+                ),
             )
             content_parts = [
                 _render_kanban_worker_focus(
-                    task, board=board, active_count=len(bucket)
+                    task, board=board, active_count=len(candidates)
                 ),
                 activity_text,
             ]
@@ -502,6 +1186,15 @@ class GatewayKanbanWatchersMixin:
                     attempt_id=attempt_id,
                 )
                 continue
+            last_sent_at = float(state.get("last_sent_at") or 0.0) if state else 0.0
+            if (
+                state
+                and now - last_sent_at < indicator.update_interval_seconds
+            ):
+                # Polling the canonical worker log stays cheap and frequent,
+                # but every Telegram edit, including worker rotation/retry,
+                # keeps the activity-indicator cadence.
+                continue
             message_id = state.get("message_id") if state else None
             if message_id:
                 try:
@@ -511,6 +1204,15 @@ class GatewayKanbanWatchersMixin:
                 except Exception:
                     logger.debug("kanban worker focus edit failed", exc_info=True)
                     continue
+                if not self._kanban_worker_display_available(lane, claim_sequence):
+                    # The principal may have reclaimed the lane while the edit
+                    # was in flight.  Re-register the edited bubble so the
+                    # retryable cleanup path can remove it deterministically.
+                    states[lane] = state
+                    await self._kanban_discard_worker_focus_state(
+                        lane, adapter, sub
+                    )
+                    continue
                 if getattr(result, "success", False):
                     state.update(
                         content=content,
@@ -518,6 +1220,8 @@ class GatewayKanbanWatchersMixin:
                         attempt_id=attempt_id,
                         activity_text=activity_text,
                         activity_updated_at=activity_updated_at,
+                        last_sent_at=now,
+                        claim_sequence=claim_sequence,
                     )
                     continue
                 if result is None or getattr(result, "retryable", False):
@@ -528,33 +1232,48 @@ class GatewayKanbanWatchersMixin:
                 logger.debug("kanban worker focus send failed", exc_info=True)
                 continue
             if getattr(result, "success", False) and getattr(result, "message_id", None):
-                states[key] = {
+                states[lane] = {
                     "message_id": str(result.message_id),
                     "content": content,
                     "task_id": task.id,
                     "attempt_id": attempt_id,
                     "activity_text": activity_text,
                     "activity_updated_at": activity_updated_at,
+                    "last_sent_at": now,
+                    "claim_sequence": claim_sequence,
                     "sub": sub,
                 }
+                if not self._kanban_worker_display_available(lane, claim_sequence):
+                    # Claim may arrive while Telegram is creating the bubble,
+                    # before there is state for the claim path to delete.  The
+                    # post-send fence closes that window and retains failures
+                    # for the normal cleanup retry.
+                    await self._kanban_discard_worker_focus_state(
+                        lane, adapter, sub
+                    )
 
         for key in list(states):
-            if key in active:
+            if key in lane_candidates:
                 continue
-            state = states.pop(key)
+            state = states.get(key) or {}
             sub = state.get("sub") or {}
+            if not state.get("message_id"):
+                states.pop(key, None)
+                continue
             try:
                 platform = _Platform(str(sub.get("platform") or "").lower())
             except ValueError:
+                states.pop(key, None)
                 continue
             profile = str(sub.get("notifier_profile") or "").strip() or None
             adapter = self._authorization_adapter(platform, profile)
-            if adapter is None or not state.get("message_id"):
+            if adapter is None:
                 continue
-            try:
-                await adapter.delete_message(sub["chat_id"], str(state["message_id"]))
-            except Exception:
-                logger.debug("kanban worker focus cleanup failed", exc_info=True)
+            await self._kanban_discard_worker_focus_state(key, adapter, sub)
+
+        for lane in list(scopes):
+            if lane not in all_active_lanes and lane not in states:
+                scopes.pop(lane, None)
 
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver material lifecycle events.
@@ -681,8 +1400,11 @@ class GatewayKanbanWatchersMixin:
                         # treats <= 0 as disabled.
                         _gc_retention_days = 30
                 agent_wake_on_events = _resolve_agent_wake_on_events(_load_config)
-                worker_focus_handoff = _resolve_worker_focus_handoff(_load_config)
-                rehydrate_worker_focus = worker_focus_handoff and not bool(
+                # Track worker lifecycle regardless of the display gate. This
+                # is the existing notifier poll, not a second DB reader; keeping
+                # the in-memory queue warm lets profile/platform config toggle
+                # without losing workers that were already running.
+                rehydrate_worker_focus = not bool(
                     getattr(self, "_kanban_worker_focus_rehydrated", False)
                 )
                 gateway_started_at = float(
@@ -893,7 +1615,7 @@ class GatewayKanbanWatchersMixin:
                                     focus_events = [
                                         ev for ev in events if ev.kind in FOCUS_KINDS
                                     ]
-                                    if worker_focus_handoff and focus_events:
+                                    if focus_events:
                                         focus_rows.append({
                                             "sub": sub,
                                             "task": task,
@@ -970,10 +1692,9 @@ class GatewayKanbanWatchersMixin:
                 deliveries, focus_rows, rehydrate_complete = await asyncio.to_thread(
                     _collect
                 )
-                if worker_focus_handoff:
-                    if rehydrate_worker_focus and rehydrate_complete:
-                        self._kanban_worker_focus_rehydrated = True
-                    self._kanban_focus_apply_rows(focus_rows)
+                if rehydrate_worker_focus and rehydrate_complete:
+                    self._kanban_worker_focus_rehydrated = True
+                self._kanban_focus_apply_rows(focus_rows)
                 for d in deliveries:
                     sub = d["sub"]
                     task = d["task"]
@@ -1514,8 +2235,7 @@ class GatewayKanbanWatchersMixin:
                             await _to_thread_process_service(
                                 self._kanban_unsub, sub, board_slug,
                             )
-                if worker_focus_handoff:
-                    await self._kanban_refresh_worker_focus()
+                await self._kanban_refresh_worker_focus()
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
             # Sleep with cancellation checks.

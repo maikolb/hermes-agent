@@ -1551,6 +1551,16 @@ delegation:
 # honcho: {}
 
 # =============================================================================
+# Busy Topic Dispatch
+# =============================================================================
+# When a project Topic already has an active principal run, independent task
+# requests can become subscribed Kanban cards instead of steering that run.
+# Explicit corrections still steer. Worker-rotation profiles inherit `true`
+# when this key is absent; set false to restore the historical behavior.
+dispatch:
+  parallel_by_default: false
+
+# =============================================================================
 # Display
 # =============================================================================
 display:
@@ -1611,6 +1621,13 @@ display:
   # Default: true everywhere, including Telegram (silent agents are worse
   # than a single edit-in-place heartbeat).
   long_running_notifications: true
+
+  # Continue the chat's work display after the principal turn ends by
+  # following the oldest active Kanban worker, then rotating in spawn order.
+  # Worker output respects tool_progress/show_reasoning and uses the activity
+  # indicator's edit cadence. May also be enabled only for one platform under
+  # display.platforms.<platform>.worker_rotation.
+  worker_rotation: false
 
   # Include detailed iteration/tool/status context in busy acknowledgments
   # and long-running heartbeats. When true, busy acks show "iteration 21/60,
