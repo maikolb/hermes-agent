@@ -31839,11 +31839,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Principal turn mirror: on board-bound topics, a long inline turn
         # gets its own claimed running card with heartbeat so the board (and
-        # read-only views) never hides the principal's work. Piggybacks on
-        # the activity-indicator wakes; see tools/principal_turn_mirror.py.
+        # read-only views) never hides the principal's work. The idempotency
+        # key (platform message id, stable across crash + auto-resume) makes
+        # a resumed turn reclaim the SAME card the interrupted turn left.
+        # Piggybacks on the activity-indicator wakes; see
+        # tools/principal_turn_mirror.py.
         from tools.principal_turn_mirror import create_principal_turn_mirror
 
-        _principal_mirror = create_principal_turn_mirror(message)
+        _principal_mirror = create_principal_turn_mirror(
+            message,
+            idempotency_key=(
+                f"principal:{source.platform.value}:{source.chat_id}:"
+                f"{event_message_id}"
+                if event_message_id
+                else None
+            ),
+        )
 
         _notify_task = asyncio.create_task(_notify_long_running())
 

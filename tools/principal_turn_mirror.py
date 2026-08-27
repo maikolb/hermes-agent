@@ -43,14 +43,30 @@ _START_THRESHOLD_SECONDS = 60.0
 
 
 class PrincipalTurnMirror:
-    """Mirror card lifecycle for one principal turn (create/beat/finish)."""
+    """Mirror card lifecycle for one principal turn (create/beat/finish).
 
-    def __init__(self, board: str, title_hint: str) -> None:
+    ``idempotency_key`` (derived from the platform message id, which is
+    stable across a crash and its native auto-resume) makes the resumed
+    turn land on the SAME mirror card the interrupted turn left claimed:
+    the orphan is reclaimed and re-claimed by this process instead of a
+    second card appearing — the resumed work keeps its traceable thread
+    (27/08: the resume did audit work with no card at all). Resuming N
+    times converges on the same card, so there is no card-creation loop.
+    """
+
+    def __init__(
+        self,
+        board: str,
+        title_hint: str,
+        idempotency_key: Optional[str] = None,
+    ) -> None:
         self._board = board
         self._title_hint = (title_hint or "").strip()
+        self._idempotency_key = (idempotency_key or "").strip() or None
         self._task_id: Optional[str] = None
         self._started = False
         self._finished = False
+        self.resumed = False
 
     async def tick(self, elapsed_seconds: float) -> None:
         """Called from each activity-indicator wake while the turn runs."""
@@ -122,7 +138,24 @@ class PrincipalTurnMirror:
                     body=body[:_BODY_MAX],
                     created_by=author,
                     board=self._board,
+                    idempotency_key=self._idempotency_key,
                 )
+                existing = kb.get_task(conn, task_id)
+                if (
+                    existing is not None
+                    and existing.status == "running"
+                    and existing.claim_lock
+                ):
+                    # Same idempotency key, already running: the interrupted
+                    # turn's orphan. Reclaim it from the dead process and
+                    # re-claim it here so the resumed turn continues the SAME
+                    # traceable card.
+                    kb.reclaim_task(
+                        conn,
+                        task_id,
+                        reason="principal turn resumed after interruption",
+                    )
+                    self.resumed = True
                 claimed = kb.claim_task(
                     conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
                 )
@@ -134,8 +167,13 @@ class PrincipalTurnMirror:
                     conn,
                     task_id,
                     author,
-                    f"Principal inline turn mirror, spawned by {author} "
-                    "(delegation.mirror_principal_turns).",
+                    (
+                        f"Principal turn RESUMED by {author} after an "
+                        "interruption; continuing on the same mirror card."
+                        if self.resumed
+                        else f"Principal inline turn mirror, spawned by "
+                        f"{author} (delegation.mirror_principal_turns)."
+                    ),
                 )
             self._task_id = task_id
         except Exception as exc:  # noqa: BLE001
@@ -151,7 +189,10 @@ class PrincipalTurnMirror:
             logger.debug("principal mirror: beat failed: %s", exc)
 
 
-def create_principal_turn_mirror(title_hint: str) -> Optional[PrincipalTurnMirror]:
+def create_principal_turn_mirror(
+    title_hint: str,
+    idempotency_key: Optional[str] = None,
+) -> Optional[PrincipalTurnMirror]:
     """Mirror for the current session's turn, or None when not applicable."""
     try:
         if not mirror_principal_turns_enabled():
@@ -159,7 +200,9 @@ def create_principal_turn_mirror(title_hint: str) -> Optional[PrincipalTurnMirro
         board = resolve_delegation_board()
         if not board:
             return None
-        return PrincipalTurnMirror(board, (title_hint or "")[:200])
+        return PrincipalTurnMirror(
+            board, (title_hint or "")[:200], idempotency_key=idempotency_key
+        )
     except Exception as exc:  # noqa: BLE001
         logger.debug("principal mirror: create failed: %s", exc)
         return None

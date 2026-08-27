@@ -207,6 +207,44 @@ def test_principal_mirror_lifecycle(kanban_env):
     assert status == "done"
 
 
+def test_principal_mirror_resume_reclaims_same_card(kanban_env):
+    import asyncio
+    import time as _time
+
+    from hermes_cli import kanban_db as kb
+    from tools.principal_turn_mirror import PrincipalTurnMirror
+
+    key = "principal:telegram:-1001:m42"
+    interrupted = PrincipalTurnMirror("default", "corrigir pipeline", idempotency_key=key)
+    asyncio.run(interrupted.tick(61.0))
+    orphan_id = interrupted._task_id
+    assert orphan_id
+    assert _get_task(orphan_id).status == "running"
+    # No finish(): the gateway died here and left the claim in place.
+
+    resumed = PrincipalTurnMirror("default", "corrigir pipeline", idempotency_key=key)
+    asyncio.run(resumed.tick(61.0))
+
+    assert resumed._task_id == orphan_id, "resume must land on the SAME card"
+    assert resumed.resumed is True
+    task = _get_task(orphan_id)
+    assert task.status == "running"
+    assert task.claim_lock
+    with kb.connect_closing() as conn:
+        comments = kb.list_comments(conn, orphan_id)
+    assert any("RESUMED" in c.body for c in comments)
+
+    resumed.finish(240.0)
+    deadline = _time.time() + 5
+    status = None
+    while _time.time() < deadline:
+        status = _get_task(orphan_id).status
+        if status == "done":
+            break
+        _time.sleep(0.2)
+    assert status == "done"
+
+
 def test_no_board_creates_nothing(kanban_env):
     from tools import delegation_kanban as dk
 
