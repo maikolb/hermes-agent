@@ -850,8 +850,14 @@ class GatewayKanbanWatchersMixin:
         self,
         state_key: tuple,
         adapter: Any,
+        trace_url_template: str = "",
     ) -> None:
         """Edit one finished worker bubble into a short completion trace.
+
+        ``trace_url_template`` (display.worker_rotation_trace_url) may carry
+        ``{board}``/``{task_id}``/``{run_id}`` placeholders; when set, the
+        trace gains a link line so the full worker log (reasoning + tool
+        activity) is one tap away in the read-only dashboard.
 
         Retryable edit failures keep the state so the next teardown pass
         retries; success and permanent failures drop it. The message itself
@@ -878,7 +884,23 @@ class GatewayKanbanWatchersMixin:
             second_line += f" · run {run_id}"
         if board and second_line:
             second_line = f"[{board}] {second_line}"
-        content = first_line if not second_line else f"{first_line}\n{second_line}"
+        lines = [first_line]
+        if second_line:
+            lines.append(second_line)
+        template = str(trace_url_template or "").strip()
+        if template and task_id:
+            try:
+                link = template.format(
+                    board=board, task_id=task_id, run_id=run_id if run_id is not None else "",
+                )
+            except (KeyError, IndexError, ValueError) as exc:
+                logger.debug(
+                    "kanban worker focus trace url template invalid: %s", exc
+                )
+                link = ""
+            if link:
+                lines.append(f"📋 Log completo: {link}")
+        content = "\n".join(lines)
         try:
             result = await adapter.edit_message(
                 sub.get("chat_id"), str(state["message_id"]), content
@@ -1508,7 +1530,18 @@ class GatewayKanbanWatchersMixin:
                 and exit_kind == "completed"
                 and self._kanban_worker_display_available(key, state_sequence)
             ):
-                await self._kanban_finalize_worker_focus_state(key, adapter)
+                trace_url_template = str(
+                    resolve_display_setting(
+                        _config_for_profile(profile),
+                        str(getattr(platform, "value", platform)).lower(),
+                        "worker_rotation_trace_url",
+                        "",
+                    )
+                    or ""
+                )
+                await self._kanban_finalize_worker_focus_state(
+                    key, adapter, trace_url_template=trace_url_template
+                )
             else:
                 await self._kanban_discard_worker_focus_state(key, adapter, sub)
 

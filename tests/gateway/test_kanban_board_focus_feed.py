@@ -430,3 +430,45 @@ def test_finished_worker_deletes_when_trace_disabled(tmp_path, monkeypatch):
     asyncio.run(GatewayRunner._kanban_refresh_worker_focus(runner))
 
     assert adapter.deletes == ["701"], "ephemeral mode must delete the bubble"
+
+
+def test_trace_includes_full_log_link_when_template_set(tmp_path, monkeypatch):
+    import asyncio
+
+    from gateway.run import GatewayRunner
+
+    runner, adapter, task, target = _trace_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "gateway.kanban_watchers._load_worker_focus_config",
+        lambda profile, load_default: {
+            "display": {
+                "worker_rotation": True,
+                "worker_rotation_trace": True,
+                "worker_rotation_trace_url": "https://vigilia.example/#kanban/{board}/{task_id}",
+                "platforms": {"telegram": {"tool_progress": "all"}},
+            },
+        },
+    )
+
+    GatewayRunner._kanban_focus_apply_rows(
+        runner,
+        [{"sub": dict(target), "task": task, "board": "dovcrm", "bootstrap": True, "events": []}],
+    )
+    asyncio.run(GatewayRunner._kanban_refresh_worker_focus(runner))
+    GatewayRunner._kanban_focus_apply_rows(
+        runner,
+        [
+            {
+                "sub": dict(target),
+                "task": task,
+                "board": "dovcrm",
+                "bootstrap": False,
+                "events": [SimpleNamespace(kind="completed", id=9, created_at=0.0)],
+            }
+        ],
+    )
+    asyncio.run(GatewayRunner._kanban_refresh_worker_focus(runner))
+
+    final = adapter.edits[-1]["content"]
+    assert "Log completo" in final
+    assert f"https://vigilia.example/#kanban/dovcrm/{task.id}" in final
