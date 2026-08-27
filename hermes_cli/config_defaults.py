@@ -1483,6 +1483,11 @@ DEFAULT_CONFIG = {
         # meaningful with worker_rotation on; a principal claim still removes
         # the bubble either way.
         "worker_rotation_trace": True,
+        # Optional URL template appended to the completion trace as a "full
+        # log" link. Placeholders: {board}, {task_id}, {run_id}. Example:
+        # "https://vigilia.example/#kanban/{board}/{task_id}". Empty (default)
+        # = no link line.
+        "worker_rotation_trace_url": "",
         # Codex Responses models narrate progress in a dedicated commentary
         # channel. When true (default), completed commentary messages are
         # delivered as visible mid-turn updates via the interim message path.
