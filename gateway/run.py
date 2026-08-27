@@ -1584,7 +1584,17 @@ def _render_activity_indicator_template(
         return None
 
 
-def _lost_steer_notice(agent: Any) -> str:
+def _drain_lost_steer(agent: Any) -> str:
+    """Un-consumed steer text of an errored turn, or empty string."""
+    try:
+        if agent is not None and hasattr(agent, "_drain_pending_steer"):
+            return agent._drain_pending_steer() or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _lost_steer_notice(lost: str) -> str:
     """Notice for steers that die un-consumed when a turn errors out.
 
     A steer accepted mid-turn ("arrives after the next tool call") used to
@@ -1592,12 +1602,6 @@ def _lost_steer_notice(agent: Any) -> str:
     work that would never happen (27/08, Concursa: two queued requests
     lost for over an hour). Empty string when there is nothing pending.
     """
-    lost = ""
-    try:
-        if agent is not None and hasattr(agent, "_drain_pending_steer"):
-            lost = agent._drain_pending_steer() or ""
-    except Exception:
-        return ""
     if not lost:
         return ""
     preview = " ".join(lost.strip().split())
@@ -23200,7 +23204,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _err_turn_agent = self._session_state(session_key).turn.agent
             except Exception:
                 _err_turn_agent = None
-            _steer_note = _lost_steer_notice(_err_turn_agent)
+            _lost_steer = _drain_lost_steer(_err_turn_agent)
+            _steer_note = ""
+            if _lost_steer and not getattr(event, "_steer_resume_attempted", False):
+                # Auto-resume: re-inject the lost steer as a fresh inbound
+                # event through the full pipeline (history reload, policies,
+                # mirrors), exactly as if the author resent it. One level
+                # only — the resumed event carries the marker, and its steer
+                # was consumed as the new turn's main message, so a second
+                # failure falls through to the explicit resend notice.
+                try:
+                    import dataclasses as _dc
+
+                    _resume_event = _dc.replace(
+                        event,
+                        text=_lost_steer,
+                        message_id=None,
+                        media_urls=[],
+                        media_types=[],
+                        prompt_response=None,
+                        reply_to_message_id=None,
+                        reply_to_text=None,
+                    )
+                    _resume_event._steer_resume_attempted = True
+                    _resume_session_key = session_key
+
+                    async def _resume_lost_steer() -> None:
+                        try:
+                            await asyncio.sleep(2.0)
+                            await self._handle_message(_resume_event)
+                        except Exception:
+                            logger.exception(
+                                "Lost-steer auto-resume failed for session %s",
+                                _resume_session_key,
+                            )
+
+                    asyncio.create_task(_resume_lost_steer())
+                    _steer_note = (
+                        "\n▶ Resuming the message(s) queued during this turn "
+                        "automatically."
+                    )
+                except Exception:
+                    logger.exception(
+                        "Lost-steer auto-resume scheduling failed for session %s",
+                        session_key,
+                    )
+                    _steer_note = _lost_steer_notice(_lost_steer)
+            elif _lost_steer:
+                _steer_note = _lost_steer_notice(_lost_steer)
             return (
                 f"Sorry, I encountered an unexpected error.{status_hint}\n"
                 "Try again or use /reset to start a fresh session."
