@@ -26908,6 +26908,59 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             candidate = Path(self._resolve_profile_home_for_source(source)) / candidate
         return candidate.expanduser().resolve(strict=False)
 
+    def _resolve_project_context_readonly(
+        self,
+        source: SessionSource,
+    ) -> Optional[ProjectContext]:
+        """Lookup-only project resolution for internal continuation events.
+
+        Same binding + ACL check as the interactive resolver, with ZERO
+        mutations: no topic auto-register, no provisioning, no lifecycle
+        transitions. Returns None (never raises, never denies the turn)
+        when the source lacks identity, has no binding, or fails the ACL —
+        exactly the old behavior for genuinely unbound internal events.
+        """
+        try:
+            router_config = getattr(
+                getattr(self, "config", None), "project_router", None
+            )
+            if getattr(router_config, "enabled", False) is not True:
+                return None
+            platform = getattr(getattr(source, "platform", None), "value", None)
+            if platform != Platform.TELEGRAM.value:
+                return None
+            thread_id = str(getattr(source, "thread_id", None) or "").strip()
+            chat_id = str(getattr(source, "chat_id", None) or "").strip()
+            sender_user_id = str(getattr(source, "user_id", None) or "").strip()
+            if not thread_id or not chat_id or not sender_user_id:
+                return None
+            raw_managed = getattr(router_config, "managed_chat_ids", []) or []
+            managed_chat_ids = {
+                str(value).strip()
+                for value in raw_managed
+                if isinstance(value, (str, int)) and not isinstance(value, bool)
+            }
+            allow_implicit_member = bool(
+                getattr(router_config, "implicit_managed_chat_members", False)
+            ) and chat_id in managed_chat_ids
+            profile = self._effective_project_router_profile(source)
+            db_path = self._project_router_db_path(source)
+            with ProjectRouter(db_path, profile) as router:
+                return router.resolve(
+                    Platform.TELEGRAM.value,
+                    chat_id,
+                    thread_id,
+                    sender_user_id,
+                    allow_implicit_member=allow_implicit_member,
+                    verified_sender_user_id=sender_user_id,
+                )
+        except Exception:
+            logger.debug(
+                "read-only project resolution failed for internal event",
+                exc_info=True,
+            )
+            return None
+
     def _resolve_project_context_for_message(
         self,
         event: Any,
@@ -26918,7 +26971,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if getattr(router_config, "enabled", False) is not True:
             return None, None
         if bool(getattr(event, "internal", False)):
-            return None, None
+            # TARGET_ARCHITECTURE gap 3: internal events (startup auto-resume,
+            # wake continuations) used to skip project resolution entirely, so
+            # every resumed turn ran WITHOUT its board — no mirror card, no
+            # dispatch routing, invisible work (27/08: mirrors stopped at
+            # 17:01, the first post-restart turn). The session's own origin
+            # carries the full binding identity; resolve it READ-ONLY (lookup
+            # + ACL, never provisioning/auto-register). Anything missing or
+            # denied keeps the old behavior: no project context, turn runs.
+            return self._resolve_project_context_readonly(source), None
         platform = getattr(getattr(source, "platform", None), "value", None)
         if platform != Platform.TELEGRAM.value:
             return None, None
