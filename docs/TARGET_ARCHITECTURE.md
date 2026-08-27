@@ -57,6 +57,10 @@ do gateway/agente referencia esta spec. Divergência daqui é bug.
    lane) e closeout do principal ao fim do turno.
 6. Delegate injeta o protocolo AOF (escopo→preflight→card→trabalho→closeout)
    no goal de cada worker.
-7. Retomada re-dispara delegated que morreram com o turno.
+7. Retomada re-dispara delegated que morreram com o turno; entrega
+   assíncrona (completion wake) confiável — caso 27/08 19:04: workers
+   concluíram e o principal só percebeu 1h depois lendo transcripts na
+   mão, e a orquestração ficou dependente da inteligência do agente em
+   vez do processo.
 8. Auditoria de limites de escrita/busca do fork + scratchpad + paths AOF.
 9. route_to_dispatcher default vira opt-in explícito (falso por default).

@@ -778,6 +778,11 @@ DEFAULT_CONFIG = {
                                       # notices and manual /compress feedback are
                                       # always visible regardless of this setting.
         "threshold": 0.50,            # compress when context usage exceeds this ratio.
+        "keep_last_human_messages": 10,  # retention policy (TARGET_ARCHITECTURE gap 1):
+                                         # the last K REAL human messages (typed or sent
+                                         # by people, media placeholders included) are
+                                         # never summarized away, wherever they sit in
+                                         # the transcript. 0 disables the policy.
                                       # Models with context windows below 512K are
                                       # floored at 0.75 (raise-only) so compaction
                                       # doesn't fire with half the window still free;
