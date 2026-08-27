@@ -763,6 +763,12 @@ class GatewayKanbanWatchersMixin:
             return False
         if int(scope.get("claim_sequence") or 0) != int(claim_sequence or 0):
             return False
+        if scope.get("synthetic"):
+            # Router-binding scope: no principal turn has run on this lane in
+            # this process, so there is no session to defer to. The moment a
+            # real turn claims the lane, its scope replaces this one and the
+            # sequence check above fences this render out.
+            return True
         principal_session_key = str(
             scope.get("principal_session_key") or ""
         ).strip()
@@ -773,6 +779,72 @@ class GatewayKanbanWatchersMixin:
         except Exception:
             logger.debug("kanban worker focus session probe failed", exc_info=True)
             return False
+
+    def _kanban_ensure_rotation_scope(
+        self,
+        lane: tuple[str, str, str, str],
+        board: str,
+    ) -> Optional[dict]:
+        """Return the lane's scope, synthesizing one from router bindings.
+
+        The rotation used to render only after a principal turn registered a
+        scope for the lane — after a gateway restart nothing renders until
+        someone talks in the topic, which in practice meant the rotation
+        never engaged (27/08). The project router persists exactly the
+        lane↔board pairing needed to project workers safely without a
+        principal, so synthesize a scope from it. A real principal claim
+        replaces the synthetic scope and immediately fences it out via the
+        claim-sequence check.
+        """
+        scopes: dict[tuple, dict] = getattr(
+            self, "_kanban_worker_display_scopes", {}
+        )
+        self._kanban_worker_display_scopes = scopes
+        scope = scopes.get(lane)
+        if scope is not None:
+            return scope
+        board_slug = str(board or "").strip()
+        if not board_slug:
+            return None
+        now = time.monotonic()
+        cache = getattr(self, "_kanban_rotation_targets_cache", None)
+        if not cache or now - cache[0] > 60.0:
+            try:
+                targets = self._kanban_board_display_targets({lane[3]})
+            except Exception:  # noqa: BLE001
+                targets = {}
+            cache = (now, targets)
+            self._kanban_rotation_targets_cache = cache
+        board_targets = cache[1].get(board_slug) or []
+        for target in board_targets:
+            if (
+                str(target.get("platform") or "").lower() == lane[0]
+                and str(target.get("chat_id") or "") == lane[1]
+                and str(target.get("thread_id") or "") == lane[2]
+                and str(target.get("notifier_profile") or "") == lane[3]
+            ):
+                claim_sequence = int(
+                    getattr(self, "_kanban_worker_display_claim_sequence", 0)
+                    or 0
+                ) + 1
+                self._kanban_worker_display_claim_sequence = claim_sequence
+                scope = {
+                    "board": board_slug,
+                    "project_id": "",
+                    "session_id": "",
+                    "principal_session_key": "",
+                    "run_generation": None,
+                    "claim_sequence": claim_sequence,
+                    "synthetic": True,
+                }
+                scopes[lane] = scope
+                logger.info(
+                    "kanban worker rotation: synthesized display scope for "
+                    "board %s from router bindings (no principal turn yet)",
+                    board_slug,
+                )
+                return scope
+        return None
 
     async def _kanban_discard_worker_focus_state(
         self,
@@ -1104,10 +1176,11 @@ class GatewayKanbanWatchersMixin:
             )
             all_active_lanes.add(lane)
             # Active rows can be reconstructed after a gateway restart, but
-            # the chat/project ownership claim is process-local.  Without a
-            # fresh principal claim we cannot safely choose among projects
-            # sharing one presentation lane, so rehydrate fail-closed.
-            scope = scopes.get(lane)
+            # the chat/project ownership claim is process-local. Without a
+            # principal claim, fall back to the router's persisted lane↔board
+            # binding (synthetic scope); only lanes with no binding at all
+            # stay fail-closed.
+            scope = self._kanban_ensure_rotation_scope(lane, key_board)
             if scope is None:
                 continue
             scope_board = str(scope.get("board") or "")
