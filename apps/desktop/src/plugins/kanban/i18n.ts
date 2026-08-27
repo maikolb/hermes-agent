@@ -16,16 +16,7 @@ type KanbanMessages = {
   newTaskCommand: string
   countTip: (running: number, ready: number) => string
   col: Record<
-    | 'archived'
-    | 'backlog'
-    | 'blocked'
-    | 'done'
-    | 'ready'
-    | 'review'
-    | 'running'
-    | 'scheduled'
-    | 'todo'
-    | 'triage',
+    'archived' | 'backlog' | 'blocked' | 'done' | 'ready' | 'review' | 'running' | 'scheduled' | 'todo' | 'triage',
     { label: string; help: string }
   >
   locked: { review: string; running: string; scheduled: string }
