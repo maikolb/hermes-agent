@@ -222,6 +222,34 @@ def _find_free_port() -> int:
 _reserved_sockets: "dict[int, socket.socket]" = {}
 _MAX_RESERVED_SOCKETS = 8
 
+# Live callback listeners keyed by port. When the MCP client retries a
+# connection while the user is still authorizing, the same flow's waiter is
+# invoked again with the same port; the reservation was already consumed by
+# the first attempt, so binding again would collide with our own live
+# listener (``[Errno 98]`` on Linux — Windows masks the self-collision via
+# SO_REUSEADDR semantics, which is why the bug only surfaced on headless
+# deployments). Re-entry must share the existing listener and result instead
+# of racing it (see the retry-collision incident of 2026-08-26).
+_active_callback_flows: "dict[int, tuple]" = {}
+
+
+def _serve_until_result(server, result) -> None:
+    """Answer callback requests until the flow resolves.
+
+    ``handle_request`` alone is one-shot: a stray request (browser favicon
+    probe, a stale tab replaying an old redirect) would consume it and leave
+    the port bound but deaf for the rest of the flow. Loop until the shared
+    result is filled; ``server_close()`` from the owning waiter unblocks the
+    pending accept and ends the loop via OSError.
+    """
+    server.timeout = 1.0
+    while result["auth_code"] is None and result["error"] is None:
+        try:
+            server.handle_request()
+        except OSError:
+            break
+
+
 
 def _park_reserved_socket(port: int, sock: socket.socket) -> None:
     """Hold *sock* bound to *port* until ``_wait_for_callback`` adopts it.
@@ -974,7 +1002,18 @@ def _make_callback_waiter(
             "authorization without binding a callback listener."
         )
 
-        handler_cls, result = _make_callback_handler()
+        active = _active_callback_flows.get(port)
+        if active is not None:
+            # Re-entry for a flow whose listener is still alive: the MCP
+            # client retried while the user was authorizing. The reservation
+            # was consumed by the first pass, so binding again would collide
+            # with our own socket (``[Errno 98]`` on Linux). Share the live
+            # listener and its result instead of racing it.
+            server, result = active
+            owns_server = False
+        else:
+            owns_server = True
+            handler_cls, result = _make_callback_handler()
 
         # Start a temporary server on this flow's port, adopting the socket
         # reserved at port-selection time when one exists. Holding the bound
@@ -985,20 +1024,23 @@ def _make_callback_waiter(
         # TIME_WAIT socket from a previous flow cannot block the next one
         # (#44590).
         try:
-            server = HTTPServer(
-                ("127.0.0.1", port), handler_cls, bind_and_activate=False
-            )
-            reserved = _reserved_sockets.pop(port, None)
-            if reserved is not None:
-                # Adopt the reserved (already bound) socket and start listening.
-                server.socket.close()
-                server.socket = reserved
-                server.server_address = reserved.getsockname()
-                server.server_activate()
-            else:
-                server.allow_reuse_address = True
-                server.server_bind()
-                server.server_activate()
+            if owns_server:
+                server = HTTPServer(
+                    ("127.0.0.1", port), handler_cls, bind_and_activate=False
+                )
+                reserved = _reserved_sockets.pop(port, None)
+                if reserved is not None:
+                    # Adopt the reserved (already bound) socket and start
+                    # listening.
+                    server.socket.close()
+                    server.socket = reserved
+                    server.server_address = reserved.getsockname()
+                    server.server_activate()
+                else:
+                    server.allow_reuse_address = True
+                    server.server_bind()
+                    server.server_activate()
+                _active_callback_flows[port] = (server, result)
         except OSError as exc:
             # The loopback callback port is genuinely in use: a concurrent OAuth
             # flow, a leftover listener, or a fixed `oauth.redirect_port` that
@@ -1011,15 +1053,20 @@ def _make_callback_waiter(
                 "in the server config, then retry."
             ) from exc
 
-        server_thread = threading.Thread(target=server.handle_request, daemon=True)
-        server_thread.start()
+        if owns_server:
+            server_thread = threading.Thread(
+                target=_serve_until_result, args=(server, result), daemon=True
+            )
+            server_thread.start()
 
-        # Optional paste-fallback thread: only on interactive TTYs. Reads one
-        # line from stdin and writes the parsed code/state into the shared
-        # result dict. The HTTP listener and this thread race for the result;
-        # whichever fills it first wins.
+        # Optional paste-fallback thread: only on interactive TTYs, and only
+        # for the waiter that owns the listener — a re-entered waiter shares
+        # the first pass's prompt and reader. Reads one line from stdin and
+        # writes the parsed code/state into the shared result dict. The HTTP
+        # listener and this thread race for the result; whichever fills it
+        # first wins.
         paste_thread: threading.Thread | None = None
-        if _is_interactive():
+        if owns_server and _is_interactive():
             print(
                 "\n  Or paste the redirect URL here (or the ``?code=...&state=...`` "
                 "portion) and press Enter. Type ``skip`` + Enter to continue "
@@ -1041,7 +1088,9 @@ def _make_callback_waiter(
                 await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
         finally:
-            server.server_close()
+            if owns_server:
+                _active_callback_flows.pop(port, None)
+                server.server_close()
 
         if result["error"] == _USER_SKIPPED_SENTINEL:
             raise OAuthNonInteractiveError("user_skipped")
