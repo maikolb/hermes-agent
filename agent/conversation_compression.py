@@ -3805,7 +3805,10 @@ def compress_context(
                         PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY,
                     )
 
-                    from agent.turn_checkpoint import CheckpointWriteError
+                    from agent.turn_checkpoint import (
+                        CheckpointConflictError,
+                        CheckpointWriteError,
+                    )
 
                     agent._session_db.archive_and_compact(
                         agent.session_id,
@@ -3826,11 +3829,32 @@ def compress_context(
                                 agent.session_id
                             )
                         )
-                        agent._turn_checkpoint_state = (
-                            _turn_checkpoint_store.commit_compaction(
-                                agent.session_id, _checkpoint_live_messages
+                        try:
+                            agent._turn_checkpoint_state = (
+                                _turn_checkpoint_store.commit_compaction(
+                                    agent.session_id, _checkpoint_live_messages
+                                )
                             )
-                        )
+                        except CheckpointConflictError:
+                            # A steer (or any concurrent append) landed while
+                            # the compaction was in flight, so the live
+                            # transcript grew past the prepared snapshot. That
+                            # is legitimate growth, not corruption: rebase the
+                            # checkpoint onto the live transcript when the
+                            # prepared set is still its verbatim prefix. Only
+                            # a genuine divergence falls through to the
+                            # rollback below (27/08 incident: two steers
+                            # during compaction aborted the whole turn).
+                            agent._turn_checkpoint_state = (
+                                _turn_checkpoint_store.commit_compaction_rebased(
+                                    agent.session_id, _checkpoint_live_messages
+                                )
+                            )
+                            logger.warning(
+                                "Compaction checkpoint rebased onto concurrent "
+                                "transcript growth for session=%s",
+                                agent.session_id,
+                            )
                     except Exception as _checkpoint_commit_error:
                         try:
                             agent._session_db.archive_and_compact(

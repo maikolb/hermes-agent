@@ -550,6 +550,7 @@ class TurnCheckpointStore:
             "message_count": len(before_messages),
             "before_hash": before_hash,
             "after_hash": after_hash,
+            "after_count": len(after_messages),
         }
         state["compaction"] = {
             "state": "prepared",
@@ -572,6 +573,45 @@ class TurnCheckpointStore:
         state["revision"] = int(state.get("revision", 0)) + 1
         state["transcript"]["current_hash"] = live_hash
         state["transcript"]["message_count"] = len(active_messages)
+        state["compaction"] = {
+            "state": "committed",
+            "prepared_at": state.get("compaction", {}).get("prepared_at"),
+            "committed_at": time.time(),
+        }
+        state["phase"] = "turn_active"
+        state["next_action"] = "resume_current_turn_from_checkpoint"
+        return self._write(state)
+
+    def commit_compaction_rebased(
+        self, session_id: str, active_messages: Sequence[Any]
+    ) -> dict[str, Any]:
+        """Commit a compaction whose live transcript GREW during the swap.
+
+        A steer (or any concurrent append) landing between prepare and
+        commit makes the strict hash check fail even though nothing is
+        wrong: the live transcript is exactly the compacted set plus new
+        tail messages. Accept that shape — the prepared ``after`` must be a
+        verbatim prefix of the live transcript — and commit on the live
+        hash. Anything else is a genuine conflict and still raises.
+        """
+        state = copy.deepcopy(self.load(session_id))
+        transcript = state.get("transcript", {})
+        expected = transcript.get("after_hash")
+        after_count = int(transcript.get("after_count") or 0)
+        live = list(active_messages)
+        if not expected or after_count <= 0 or len(live) < after_count:
+            raise CheckpointConflictError(
+                "cannot rebase checkpoint: live transcript does not extend "
+                "the prepared after transcript"
+            )
+        if transcript_hash(live[:after_count]) != expected:
+            raise CheckpointConflictError(
+                "cannot rebase checkpoint: live transcript does not extend "
+                "the prepared after transcript"
+            )
+        state["revision"] = int(state.get("revision", 0)) + 1
+        state["transcript"]["current_hash"] = transcript_hash(live)
+        state["transcript"]["message_count"] = len(live)
         state["compaction"] = {
             "state": "committed",
             "prepared_at": state.get("compaction", {}).get("prepared_at"),

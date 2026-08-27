@@ -29,6 +29,7 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 _WORKER_FOCUS_LOG_TAIL_BYTES = 64 * 1024
+_WORKER_TRACE_SUMMARY_MAX_CHARS = 700
 _WORKER_FOCUS_MAX_ITEMS = 10
 _WORKER_FOCUS_MAX_LINE_CHARS = 280
 _WORKER_FOCUS_MAX_REASONING_CHARS = 800
@@ -884,7 +885,34 @@ class GatewayKanbanWatchersMixin:
             second_line += f" · run {run_id}"
         if board and second_line:
             second_line = f"[{board}] {second_line}"
+        summary = ""
+        if task_id and board:
+            # The card's completion result is the worker's own summary of
+            # what it did — a trace with just a title reads as "nothing to
+            # see here" (user feedback 27/08). Best-effort read; a missing
+            # or unreadable result keeps the short trace.
+            try:
+                from hermes_cli import kanban_db as _trace_kb
+
+                with _trace_kb.connect_closing(board=board) as _trace_conn:
+                    _trace_task = _trace_kb.get_task(_trace_conn, task_id)
+                summary = str(getattr(_trace_task, "result", "") or "").strip()
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "kanban worker focus trace result read failed",
+                    exc_info=True,
+                )
+        if summary:
+            summary = re.sub(r"\n{3,}", "\n\n", summary)
+            if len(summary) > _WORKER_TRACE_SUMMARY_MAX_CHARS:
+                summary = (
+                    summary[: _WORKER_TRACE_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+                )
         lines = [first_line]
+        if summary:
+            lines.append("")
+            lines.append(summary)
+            lines.append("")
         if second_line:
             lines.append(second_line)
         template = str(trace_url_template or "").strip()

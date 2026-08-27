@@ -1190,3 +1190,54 @@ def test_explicit_resume_guard_exhausts_instead_of_accepting_false_status():
         "Continuidade ativa; a implementação está em execução.",
     ) is None
     assert agent._checkpoint_resume_guard_exhausted is True
+
+
+def test_commit_compaction_rebased_accepts_appended_growth(tmp_path):
+    """A steer landing mid-compaction appends to the live transcript; the
+    rebase commit accepts the prepared set as a verbatim prefix (27/08)."""
+    store = _store(tmp_path)
+    before = _messages("um", "dois", "tres", "quatro")
+    after = _messages("resumo comprimido")
+    store.start_turn(
+        session_id="session-1",
+        turn_id="turn-1",
+        user_content="compact me",
+        messages=before,
+        routing={"platform": "telegram", "chat_id": "42", "thread_id": "9"},
+    )
+    store.prepare_compaction("session-1", before, after)
+
+    import pytest as _pytest
+
+    with _pytest.raises(CheckpointConflictError):
+        store.commit_compaction("session-1", after + [{"role": "user", "content": "steer novo"}])
+
+    live = after + [{"role": "user", "content": "steer novo"}]
+    state = store.commit_compaction_rebased("session-1", live)
+
+    assert state["compaction"]["state"] == "committed"
+    assert state["transcript"]["current_hash"] == transcript_hash(live)
+    assert state["transcript"]["message_count"] == len(live)
+    assert state["phase"] == "turn_active"
+
+
+def test_commit_compaction_rebased_rejects_divergence(tmp_path):
+    store = _store(tmp_path)
+    before = _messages("um", "dois")
+    after = _messages("resumo")
+    store.start_turn(
+        session_id="session-1",
+        turn_id="turn-1",
+        user_content="compact me",
+        messages=before,
+        routing={"platform": "telegram", "chat_id": "42", "thread_id": "9"},
+    )
+    store.prepare_compaction("session-1", before, after)
+
+    import pytest as _pytest
+
+    divergent = _messages("outra coisa") + [{"role": "user", "content": "steer"}]
+    with _pytest.raises(CheckpointConflictError):
+        store.commit_compaction_rebased("session-1", divergent)
+    with _pytest.raises(CheckpointConflictError):
+        store.commit_compaction_rebased("session-1", after[:1])
