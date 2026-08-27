@@ -15,10 +15,10 @@ claimed by the delegating gateway process. The claim carries a long TTL
 handed to a dispatcher worker, and if the whole process dies the claim
 eventually expires and ``release_stale_claims`` returns the card to
 ``ready``, where a real dispatcher worker legitimately resumes the orphaned
-goal. Terminal transitions: child ``ok`` maps to ``done`` (child summary as
-result); anything else (``error``/``timeout``/interrupt) maps to ``blocked``
-with kind ``needs_input`` so a human decides between re-delegating and
-letting a dispatcher worker take over.
+goal. Terminal transitions: child ``completed`` maps to ``done`` (child
+summary as result); anything else (``failed``/``interrupted``/``timeout``/
+``error``) maps to ``blocked`` with kind ``needs_input`` so a human decides
+between re-delegating and letting a dispatcher worker take over.
 
 Behaviour contract mirrors ``delegation_live_log``: strictly best-effort.
 Every entry point catches everything; a kanban failure must never break a
@@ -180,7 +180,10 @@ def close_delegation_cards(
                 try:
                     status = str(entry.get("status") or "")
                     summary = str(entry.get("summary") or "").strip()
-                    if status == "ok":
+                    # Terminal statuses stamped by _execute_and_aggregate:
+                    # "completed" | "failed" | "interrupted", plus
+                    # "timeout" | "error" from the exceptional path.
+                    if status == "completed":
                         kb.complete_task(
                             conn,
                             task_id,
