@@ -49,6 +49,7 @@ def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     return home
@@ -70,11 +71,13 @@ def test_board_empty(client):
     r = client.get("/api/plugins/kanban/board")
     assert r.status_code == 200
     data = r.json()
-    # All canonical columns present (triage + the rest), each empty.
+    # All canonical columns present in workflow order, each empty.
     names = [c["name"] for c in data["columns"]]
     assert set(names) == kb.VALID_STATUSES - {"archived"}
-    for expected in ("triage", "todo", "scheduled", "ready", "running", "blocked", "done"):
-        assert expected in names, f"missing column {expected}: {names}"
+    assert names == [
+        "backlog", "triage", "todo", "scheduled", "ready",
+        "running", "blocked", "review", "done",
+    ]
     assert all(len(c["tasks"]) == 0 for c in data["columns"])
     assert data["tenants"] == []
     assert data["assignees"] == []
@@ -223,6 +226,21 @@ def test_task_detail_includes_links_and_events(client):
 # ---------------------------------------------------------------------------
 # PATCH /tasks/:id — status transitions
 # ---------------------------------------------------------------------------
+
+
+def test_patch_moves_backlog_to_todo(client):
+    task = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "approve me", "backlog": True},
+    ).json()["task"]
+    assert task["status"] == "backlog"
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task['id']}",
+        json={"status": "todo"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["task"]["status"] == "todo"
 
 
 def test_patch_review_lifecycle_preserves_handoff_and_reopens(client):
@@ -1253,4 +1271,3 @@ def test_specify_happy_path(client, monkeypatch):
 # ---------------------------------------------------------------------------
 # Final result visibility for Done cards
 # ---------------------------------------------------------------------------
-

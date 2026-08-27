@@ -51,6 +51,7 @@ def worker_env(monkeypatch, tmp_path):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.setenv("HERMES_PROFILE", "test-worker")
     monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
     from pathlib import Path as _Path
@@ -691,6 +692,36 @@ def test_create_happy_path(worker_env):
         assert child.assignee == "peer"
     finally:
         conn.close()
+
+
+def test_create_backlog_is_approval_gated(worker_env):
+    from tools import kanban_tools as kt
+
+    out = kt._handle_create({
+        "title": "await approval",
+        "assignee": "peer",
+        "backlog": True,
+    })
+    data = json.loads(out)
+    assert data["ok"] is True
+    assert data["status"] == "backlog"
+
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect() as conn:
+        assert kb.get_task(conn, data["task_id"]).status == "backlog"
+
+
+def test_create_rejects_backlog_with_triage(worker_env):
+    from tools import kanban_tools as kt
+
+    data = json.loads(kt._handle_create({
+        "title": "ambiguous intake",
+        "assignee": "peer",
+        "backlog": True,
+        "triage": True,
+    }))
+    assert "mutually exclusive" in data["error"]
 
 
 def test_link_happy_path(worker_env):
