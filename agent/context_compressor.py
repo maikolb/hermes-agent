@@ -3121,8 +3121,16 @@ class ContextCompressor(ContextEngine):
         proactive_prune_min_reclaim_tokens: int = 4096,
         min_tail_user_messages: int = 1,
         tail_mode: str = "legacy",
+        keep_last_human_messages: int = 0,
     ):
         self.model = model
+        # Retention policy (agent/transcript_retention.py): the last K real
+        # human messages are never summarized away, wherever they sit.
+        # Constructor default is 0 (no behavior change for direct callers);
+        # the PRODUCT default lives in config_defaults
+        # (compression.keep_last_human_messages: 10) and is wired through
+        # agent_init, so every real agent gets the protection.
+        self.keep_last_human_messages = max(0, int(keep_last_human_messages))
         self.base_url = base_url
         self.api_key = api_key
         self.provider = provider
@@ -7402,6 +7410,35 @@ This compaction should PRIORITISE preserving all information related to the focu
             return messages
 
         turns_to_summarize = messages[compress_start:compress_end]
+        # Retention policy (TARGET_ARCHITECTURE gap 1): the last K real human
+        # messages are inviolable wherever they sit. Rescue the ones inside
+        # the summarization window BEFORE anything consumes the slice — they
+        # are excluded from the summary input and re-emitted verbatim as the
+        # tail prefix in Phase 4, so a mention right after compaction still
+        # sees what the operators actually said (27/08 DOVCRM incident).
+        from agent.transcript_retention import select_retained_middle_humans
+
+        _retained_human_pairs = select_retained_middle_humans(
+            messages,
+            compress_start,
+            compress_end,
+            getattr(self, "keep_last_human_messages", 10),
+        )
+        if _retained_human_pairs:
+            _retained_indices = {index for index, _ in _retained_human_pairs}
+            turns_to_summarize = [
+                message
+                for offset, message in enumerate(
+                    turns_to_summarize, start=compress_start
+                )
+                if offset not in _retained_indices
+            ]
+            if not self.quiet_mode:
+                logger.info(
+                    "Retention policy rescuing %d human message(s) from the "
+                    "compression window",
+                    len(_retained_human_pairs),
+                )
         # Lean mode: demote stale tool results INSIDE the tail so the small
         # budget binds without the tool-group alignment floor hoarding old
         # output (#compaction-v2). Runs before summary generation so the
@@ -7767,6 +7804,16 @@ This compaction should PRIORITISE preserving all information related to the focu
             stripped = self._strip_context_summary_handoff_message(msg)
             if stripped is not None:
                 tail_messages.append(stripped)
+
+        # Retention policy re-emit: rescued human messages become the tail
+        # prefix (chronological order: they predate the positional tail).
+        # Prepended BEFORE the alternation/role logic below so first_tail_role
+        # and the zero-user-turn guard account for them naturally.
+        if _retained_human_pairs:
+            tail_messages[:0] = [
+                _fresh_compaction_message_copy(message)
+                for _, message in _retained_human_pairs
+            ]
 
         _merge_summary_into_tail = False
         # last_head_role reads the assembled (post-strip) head; first_tail_role

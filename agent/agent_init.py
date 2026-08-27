@@ -2146,6 +2146,9 @@ def init_agent(
     compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
     compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
     compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
+    compression_keep_last_humans = int(
+        _compression_cfg.get("keep_last_human_messages", 10)
+    )
     # Tail retention mode (compression.tail_mode). "legacy" (default) keeps
     # the 0.20*window verbatim tail; "lean" switches to the clamped
     # 2.5%/10K-25K tail with recovery-pointer machinery (#87326). Unknown
@@ -2788,6 +2791,7 @@ def init_agent(
             proactive_prune_min_reclaim_tokens=compression_proactive_prune_min_reclaim,
             min_tail_user_messages=compression_min_tail_users,
             tail_mode=compression_tail_mode,
+            keep_last_human_messages=compression_keep_last_humans,
         )
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
     if callable(_bind_session_state):
