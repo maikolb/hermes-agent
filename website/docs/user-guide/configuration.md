@@ -1977,6 +1977,26 @@ queue is empty. The worker projection respects the destination profile's
 `kanban.worker_focus_handoff: true` remains a compatibility fallback only when
 `display.worker_rotation` is not set.
 
+### Parallel-by-default project Topic intake
+
+When a principal run is already active in a project Topic, Hermes can route a
+new, independent task into Kanban immediately while corrections continue to
+steer the active run:
+
+```yaml
+dispatch:
+  parallel_by_default: true
+```
+
+The created card is assigned through the existing Kanban dispatcher route,
+auto-subscribed to the originating chat, and picked up on the next dispatcher
+tick subject to `kanban.max_in_progress` and
+`kanban.max_in_progress_per_profile`. If capacity is full, the confirmation
+includes its ready-queue position. Set `parallel_by_default: false` to restore
+the previous busy-input behavior. When the key is absent, profiles that have
+already enabled `display.worker_rotation` (or the legacy
+`kanban.worker_focus_handoff`) inherit `true`; other profiles inherit `false`.
+
 Signal is listed as a valid platform key because the setting can be saved per platform, but the current Signal adapter cannot edit sent messages and does not render tool-progress bubbles. Keep Signal `tool_progress` set to `off`; use the CLI or an editing-capable messaging platform if you need to watch each tool call live.
 
 `interim_assistant_messages` is gateway-only. When enabled, Hermes sends completed mid-turn assistant updates as separate chat messages. This is independent from `tool_progress` and does not require gateway streaming.

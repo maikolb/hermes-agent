@@ -1322,6 +1322,13 @@ DEFAULT_CONFIG = {
         },
     },
     
+    # Busy-topic intake policy. Disabled globally so existing profiles keep
+    # their historical steer/queue behavior. Profiles that enable worker
+    # rotation inherit parallel intake unless they explicitly set this false.
+    "dispatch": {
+        "parallel_by_default": False,
+    },
+
     "display": {
         "compact": False,
         "personality": "",

@@ -1547,6 +1547,16 @@ delegation:
 # honcho: {}
 
 # =============================================================================
+# Busy Topic Dispatch
+# =============================================================================
+# When a project Topic already has an active principal run, independent task
+# requests can become subscribed Kanban cards instead of steering that run.
+# Explicit corrections still steer. Worker-rotation profiles inherit `true`
+# when this key is absent; set false to restore the historical behavior.
+dispatch:
+  parallel_by_default: false
+
+# =============================================================================
 # Display
 # =============================================================================
 display:

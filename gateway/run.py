@@ -11563,6 +11563,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _busy_state = self._peek_session_state(session_key)
         running_agent = _busy_state.turn.agent if _busy_state else None
 
+        # Part 2 worker rotation: an independent task sent into a project
+        # Topic while the principal is busy becomes a subscribed Kanban card.
+        # Commands, media, conversational follow-ups, and corrections keep the
+        # established steer/queue/interrupt path below.
+        if (
+            event.message_type == MessageType.TEXT
+            and not getattr(event, "media_urls", None)
+            and not getattr(event, "media_types", None)
+            and await self._kanban_parallel_dispatch_busy_message(
+                event,
+                session_key,
+            )
+        ):
+            return True
+
         busy_text_mode = self._effective_busy_text_mode(event.source)
         if (
             event.message_type == MessageType.TEXT

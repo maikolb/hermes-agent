@@ -14,8 +14,10 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import sqlite3
 import time
+import unicodedata
 from contextvars import Context
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -34,6 +36,84 @@ _WORKER_FOCUS_MAX_OUTPUT_CHARS = 2800
 _WORKER_FOCUS_ANSI_RE = re.compile(
     r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"
 )
+
+_PARALLEL_TASK_PREFIX_RE = re.compile(
+    r"^(?:por\s+favor\s+)?(?:"
+    r"investig(?:a|ar|ue)|implemente?|implementa|implementar|crie?|criar|"
+    r"analise?|analisar|pesquise?|pesquisar|revise?|revisar|"
+    r"teste?|testar|documente?|documentar|prepare?|preparar|"
+    r"corrija?|corrigir|conserte?|consertar|"
+    r"investigate|implement|create|analy[sz]e|research|review|"
+    r"test|document|prepare|fix|build|add"
+    r")\b",
+    re.IGNORECASE,
+)
+_PARALLEL_EXPLICIT_RE = re.compile(
+    r"\b(?:nova\s+tarefa|outra\s+tarefa|em\s+paralelo|parallel(?:ly)?|"
+    r"separate\s+task|new\s+task)\b",
+    re.IGNORECASE,
+)
+_STEER_REFERENCE_RE = re.compile(
+    r"\b(?:isso|isto|esse|essa|esses|essas|aquilo|"
+    r"o\s+que\s+voce|que\s+voce|que\s+acabou|acabou\s+de|"
+    r"ultima\s+(?:mudanca|alteracao)|mudanca\s+anterior|"
+    r"this|that|what\s+you|you\s+just|last\s+change|previous\s+change)\b",
+    re.IGNORECASE,
+)
+_STEER_ACTION_RE = re.compile(
+    r"^(?:por\s+favor\s+)?(?:"
+    r"reverta?|reverter|desfaca?|desfazer|volte?|voltar|"
+    r"ajuste?|ajustar|mude?|mudar|troque?|trocar|"
+    r"continue?|continuar|pare?|parar|ignore?|ignorar|"
+    r"undo|revert|roll\s+back|change|adjust|continue|stop|ignore"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _fold_parallel_intake_text(value: Any) -> str:
+    """Normalize accents/case without changing the user text persisted to Kanban."""
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch)).strip()
+
+
+def _classify_parallel_intake_message(text: Any) -> str:
+    """Classify a busy follow-up as ``new_task`` or ``steer``.
+
+    The classifier is deliberately deterministic and conservative: explicit
+    parallel/new-task language wins, deictic corrections stay attached to the
+    current run, and otherwise only action-oriented task requests fan out.
+    Unknown conversational follow-ups retain the established steer behavior.
+    """
+    folded = _fold_parallel_intake_text(text)
+    if not folded or folded.startswith("/"):
+        return "steer"
+    if _PARALLEL_EXPLICIT_RE.search(folded):
+        return "new_task"
+    if _STEER_ACTION_RE.search(folded) and _STEER_REFERENCE_RE.search(folded):
+        return "steer"
+    if _STEER_REFERENCE_RE.search(folded) and re.match(
+        r"^(?:corrija?|corrigir|fix|conserte?|consertar)\b",
+        folded,
+        re.IGNORECASE,
+    ):
+        return "steer"
+    return "new_task" if _PARALLEL_TASK_PREFIX_RE.search(folded) else "steer"
+
+
+def _resolve_parallel_by_default(config: Any, platform_key: str = "telegram") -> bool:
+    """Resolve the profile gate, preserving an explicit false.
+
+    Profiles that already opted into Part 1 worker rotation inherit the Part 2
+    default until they explicitly set ``dispatch.parallel_by_default``. This
+    makes the NF/PF rollout cohesive while every other profile keeps the old
+    busy-input behavior.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    dispatch_cfg = cfg.get("dispatch")
+    if isinstance(dispatch_cfg, dict) and "parallel_by_default" in dispatch_cfg:
+        return dispatch_cfg.get("parallel_by_default") is True
+    return _resolve_worker_focus_handoff(lambda: cfg, platform_key)
 
 
 def _resolve_auto_decompose_settings(
@@ -430,6 +510,228 @@ class GatewayKanbanWatchersMixin:
         handle = getattr(self, "_kanban_dispatcher_lock_handle", None)
         self._kanban_dispatcher_lock_handle = None
         _release_singleton_lock(handle)
+
+    def _kanban_parallel_dispatch_config(self, source: Any) -> dict:
+        """Load the raw config owned by the inbound message's profile."""
+        profile = str(getattr(source, "profile", "") or "").strip() or None
+        try:
+            from gateway.run import _load_gateway_config
+
+            return _load_worker_focus_config(profile, _load_gateway_config)
+        except Exception:
+            logger.debug(
+                "parallel intake: profile config read failed",
+                exc_info=True,
+            )
+            return {}
+
+    def _kanban_parallel_dispatch_assignee(
+        self,
+        source: Any,
+        config: dict,
+    ) -> str:
+        """Resolve the existing dispatcher route for a new parallel card."""
+        kanban_cfg = config.get("kanban") if isinstance(config, dict) else None
+        if isinstance(kanban_cfg, dict):
+            configured = str(kanban_cfg.get("default_assignee") or "").strip()
+            if configured:
+                return configured
+        routed = str(getattr(source, "profile", "") or "").strip()
+        if routed:
+            return routed
+        try:
+            return str(self._active_profile_name() or "default")
+        except Exception:
+            return "default"
+
+    @staticmethod
+    def _kanban_parallel_queue_state(
+        board: str,
+        task_id: str,
+        assignee: str,
+        config: dict,
+    ) -> tuple[bool, int]:
+        """Return ``(capacity_reached, ready_position)`` for one new card."""
+        from hermes_cli import kanban_db as _kb
+
+        kcfg = config.get("kanban") if isinstance(config, dict) else None
+        kcfg = kcfg if isinstance(kcfg, dict) else {}
+
+        def _positive_int(value: Any) -> Optional[int]:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed > 0 else None
+
+        conn = _kb.connect(board=board or None)
+        try:
+            ready = conn.execute(
+                "SELECT id FROM tasks WHERE status = 'ready' "
+                "AND claim_lock IS NULL ORDER BY priority DESC, created_at ASC"
+            ).fetchall()
+            position = next(
+                (index for index, row in enumerate(ready, start=1) if row["id"] == task_id),
+                0,
+            )
+            running = _kb.count_running_tasks(conn)
+            at_capacity = False
+            max_spawn = _positive_int(kcfg.get("max_spawn"))
+            if max_spawn is not None and running >= max_spawn:
+                at_capacity = True
+
+            configured_max = _positive_int(kcfg.get("max_in_progress"))
+            effective_max = _kb.resolve_max_in_progress(configured_max)
+            if effective_max is not None:
+                host_running = running + _kb.count_running_tasks_other_boards(
+                    board or None
+                )
+                if host_running >= effective_max:
+                    at_capacity = True
+
+            per_profile = _positive_int(kcfg.get("max_in_progress_per_profile"))
+            if per_profile is not None and assignee:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM tasks "
+                    "WHERE status = 'running' AND assignee = ?",
+                    (assignee,),
+                ).fetchone()
+                if int(row["n"] if row else 0) >= per_profile:
+                    at_capacity = True
+            return at_capacity, position
+        finally:
+            conn.close()
+
+    async def _kanban_parallel_dispatch_busy_message(
+        self,
+        event: Any,
+        session_key: str,
+    ) -> bool:
+        """Turn an independent busy-topic request into a subscribed Kanban card."""
+        source = getattr(event, "source", None)
+        if source is None or getattr(event, "internal", False):
+            return False
+        if not str(getattr(source, "thread_id", "") or "").strip():
+            return False
+        text = str(getattr(event, "text", "") or "").strip()
+        if _classify_parallel_intake_message(text) != "new_task":
+            return False
+
+        config = self._kanban_parallel_dispatch_config(source)
+        platform = getattr(getattr(source, "platform", None), "value", None)
+        platform_key = str(platform or getattr(source, "platform", "") or "").lower()
+        if not _resolve_parallel_by_default(config, platform_key):
+            return False
+
+        project_context, project_denial = await asyncio.to_thread(
+            self._resolve_project_context_for_message,
+            event,
+            source,
+        )
+        if (
+            project_denial is not None
+            or project_context is None
+            or bool(getattr(project_context, "is_management", False))
+        ):
+            return False
+        board = str(getattr(project_context, "board_slug", "") or "").strip()
+        if not board:
+            return False
+
+        assignee = self._kanban_parallel_dispatch_assignee(source, config)
+        args = [
+            "kanban",
+            "create",
+            text,
+            "--assignee",
+            assignee,
+            "--created-by",
+            "gateway-parallel-intake",
+        ]
+        original_text = event.text
+        try:
+            event.text = "/" + shlex.join(args)
+            output = await self._handle_kanban_command(event)
+        except Exception:
+            logger.warning(
+                "parallel intake: Kanban create failed for session %s",
+                session_key,
+                exc_info=True,
+            )
+            return False
+        finally:
+            event.text = original_text
+
+        match = re.search(r"Created\s+(t_[0-9a-f]+)\b", str(output or ""))
+        if match is None:
+            logger.warning(
+                "parallel intake: Kanban create returned no task id for session %s",
+                session_key,
+            )
+            return False
+        task_id = match.group(1)
+        try:
+            at_capacity, position = await asyncio.to_thread(
+                self._kanban_parallel_queue_state,
+                board,
+                task_id,
+                assignee,
+                config,
+            )
+        except Exception:
+            logger.debug("parallel intake: queue-state read failed", exc_info=True)
+            at_capacity, position = False, 0
+
+        if at_capacity:
+            suffix = f" Ready queue position: {position}." if position else ""
+            message = (
+                f"🧩 Parallel task created: {task_id}. Worker capacity is full; "
+                f"the card remains ready.{suffix}"
+            )
+        else:
+            message = (
+                f"🧩 Parallel task created: {task_id}. "
+                "The dispatcher will start it on its next tick."
+            )
+
+        adapter = self._adapter_for_source(source)
+        if adapter is not None:
+            reply_anchor = self._reply_anchor_for_event(event)
+            try:
+                await adapter._send_with_retry(
+                    chat_id=source.chat_id,
+                    content=message,
+                    reply_to=(
+                        reply_anchor
+                        if platform_key == "telegram"
+                        and getattr(source, "chat_type", "") == "dm"
+                        and getattr(source, "thread_id", None)
+                        else (
+                            None
+                            if platform_key == "telegram"
+                            and getattr(source, "thread_id", None)
+                            else getattr(event, "message_id", None)
+                        )
+                    ),
+                    metadata=self._thread_metadata_for_source(source, reply_anchor),
+                )
+            except Exception:
+                # The card is already durable. Never fall back to steering the
+                # same request merely because its confirmation could not send.
+                logger.warning(
+                    "parallel intake: confirmation failed for %s",
+                    task_id,
+                    exc_info=True,
+                )
+        logger.info(
+            "Parallel intake created %s on board %s for session %s (queued=%s position=%s)",
+            task_id,
+            board,
+            session_key,
+            at_capacity,
+            position,
+        )
+        return True
 
     def _kanban_worker_display_lane(self, source: Any) -> tuple[str, str, str, str]:
         """Return the profile-aware presentation lane for one chat source."""
