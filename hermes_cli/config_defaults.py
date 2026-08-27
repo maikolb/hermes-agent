@@ -2056,12 +2056,12 @@ DEFAULT_CONFIG = {
                                      # (API, tools, iteration budget), never a delegation
                                      # stopwatch. Set a positive number of seconds
                                      # (floor 30s) to enforce a hard cap.
-        "route_to_dispatcher": None,  # board-bound delegations become READY kanban cards
-                                      # executed by isolated dispatcher workers instead of
-                                      # in-process subagents (which share the gateway event
-                                      # loop and starve under congestion). None (default)
-                                      # inherits display.worker_rotation; set true/false to
-                                      # pin explicitly.
+        "route_to_dispatcher": False,  # board-bound delegations become READY kanban cards
+                                       # executed by isolated dispatcher workers instead of
+                                       # in-process subagents. STRICTLY OPT-IN: switching it
+                                       # on changes delegation semantics (results stop
+                                       # returning to the principal's turn), so no implicit
+                                       # inheritance (TARGET_ARCHITECTURE gap 9).
         "mirror_principal_turns": None,  # mirror long principal turns on board-bound
                                          # sessions as claimed running cards with heartbeat,
                                          # so the board stays the authority over ALL work.

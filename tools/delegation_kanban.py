@@ -111,17 +111,16 @@ def _delegation_flag(key: str) -> Optional[bool]:
 
 
 def route_to_dispatcher_enabled() -> bool:
-    """``delegation.route_to_dispatcher``; unset inherits display.worker_rotation.
+    """``delegation.route_to_dispatcher``; strictly opt-in (default False).
 
     When on, delegations from board-bound sessions become ready cards executed
-    by isolated dispatcher workers instead of in-process subagents sharing the
-    gateway event loop (which starve under gateway congestion and die on the
-    child timeout — the 27/08 DOVCRM incident).
+    by isolated dispatcher workers instead of in-process subagents. Inheriting
+    display.worker_rotation proved to be a bad implicit coupling: it silently
+    changed delegation semantics (results no longer return to the principal's
+    turn) on every rotation-enabled profile — TARGET_ARCHITECTURE gap 9.
     """
     explicit = _delegation_flag("route_to_dispatcher")
-    if explicit is not None:
-        return explicit
-    return _display_worker_rotation()
+    return bool(explicit) if explicit is not None else False
 
 
 def mirror_principal_turns_enabled() -> bool:
