@@ -1477,6 +1477,12 @@ DEFAULT_CONFIG = {
         # Kanban worker in the same chat and rotate until the queue is empty.
         # Orchestration profiles opt in globally or under display.platforms.
         "worker_rotation": False,
+        # When the last worker on a lane finishes, edit its rotation bubble
+        # into a short completion trace ("Worker concluído: ...") instead of
+        # deleting it. False restores the fully ephemeral bubble. Only
+        # meaningful with worker_rotation on; a principal claim still removes
+        # the bubble either way.
+        "worker_rotation_trace": True,
         # Codex Responses models narrate progress in a dedicated commentary
         # channel. When true (default), completed commentary messages are
         # delivered as visible mid-turn updates via the interim message path.
