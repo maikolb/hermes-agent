@@ -1170,6 +1170,52 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+def _resolve_completion_routing(parent_agent, origin_ui_session_id):
+    """Resolve the ``(session_key, ui_session_id)`` a completion routes to.
+
+    In desktop/TUI, the routable session key is the durable
+    AIAgent.session_id. Context compression can rotate that id during the
+    same turn before the TUI-side session dict is re-anchored; capturing the
+    stale approval/session context key here would orphan the completion and
+    let any desktop poller consume it. Gateway chats keep their platform
+    conversation key (agent:main:...).
+
+    CLI (single-process) path: the approval contextvar is only bound during
+    gateway/TUI turns, so the key resolves empty there. Since #64240 the CLI
+    drains completions through a positive-ownership filter keyed on the
+    durable AIAgent.session_id — an empty session_key would fail closed
+    (#64484) — so the parent's durable session id is stamped instead;
+    compression rotations are handled on the drain side via
+    resolve_resume_session_id lineage resolution.
+
+    Shared by the background dispatch and the foreground crash marker so
+    both route their (eventual) completion events identically.
+    """
+    from tools.approval import get_current_session_key
+
+    session_key = get_current_session_key(default="")
+    try:
+        from gateway.session_context import get_session_env
+
+        source = get_session_env("HERMES_SESSION_SOURCE", "")
+        # Refresh from the same task-local source when available, but retain
+        # the immutable value captured before child construction otherwise.
+        origin_ui_session_id = (
+            get_session_env("HERMES_UI_SESSION_ID", "") or origin_ui_session_id
+        )
+        if source == "tui":
+            agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
+            if agent_session_id:
+                session_key = agent_session_id
+    except Exception:
+        pass
+    if not session_key:
+        agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
+        if agent_session_id:
+            session_key = agent_session_id
+    return session_key, origin_ui_session_id
+
+
 def _build_child_system_prompt(
     goal: str,
     context: Optional[str] = None,
@@ -1229,18 +1275,35 @@ def _build_child_system_prompt(
                 "your work in this workspace.\n\n" + _ctx_files.strip()
             )
     parts.append(
-        "\nComplete this task using the tools available to you. "
-        "When finished, provide a clear, concise summary of:\n"
-        "- What you did\n"
-        "- What you found or accomplished\n"
-        "- Any files you created or modified\n"
-        "- Any issues encountered\n\n"
+        "\n## Delegated Work Protocol\n"
+        "Run the same working cycle the principal agent runs "
+        "(TARGET_ARCHITECTURE: workers replicate the principal's cycle):\n"
+        "1. SCOPE — restate the requested outcome in one sentence and note "
+        "what is out of scope. Never expand scope on your own.\n"
+        "2. PREFLIGHT — before building anything, check whether it already "
+        "exists (code, commits, docs). Report a duplicate instead of "
+        "rebuilding it.\n"
+        "3. WORK WITH EVIDENCE — validate by running things (tests, "
+        "commands, checks), not by reading them. No completion claim "
+        "without validation evidence; say explicitly when a check was "
+        "skipped or failed.\n"
+        "A tracking card for this task is managed by the system — do not "
+        "try to create or move cards yourself.\n\n"
         "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
         "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
-        "Keep your final summary tight: lead with outcomes, prefer bullet "
-        "points over paragraphs, and don't replay your whole process. Your "
-        "response is returned to the parent agent as a summary, and overlong "
-        "summaries crowd out the parent's context window."
+        "When finished (or blocked), end with a structured CLOSEOUT — your "
+        "final response is relayed to the parent agent and to the "
+        "operator's display as this task's closeout:\n"
+        "- Scope: the one-sentence outcome you worked toward\n"
+        "- Done: what you did, found, created or modified\n"
+        "- Evidence: how it was validated (command + result), or 'not "
+        "validated' with the reason\n"
+        "- Limitations: known gaps, issues encountered; if you are blocked, "
+        "the blocking reason goes here — a clear blocked closeout is a "
+        "valid outcome, not a failure.\n\n"
+        "Keep the closeout tight: lead with outcomes, prefer bullet "
+        "points over paragraphs, and don't replay your whole process. "
+        "Overlong summaries crowd out the parent's context window."
     )
     if role == "orchestrator":
         child_note = (
@@ -4185,6 +4248,56 @@ def delegate_task(
             combined["live_transcripts"] = list(live_paths)
         return combined
 
+    def _run_foreground_aggregate(**agg_kwargs) -> dict:
+        """Run the in-process fan-out under a durable crash marker.
+
+        TARGET_ARCHITECTURE gap 7: foreground workers die with the hosting
+        process and nothing re-dispatched them. The marker reuses the
+        async-delegation recovery machine: on the next process start the
+        goals re-enter the conversation as an outcome-unknown turn and the
+        principal re-delegates as process. Normal completion — including an
+        in-turn failure the parent already saw inline — deletes the marker
+        in the finally; only a process death leaves it behind.
+        """
+        _marker_id = None
+        try:
+            from tools.async_delegation import register_foreground_delegation
+
+            _fg_session_key, _fg_origin_ui = _resolve_completion_routing(
+                parent_agent, _origin_ui_session_id
+            )
+            _marker_id = register_foreground_delegation(
+                goals=[t["goal"] for t in task_list],
+                context=context,
+                toolsets=None,
+                role=top_role,
+                model=creds.get("model"),
+                session_key=_fg_session_key,
+                origin_ui_session_id=_fg_origin_ui,
+                origin_session_id=_origin_wake_sid,
+                parent_session_id=getattr(parent_agent, "session_id", None),
+                delegation_id=live_deleg_id,
+            )
+        except Exception:
+            logger.debug(
+                "foreground delegation crash marker failed", exc_info=True
+            )
+        try:
+            return _execute_and_aggregate(**agg_kwargs)
+        finally:
+            if _marker_id:
+                try:
+                    from tools.async_delegation import (
+                        complete_foreground_delegation,
+                    )
+
+                    complete_foreground_delegation(_marker_id)
+                except Exception:
+                    logger.debug(
+                        "foreground crash marker completion failed",
+                        exc_info=True,
+                    )
+
     # ----- Background dispatch: run the WHOLE batch as one async unit -----
     # When background is true, the entire fan-out runs on the daemon executor
     # via a single async delegation. _execute_and_aggregate() joins on every
@@ -4194,7 +4307,6 @@ def delegate_task(
     # keep chatting, get the combined summaries back together at the end.
     if background:
         from tools.async_delegation import dispatch_async_delegation_batch
-        from tools.approval import get_current_session_key
 
         # Finite sessions cannot route a detached subagent result back to the
         # agent after their turn/process ends. This includes stateless HTTP
@@ -4236,7 +4348,7 @@ def delegate_task(
                 "delegate_task: async delivery unsupported on this session "
                 "runtime; running the batch synchronously instead."
             )
-            _sync_result = _execute_and_aggregate()
+            _sync_result = _run_foreground_aggregate()
             if isinstance(_sync_result, dict):
                 _sync_result["note"] = (
                     "background=true is not available in this session — it cannot "
@@ -4247,43 +4359,9 @@ def delegate_task(
                 )
             return json.dumps(_sync_result, ensure_ascii=False)
 
-        _session_key = get_current_session_key(default="")
-        try:
-            from gateway.session_context import get_session_env
-
-            _source = get_session_env("HERMES_SESSION_SOURCE", "")
-            # Refresh from the same task-local source when available, but retain
-            # the immutable value captured before child construction otherwise.
-            _origin_ui_session_id = (
-                get_session_env("HERMES_UI_SESSION_ID", "") or _origin_ui_session_id
-            )
-            # In desktop/TUI, the routable session key is the durable
-            # AIAgent.session_id. Context compression can rotate that id during
-            # the same turn before the TUI-side session dict is re-anchored;
-            # if we capture the stale approval/session context key here, the
-            # async completion becomes an orphan and any desktop poller may
-            # consume it. Gateway chats are different: their session_key is the
-            # platform conversation key (agent:main:...), so keep it there.
-            if _source == "tui":
-                _agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
-                if _agent_session_id:
-                    _session_key = _agent_session_id
-        except Exception:
-            _source = ""
-        if not _session_key:
-            # CLI (single-process) path: the approval contextvar is only bound
-            # during gateway/TUI turns and HERMES_SESSION_KEY is not in the CLI
-            # environment, so the key resolves empty here. Since #64240 the CLI
-            # drains completions through a positive-ownership filter keyed on
-            # the durable AIAgent.session_id — an empty session_key would fail
-            # closed and the CLI could never claim its own completions, while
-            # a restored foreign event with an empty key could leak into any
-            # unfiltered consumer (#64484). Stamp the parent's durable session
-            # id instead; compression rotations are handled on the drain side
-            # via resolve_resume_session_id lineage resolution.
-            _agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
-            if _agent_session_id:
-                _session_key = _agent_session_id
+        _session_key, _origin_ui_session_id = _resolve_completion_routing(
+            parent_agent, _origin_ui_session_id
+        )
         _parent_session_id = getattr(parent_agent, "session_id", None)
         _child_agents = [c for (_, _, c) in children]
 
@@ -4431,7 +4509,7 @@ def delegate_task(
             "batch synchronously instead.",
             dispatch.get("error", "rejected"),
         )
-        _cap_result = _execute_and_aggregate()
+        _cap_result = _run_foreground_aggregate()
         if isinstance(_cap_result, dict):
             _cap_result["note"] = (
                 "The background delegation pool was at capacity "
@@ -4443,7 +4521,7 @@ def delegate_task(
         return json.dumps(_cap_result, ensure_ascii=False)
 
     # ----- Synchronous path -----
-    return json.dumps(_execute_and_aggregate(), ensure_ascii=False)
+    return json.dumps(_run_foreground_aggregate(), ensure_ascii=False)
 
 
 def _resolve_child_credential_pool(

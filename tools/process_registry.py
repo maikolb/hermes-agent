@@ -2976,6 +2976,15 @@ def _format_async_delegation(evt: dict) -> str:
         if error and not results:
             lines.append("--- ERROR ---")
             lines.append(f"The batch did not complete successfully: {error}")
+            # Without the goals the parent has nothing to act on — a
+            # restart-recovered "outcome unknown" batch (workers died with
+            # the process) must hand back the full task list so the agent
+            # can re-delegate as process, not memory (gap 7).
+            if goals:
+                lines.append("")
+                lines.append("Original goals of this fan-out:")
+                for _gi, _g in enumerate(goals):
+                    lines.append(f"  {_gi + 1}. {_g}")
             return "\n".join(lines)
         for r in sorted(results, key=lambda x: x.get("task_index", 0)):
             idx = r.get("task_index", 0)
