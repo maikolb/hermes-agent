@@ -1,0 +1,1 @@
+{"blocking": "unrequested-optional-expansion-only", "discovery_limit": 5, "hard_seconds": 270, "mode": "intelligent-redirect-with-scope-veto", "pid": 2903649, "registered_at_epoch": 1787900432.5734718, "soft_seconds": 180, "version": "1.3.0"}

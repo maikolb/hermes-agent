@@ -1,0 +1,5 @@
+name: fast-quality-guard
+version: "1.3.0"
+description: "Intelligent first-delivery redirects plus deterministic veto of unrequested scope/security expansion."
+author: Maikol + Hermes Agent
+kind: standalone

@@ -1,0 +1,5 @@
+name: zero-ui-guard
+version: "1.0.1"
+description: "Windows-only pre-dispatch guard against launch paths that can create visible external UI or console windows; inert on non-Windows hosts."
+author: Maikol + Hermes Agent
+kind: standalone

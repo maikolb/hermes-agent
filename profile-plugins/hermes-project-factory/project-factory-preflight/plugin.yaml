@@ -1,0 +1,5 @@
+name: project-factory-preflight
+version: "1.0.0"
+description: "Completes Project OS topic creation with a private repository and autonomous first-code deployment contract."
+author: Maikol + Hermes Project Factory
+kind: standalone
