@@ -11460,8 +11460,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         echo respects the count-based ledger.  If steering later falls back
         to queue mode, the drain path reuses the cached transcript instead of
         paying for a second STT call or re-echoing the same line.
+
+        STT inputs are excluded from the placeholder only when transcription
+        actually succeeded (the transcript already carries them).  On STT
+        failure the voice attachment is kept as a local-path placeholder:
+        an empty payload here would silently demote the steer to queue mode
+        and detach the message from the turn it was aimed at
+        (TARGET_ARCHITECTURE gap 2 — attachments stay with their message).
         """
         text = (event.text or "").strip()
+        stt_succeeded = False
         if self._pending_event_audio_paths(event):
             adapter = self._adapter_for_source(event.source)
             enriched_text, successful_transcripts = await self._transcribe_and_echo_pending_voice(
@@ -11472,9 +11480,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 log_context="Busy-steer",
             )
             if successful_transcripts:
+                stt_succeeded = True
                 text = (enriched_text or text).strip()
 
-        media_context = _build_media_placeholder(event, skip_stt_inputs=True)
+        media_context = _build_media_placeholder(event, skip_stt_inputs=stt_succeeded)
         if media_context:
             text = f"{text}\n\n{media_context}".strip()
         return text
