@@ -3076,7 +3076,7 @@ class GatewayKanbanWatchersMixin:
         assignee = str(task["assignee"] or "").strip() if "assignee" in task.keys() else ""
         if not assignee and not default_assignee:
             return (
-                "sem assignee e sem kanban.default_assignee — o dispatcher "
+                "sem assignee e sem kanban.default_assignee: o dispatcher "
                 "pula este card para sempre"
             )
         workspace = (
@@ -3087,7 +3087,7 @@ class GatewayKanbanWatchersMixin:
         if workspace and not Path(workspace).expanduser().exists():
             return f"workspace declarado não existe no host: {workspace}"
         return (
-            "pronto sem claim — dispatcher parado, saturado "
+            "pronto sem claim: dispatcher parado, saturado "
             "(max_in_progress) ou perfil executor indisponível"
         )
 
