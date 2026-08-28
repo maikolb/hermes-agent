@@ -1136,6 +1136,55 @@ class ProjectRouter:
             access=access,
         )
 
+    def resolve_binding_readonly(
+        self,
+        platform: object,
+        chat_id: object,
+        thread_id: object,
+    ) -> ProjectContext:
+        """Binding lookup with NO sender authorization — internal turns only.
+
+        Gateway-synthesized continuations (startup auto-resume, kanban wake
+        events) carry no human sender, so the ACL check in :meth:`resolve`
+        has no identity to authorize and the turn used to silently lose its
+        project env — delegations then ran without cards/rotation/traces
+        (probe firings 28/08 04:36 and 05:58, DOVTest). The topic's ACL was
+        already enforced when the binding was created and on every human
+        turn; an internal continuation only needs the binding row back.
+        Zero mutations. Raises :class:`UnknownBindingError` when the topic
+        is not bound.
+        """
+        platform_s = _id(platform, "platform")
+        chat_s = _id(chat_id, "chat_id")
+        thread_s = _id(thread_id, "thread_id")
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT p.project_id, p.slug, p.board_slug, p.workdir, p.status,
+                       b.is_management
+                FROM topic_bindings AS b
+                JOIN projects AS p
+                  ON p.profile=b.profile AND p.project_id=b.project_id
+                WHERE b.profile=? AND b.platform=? AND b.chat_id=? AND b.thread_id=?
+                """,
+                (self.profile, platform_s, chat_s, thread_s),
+            ).fetchone()
+        if row is None:
+            raise UnknownBindingError("no project binding exists for this topic")
+        return ProjectContext(
+            project_id=row["project_id"],
+            slug=row["slug"],
+            board_slug=row["board_slug"],
+            workdir=Path(row["workdir"]) if row["workdir"] else None,
+            status=row["status"],
+            platform=platform_s,
+            chat_id=chat_s,
+            thread_id=thread_s,
+            sender_user_id="",
+            is_management=bool(row["is_management"]),
+            access="allow",
+        )
+
     def find_telegram_binding(
         self,
         chat_id: object,

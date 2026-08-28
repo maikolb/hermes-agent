@@ -106,7 +106,7 @@ def test_internal_event_resolves_bound_project_readonly(tmp_path):
     assert context.is_management is False
 
 
-def test_internal_event_without_binding_or_identity_stays_unbound(tmp_path):
+def test_internal_event_without_binding_stays_unbound(tmp_path):
     _make_router_db(tmp_path / "router.db")
     runner = _runner(tmp_path)
 
@@ -115,10 +115,34 @@ def test_internal_event_without_binding_or_identity_stays_unbound(tmp_path):
     context, denial = runner._resolve_project_context_for_message(event, no_binding)
     assert (context, denial) == (None, None)
 
-    no_identity = _source(user_id=None)
-    event2 = MessageEvent(text="", message_type=MessageType.TEXT, source=no_identity, internal=True)
-    context2, denial2 = runner._resolve_project_context_for_message(event2, no_identity)
+    # No identity AND no binding: still unbound.
+    orphan = _source(user_id=None, thread="999")
+    event2 = MessageEvent(text="", message_type=MessageType.TEXT, source=orphan, internal=True)
+    context2, denial2 = runner._resolve_project_context_for_message(event2, orphan)
     assert (context2, denial2) == (None, None)
+
+
+def test_internal_event_without_identity_still_resolves_bound_topic(tmp_path):
+    """Probe firings 28/08 (04:36, 05:58 DOVTest): gateway-synthesized
+    continuations (kanban wake events, auto-resume origins without a user)
+    carry no sender, and requiring one silently dropped the board env —
+    the resumed fan-out then delegated with no cards/rotation/traces. A
+    bound topic must resolve for an internal turn on the binding alone;
+    the ACL was enforced when the binding was created and on every human
+    turn."""
+    _make_router_db(tmp_path / "router.db")
+    runner = _runner(tmp_path)
+
+    no_identity = _source(user_id=None)
+    event = MessageEvent(
+        text="", message_type=MessageType.TEXT, source=no_identity, internal=True
+    )
+    context, denial = runner._resolve_project_context_for_message(event, no_identity)
+    assert denial is None
+    assert context is not None
+    assert context.board_slug == "dovcrm"
+    assert context.sender_user_id == ""
+    assert context.access == "allow"
 
 
 def _router_data_snapshot(path: Path) -> dict:
