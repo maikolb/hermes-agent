@@ -3116,6 +3116,20 @@ class GatewayKanbanWatchersMixin:
             for row in rows:
                 claim = str(row["claim_lock"] or "")
                 host, _, pid_s = claim.rpartition(":")
+                # The claim records the DISPATCHER's PID, but dispatcher
+                # workers are independent subprocesses (start_new_session)
+                # that survive a gateway restart. A live worker_pid means
+                # live work — reaping on the dead dispatcher PID would
+                # requeue a running card into a duplicate (the exact
+                # failure class this reaper exists to end).
+                if host == hostname and row["worker_pid"] is not None:
+                    try:
+                        from gateway.status import _pid_exists
+
+                        if _pid_exists(int(row["worker_pid"])):
+                            continue
+                    except Exception:  # noqa: BLE001
+                        continue
                 dead = False
                 if host == hostname and pid_s.isdigit():
                     try:
@@ -3124,6 +3138,14 @@ class GatewayKanbanWatchersMixin:
                         dead = not _pid_exists(int(pid_s))
                     except Exception:  # noqa: BLE001
                         dead = False
+                    if not dead and row["worker_pid"] is not None:
+                        # Claim owner alive but the worker process died —
+                        # judge by the worker, with the heartbeat as the
+                        # grace signal so a just-spawned worker isn't hit.
+                        if row["last_heartbeat_at"] is not None:
+                            dead = (
+                                now - float(row["last_heartbeat_at"])
+                            ) > heartbeat_secs
                 elif row["last_heartbeat_at"] is not None:
                     dead = (
                         now - float(row["last_heartbeat_at"])
