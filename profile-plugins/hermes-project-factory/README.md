@@ -5,3 +5,7 @@ Fonte de verdade versionada dos plugins profile-local do perfil `hermes-project-
 Instalação: copiar o diretório do plugin para `HERMES_HOME/profiles/hermes-project-factory/plugins/` do alvo. Paridade runtime↔repo é verificada por hash no gate de promoção; divergência no runtime sem PR correspondente é regressão (ver AOF `framework/docs/multiagent-git-flow.md`).
 
 Fora deste diretório de propósito: `aof-route-policy` NÃO é versionado aqui. Origem canônica: repo AgentOperatingFramework (`adapters/hermes/plugin/aof-route-policy/`), instalado com fingerprint por home (runtime hash-pinado). Vendorizar aqui criaria segunda fonte de verdade que a próxima instalação do AOF sobrescreveria.
+
+## Line endings e paridade
+
+Os arquivos aqui são LF (normalizados pelo git; `.gitattributes` força). O runtime atual da VPS carrega CRLF porque a instalação original partiu de host Windows: a PRÓXIMA instalação git→VPS muda os bytes para LF e qualquer verificação de paridade por hash deve comparar contra o git, não contra o snapshot antigo do runtime.
