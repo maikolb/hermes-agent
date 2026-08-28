@@ -1084,6 +1084,66 @@ def _wal_is_usable() -> bool:
 _AUDIO_GUARD_BYPASS_MARK = "real_audio_playback"
 _ALLOW_MACOS_KEYCHAIN_MARK = "allow_macos_keychain"
 
+
+class _SpeakerBlockedSubprocess:
+    """``subprocess`` proxy installed into ``tools.voice_mode`` during tests.
+
+    Delegates everything to the real module except ``Popen`` of an audio
+    PLAYER (ffplay/aplay/paplay/afplay/play — the binaries
+    ``play_audio_file`` walks), which returns a silent already-finished
+    process instead of opening the speakers. Converters (ffmpeg) pass
+    through untouched. Tests that mock playback themselves patch
+    ``vm.subprocess.Popen`` — that patch lands on this proxy instance and
+    shadows the filter, so their mocks keep working.
+    """
+
+    _PLAYERS = {"ffplay", "aplay", "paplay", "afplay", "play"}
+
+    def __init__(self, real):
+        self._real = real
+        # The Popen that can genuinely open the speakers, captured before
+        # the test body runs. When a test later installs its own mock (at
+        # this proxy OR at global ``subprocess.Popen``), the live attribute
+        # differs from this and the call is honored untouched — mocks don't
+        # make noise, and playback tests keep capturing their players.
+        self._genuine_popen = real.Popen
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def Popen(self, cmd, *args, **kwargs):  # noqa: N802 — mirrors subprocess API
+        current = getattr(self._real, "Popen")
+        if current is not self._genuine_popen:
+            return current(cmd, *args, **kwargs)
+        exe = ""
+        try:
+            if isinstance(cmd, (list, tuple)) and cmd:
+                exe = os.path.basename(str(cmd[0])).lower().split(".")[0]
+        except Exception:
+            exe = ""
+        blocked = exe in self._PLAYERS
+        if not blocked and exe.startswith("powershell"):
+            joined = " ".join(str(part) for part in cmd)
+            blocked = "SoundPlayer" in joined or "PlaySync" in joined
+        if blocked:
+            class _SilentDone:
+                returncode = 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+                def poll(self):
+                    return 0
+
+                def kill(self):
+                    return None
+
+                def terminate(self):
+                    return None
+
+            return _SilentDone()
+        return self._real.Popen(cmd, *args, **kwargs)
+
 # ---------------------------------------------------------------------------
 # OS gating
 #
@@ -1691,6 +1751,25 @@ def _audio_playback_guard(request, monkeypatch):
         monkeypatch.setattr(_voice, "speak_text", _blocked_speak_text)
     if hasattr(_voice, "play_audio_file"):
         monkeypatch.setattr(_voice, "play_audio_file", _blocked_play_audio_file)
+
+    # Direct-binding hole (27/08 incident): gateway streaming-TTS tests reach
+    # ``tools.voice_mode.play_audio_file`` directly — the hermes_cli.voice
+    # patches above never see that binding — and ffplay opened the operator's
+    # SPEAKERS twice mid-suite (audio PolicyConfig registry + Prefetch traced
+    # ffplay.exe to this suite's runs). Blocking the player spawn at the
+    # module's subprocess seam, rather than the function, keeps the tests
+    # that legitimately exercise ``play_audio_file`` with a mocked backend
+    # working unchanged: they patch this exact seam
+    # (``patch.object(vm.subprocess, "Popen")``) and their mock simply
+    # shadows the proxy's filter.
+    try:
+        import tools.voice_mode as _vm
+
+        monkeypatch.setattr(
+            _vm, "subprocess", _SpeakerBlockedSubprocess(_vm.subprocess)
+        )
+    except Exception:
+        pass
 
     yield
 
