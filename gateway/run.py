@@ -26912,8 +26912,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             thread_id = str(getattr(source, "thread_id", None) or "").strip()
             chat_id = str(getattr(source, "chat_id", None) or "").strip()
             sender_user_id = str(getattr(source, "user_id", None) or "").strip()
-            if not thread_id or not chat_id or not sender_user_id:
+            if not thread_id or not chat_id:
                 return None
+            profile = self._effective_project_router_profile(source)
+            db_path = self._project_router_db_path(source)
+            if not sender_user_id:
+                # Gateway-synthesized continuations (kanban wake events,
+                # some auto-resume origins) carry no human sender, so there
+                # is no identity to run the ACL against — requiring one
+                # silently dropped the board env and the resumed fan-out
+                # ran without cards/rotation/traces (probe firings 28/08).
+                # The binding row is enough: the topic's ACL was enforced
+                # when the binding was created and on every human turn.
+                with ProjectRouter(db_path, profile) as router:
+                    return router.resolve_binding_readonly(
+                        Platform.TELEGRAM.value,
+                        chat_id,
+                        thread_id,
+                    )
             raw_managed = getattr(router_config, "managed_chat_ids", []) or []
             managed_chat_ids = {
                 str(value).strip()
@@ -26923,8 +26939,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             allow_implicit_member = bool(
                 getattr(router_config, "implicit_managed_chat_members", False)
             ) and chat_id in managed_chat_ids
-            profile = self._effective_project_router_profile(source)
-            db_path = self._project_router_db_path(source)
             with ProjectRouter(db_path, profile) as router:
                 return router.resolve(
                     Platform.TELEGRAM.value,
