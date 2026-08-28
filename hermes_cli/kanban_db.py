@@ -12074,13 +12074,40 @@ def check_respawn_guard(
     #    open with red/pending checks or conflicts → keep holding, that is
     #    the one case where respawning would duplicate work in flight.
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
+    latest_pr_url = None
+    latest_pr_at = 0
     for c in conn.execute(
-        "SELECT body FROM task_comments WHERE task_id = ? AND created_at >= ?",
+        "SELECT body, created_at FROM task_comments "
+        "WHERE task_id = ? AND created_at >= ? ORDER BY created_at",
         (task_id, pr_cutoff),
     ).fetchall():
         match = _RESPAWN_GUARD_PR_URL_RE.search(c["body"]) if c["body"] else None
         if match:
-            return _resolve_active_pr_guard(conn, task_id, match.group(0), now)
+            latest_pr_url = match.group(0)
+            latest_pr_at = int(c["created_at"] or 0)
+    if latest_pr_url:
+        # Rework requested AFTER the PR was opened (a formal
+        # ``changes_requested`` event, or a reviewer comment) means the
+        # respawn IS the correction cycle on the existing branch/PR — the
+        # exact opposite of the duplicate-PR risk this guard exists for.
+        # Wave 4 do DOVCRM deadlocked here for a day: reviewer posted
+        # "Changes requested" on the card, the worker needed a respawn to
+        # address it, and the guard held that respawn forever.
+        rework_event = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? "
+            "AND kind = 'changes_requested' AND created_at > ? LIMIT 1",
+            (task_id, latest_pr_at),
+        ).fetchone()
+        if rework_event:
+            return None
+        rework_comment = conn.execute(
+            "SELECT 1 FROM task_comments WHERE task_id = ? "
+            "AND created_at > ? AND body LIKE 'Changes requested%' LIMIT 1",
+            (task_id, latest_pr_at),
+        ).fetchone()
+        if rework_comment:
+            return None
+        return _resolve_active_pr_guard(conn, task_id, latest_pr_url, now)
 
     return None
 
