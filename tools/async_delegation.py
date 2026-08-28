@@ -337,6 +337,44 @@ def complete_foreground_delegation(delegation_id: str) -> None:
         _delete_durable_delegation(delegation_id)
 
 
+def attach_delegation_cards(
+    delegation_id: str,
+    board: Optional[str],
+    cards: Optional[Dict[int, str]],
+) -> None:
+    """Record a fan-out's board and mirror card ids on its durable row.
+
+    Recovery needs the concrete card ids to archive the dead attempt's
+    mirrors (``recover_abandoned_delegations``); without them it could only
+    say "cards are stale" and leave them holding max_in_progress slots for
+    the full claim TTL. Best-effort: a failure here never breaks a dispatch.
+    """
+    if not delegation_id or not board or not cards:
+        return
+    try:
+        with _DB_LOCK, _transaction() as conn:
+            row = conn.execute(
+                "SELECT task_json FROM async_delegations WHERE delegation_id=?",
+                (delegation_id,),
+            ).fetchone()
+            if row is None:
+                return
+            task = json.loads(row[0] or "{}")
+            task["board"] = board
+            task["mirror_cards"] = {
+                str(index): task_id for index, task_id in cards.items()
+            }
+            conn.execute(
+                "UPDATE async_delegations SET task_json=?, updated_at=? "
+                "WHERE delegation_id=?",
+                (json.dumps(task), time.time(), delegation_id),
+            )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "attach_delegation_cards failed (%s)", delegation_id, exc_info=True
+        )
+
+
 def _prune_durable_records() -> None:
     """Bound terminal history, preferring delivered records for deletion."""
     now = time.time()
@@ -422,23 +460,56 @@ def recover_abandoned_delegations() -> int:
             if live:
                 continue
             task = json.loads(task_json or "{}")
-            if task.get("mode") == "foreground":
+            # Archive the dead attempt's mirror cards NOW. Leaving them
+            # claimed-running for the claim TTL occupies max_in_progress
+            # slots (phantom saturation) and races the principal's
+            # re-delegation into duplicated work — 28/08 concursa-ai:
+            # two dead generations kept "running" while the third worked,
+            # tripling every card on the board.
+            _archived_cards: list = []
+            _card_map = task.get("mirror_cards") or {}
+            if task.get("board") and _card_map:
+                try:
+                    from tools.delegation_kanban import (
+                        archive_stale_delegation_cards,
+                    )
+
+                    _archived_cards = archive_stale_delegation_cards(
+                        str(task["board"]),
+                        [str(v) for v in _card_map.values()],
+                        delegation_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "recovery: mirror card archive failed (%s)",
+                        delegation_id, exc_info=True,
+                    )
+            if _archived_cards:
                 _cards_note = (
-                    " and their kanban mirror cards from that attempt are "
-                    "stale"
-                    if task.get("board")
-                    else ""
+                    " Stale mirror cards from that attempt were archived "
+                    f"automatically ({', '.join(_archived_cards)})."
                 )
+            elif task.get("board"):
+                _cards_note = (
+                    " Kanban mirror cards from that attempt may be stale."
+                )
+            else:
+                _cards_note = ""
+            if task.get("mode") == "foreground":
                 _recovery_error = (
                     "The process hosting this in-process fan-out exited "
                     "before the workers finished — the workers died with "
-                    f"it{_cards_note}. Re-delegate the goals listed below "
-                    "with delegate_task to resume the work."
+                    f"it.{_cards_note} Re-delegate the goals listed below "
+                    "ONCE with delegate_task to resume the work; the new "
+                    "fan-out mirrors itself on the board, so do NOT create "
+                    "kanban cards manually."
                 )
             else:
                 _recovery_error = (
                     "Delegation owner exited before recording a terminal "
-                    "result; outcome unknown."
+                    f"result; outcome unknown.{_cards_note} If the work "
+                    "must continue, re-delegate ONCE with delegate_task; "
+                    "do NOT create kanban cards manually."
                 )
             event = {
                 "type": "async_delegation", "delegation_id": delegation_id,

@@ -4464,6 +4464,12 @@ def delegate_task(
                 delegation_id=live_deleg_id,
                 board=kanban_board,
             )
+            if _marker_id and kanban_board and kanban_card_ids:
+                from tools.async_delegation import attach_delegation_cards
+
+                attach_delegation_cards(
+                    _marker_id, kanban_board, kanban_card_ids
+                )
         except Exception:
             logger.debug(
                 "foreground delegation crash marker failed", exc_info=True
@@ -4635,6 +4641,17 @@ def delegate_task(
         )
 
         if dispatch.get("status") == "dispatched":
+            if kanban_board and kanban_card_ids:
+                try:
+                    from tools.async_delegation import attach_delegation_cards
+
+                    attach_delegation_cards(
+                        dispatch["delegation_id"], kanban_board, kanban_card_ids
+                    )
+                except Exception:
+                    logger.debug(
+                        "delegation card attach failed", exc_info=True
+                    )
             n = len(_goals)
             note = (
                 "Subagent is running in the background. You and the user can "
