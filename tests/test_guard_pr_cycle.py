@@ -77,6 +77,28 @@ def test_open_green_mergeable_pr_is_merged_and_released(board, monkeypatch):
     conn.close()
 
 
+def test_release_train_head_is_never_automerged(board, monkeypatch):
+    """A green staging→main release PR cited on a card must NOT be shipped
+    to production as a guard side effect (28/08 audit — smoke-gate class)."""
+    conn, task_id = _task_with_pr(monkeypatch)
+    monkeypatch.setattr(
+        kb, "_gh_pr_json",
+        lambda url: {
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+            "headRefName": "staging",
+        },
+    )
+    monkeypatch.setattr(
+        kb, "_gh_pr_merge",
+        lambda url: (_ for _ in ()).throw(AssertionError("must not merge")),
+    )
+
+    assert kb.check_respawn_guard(conn, task_id) == "active_pr"
+    conn.close()
+
+
 def test_red_or_conflicting_pr_keeps_holding(board, monkeypatch):
     conn, task_id = _task_with_pr(monkeypatch)
     monkeypatch.setattr(
