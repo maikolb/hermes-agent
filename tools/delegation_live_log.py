@@ -124,6 +124,12 @@ class LiveTranscriptWriter:
         self._lock = threading.Lock()
         self._stream_buf: List[str] = []
         self._stream_len = 0
+        # Native board worker-log tee (attach_board_log). One sink for
+        # display: the FNAT bubble and the Vigília activity panel read the
+        # board log the dispatcher workers already write, so in-process
+        # workers surface identically — no second dialect, no fallback.
+        self._board_log_path: Optional[Path] = None
+        self._board_tool_args: Dict[str, str] = {}
         try:
             base = (root if root is not None else live_transcript_root())
             d = base / delegation_id
@@ -167,6 +173,69 @@ class LiveTranscriptWriter:
             self._ok = False
             logger.debug("Live transcript write failed (%s): %s", self.path, exc)
 
+    # ── native board worker-log tee ──────────────────────────────────────
+    _BOARD_TOOL_ICONS = {
+        "terminal": "💻", "read_file": "🔎", "search_files": "🔎",
+        "find": "🔎", "write_file": "✏", "patch_file": "✏",
+        "skill": "📚", "todo": "🗒",
+    }
+
+    def attach_board_log(self, board: Optional[str], task_id: str,
+                         goal: str = "") -> None:
+        """Mirror this worker's activity into the board's NATIVE worker log.
+
+        Operator requirement (28/08): one mechanism, one rendering, no lost
+        visibility. Dispatcher workers already stream to
+        ``<board>/logs/<task_id>.log`` — the FNAT bubble and the Vigília
+        activity panel read exactly that file. Attaching the mirror card's
+        task id here makes in-process workers surface through the SAME
+        sink, in the same line dialect, with zero display-side fallbacks.
+        Best-effort like everything else in this module.
+        """
+        if not task_id:
+            return
+        try:
+            from hermes_cli.kanban_db import worker_log_path
+
+            path = worker_log_path(task_id, board=board or None)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            header = (
+                f"Query: work kanban task {task_id} (delegated in-process)\n"
+                f"Goal: {_redact(_one_line(goal, _KICKOFF_MAX))}\n"
+                + "─" * 40 + "\n"
+            )
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(header)
+            self._board_log_path = path
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("board worker-log attach failed (%s): %s", task_id, exc)
+            self._board_log_path = None
+
+    def _board_append(self, line: str) -> None:
+        if self._board_log_path is None:
+            return
+        try:
+            with self._lock:
+                with open(self._board_log_path, "a", encoding="utf-8") as fh:
+                    fh.write(line if line.endswith("\n") else line + "\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("board worker-log write failed: %s", exc)
+            self._board_log_path = None
+
+    def _board_tool_line(self, name: str, duration: Any,
+                         is_error: bool) -> None:
+        icon = self._BOARD_TOOL_ICONS.get(name, "⚙")
+        args = self._board_tool_args.pop(name, "")
+        dur = ""
+        try:
+            if duration is not None:
+                dur = f"  {float(duration):.1f}s"
+        except (TypeError, ValueError):
+            pass
+        prefix = "⚠" if is_error else " ┊"
+        label = f"{name:<10}"[:14]
+        self._board_append(f"  {prefix} {icon} {label} {args}{dur}")
+
     # ── typed helpers ────────────────────────────────────────────────────
     def assistant_text(self, text: str) -> None:
         t = _one_line(text, _ASSISTANT_MAX)
@@ -177,11 +246,18 @@ class LiveTranscriptWriter:
         t = _one_line(text, _THINKING_MAX)
         if t:
             self.event("think", t)
+            self._board_append(f"┌─ Reasoning\n│ {_redact(t)}\n└")
 
     def tool_start(self, name: str, args_preview: Any = None) -> None:
         self.flush_stream()
         args = _one_line(args_preview, _ARGS_MAX)
         self.event("tool", f"-> {name or '?'}({args})")
+        if self._board_log_path is not None and name:
+            # Kept for the completion line: the native dialect shows
+            # "name  args  duration" as one line when the tool finishes.
+            self._board_tool_args[str(name)] = _redact(
+                _one_line(args_preview, 60)
+            )
 
     def tool_result(self, name: str, result: Any = None,
                     duration: Any = None, is_error: bool = False) -> None:
@@ -194,11 +270,13 @@ class LiveTranscriptWriter:
             pass
         self.event("result", f"{name or '?'} {status}{dur}: "
                              f"{_one_line(result, _RESULT_MAX)}")
+        self._board_tool_line(str(name or "?"), duration, is_error)
 
     def marker(self, text: str) -> None:
         """Lifecycle marker: start / final / error / interrupt / budget."""
         self.flush_stream()
         self.event("final", _one_line(text, _ASSISTANT_MAX))
+        self._board_append(f"  ── {_redact(_one_line(text, 200))}")
 
     # ── streamed reply buffering ─────────────────────────────────────────
     def add_stream_delta(self, delta: str) -> None:

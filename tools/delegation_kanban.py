@@ -144,6 +144,24 @@ def resolve_delegation_board() -> Optional[str]:
         from gateway.session_context import get_session_env
 
         board = (get_session_env("HERMES_PROJECT_BOARD", "") or "").strip()
+        if not board:
+            # Diagnostic probe (28/08, DOVTest 23:50): ONE observed case of a
+            # checkpoint-restored turn delegating with no board env while
+            # its topic was board-bound — cards, subs, rotation and traces
+            # all silently skipped. Not reproduced on the common resume
+            # paths; this warning names the next occurrence instead of
+            # letting it pass as "no board".
+            chat_id = (get_session_env("HERMES_SESSION_CHAT_ID", "") or "").strip()
+            if chat_id:
+                logger.warning(
+                    "delegation kanban: no HERMES_PROJECT_BOARD in a gateway "
+                    "session (chat_id=%s thread=%s) — if this topic is "
+                    "board-bound, the turn lost its project env (suspected "
+                    "checkpoint-restore path); cards/rotation will be "
+                    "skipped for this fan-out",
+                    chat_id,
+                    (get_session_env("HERMES_SESSION_THREAD_ID", "") or ""),
+                )
         return board or None
     except Exception as exc:  # noqa: BLE001 - never break delegation
         logger.debug("delegation kanban: board resolution failed: %s", exc)

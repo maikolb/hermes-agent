@@ -4128,6 +4128,20 @@ def delegate_task(
     kanban_card_ids = create_delegation_cards(
         task_list, live_deleg_id, kanban_board, live_paths=live_paths
     )
+    # One display sink (operator requirement 28/08): each child's activity
+    # tees into the board's NATIVE worker log under its mirror card id, so
+    # the FNAT bubble and the Vigília activity panel show in-process
+    # workers exactly like dispatcher workers — same file, same dialect.
+    for _card_idx, _card_id in kanban_card_ids.items():
+        if _card_idx < len(live_writers) and live_writers[_card_idx] is not None:
+            try:
+                live_writers[_card_idx].attach_board_log(
+                    kanban_board,
+                    _card_id,
+                    goal=str(task_list[_card_idx].get("goal") or ""),
+                )
+            except Exception:
+                logger.debug("board log attach failed", exc_info=True)
     # Mirror cards hold a claim with no live worker_pid, so without a beat
     # every read-only view renders them dead while the children work.
     kanban_heartbeat = start_mirror_heartbeat(kanban_board, kanban_card_ids)
