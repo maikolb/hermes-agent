@@ -1341,6 +1341,7 @@ def _build_child_system_prompt(
     max_spawn_depth: int = 2,
     child_depth: int = 1,
     parity: Optional[dict] = None,
+    board_bound: bool = False,
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -1436,9 +1437,13 @@ def _build_child_system_prompt(
         "commands, checks), not by reading them. No completion claim "
         "without validation evidence; say explicitly when a check was "
         "skipped or failed.\n"
-        "A tracking card for this task is managed by the system — do not "
-        "try to create or move cards yourself.\n\n"
-        "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
+        + (
+            "A tracking card for this task is managed by the system — do "
+            "not try to create or move cards yourself.\n\n"
+            if board_bound
+            else "\n"
+        )
+        + "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
         "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
         "When finished (or blocked), end with a structured CLOSEOUT — your "
         "final response is relayed to the parent agent and to the "
@@ -1838,6 +1843,10 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Whether this delegation is bound to a project board (Factory OS
+    # layer). Board-specific prompt text (mirror cards) only renders when
+    # True — a plain Hermes install delegating in a DM has no cards.
+    board_bound: bool = False,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1951,6 +1960,7 @@ def _build_child_agent(
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
         parity=_parity_blocks,
+        board_bound=board_bound,
     )
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
@@ -4175,6 +4185,7 @@ def delegate_task(
                 override_acp_command=creds.get("command"),
                 override_acp_args=creds.get("args"),
                 role=effective_role,
+                board_bound=bool(kanban_board),
             )
         except ValueError as exc:
             # Explicit-pin preflight failures (e.g. pinned delegation.command
@@ -4430,6 +4441,7 @@ def delegate_task(
                 origin_session_id=_origin_wake_sid,
                 parent_session_id=getattr(parent_agent, "session_id", None),
                 delegation_id=live_deleg_id,
+                board=kanban_board,
             )
         except Exception:
             logger.debug(

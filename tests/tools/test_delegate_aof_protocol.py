@@ -36,8 +36,10 @@ class TestDelegatedWorkProtocol(unittest.TestCase):
     def test_workers_are_told_cards_are_system_managed(self):
         # Workers have the kanban toolset blocked; their card is the mirror
         # card created by delegate_task. The prompt must prevent the worker
-        # from wasting turns trying to manage cards it cannot reach.
-        prompt = _build_child_system_prompt("Tarefa")
+        # from wasting turns trying to manage cards it cannot reach — but
+        # ONLY on board-bound delegations (Factory OS layer); a plain DM
+        # delegation has no cards at all.
+        prompt = _build_child_system_prompt("Tarefa", board_bound=True)
         self.assertIn("managed by the system", prompt)
 
     def test_orchestrator_keeps_protocol_and_delegation_block(self):
@@ -51,3 +53,23 @@ class TestDelegatedWorkProtocol(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFactoryLayerSeparation(unittest.TestCase):
+    """Board/kanban wording is the Factory OS layer, NOT core Hermes.
+
+    A plain Hermes install (personal DM, no project router, no boards)
+    delegating a task must never hear about tracking cards — the operator
+    separated the Project OS from the fork on purpose (27/08 review).
+    """
+
+    def test_dm_delegation_has_no_card_wording(self):
+        prompt = _build_child_system_prompt("Tarefa na DM")
+        self.assertNotIn("tracking card", prompt)
+        self.assertNotIn("kanban", prompt.lower())
+        # The generic engineering cycle still applies everywhere.
+        self.assertIn("Delegated Work Protocol", prompt)
+
+    def test_board_bound_delegation_keeps_card_wording(self):
+        prompt = _build_child_system_prompt("Tarefa no board", board_bound=True)
+        self.assertIn("tracking card for this task is managed by the system", prompt)

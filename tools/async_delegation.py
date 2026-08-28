@@ -246,8 +246,10 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
             "goal", "goals", "context", "toolsets", "role", "model", "is_batch",
             # "mode": "foreground" marks a crash marker for an in-process
             # fan-out (register_foreground_delegation) — recovery wording
-            # differs from a detached background unit.
-            "mode",
+            # differs from a detached background unit. "board" records
+            # whether the fan-out was board-bound (Factory OS layer), so
+            # recovery only mentions mirror cards when they existed.
+            "mode", "board",
             # Routing origin (scope_id/user_id/user_name): persisted so a
             # restart-recovered completion can reconstruct a full
             # SessionSource — see _capture_routing_origin.
@@ -289,6 +291,7 @@ def register_foreground_delegation(
     origin_session_id="",
     parent_session_id=None,
     delegation_id: Optional[str] = None,
+    board: Optional[str] = None,
 ) -> str:
     """Persist a durable crash marker for an IN-PROCESS (foreground) fan-out.
 
@@ -309,6 +312,10 @@ def register_foreground_delegation(
         "goals": list(goals or []),
         "is_batch": True,
         "mode": "foreground",
+        # Factory OS layer marker: recovery wording mentions stale mirror
+        # cards only when the fan-out actually had a board (a plain Hermes
+        # install delegating in a DM has none).
+        "board": str(board or "") or None,
         "context": context,
         "toolsets": list(toolsets) if toolsets else None,
         "role": role,
@@ -416,12 +423,17 @@ def recover_abandoned_delegations() -> int:
                 continue
             task = json.loads(task_json or "{}")
             if task.get("mode") == "foreground":
+                _cards_note = (
+                    " and their kanban mirror cards from that attempt are "
+                    "stale"
+                    if task.get("board")
+                    else ""
+                )
                 _recovery_error = (
                     "The process hosting this in-process fan-out exited "
-                    "before the workers finished — the workers died with it "
-                    "and their kanban mirror cards from that attempt are "
-                    "stale. Re-delegate the goals listed below with "
-                    "delegate_task to resume the work."
+                    "before the workers finished — the workers died with "
+                    f"it{_cards_note}. Re-delegate the goals listed below "
+                    "with delegate_task to resume the work."
                 )
             else:
                 _recovery_error = (
