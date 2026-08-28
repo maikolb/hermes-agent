@@ -198,3 +198,57 @@ def test_read_summary_completed_result_and_blocked_comment(
         kw._read_worker_trace_summary("b", blocked_id, "blocked")
         == "Limitations: sem acesso ao S3"
     )
+
+
+def test_live_transcript_converts_to_worker_log_dialect():
+    """FNAT RTU (28/08): in-process workers stream to the live transcript;
+    its lines must surface as Reasoning/tool items in the focus bubble."""
+    live = "\n".join([
+        "  Task 0: Executar TZ1",
+        "12:00:01 start    | goal accepted",
+        "12:00:02 think    | Bloco 1 revisado, seguindo pro 2",
+        "12:00:03 tool     | -> write_file(notas/TZ1.md)",
+        "12:00:04 result   | write_file ok 0.3s: 5 itens gravados",
+        "12:00:05 assistant| parcial entregue",
+    ])
+    converted = kw._live_transcript_to_worker_log(live)
+    assert "┌─ Reasoning" in converted
+    assert "│ Bloco 1 revisado, seguindo pro 2" in converted
+    assert "┊ Tool: write_file(notas/TZ1.md)" in converted
+    assert "┊ write_file ok 0.3s: 5 itens gravados" in converted
+    # Renders through the EXISTING bubble renderer:
+    out = kw._render_kanban_worker_focus_output(
+        converted, task_id="t_x", include_tool_progress=True,
+        include_reasoning=True,
+    )
+    assert "Reasoning: Bloco 1 revisado" in out
+    assert "┊ Tool: write_file" in out
+
+
+def test_mirror_live_transcript_read_from_card_comment(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    kb._INITIALIZED_PATHS = set()
+    real_connect = kb.connect
+    monkeypatch.setattr(kb, "connect", lambda db_path=None, board=None: real_connect())
+
+    live_path = tmp_path / "task-0.log"
+    live_path.write_text(
+        "12:00:02 think    | validando bloco\n"
+        "12:00:03 tool     | -> read_file(x)\n",
+        encoding="utf-8",
+    )
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="mirror", assignee="w")
+        kb.add_comment(
+            conn, tid, "delegation",
+            f"Mirror card for in-process delegation d1 task 0. "
+            f"Live transcript: {live_path}",
+        )
+    finally:
+        conn.close()
+
+    out = kw._read_mirror_live_transcript("b", tid, 64 * 1024)
+    assert "┌─ Reasoning" in out
+    assert "┊ Tool: read_file(x)" in out

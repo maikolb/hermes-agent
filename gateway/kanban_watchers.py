@@ -456,6 +456,85 @@ def _render_kanban_worker_focus_output(
     return output.strip()
 
 
+_LIVE_LOG_LINE_RE = re.compile(
+    r"^\d{2}:\d{2}:\d{2} (?P<role>\w+)\s*\| (?P<text>.*)$"
+)
+
+
+def _live_transcript_to_worker_log(text: str) -> str:
+    """Convert a delegation live transcript into board-worker-log dialect.
+
+    Operator feedback (28/08, DOVTest): the FNAT focus bubble showed no
+    reasoning/tool activity for in-process workers — they stream to the
+    delegation live transcript, not to the board worker log the bubble
+    reads. Rather than teaching the renderer a second dialect, the live
+    lines (``HH:MM:SS role | text``) are mapped onto the exact shapes
+    ``_render_kanban_worker_focus_output`` already parses: ``think`` lines
+    become Reasoning blocks, ``tool``/``result`` lines become ``┊`` items.
+    """
+    out: list[str] = []
+    for raw_line in (text or "").splitlines():
+        match = _LIVE_LOG_LINE_RE.match(raw_line.strip())
+        if not match:
+            continue
+        role = match.group("role")
+        body = match.group("text").strip()
+        if not body:
+            continue
+        if role == "think":
+            out.append("┌─ Reasoning")
+            out.append(f"│ {body}")
+            out.append("└")
+        elif role == "tool":
+            out.append(f"┊ Tool: {body.lstrip('-> ')}")
+        elif role == "result":
+            out.append(f"┊ {body}")
+    return "\n".join(out)
+
+
+def _read_mirror_live_transcript(board: str, task_id: str,
+                                 tail_bytes: int) -> str:
+    """Tail the live transcript a mirror card's comment points at.
+
+    ``create_delegation_cards`` records ``Live transcript: <path>`` in the
+    card's first comment. Best-effort: any failure returns "" and the
+    bubble simply has no activity block (the old behavior).
+    """
+    if not task_id:
+        return ""
+    try:
+        from hermes_cli import kanban_db as _kb
+
+        with _kb.connect_closing(board=board or None) as conn:
+            comments = _kb.list_comments(conn, task_id)
+        path_str = ""
+        for comment in comments:
+            body = str(getattr(comment, "body", "") or "")
+            marker = "Live transcript: "
+            at = body.find(marker)
+            if at >= 0:
+                path_str = body[at + len(marker):].split()[0].strip()
+                break
+        if not path_str:
+            return ""
+        from pathlib import Path as _Path
+
+        path = _Path(path_str)
+        if not path.is_file():
+            return ""
+        size = path.stat().st_size
+        with open(path, "rb") as fh:
+            if size > tail_bytes:
+                fh.seek(size - tail_bytes)
+            data = fh.read()
+        return _live_transcript_to_worker_log(
+            data.decode("utf-8", errors="replace")
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("mirror live transcript read failed", exc_info=True)
+        return ""
+
+
 def _kanban_dispatch_allowed() -> bool:
     """Return False while the global emergency stop (`hermes pause`) is engaged.
 
@@ -1467,6 +1546,18 @@ class GatewayKanbanWatchersMixin:
             except Exception:
                 logger.debug("kanban worker focus log read failed", exc_info=True)
                 raw_log = None
+            if not raw_log:
+                # In-process (delegate_task) workers never write the board
+                # worker log — their activity streams to the delegation live
+                # transcript referenced by the mirror card's comment. Fall
+                # back to it so the focus bubble shows reasoning/tool
+                # activity for them too (operator feedback 28/08).
+                raw_log = await asyncio.to_thread(
+                    _read_mirror_live_transcript,
+                    board,
+                    task.id,
+                    _WORKER_FOCUS_LOG_TAIL_BYTES,
+                )
             if not self._kanban_worker_display_available(lane, claim_sequence):
                 await self._kanban_discard_worker_focus_state(lane, adapter, sub)
                 continue
