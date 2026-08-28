@@ -3106,10 +3106,26 @@ class GatewayKanbanWatchersMixin:
         settings = self._ready_watchdog_settings()
         if not settings["enabled"]:
             return
+        # Profile discovery mirrors what actually works for focus/closeout:
+        # bindings live under whatever profiles exist ON DISK, not under
+        # whatever _active_profile_name() answers — inside the real gateway
+        # process that answer proved unreliable ('default' while the unit
+        # runs hermes-project-factory), which silently produced zero
+        # display targets and a watchdog that never fired.
+        profiles: set = set()
         try:
-            profiles = {str(self._active_profile_name() or "").strip()}
+            profiles.add(str(self._active_profile_name() or "").strip())
         except Exception:  # noqa: BLE001
-            profiles = set()
+            pass
+        try:
+            from hermes_cli.profiles import list_profiles
+
+            profiles.update(
+                str(getattr(info, "name", "") or "").strip()
+                for info in list_profiles()
+            )
+        except Exception:  # noqa: BLE001
+            pass
         profiles.discard("")
         if not profiles:
             return
