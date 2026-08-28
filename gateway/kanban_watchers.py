@@ -3039,6 +3039,7 @@ class GatewayKanbanWatchersMixin:
                                 self._kanban_unsub, sub, board_slug,
                             )
                 await self._kanban_refresh_worker_focus()
+                await self._kanban_ready_watchdog()
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
             # Sleep with cancellation checks.
@@ -3046,6 +3047,187 @@ class GatewayKanbanWatchersMixin:
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+
+    def _ready_watchdog_settings(self) -> dict:
+        """Lazy-read the abandonment-watchdog knobs (operator card t_7872edd5)."""
+        cached = getattr(self, "_ready_watchdog_cfg", None)
+        if cached is not None:
+            return cached
+        settings = {"enabled": True, "threshold": 180.0, "default_assignee": ""}
+        try:
+            from hermes_cli.config import load_config as _load_config
+
+            kanban_cfg = (_load_config() or {}).get("kanban", {}) or {}
+            settings["enabled"] = bool(kanban_cfg.get("ready_watchdog", True))
+            interval = float(kanban_cfg.get("dispatch_interval_seconds", 60) or 60)
+            ticks = float(kanban_cfg.get("ready_watchdog_ticks", 3) or 3)
+            settings["threshold"] = max(interval * ticks, 60.0)
+            settings["default_assignee"] = (
+                str(kanban_cfg.get("default_assignee") or "").strip()
+            )
+        except Exception:  # noqa: BLE001 - defaults are safe
+            logger.debug("ready watchdog: config unavailable; using defaults")
+        self._ready_watchdog_cfg = settings
+        return settings
+
+    def _ready_watchdog_reason(
+        self, task: Any, default_assignee: str
+    ) -> str:
+        assignee = str(task["assignee"] or "").strip() if "assignee" in task.keys() else ""
+        if not assignee and not default_assignee:
+            return (
+                "sem assignee e sem kanban.default_assignee — o dispatcher "
+                "pula este card para sempre"
+            )
+        workspace = (
+            str(task["workspace_path"] or "").strip()
+            if "workspace_path" in task.keys()
+            else ""
+        )
+        if workspace and not Path(workspace).expanduser().exists():
+            return f"workspace declarado não existe no host: {workspace}"
+        return (
+            "pronto sem claim — dispatcher parado, saturado "
+            "(max_in_progress) ou perfil executor indisponível"
+        )
+
+    async def _kanban_ready_watchdog(self) -> None:
+        """Alert on ready cards nobody will ever claim (operator, 28/08).
+
+        A hand-created card without an assignee is skipped by the
+        dispatcher forever (#27145) and stays green-looking while dead —
+        the operator called it the worst failure mode: silent with a
+        healthy face. One pass per notifier tick over boards that have a
+        display binding; one durable alert per card (a ``watchdog``
+        comment is the dedupe token), delivered to the board's topic.
+        """
+        from gateway.config import Platform as _Platform
+
+        settings = self._ready_watchdog_settings()
+        if not settings["enabled"]:
+            return
+        try:
+            profiles = {str(self._active_profile_name() or "").strip()}
+        except Exception:  # noqa: BLE001
+            profiles = set()
+        profiles.discard("")
+        if not profiles:
+            return
+        try:
+            targets_by_board = self._kanban_board_display_targets(profiles)
+        except Exception:  # noqa: BLE001
+            return
+        if not targets_by_board:
+            return
+        from hermes_cli import kanban_db as _kb
+
+        now = time.time()
+        for board, targets in targets_by_board.items():
+            try:
+                stale = await asyncio.to_thread(
+                    self._ready_watchdog_collect, board, now, settings,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "ready watchdog: collect failed for %s", board, exc_info=True,
+                )
+                continue
+            for task_id, title, reason, age_minutes in stale:
+                text = (
+                    f"⚠️ Card pronto sem ninguém há {age_minutes}min: "
+                    f"{title}\n[{board}] Kanban {task_id}\nMotivo: {reason}"
+                )
+                delivered = False
+                for target in targets:
+                    try:
+                        platform = _Platform(
+                            str(target.get("platform") or "").lower()
+                        )
+                    except ValueError:
+                        continue
+                    profile = (
+                        str(target.get("notifier_profile") or "").strip() or None
+                    )
+                    adapter = self._authorization_adapter(platform, profile)
+                    if adapter is None:
+                        continue
+                    metadata = (
+                        {"thread_id": target["thread_id"]}
+                        if target.get("thread_id")
+                        else None
+                    )
+                    try:
+                        result = await adapter.send(
+                            target["chat_id"], text, metadata=metadata,
+                        )
+                        delivered = delivered or bool(
+                            getattr(result, "success", True)
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "ready watchdog: send failed for %s/%s",
+                            board, task_id, exc_info=True,
+                        )
+                if delivered:
+                    try:
+                        await asyncio.to_thread(
+                            self._ready_watchdog_mark, board, task_id, reason,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "ready watchdog: mark failed for %s/%s",
+                            board, task_id, exc_info=True,
+                        )
+
+    def _ready_watchdog_collect(
+        self, board: str, now: float, settings: dict,
+    ) -> list:
+        """Sync: ready tasks past threshold without claim or prior alert."""
+        from hermes_cli import kanban_db as _kb
+
+        stale: list = []
+        conn = _kb.connect(board=board)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE status = 'ready' "
+                "AND (claim_lock IS NULL OR claim_lock = '') "
+                "AND created_at <= ?",
+                (int(now - settings["threshold"]),),
+            ).fetchall()
+            for task in rows:
+                task_id = str(task["id"])
+                already = conn.execute(
+                    "SELECT 1 FROM task_comments WHERE task_id = ? "
+                    "AND author = 'watchdog' LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if already:
+                    continue
+                reason = self._ready_watchdog_reason(
+                    task, settings["default_assignee"]
+                )
+                age_minutes = max(
+                    1, int((now - float(task["created_at"] or now)) // 60)
+                )
+                stale.append(
+                    (task_id, str(task["title"] or task_id), reason, age_minutes)
+                )
+        finally:
+            conn.close()
+        return stale
+
+    def _ready_watchdog_mark(self, board: str, task_id: str, reason: str) -> None:
+        """Sync: durable dedupe token — one watchdog comment per card."""
+        from hermes_cli import kanban_db as _kb
+
+        conn = _kb.connect(board=board)
+        try:
+            _kb.add_comment(
+                conn, task_id, "watchdog",
+                f"Alerta de abandono publicado no tópico do projeto: {reason}",
+            )
+        finally:
+            conn.close()
 
     def _kanban_advance(
         self, sub: dict, cursor: int, board: Optional[str] = None,
