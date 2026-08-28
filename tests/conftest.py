@@ -77,13 +77,27 @@ def _hermes_home_points_at_production(value: str) -> bool:
         return True
     try:
         resolved = Path(value).expanduser().resolve()
-        real_root = (Path.home() / ".hermes").resolve()
+        # BOTH production layouts, not just the POSIX one. On Windows the
+        # real home is %LOCALAPPDATA%\hermes (hermes_constants
+        # _get_platform_default_hermes_home); a user-level HERMES_HOME env
+        # pointing there passed this check as "genuinely custom" and the
+        # sandbox never armed — the whole suite ran against the operator's
+        # LIVE install (27/08: real config fed TTS tests that played spoken
+        # audio on the speakers, and /update tests wrote
+        # .update_pending.json into the live home).
+        real_roots = {(Path.home() / ".hermes").resolve()}
+        try:
+            from hermes_constants import _get_platform_default_hermes_home
+
+            real_roots.add(_get_platform_default_hermes_home().resolve())
+        except Exception:
+            pass
     except Exception:
         return True
-    if resolved == real_root:
+    if resolved in real_roots:
         return True
     # Profile home directly under the production root: <root>/profiles/<name>
-    return resolved.parent.name == "profiles" and resolved.parent.parent == real_root
+    return resolved.parent.name == "profiles" and resolved.parent.parent in real_roots
 
 
 if _hermes_home_points_at_production(os.environ.get("HERMES_HOME", "")):
