@@ -12145,7 +12145,7 @@ def _gh_pr_json(pr_url: str) -> "Optional[dict]":
         proc = subprocess.run(
             [
                 "gh", "pr", "view", pr_url,
-                "--json", "state,mergeable,statusCheckRollup",
+                "--json", "state,mergeable,statusCheckRollup,headRefName",
             ],
             capture_output=True, text=True, timeout=20, check=False,
         )
@@ -12197,6 +12197,18 @@ def _resolve_active_pr_guard(
     }
     all_green = not conclusions or conclusions <= {"SUCCESS", "NEUTRAL", "SKIPPED"}
     mergeable = str(info.get("mergeable") or "").upper() == "MERGEABLE"
+    # Release-train branches are NEVER auto-merged. A worker comment citing
+    # a staging→main release PR must not let this guard ship a whole
+    # integration train to production as a side effect (28/08 audit: the
+    # Concursa P0 window had exactly such a PR in flight — the guard never
+    # fired, but only because no card cited it; the hole was real).
+    # AOF: releasing is a deliberate act with its own evidence gate.
+    head_ref = str(info.get("headRefName") or "").strip().lower()
+    release_train = head_ref in {"staging", "develop", "main", "master"} or (
+        head_ref.startswith("release/") or head_ref.startswith("release-")
+    )
+    if release_train:
+        return "active_pr"
     if state == "OPEN" and all_green and mergeable:
         if _gh_pr_merge(pr_url):
             _record_pr_guard_event(conn, task_id, "pr_automerged", pr_url, "MERGED")

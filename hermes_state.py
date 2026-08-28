@@ -10500,6 +10500,82 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             return value
         return json.dumps(value)
 
+    @staticmethod
+    def _duplicate_message_id(
+        conn,
+        session_id: str,
+        role: str,
+        stored_content: Any,
+        platform_message_id: Optional[str],
+        tool_calls_json: Optional[str],
+        compressed_summary: bool,
+        observed: bool,
+        message_timestamp: float,
+    ) -> Optional[int]:
+        """Row id of an already-persisted twin of this message, or None.
+
+        28/08 incident: resume/steer replay persisted the same user steer
+        up to 10x and re-wrote whole blocks of earlier assistant replies on
+        every recovery pass, poisoning the durable transcript. Dedupe is
+        deliberately narrow — plain conversational rows only (never tool
+        traffic or compression summaries), same observed class only (an
+        observed group message and the real steer share a platform id and
+        must both persist) — with three identity rules:
+
+        1. user + platform_message_id: the platform id IS the identity.
+        2. content >= 200 chars: a byte-identical long row in the same
+           session is a replay, any age.
+        3. short user/system content: identical row within 10 minutes
+           (system notes from one shutdown burst collapse; distinct later
+           events persist).
+
+        ``HERMES_STATE_DEDUPE=off`` disables. Any query failure returns
+        None — dedupe must never block a legitimate write.
+        """
+        if compressed_summary or tool_calls_json:
+            return None
+        if role not in ("user", "assistant", "system"):
+            return None
+        if os.environ.get("HERMES_STATE_DEDUPE", "on").strip().lower() in (
+            "off", "0", "false",
+        ):
+            return None
+        observed_flag = 1 if observed else 0
+        try:
+            if role == "user" and platform_message_id:
+                row = conn.execute(
+                    "SELECT id FROM messages WHERE session_id = ? "
+                    "AND role = 'user' AND platform_message_id = ? "
+                    "AND observed = ? AND active = 1 "
+                    "ORDER BY id DESC LIMIT 1",
+                    (session_id, platform_message_id, observed_flag),
+                ).fetchone()
+                if row:
+                    return int(row[0])
+            if not isinstance(stored_content, str) or not stored_content:
+                return None
+            if len(stored_content) >= 200:
+                row = conn.execute(
+                    "SELECT id FROM messages WHERE session_id = ? "
+                    "AND role = ? AND content = ? AND observed = ? "
+                    "AND active = 1 ORDER BY id DESC LIMIT 1",
+                    (session_id, role, stored_content, observed_flag),
+                ).fetchone()
+                return int(row[0]) if row else None
+            if role in ("user", "system"):
+                row = conn.execute(
+                    "SELECT id FROM messages WHERE session_id = ? "
+                    "AND role = ? AND content = ? AND observed = ? "
+                    "AND active = 1 AND timestamp > ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (session_id, role, stored_content, observed_flag,
+                     message_timestamp - 600.0),
+                ).fetchone()
+                return int(row[0]) if row else None
+        except Exception:  # noqa: BLE001 — dedupe must never block a write
+            return None
+        return None
+
     def append_message(
         self,
         session_id: str,
@@ -10583,6 +10659,18 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
         def _do(conn):
+            dedupe_id = self._duplicate_message_id(
+                conn, session_id, role, stored_content,
+                platform_message_id, tool_calls_json,
+                _compressed_summary, observed, message_timestamp,
+            )
+            if dedupe_id is not None:
+                logger.debug(
+                    "append_message: dedupe hit (session %s, role %s, "
+                    "existing row %s) — replay/duplicate write skipped",
+                    session_id, role, dedupe_id,
+                )
+                return dedupe_id
             self._check_transcript_write_guards(
                 conn,
                 session_id,
