@@ -42,6 +42,38 @@ logger = logging.getLogger(__name__)
 _START_THRESHOLD_SECONDS = 60.0
 
 
+def _last_assistant_message(session_id: Optional[str]) -> str:
+    """Best-effort: the turn's final assistant message from the profile state.
+
+    The mirror closes in turn teardown, after the final response was
+    persisted; that text is the principal's own AOF closeout. Any failure
+    (no session id, schema drift, empty turn) returns "" and the caller
+    falls back to the bare duration line.
+    """
+    if not session_id:
+        return ""
+    try:
+        import sqlite3
+
+        from hermes_constants import get_hermes_home
+
+        conn = sqlite3.connect(str(get_hermes_home() / "state.db"), timeout=5)
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT content FROM messages WHERE session_id = ? "
+                "AND role = 'assistant' AND content IS NOT NULL "
+                "AND length(content) > 0 "
+                "ORDER BY timestamp DESC, id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return str(row["content"]).strip() if row else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _clean_title_hint(raw: str) -> str:
     """Distill a card title from the raw turn prompt.
 
@@ -82,10 +114,12 @@ class PrincipalTurnMirror:
         board: str,
         title_hint: str,
         idempotency_key: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> None:
         self._board = board
         self._title_hint = (title_hint or "").strip()
         self._idempotency_key = (idempotency_key or "").strip() or None
+        self._session_id = (session_id or "").strip() or None
         self._task_id: Optional[str] = None
         self._started = False
         self._finished = False
@@ -115,19 +149,29 @@ class PrincipalTurnMirror:
             return
         task_id = self._task_id
         board = self._board
+        session_id = self._session_id
         minutes = max(1, int(elapsed_seconds // 60))
 
         def _close() -> None:
             try:
                 from hermes_cli import kanban_db as kb
 
+                # Spec (TARGET_ARCHITECTURE, 27/08): "Fim do trabalho
+                # principal: closeout AOF com o trabalho feito." The turn's
+                # own final message IS that closeout — carry it as the card
+                # result so the completion trace publishes substance, not a
+                # bare duration line.
+                summary = _last_assistant_message(session_id)
+                if summary:
+                    result = (
+                        f"{summary}\n\n"
+                        f"(Turno principal concluído em ~{minutes} min.)"
+                    )
+                else:
+                    result = f"Turno principal concluído em ~{minutes} min."
                 with kb.connect_closing(board=board) as conn:
                     kb.complete_task(
-                        conn,
-                        task_id,
-                        result=(
-                            f"Turno principal concluído em ~{minutes} min."
-                        )[:_SUMMARY_MAX],
+                        conn, task_id, result=result[:_SUMMARY_MAX],
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("principal mirror: close failed: %s", exc)
@@ -217,6 +261,7 @@ class PrincipalTurnMirror:
 def create_principal_turn_mirror(
     title_hint: str,
     idempotency_key: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Optional[PrincipalTurnMirror]:
     """Mirror for the current session's turn, or None when not applicable."""
     try:
@@ -226,7 +271,10 @@ def create_principal_turn_mirror(
         if not board:
             return None
         return PrincipalTurnMirror(
-            board, (title_hint or "")[:200], idempotency_key=idempotency_key
+            board,
+            (title_hint or "")[:200],
+            idempotency_key=idempotency_key,
+            session_id=session_id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("principal mirror: create failed: %s", exc)
