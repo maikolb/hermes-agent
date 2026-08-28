@@ -324,9 +324,22 @@ def _render_worker_trace_content(
     together produce two traces, and a blocked worker reports its reason
     instead of disappearing silently.
     """
-    first_line = (
-        "✅ Worker concluído" if kind == "completed" else "⛔ Worker bloqueado"
-    )
+    # Principal-turn mirror cards (title contract: "Principal: <hint>")
+    # are the principal's own inline work — announcing them as "Worker
+    # concluído" mislabeled the lane in the topic (28/08 concursa-ai).
+    if title.startswith("Principal: "):
+        title = title[len("Principal: "):]
+        first_line = (
+            "✅ Turno principal concluído"
+            if kind == "completed"
+            else "⛔ Turno principal bloqueado"
+        )
+    else:
+        first_line = (
+            "✅ Worker concluído"
+            if kind == "completed"
+            else "⛔ Worker bloqueado"
+        )
     if title:
         first_line += f": {title}"
     second_line = f"Kanban {task_id}" if task_id else ""
@@ -3040,6 +3053,7 @@ class GatewayKanbanWatchersMixin:
                                 self._kanban_unsub, sub, board_slug,
                             )
                 await self._kanban_refresh_worker_focus()
+                await self._kanban_claim_reaper()
                 await self._kanban_ready_watchdog()
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
@@ -3048,6 +3062,181 @@ class GatewayKanbanWatchersMixin:
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+
+    def _claim_reaper_settings(self) -> dict:
+        """Lazy-read the stale-claim reaper knobs (operator, 28/08)."""
+        cached = getattr(self, "_claim_reaper_cfg", None)
+        if cached is not None:
+            return cached
+        settings = {"enabled": True, "heartbeat_secs": 600.0}
+        try:
+            from hermes_cli.config import load_config as _load_config
+
+            kanban_cfg = (_load_config() or {}).get("kanban", {}) or {}
+            secs = float(kanban_cfg.get("claim_reap_heartbeat_secs", 600) or 0)
+            settings["enabled"] = secs > 0
+            settings["heartbeat_secs"] = max(secs, 120.0)
+        except Exception:  # noqa: BLE001 - defaults are safe
+            logger.debug("claim reaper: config unavailable; using defaults")
+        self._claim_reaper_cfg = settings
+        return settings
+
+    def _claim_reaper_collect(
+        self, board: str, now: float, heartbeat_secs: float
+    ) -> list:
+        """Sync: running cards whose claim owner is provably dead.
+
+        Death proof is conservative: a claim held by THIS host is judged by
+        its PID alone (a live-but-slow worker is never reaped on a stale
+        heartbeat); a claim from another host falls back to the heartbeat
+        age. Returns ``(task_id, title, is_mirror, is_worker)``.
+        """
+        import socket
+
+        from hermes_cli import kanban_db as _kb
+
+        hostname = socket.gethostname()
+        out: list = []
+        conn = _kb.connect(board=board)
+        try:
+            rows = conn.execute(
+                "SELECT id, title, claim_lock, worker_pid, last_heartbeat_at "
+                "FROM tasks WHERE status = 'running' "
+                "AND claim_lock IS NOT NULL",
+            ).fetchall()
+            for row in rows:
+                claim = str(row["claim_lock"] or "")
+                host, _, pid_s = claim.rpartition(":")
+                dead = False
+                if host == hostname and pid_s.isdigit():
+                    try:
+                        from gateway.status import _pid_exists
+
+                        dead = not _pid_exists(int(pid_s))
+                    except Exception:  # noqa: BLE001
+                        dead = False
+                elif row["last_heartbeat_at"] is not None:
+                    dead = (
+                        now - float(row["last_heartbeat_at"])
+                    ) > heartbeat_secs
+                if not dead:
+                    continue
+                is_mirror = conn.execute(
+                    "SELECT 1 FROM task_comments WHERE task_id = ? AND "
+                    "body LIKE 'Mirror card for in-process delegation%' "
+                    "LIMIT 1",
+                    (row["id"],),
+                ).fetchone() is not None
+                out.append(
+                    (str(row["id"]), str(row["title"] or ""), is_mirror,
+                     row["worker_pid"] is not None)
+                )
+        finally:
+            conn.close()
+        return out
+
+    def _claim_reaper_apply(
+        self, board: str, task_id: str, disposition: str
+    ) -> None:
+        from hermes_cli import kanban_db as _kb
+
+        new_status = (
+            "archived" if disposition == "archived_stale_mirror" else "ready"
+        )
+        conn = _kb.connect(board=board)
+        try:
+            with _kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET status = ?, claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL "
+                    "WHERE id = ? AND status = 'running'",
+                    (new_status, task_id),
+                )
+                conn.execute(
+                    "INSERT INTO task_events"
+                    "(task_id, kind, payload, created_at) "
+                    "VALUES (?, 'claim_reaped', ?, strftime('%s','now'))",
+                    (task_id, json.dumps({"disposition": disposition})),
+                )
+            note = (
+                "Card espelho de subagente arquivado."
+                if disposition == "archived_stale_mirror"
+                else "Card devolvido pra fila (ready); o dispatcher respawna."
+            )
+            _kb.add_comment(
+                conn, task_id, "watchdog",
+                "Claim morto colhido pelo reaper: o processo dono sumiu ou o "
+                f"heartbeat parou. {note}",
+            )
+        finally:
+            conn.close()
+
+    async def _kanban_claim_reaper(self) -> None:
+        """Reap claims whose owning process died (operator, 28/08).
+
+        Concursa-ai incident: two gateway restarts left four mirror cards
+        claimed-``running`` with dead PIDs for the full ~29h claim TTL.
+        They occupied every max_in_progress slot, so genuinely ready cards
+        starved in the queue (phantom saturation) while the board showed
+        five workers "running" with one alive. One pass per notifier tick:
+        dead delegation mirrors are archived (their resume path is the
+        principal's re-delegation, never a dispatcher respawn), dead
+        dispatcher workers go back to ready for a legitimate respawn, and
+        anything else (principal turn mirrors) is left alone.
+        """
+        settings = self._claim_reaper_settings()
+        if not settings["enabled"]:
+            return
+        profiles: set = set()
+        try:
+            profiles.add(str(self._active_profile_name() or "").strip())
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from hermes_cli.profiles import list_profiles
+
+            profiles.update(
+                str(getattr(info, "name", "") or "").strip()
+                for info in list_profiles()
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        profiles.discard("")
+        if not profiles:
+            return
+        try:
+            targets_by_board = self._kanban_board_display_targets(profiles)
+        except Exception:  # noqa: BLE001
+            return
+        now = time.time()
+        for board in targets_by_board:
+            try:
+                stale = await asyncio.to_thread(
+                    self._claim_reaper_collect, board, now,
+                    settings["heartbeat_secs"],
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            for task_id, _title, is_mirror, is_worker in stale:
+                if is_mirror:
+                    disposition = "archived_stale_mirror"
+                elif is_worker:
+                    disposition = "requeued"
+                else:
+                    continue
+                try:
+                    await asyncio.to_thread(
+                        self._claim_reaper_apply, board, task_id, disposition,
+                    )
+                    logger.info(
+                        "claim reaper: %s/%s -> %s",
+                        board, task_id, disposition,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "claim reaper: apply failed for %s/%s",
+                        board, task_id, exc_info=True,
+                    )
 
     def _ready_watchdog_settings(self) -> dict:
         """Lazy-read the abandonment-watchdog knobs (operator card t_7872edd5)."""

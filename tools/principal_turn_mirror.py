@@ -42,6 +42,29 @@ logger = logging.getLogger(__name__)
 _START_THRESHOLD_SECONDS = 60.0
 
 
+def _clean_title_hint(raw: str) -> str:
+    """Distill a card title from the raw turn prompt.
+
+    Raw prompts arrive wrapped in metadata the board must not display —
+    sender tags (``[Jhonatan|7550030839]``), system notes, image markers,
+    forwarded-message timestamps. 28/08 concursa-ai: mirror cards titled
+    with the full bracket soup reached the closeout trace in the topic
+    verbatim. Keep the first meaningful line, drop leading bracket blocks,
+    and cut at the first inline bracket.
+    """
+    text = (raw or "").strip()
+    while text.startswith("["):
+        end = text.find("]")
+        if end < 0:
+            return ""
+        text = text[end + 1:].lstrip(" |\n\t-:")
+    text = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    cut = text.find("[")
+    if cut > 0:
+        text = text[:cut].rstrip(" |-:")
+    return text[:90].strip()
+
+
 class PrincipalTurnMirror:
     """Mirror card lifecycle for one principal turn (create/beat/finish).
 
@@ -103,7 +126,7 @@ class PrincipalTurnMirror:
                         conn,
                         task_id,
                         result=(
-                            f"Principal turn finished after ~{minutes} min."
+                            f"Turno principal concluído em ~{minutes} min."
                         )[:_SUMMARY_MAX],
                     )
             except Exception as exc:  # noqa: BLE001
@@ -121,7 +144,9 @@ class PrincipalTurnMirror:
             from hermes_cli import kanban_db as kb
 
             author = _author()
-            hint = self._title_hint or time.strftime("%H:%M")
+            hint = _clean_title_hint(self._title_hint) or time.strftime(
+                "%H:%M"
+            )
             title = f"Principal: {hint}"[:_TITLE_MAX]
             body = (
                 "Mirror card for the principal's own inline turn on this "

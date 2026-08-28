@@ -12,10 +12,11 @@ Lifecycle: ``create_task`` (ready) followed immediately by a directed
 ``claim_task`` on the same connection, so the card sits in ``running``
 claimed by the delegating gateway process. The claim carries a long TTL
 (``_CLAIM_TTL_SECONDS``): while the delegation is alive the card cannot be
-handed to a dispatcher worker, and if the whole process dies the claim
-eventually expires and ``release_stale_claims`` returns the card to
-``ready``, where a real dispatcher worker legitimately resumes the orphaned
-goal. Terminal transitions: child ``completed`` maps to ``done`` (child
+handed to a dispatcher worker. If the whole process dies, delegation
+recovery archives the dead attempt's cards on the next boot
+(``archive_stale_delegation_cards``) and the principal re-delegates — a
+single resume path, so a TTL-expired card never races a re-delegation into
+duplicate work (28/08 concursa-ai: both paths ran and tripled the cards). Terminal transitions: child ``completed`` maps to ``done`` (child
 summary as result); anything else (``failed``/``interrupted``/``timeout``/
 ``error``) maps to ``blocked`` with kind ``needs_input`` so a human decides
 between re-delegating and letting a dispatcher worker take over.
@@ -27,6 +28,7 @@ delegation.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -347,6 +349,71 @@ def create_dispatch_cards(
     except Exception as exc:  # noqa: BLE001
         logger.debug("delegation kanban: dispatch batch create failed: %s", exc)
     return cards
+
+
+def archive_stale_delegation_cards(
+    board: str,
+    card_ids: List[str],
+    delegation_id: str,
+) -> List[str]:
+    """Archive mirror cards left behind by a fan-out whose process died.
+
+    Before this existed, the dead attempt's cards sat ``running`` with a
+    stale claim for the full claim TTL (~29h), occupying max_in_progress
+    slots (phantom saturation: 28/08 concursa-ai, 4 dead cards starving the
+    queue) and triple-counting the same work once the principal re-delegated.
+    Recovery calls this for every card of the dead attempt: release the
+    claim, archive, and leave an audit trail. Best-effort per card, same
+    contract as the rest of this module. Returns the ids actually archived.
+    """
+    archived: List[str] = []
+    if not board or not card_ids:
+        return archived
+    try:
+        from hermes_cli import kanban_db as kb
+
+        with kb.connect_closing(board=board) as conn:
+            for task_id in card_ids:
+                try:
+                    row = conn.execute(
+                        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+                    ).fetchone()
+                    if row is None or row["status"] not in (
+                        "running", "ready", "review",
+                    ):
+                        continue
+                    with kb.write_txn(conn):
+                        conn.execute(
+                            "UPDATE tasks SET status='archived', "
+                            "claim_lock=NULL, claim_expires=NULL "
+                            "WHERE id = ?",
+                            (task_id,),
+                        )
+                        conn.execute(
+                            "INSERT INTO task_events"
+                            "(task_id, kind, payload, created_at) "
+                            "VALUES (?, 'delegation_stale', ?, "
+                            "strftime('%s','now'))",
+                            (task_id,
+                             json.dumps({"delegation_id": delegation_id})),
+                        )
+                    kb.add_comment(
+                        conn, task_id, _author(),
+                        "Tentativa interrompida: o processo que hospedava o "
+                        f"subagente ({delegation_id}) morreu antes de "
+                        "concluir. Card arquivado automaticamente pelo "
+                        "recovery; a retomada acontece em um novo fan-out "
+                        "com cards próprios.",
+                    )
+                    archived.append(task_id)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "delegation kanban: stale archive failed (%s)",
+                        task_id, exc_info=True,
+                    )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("delegation kanban: stale archive batch failed: %s", exc)
+    return archived
 
 
 class MirrorHeartbeat:
