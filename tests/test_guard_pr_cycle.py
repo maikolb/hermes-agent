@@ -114,3 +114,38 @@ def test_kill_switch_disables_resolution(board, monkeypatch):
 
     assert kb.check_respawn_guard(conn, task_id) == "active_pr"
     conn.close()
+
+
+def test_rework_requested_after_pr_releases_guard(board, monkeypatch):
+    """Wave 4 do DOVCRM: reviewer pediu mudanças DEPOIS da PR aberta; o
+    respawn é o ciclo de correção na MESMA branch/PR, não duplicação."""
+    conn, task_id = _task_with_pr(monkeypatch)
+    time.sleep(1.1)
+    kb.add_comment(
+        conn, task_id, "hermes-project-factory",
+        "Changes requested (review round 1): corrigir autorização no store.",
+    )
+    monkeypatch.setattr(
+        kb, "_gh_pr_json",
+        lambda url: (_ for _ in ()).throw(AssertionError("must not call gh")),
+    )
+
+    assert kb.check_respawn_guard(conn, task_id) is None
+    conn.close()
+
+
+def test_formal_changes_requested_event_releases_guard(board, monkeypatch):
+    conn, task_id = _task_with_pr(monkeypatch)
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_events(task_id, kind, payload, created_at) "
+            "VALUES (?, 'changes_requested', '{}', strftime('%s','now')+2)",
+            (task_id,),
+        )
+    monkeypatch.setattr(
+        kb, "_gh_pr_json",
+        lambda url: (_ for _ in ()).throw(AssertionError("must not call gh")),
+    )
+
+    assert kb.check_respawn_guard(conn, task_id) is None
+    conn.close()
