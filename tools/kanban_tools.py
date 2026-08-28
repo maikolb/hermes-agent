@@ -900,6 +900,14 @@ def _handle_complete(args: dict, **kw) -> str:
         return tool_error(
             "provide at least one of: summary (preferred), result"
         )
+    # The closeout IS the card's durable record. A summary-only handoff
+    # used to live only in the completed event (board showed result_len 0)
+    # and every surface that reads task.result — completion trace, Vigília,
+    # `hermes kanban show` — went out empty (28/08, run 57: the worker
+    # delivered a full closeout in `summary` and the board recorded
+    # nothing). Persist it as the result when no explicit result came.
+    if not result and summary:
+        result = summary
     if metadata is not None and not isinstance(metadata, dict):
         return tool_error(
             f"metadata must be an object/dict, got {type(metadata).__name__}"
@@ -926,6 +934,27 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"evidence in your summary matching the task's criteria, "
                     f"or (2) create continuation tasks with parents=[{tid}] "
                     f"and keep this task alive."
+                )
+
+            # AOF enforcement (spec: real, not textual): a worker
+            # completing its OWN card must hand off a substantive
+            # closeout — prompts and SOUL only suggest; the tool refuses.
+            # Runs after the goal judge so its richer rejection speaks
+            # first. HERMES_KANBAN_REQUIRE_CLOSEOUT=off is the escape.
+            if (
+                os.environ.get("HERMES_KANBAN_TASK", "").strip() == str(tid)
+                and os.environ.get(
+                    "HERMES_KANBAN_REQUIRE_CLOSEOUT", "on"
+                ).strip().lower() not in ("off", "0", "false")
+                and len(str(result or "").strip()) < 40
+            ):
+                return tool_error(
+                    "closeout too short: this completion is the card's "
+                    "durable record and the operator's completion trace. "
+                    "Call kanban_complete again with `summary` (or "
+                    "`result`) carrying your structured closeout — Scope / "
+                    "Done / Evidence / Limitations, or your profile's own "
+                    "closeout contract."
                 )
 
             delivery = kb.get_git_delivery_contract(conn, tid)

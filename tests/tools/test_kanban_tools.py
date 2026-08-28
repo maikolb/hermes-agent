@@ -115,7 +115,7 @@ def test_list_filters_tasks(monkeypatch, worker_env):
 def test_complete_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_complete({
-        "summary": "got the thing done",
+        "summary": "got the thing done: tests green, scope kept as asked.",
         "metadata": {"files": 2},
     })
     d = json.loads(out)
@@ -127,7 +127,7 @@ def test_complete_happy_path(worker_env):
     try:
         run = kb.latest_run(conn, worker_env)
         assert run.outcome == "completed"
-        assert run.summary == "got the thing done"
+        assert run.summary == "got the thing done: tests green, scope kept as asked."
         assert run.metadata == {"files": 2}
     finally:
         conn.close()
@@ -329,7 +329,7 @@ def test_complete_entrypoint_verifies_sealed_required_delivery(
     monkeypatch.setattr(
         git_delivery, "verify_and_persist_git_delivery", _not_merged
     )
-    output = json.loads(kt._handle_complete({"summary": "approve"}))
+    output = json.loads(kt._handle_complete({"summary": "approve: delivery verified against the sealed contract, checks green."}))
 
     assert called == [task_id]
     assert "pr_not_merged" in output["error"]
@@ -399,7 +399,7 @@ def test_complete_requeries_remote_even_when_prior_receipt_exists(
         "verify_and_persist_git_delivery",
         _checks_regressed,
     )
-    output = json.loads(kt._handle_complete({"summary": "retry"}))
+    output = json.loads(kt._handle_complete({"summary": "retry: remote delivery requeried and verified before completion."}))
 
     assert called == [task_id]
     assert "required_check_not_green" in output["error"]
@@ -419,14 +419,14 @@ def test_complete_retry_with_empty_created_cards_succeeds(worker_env):
 
     # Hit the gate first.
     rejected = json.loads(kt._handle_complete({
-        "summary": "oops",
+        "summary": "oops: first attempt with malformed created_cards, retried below.",
         "created_cards": ["t_phantomdeadbeef"],
     }))
     assert rejected.get("error")
 
     # Retry with the escape hatch.
     ok = json.loads(kt._handle_complete({
-        "summary": "retry without claims",
+        "summary": "retry without claims: empty created_cards list accepted on retry.",
         "created_cards": [],
     }))
     assert ok.get("ok") is True
@@ -824,7 +824,7 @@ def test_worker_lifecycle_through_tools(worker_env):
 
     # 5. complete with structured handoff
     comp = json.loads(kt._handle_complete({
-        "summary": "implemented + spawned QA follow-up",
+        "summary": "implemented + spawned QA follow-up; evidence: focused suite green.",
         "metadata": {"child_task": child_out["task_id"]},
     }))
     assert comp["ok"]
