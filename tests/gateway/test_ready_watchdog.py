@@ -162,3 +162,41 @@ def test_watchdog_gate_off_is_silent(board, monkeypatch):
     asyncio.run(runner._kanban_ready_watchdog())
 
     assert adapter.sent == []
+
+
+def test_dispatcher_guard_reason_beats_generic(board, monkeypatch):
+    """Wave 4 do DOVCRM (28/08): quando o dispatcher está deliberadamente
+    segurando o card (respawn_guarded active_pr a cada tick), o alerta deve
+    nomear o guard em vez do genérico 'dispatcher parado'."""
+    import json as _json
+    import time as _time
+
+    adapter = RecordingAdapter()
+    runner = _runner(
+        adapter,
+        monkeypatch,
+        settings={
+            "enabled": True,
+            "threshold": 180.0,
+            "default_assignee": "hermes",
+        },
+    )
+    task_id = _make_ready(600, assignee="hermes")
+    conn = kb.connect()
+    try:
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_events(task_id, kind, payload, created_at) "
+                "VALUES (?, 'respawn_guarded', ?, ?)",
+                (task_id, _json.dumps({"reason": "active_pr"}), int(_time.time())),
+            )
+    finally:
+        conn.close()
+
+    asyncio.run(runner._kanban_ready_watchdog())
+
+    assert len(adapter.sent) == 1
+    text = adapter.sent[0]["text"]
+    assert "segurado por guard do dispatcher" in text
+    assert "PR ativa do projeto" in text
+    assert "dispatcher parado" not in text

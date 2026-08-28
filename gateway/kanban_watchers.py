@@ -11,6 +11,7 @@ behavior-neutral move that lifts ~1,000 LOC out of run.py.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -3091,6 +3092,36 @@ class GatewayKanbanWatchersMixin:
             "(max_in_progress) ou perfil executor indisponível"
         )
 
+    @staticmethod
+    def _ready_watchdog_guard_reason(conn: Any, task_id: str) -> str:
+        """Precise reason when the dispatcher is deliberately holding a card.
+
+        Operator feedback 28/08 (Wave 4 do DOVCRM): the generic no-claim
+        reason hid the real story — the card's own events showed
+        ``respawn_guarded {"reason": "active_pr"}`` every ~90s. When the
+        latest event is a dispatcher guard, name it instead of guessing.
+        """
+        row = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if not row or str(row["kind"] or "") != "respawn_guarded":
+            return ""
+        guard = ""
+        try:
+            guard = str((json.loads(row["payload"] or "{}") or {}).get("reason") or "")
+        except (ValueError, TypeError):
+            guard = ""
+        if guard == "active_pr":
+            return (
+                "segurado por guard do dispatcher: há PR ativa do projeto "
+                "(single writer); merge/publicação da PR libera o card sozinho"
+            )
+        return (
+            f"segurado por guard do dispatcher ({guard or 'motivo não informado'})"
+        )
+
     async def _kanban_ready_watchdog(self) -> None:
         """Alert on ready cards nobody will ever claim (operator, 28/08).
 
@@ -3219,8 +3250,11 @@ class GatewayKanbanWatchersMixin:
                 ).fetchone()
                 if already:
                     continue
-                reason = self._ready_watchdog_reason(
-                    task, settings["default_assignee"]
+                reason = (
+                    self._ready_watchdog_guard_reason(conn, task_id)
+                    or self._ready_watchdog_reason(
+                        task, settings["default_assignee"]
+                    )
                 )
                 age_minutes = max(
                     1, int((now - float(task["created_at"] or now)) // 60)
