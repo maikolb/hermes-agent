@@ -31996,6 +31996,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if event_message_id
                 else None
             ),
+            # Lets the mirror close with the turn's own final message as
+            # the card result — the "closeout AOF com o trabalho feito"
+            # the spec requires, instead of a bare duration line.
+            session_id=session_id,
         )
 
         _notify_task = asyncio.create_task(_notify_long_running())
