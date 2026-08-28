@@ -123,9 +123,12 @@ class TestAudioOutputRefcount:
         vm.mark_audio_output_active(False)
         assert vm.is_audio_output_active() is False
 
-    def test_play_audio_file_brackets_refcount(self, tmp_path):
+    def test_play_audio_file_brackets_refcount(self, tmp_path, monkeypatch):
         """play_audio_file flags real speaker output for its whole duration,
         so the thinking loop knows audio is flowing."""
+        # The playback impl is mocked (no sound); disarm the process-wide
+        # kill switch so the refcount bracketing under test actually runs.
+        monkeypatch.delenv("HERMES_DISABLE_AUDIO", raising=False)
         _reset()
         seen = []
 

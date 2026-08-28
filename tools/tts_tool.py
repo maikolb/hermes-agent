@@ -182,7 +182,17 @@ def _import_mistral_client():
     return Mistral
 
 def _import_sounddevice():
-    """Lazy import sounddevice. Returns the module or raises ImportError/OSError."""
+    """Lazy import sounddevice. Returns the module or raises ImportError/OSError.
+
+    Honors the process-wide ``HERMES_DISABLE_AUDIO`` kill switch at call
+    time (see tools.voice_mode._audio_disabled): with it set, native audio
+    output is structurally impossible in this process — including playback
+    dispatched on daemon threads after test fixtures were torn down.
+    """
+    from tools.voice_mode import _audio_disabled
+
+    if _audio_disabled():
+        raise ImportError("audio disabled by HERMES_DISABLE_AUDIO")
     import sounddevice as sd
     return sd
 

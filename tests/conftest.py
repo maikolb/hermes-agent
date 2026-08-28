@@ -119,6 +119,21 @@ if _hermes_home_points_at_production(os.environ.get("HERMES_HOME", "")):
 # env instead of stripping markers.
 os.environ["HERMES_TEST_ISOLATION"] = os.environ.get("HERMES_HOME", "") or "1"
 
+# ── Process-wide audio kill switch ──────────────────────────────────────────
+# The fixture-scoped audio guards (see _audio_playback_guard) revert on
+# teardown; voice playback is dispatched on DAEMON THREADS, and a late
+# thread that runs after teardown sees the real functions again — that
+# window played real spoken TTS on the operator's speakers at 22:22 even
+# with all three fixture guards active (ffplay of a tempfile mp3, caught by
+# live process telemetry). HERMES_DISABLE_AUDIO is honored by the product
+# AT CALL TIME (tools.voice_mode._audio_disabled), set here once for the
+# whole pytest process and never reverted, so no thread ever finds the
+# speakers open regardless of fixture lifecycle. Escape hatch for a human
+# deliberately testing real audio OUTSIDE the suite's guarantees: export
+# HERMES_TEST_REAL_AUDIO=1 before invoking pytest.
+if os.environ.get("HERMES_TEST_REAL_AUDIO", "").strip() != "1":
+    os.environ["HERMES_DISABLE_AUDIO"] = "1"
+
 #: HERMES_HOME as it stood when conftest was imported - i.e. before any test
 #: module could import code that configures logging. Recorded so the guard in
 #: tests/test_log_isolation.py can assert the sandbox existed AT THAT MOMENT.
@@ -1336,6 +1351,23 @@ def pytest_collection_modifyitems(config, items):  # noqa: D401 — pytest hook
     skip is diagnosable rather than mysterious.
     """
     _reject_multiple_os_marks(items)
+
+    # Real-audio tests are skipped, not silenced, while the process-wide
+    # kill switch is armed (the suite default). Letting them run would make
+    # them vacuous — the switch turns their real pipeline into a no-op and
+    # they'd "pass" without testing anything. Skipping keeps them honest
+    # and visible; HERMES_TEST_REAL_AUDIO=1 disarms the switch and runs
+    # them for real (speakers included, deliberately).
+    if os.environ.get("HERMES_DISABLE_AUDIO", "").strip() == "1":
+        skip_real_audio = pytest.mark.skip(
+            reason=(
+                "requires real audio output; run with "
+                "HERMES_TEST_REAL_AUDIO=1 to exercise the real pipeline"
+            )
+        )
+        for item in items:
+            if item.get_closest_marker(_AUDIO_GUARD_BYPASS_MARK) is not None:
+                item.add_marker(skip_real_audio)
 
     for mark_name, (is_host, label) in _OS_MARKS.items():
         if is_host():

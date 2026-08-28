@@ -12,6 +12,27 @@ from __future__ import annotations
 import pytest
 
 
+def test_process_wide_kill_switch_is_armed():
+    """HERMES_DISABLE_AUDIO is set once for the whole pytest process.
+
+    Fixture-scoped guards revert on teardown, and voice playback runs on
+    daemon threads that can fire AFTER teardown — the escape that played
+    spoken TTS at 22:22 with all fixture guards active. The env switch is
+    read by the product at call time, so late threads stay silent too.
+    """
+    import os
+
+    assert os.environ.get("HERMES_DISABLE_AUDIO") == "1"
+
+
+def test_kill_switch_silences_playback_without_any_fixture_patching():
+    """play_audio_file refuses BEFORE touching players — env, not fixture."""
+    import tools.voice_mode as vm
+
+    assert vm._audio_disabled() is True
+    assert vm.play_audio_file("/nonexistent/never-touched.wav") is False
+
+
 def test_voice_mode_native_audio_is_blocked():
     import tools.voice_mode as vm
 
