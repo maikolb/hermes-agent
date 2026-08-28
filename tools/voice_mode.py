@@ -33,12 +33,34 @@ logger = logging.getLogger(__name__)
 # in headless environments (SSH, Docker, WSL, no PortAudio).
 # ---------------------------------------------------------------------------
 
+def _audio_disabled() -> bool:
+    """Process-wide audio kill switch, read AT CALL TIME on every path.
+
+    ``HERMES_DISABLE_AUDIO=1`` guarantees this process never opens the
+    speakers or the microphone: native streams (sounddevice) refuse to
+    import and ``play_audio_file`` refuses to spawn players. Read per call
+    rather than at import so it also covers playback dispatched on daemon
+    threads long after the caller returned — the escape path that let a
+    test suite play real audio on the operator's machine even with
+    fixture-scoped guards (they revert on teardown; a late thread then saw
+    the real functions). Useful beyond tests: headless servers and CI can
+    export it to make audio structurally impossible.
+    """
+    return os.environ.get("HERMES_DISABLE_AUDIO", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _import_audio():
     """Lazy-import sounddevice and numpy.  Returns (sd, np).
 
     Raises ImportError or OSError if the libraries are not available
-    (e.g. PortAudio missing on headless servers).
+    (e.g. PortAudio missing on headless servers), or when the
+    ``HERMES_DISABLE_AUDIO`` kill switch is set (every caller already
+    treats ImportError as "no audio available" and continues silently).
     """
+    if _audio_disabled():
+        raise ImportError("audio disabled by HERMES_DISABLE_AUDIO")
     import sounddevice as sd
     import numpy as np
     return sd, np
@@ -1633,6 +1655,9 @@ def play_audio_file(file_path: str) -> bool:
     Returns:
         ``True`` if playback succeeded, ``False`` otherwise.
     """
+    if _audio_disabled():
+        # Kill switch checked per call — covers late daemon-thread dispatch.
+        return False
     # Ref-count real speaker output for the whole call so the thinking-sound
     # loop (and any other ambient cue) knows audio is flowing right now.
     mark_audio_output_active(True)

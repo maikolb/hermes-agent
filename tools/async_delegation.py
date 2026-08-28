@@ -244,6 +244,12 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
         key: record.get(key)
         for key in (
             "goal", "goals", "context", "toolsets", "role", "model", "is_batch",
+            # "mode": "foreground" marks a crash marker for an in-process
+            # fan-out (register_foreground_delegation) — recovery wording
+            # differs from a detached background unit. "board" records
+            # whether the fan-out was board-bound (Factory OS layer), so
+            # recovery only mentions mirror cards when they existed.
+            "mode", "board",
             # Routing origin (scope_id/user_id/user_name): persisted so a
             # restart-recovered completion can reconstruct a full
             # SessionSource — see _capture_routing_origin.
@@ -271,6 +277,64 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
 def _delete_durable_delegation(delegation_id: str) -> None:
     with _DB_LOCK, _transaction() as conn:
         conn.execute("DELETE FROM async_delegations WHERE delegation_id=?", (delegation_id,))
+
+
+def register_foreground_delegation(
+    *,
+    goals,
+    context=None,
+    toolsets=None,
+    role="leaf",
+    model=None,
+    session_key="",
+    origin_ui_session_id="",
+    origin_session_id="",
+    parent_session_id=None,
+    delegation_id: Optional[str] = None,
+    board: Optional[str] = None,
+) -> str:
+    """Persist a durable crash marker for an IN-PROCESS (foreground) fan-out.
+
+    TARGET_ARCHITECTURE gap 7: foreground workers die with the hosting
+    process (gateway restart, crash, power loss) and nothing re-dispatched
+    them. The marker reuses the async-delegation recovery machine verbatim:
+    on the next process start ``recover_abandoned_delegations`` flips it to
+    outcome ``unknown`` and ``restore_undelivered_completions`` re-enters
+    the goals as a turn, so the principal re-delegates as process. The
+    caller MUST delete the marker on normal completion
+    (:func:`complete_foreground_delegation`), including in-turn failures the
+    parent already saw inline — only a process death leaves it behind.
+    """
+    deleg_id = delegation_id or _new_delegation_id()
+    record: Dict[str, Any] = {
+        "delegation_id": deleg_id,
+        "goal": "",
+        "goals": list(goals or []),
+        "is_batch": True,
+        "mode": "foreground",
+        # Factory OS layer marker: recovery wording mentions stale mirror
+        # cards only when the fan-out actually had a board (a plain Hermes
+        # install delegating in a DM has none).
+        "board": str(board or "") or None,
+        "context": context,
+        "toolsets": list(toolsets) if toolsets else None,
+        "role": role,
+        "model": model,
+        "session_key": session_key,
+        "origin_ui_session_id": origin_ui_session_id,
+        "origin_session_id": origin_session_id,
+        "parent_session_id": parent_session_id,
+        **_capture_routing_origin(),
+        "dispatched_at": time.time(),
+    }
+    _persist_dispatch(record)
+    return deleg_id
+
+
+def complete_foreground_delegation(delegation_id: str) -> None:
+    """Drop a foreground crash marker after the fan-out finished in-turn."""
+    if delegation_id:
+        _delete_durable_delegation(delegation_id)
 
 
 def _prune_durable_records() -> None:
@@ -358,6 +422,24 @@ def recover_abandoned_delegations() -> int:
             if live:
                 continue
             task = json.loads(task_json or "{}")
+            if task.get("mode") == "foreground":
+                _cards_note = (
+                    " and their kanban mirror cards from that attempt are "
+                    "stale"
+                    if task.get("board")
+                    else ""
+                )
+                _recovery_error = (
+                    "The process hosting this in-process fan-out exited "
+                    "before the workers finished — the workers died with "
+                    f"it{_cards_note}. Re-delegate the goals listed below "
+                    "with delegate_task to resume the work."
+                )
+            else:
+                _recovery_error = (
+                    "Delegation owner exited before recording a terminal "
+                    "result; outcome unknown."
+                )
             event = {
                 "type": "async_delegation", "delegation_id": delegation_id,
                 "session_key": session_key, "origin_ui_session_id": origin_ui,
@@ -368,8 +450,9 @@ def recover_abandoned_delegations() -> int:
                 "goals": task.get("goals"), "context": task.get("context"),
                 "toolsets": task.get("toolsets"), "role": task.get("role"),
                 "model": task.get("model"), "is_batch": bool(task.get("is_batch")),
+                "mode": task.get("mode"),
                 "status": "unknown", "summary": None,
-                "error": "Delegation owner exited before recording a terminal result; outcome unknown.",
+                "error": _recovery_error,
                 "dispatched_at": dispatched_at, "completed_at": now,
             }
             # Routing origin persisted at dispatch (see _capture_routing_origin):

@@ -1049,8 +1049,18 @@ class TestAutoTtsEmptyTextGuard:
         # The real fix is in base.py — empty check after strip
 
 
+@pytest.mark.real_audio_playback
 class TestStreamTtsToSpeaker:
-    """Functional tests for the streaming TTS pipeline."""
+    """Functional tests for the streaming TTS pipeline.
+
+    These are REAL by design: no mocks, real synthesis, real playback out
+    of the machine's speakers ("Hello world." spoken aloud — this class was
+    the source of the 27/08 incident, named by live process telemetry).
+    The marker keeps them out of the default run: the suite arms the
+    process-wide HERMES_DISABLE_AUDIO kill switch and marked tests are
+    skipped under it. To exercise them for real:
+    ``HERMES_TEST_REAL_AUDIO=1 pytest tests/gateway/test_voice_command.py``.
+    """
 
     def test_none_sentinel_flushes_buffer(self):
         """None sentinel causes remaining buffer to be spoken."""

@@ -43,6 +43,17 @@ do gateway/agente referencia esta spec. Divergência daqui é bug.
 - Tudo sincronizado no Vigília: visibilidade externa equivalente ao
   Telegram.
 
+## Aceite (cenário canônico, ditado 27/08)
+
+Tópico real de teste (ex.: DOVTest). 7 tarefas paralelas: duas terminam
+juntas, uma termina depois, duas bloqueiam, as demais entregam em
+sequência. Verificar no fluxo: pull das conversas anteriores ao marcar,
+tag "Trabalhando...", now watching, closeout AOF por worker e do
+principal, blocked movendo card + closeout com motivo, checkpoint
+(queda/retomada), Vigília sincronizado com animação. O relatório final
+apresenta a spec por categoria com check por item e resumo do
+funcionamento.
+
 ## Gap map (27/08/2026, ordem de ataque)
 
 1. Compaction não pode arquivar mensagens humanas não-processadas
@@ -63,4 +74,24 @@ do gateway/agente referencia esta spec. Divergência daqui é bug.
    mão, e a orquestração ficou dependente da inteligência do agente em
    vez do processo.
 8. Auditoria de limites de escrita/busca do fork + scratchpad + paths AOF.
+   Resultado (27/08): os tetos principais JÁ são config, não código —
+   `tool_output.max_bytes/max_lines/max_line_length` (default 50KB/2000/2000),
+   `model.max_tokens` (default: provider), busca sem teto rígido
+   (`DEFAULT_SEARCH_LIMIT` 50 é só default por chamada), `MAX_FILE_SIZE`
+   50KB é warning, não bloqueio. Mudança de código: trace de closeout do
+   worker no chat subiu 700→1600 chars (o closeout estruturado do gap 6
+   não cabia). Pendências de CONFIG DE PERFIL (janela de deploy, VPS):
+   subir tool_output no perfil factory, conferir model.max_tokens do
+   perfil, declarar scratchpad permitido no scope validator do AOF e
+   ligar kanban.agent_wake_on_events para o principal acordar em
+   conclusão de card despachado.
 9. route_to_dispatcher default vira opt-in explícito (falso por default).
+10. Paridade do worker com o principal: capacidade, memórias e contexto
+    (ordem do Maikol 27/08 ~21:45, evidência do próprio principal em
+    produção: "o worker recebe um contexto isolado, sem toda a
+    continuidade e decisões que eu mantenho nesta sessão; ele tende a
+    redescobrir o sistema e seguir o contrato literalmente", e o
+    principal parou o worker para fazer ele mesmo). Workers devem
+    receber o que o principal tem: identidade/instruções operacionais
+    do perfil, memórias persistentes e o contexto/decisões da sessão,
+    além de modelo/capacidade equivalentes.

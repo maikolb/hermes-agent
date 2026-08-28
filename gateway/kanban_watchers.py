@@ -29,7 +29,10 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 _WORKER_FOCUS_LOG_TAIL_BYTES = 64 * 1024
-_WORKER_TRACE_SUMMARY_MAX_CHARS = 700
+# 1600: a structured worker closeout (Scope/Done/Evidence/Limitations —
+# gap 6) no longer fits the old 700; the full trace (header + summary +
+# link) must stay under Telegram's 4096-char message cap (gap 8 audit).
+_WORKER_TRACE_SUMMARY_MAX_CHARS = 1600
 _WORKER_FOCUS_MAX_ITEMS = 10
 _WORKER_FOCUS_MAX_LINE_CHARS = 280
 _WORKER_FOCUS_MAX_REASONING_CHARS = 800
@@ -276,6 +279,87 @@ def _kanban_worker_matches_scope(
     if session_only:
         return bool(wanted_session and task_session == wanted_session)
     return True
+
+
+def _read_worker_trace_summary(board: str, task_id: str, kind: str) -> str:
+    """Fetch the worker's own closeout text for a completion/blocked trace.
+
+    Completed cards carry the worker's final summary in ``result``; blocked
+    cards carry it in the last card comment (close_delegation_cards stores
+    the summary as a comment on the block path). Best-effort: any failure
+    returns an empty string and the trace stays short.
+    """
+    if not (board and task_id):
+        return ""
+    try:
+        from hermes_cli import kanban_db as _kb
+
+        with _kb.connect_closing(board=board) as conn:
+            if kind == "completed":
+                task = _kb.get_task(conn, task_id)
+                return str(getattr(task, "result", "") or "").strip()
+            comments = _kb.list_comments(conn, task_id)
+            if comments:
+                return str(getattr(comments[-1], "body", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        logger.debug("worker trace summary read failed", exc_info=True)
+    return ""
+
+
+def _render_worker_trace_content(
+    *,
+    kind: str,
+    title: str,
+    board: str,
+    task_id: str,
+    run_id: Any,
+    summary: str,
+    trace_url_template: str,
+) -> str:
+    """Render one worker's terminal trace (its closeout, as shown in chat).
+
+    TARGET_ARCHITECTURE gap 5: every finished worker publishes ITS OWN
+    closeout — per worker, not per display lane — so two workers finishing
+    together produce two traces, and a blocked worker reports its reason
+    instead of disappearing silently.
+    """
+    first_line = (
+        "✅ Worker concluído" if kind == "completed" else "⛔ Worker bloqueado"
+    )
+    if title:
+        first_line += f": {title}"
+    second_line = f"Kanban {task_id}" if task_id else ""
+    if run_id is not None:
+        second_line += f" · run {run_id}"
+    if board and second_line:
+        second_line = f"[{board}] {second_line}"
+    if summary:
+        summary = re.sub(r"\n{3,}", "\n\n", summary)
+        if len(summary) > _WORKER_TRACE_SUMMARY_MAX_CHARS:
+            summary = (
+                summary[: _WORKER_TRACE_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+            )
+    lines = [first_line]
+    if summary:
+        lines.append("")
+        lines.append(summary)
+        lines.append("")
+    if second_line:
+        lines.append(second_line)
+    template = str(trace_url_template or "").strip()
+    if template and task_id:
+        try:
+            link = template.format(
+                board=board,
+                task_id=task_id,
+                run_id=run_id if run_id is not None else "",
+            )
+        except (KeyError, IndexError, ValueError) as exc:
+            logger.debug("worker trace url template invalid: %s", exc)
+            link = ""
+        if link:
+            lines.append(f"📋 Log completo: {link}")
+    return "\n".join(lines)
 
 
 def _render_kanban_worker_focus(task: Any, *, board: str, active_count: int) -> str:
@@ -852,13 +936,18 @@ class GatewayKanbanWatchersMixin:
         state_key: tuple,
         adapter: Any,
         trace_url_template: str = "",
+        exit_kind: str = "completed",
     ) -> None:
-        """Edit one finished worker bubble into a short completion trace.
+        """Edit one finished worker bubble into a short terminal trace.
 
         ``trace_url_template`` (display.worker_rotation_trace_url) may carry
         ``{board}``/``{task_id}``/``{run_id}`` placeholders; when set, the
         trace gains a link line so the full worker log (reasoning + tool
         activity) is one tap away in the read-only dashboard.
+
+        The trace body is the worker's own closeout (card result for
+        completed, last card comment for blocked) — a trace with just a
+        title reads as "nothing to see here" (user feedback 27/08).
 
         Retryable edit failures keep the state so the next teardown pass
         retries; success and permanent failures drop it. The message itself
@@ -877,58 +966,18 @@ class GatewayKanbanWatchersMixin:
         run_id = None
         if isinstance(attempt, (tuple, list)) and len(attempt) > 1:
             run_id = attempt[1]
-        first_line = "✅ Worker concluído"
-        if title:
-            first_line += f": {title}"
-        second_line = f"Kanban {task_id}" if task_id else ""
-        if run_id is not None:
-            second_line += f" · run {run_id}"
-        if board and second_line:
-            second_line = f"[{board}] {second_line}"
-        summary = ""
-        if task_id and board:
-            # The card's completion result is the worker's own summary of
-            # what it did — a trace with just a title reads as "nothing to
-            # see here" (user feedback 27/08). Best-effort read; a missing
-            # or unreadable result keeps the short trace.
-            try:
-                from hermes_cli import kanban_db as _trace_kb
-
-                with _trace_kb.connect_closing(board=board) as _trace_conn:
-                    _trace_task = _trace_kb.get_task(_trace_conn, task_id)
-                summary = str(getattr(_trace_task, "result", "") or "").strip()
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "kanban worker focus trace result read failed",
-                    exc_info=True,
-                )
-        if summary:
-            summary = re.sub(r"\n{3,}", "\n\n", summary)
-            if len(summary) > _WORKER_TRACE_SUMMARY_MAX_CHARS:
-                summary = (
-                    summary[: _WORKER_TRACE_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
-                )
-        lines = [first_line]
-        if summary:
-            lines.append("")
-            lines.append(summary)
-            lines.append("")
-        if second_line:
-            lines.append(second_line)
-        template = str(trace_url_template or "").strip()
-        if template and task_id:
-            try:
-                link = template.format(
-                    board=board, task_id=task_id, run_id=run_id if run_id is not None else "",
-                )
-            except (KeyError, IndexError, ValueError) as exc:
-                logger.debug(
-                    "kanban worker focus trace url template invalid: %s", exc
-                )
-                link = ""
-            if link:
-                lines.append(f"📋 Log completo: {link}")
-        content = "\n".join(lines)
+        summary = await asyncio.to_thread(
+            _read_worker_trace_summary, board, task_id, exit_kind
+        )
+        content = _render_worker_trace_content(
+            kind=exit_kind,
+            title=title,
+            board=board,
+            task_id=task_id,
+            run_id=run_id,
+            summary=summary,
+            trace_url_template=trace_url_template,
+        )
         try:
             result = await adapter.edit_message(
                 sub.get("chat_id"), str(state["message_id"]), content
@@ -1209,7 +1258,15 @@ class GatewayKanbanWatchersMixin:
                         bucket.pop(task.id, None)
                 elif event.kind in terminal_kinds:
                     bucket.pop(task.id, None)
-                    exits.setdefault(key, {})[str(task.id)] = str(event.kind)
+                    # Carry enough context to publish this worker's closeout
+                    # even when it never held the focus bubble (gap 5: the
+                    # trace is per WORKER, not per display lane).
+                    exits.setdefault(key, {})[str(task.id)] = {
+                        "kind": str(event.kind),
+                        "sub": dict(sub) if isinstance(sub, dict) else {},
+                        "title": str(getattr(task, "title", "") or "")[:96],
+                        "run_id": getattr(task, "current_run_id", None),
+                    }
                 elif event.kind in {"status", "unblocked"}:
                     # Dashboard/direct status changes do not emit a dedicated
                     # terminal event.  Converge from the fetched task state so
@@ -1248,7 +1305,9 @@ class GatewayKanbanWatchersMixin:
             self, "_kanban_worker_focus_exits", {}
         )
         self._kanban_worker_focus_exits = exits
-        if not active and not states:
+        # exits participates in the gate: a worker can finish after its lane
+        # emptied (no active rows, no bubble) and its closeout is still owed.
+        if not active and not states and not exits:
             return
 
         config_cache: dict[str, dict] = {}
@@ -1535,15 +1594,22 @@ class GatewayKanbanWatchersMixin:
             adapter = self._authorization_adapter(platform, profile)
             if adapter is None:
                 continue
-            # Worker actually COMPLETED (lane still presentable): leave a
-            # short completion trace instead of erasing every sign of work —
-            # a topic opened later used to look like nothing ever ran. Any
-            # other exit (retry/reclaim/crash/blocked) keeps the silent
-            # delete, and so does a principal claim owning the lane.
+            # Worker finished terminally (lane still presentable): leave a
+            # trace with its closeout instead of erasing every sign of work —
+            # a topic opened later used to look like nothing ever ran.
+            # Completed AND blocked both trace (spec: a blocked worker
+            # publishes its closeout with the reason); retry/reclaim/crash
+            # keep the silent delete. Only THIS bubble's exit is consumed —
+            # other workers' exits stay for the per-worker trace pass below.
             exit_key = (str(state.get("board") or ""), *key)
-            exit_kind = (exits.pop(exit_key, None) or {}).get(
-                str(state.get("task_id") or "")
-            )
+            lane_exits = exits.get(exit_key) or {}
+            exit_info = lane_exits.pop(str(state.get("task_id") or ""), None)
+            if not lane_exits:
+                exits.pop(exit_key, None)
+            if isinstance(exit_info, dict):
+                exit_kind = str(exit_info.get("kind") or "")
+            else:
+                exit_kind = str(exit_info or "")
             trace_enabled = bool(
                 resolve_display_setting(
                     _config_for_profile(profile),
@@ -1553,10 +1619,9 @@ class GatewayKanbanWatchersMixin:
                 )
             )
             state_sequence = int(state.get("claim_sequence") or 0)
-            if (
-                trace_enabled
-                and exit_kind == "completed"
-                and self._kanban_worker_display_available(key, state_sequence)
+            traceable = trace_enabled and exit_kind in {"completed", "blocked"}
+            if traceable and self._kanban_worker_display_available(
+                key, state_sequence
             ):
                 trace_url_template = str(
                     resolve_display_setting(
@@ -1568,10 +1633,110 @@ class GatewayKanbanWatchersMixin:
                     or ""
                 )
                 await self._kanban_finalize_worker_focus_state(
-                    key, adapter, trace_url_template=trace_url_template
+                    key,
+                    adapter,
+                    trace_url_template=trace_url_template,
+                    exit_kind=exit_kind,
                 )
             else:
                 await self._kanban_discard_worker_focus_state(key, adapter, sub)
+                if traceable and isinstance(exit_info, dict):
+                    # Principal reclaimed the lane while this worker was
+                    # finishing: the bubble goes away, but the closeout is
+                    # still owed — hand the exit to the per-worker trace
+                    # pass so it is published as its own message.
+                    exits.setdefault(exit_key, {})[
+                        str(state.get("task_id") or "")
+                    ] = exit_info
+
+        # Per-worker closeout traces (TARGET_ARCHITECTURE gap 5). Exits not
+        # consumed by the bubble teardown above belong to workers that
+        # finished WITHOUT holding the focus bubble — the second of two
+        # simultaneous finishers, a worker that ended while another held the
+        # focus, or one that ended after the principal reclaimed the lane.
+        # Each completed/blocked one publishes its own closeout message;
+        # other exit kinds (retry/reclaim/crash/stale) stay silent, matching
+        # the bubble path. Best-effort: a failed send drops the exit rather
+        # than retrying forever.
+        for exit_key in list(exits):
+            pending = exits.get(exit_key) or {}
+            if len(exit_key) != 5:
+                exits.pop(exit_key, None)
+                continue
+            exit_board = str(exit_key[0] or "")
+            for exit_task_id in list(pending):
+                info = pending.pop(exit_task_id, None)
+                if not isinstance(info, dict):
+                    continue
+                kind = str(info.get("kind") or "")
+                if kind not in {"completed", "blocked"}:
+                    continue
+                sub = info.get("sub") or {}
+                try:
+                    platform = _Platform(
+                        str(sub.get("platform") or exit_key[1] or "").lower()
+                    )
+                except ValueError:
+                    continue
+                profile = (
+                    str(sub.get("notifier_profile") or "").strip() or None
+                )
+                user_config = _config_for_profile(profile)
+                indicator = _resolve_activity_indicator_settings(
+                    user_config, platform.value, 180.0
+                )
+                if not indicator.worker_rotation:
+                    continue
+                if not bool(
+                    resolve_display_setting(
+                        user_config,
+                        platform.value,
+                        "worker_rotation_trace",
+                        True,
+                    )
+                ):
+                    continue
+                adapter = self._authorization_adapter(platform, profile)
+                if adapter is None or not sub.get("chat_id"):
+                    continue
+                trace_url_template = str(
+                    resolve_display_setting(
+                        user_config,
+                        platform.value,
+                        "worker_rotation_trace_url",
+                        "",
+                    )
+                    or ""
+                )
+                summary = await asyncio.to_thread(
+                    _read_worker_trace_summary, exit_board, exit_task_id, kind
+                )
+                content = _render_worker_trace_content(
+                    kind=kind,
+                    title=str(info.get("title") or ""),
+                    board=exit_board,
+                    task_id=exit_task_id,
+                    run_id=info.get("run_id"),
+                    summary=summary,
+                    trace_url_template=trace_url_template,
+                )
+                metadata = (
+                    dict(sub.get("delivery_metadata"))
+                    if isinstance(sub.get("delivery_metadata"), dict)
+                    else {}
+                )
+                if sub.get("thread_id") and not metadata.get("thread_id"):
+                    metadata["thread_id"] = sub["thread_id"]
+                try:
+                    await adapter.send(
+                        sub["chat_id"], content, metadata=metadata
+                    )
+                except Exception:
+                    logger.debug(
+                        "per-worker closeout trace send failed", exc_info=True
+                    )
+            if not pending:
+                exits.pop(exit_key, None)
 
         for lane in list(scopes):
             if lane not in all_active_lanes and lane not in states:

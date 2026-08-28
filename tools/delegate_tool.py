@@ -1170,6 +1170,168 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+_PARITY_SOUL_MAX_CHARS = 14_000
+_PARITY_MEMORY_MAX_CHARS = 9_000
+_PARITY_BRIEF_MAX_CHARS = 7_000
+_PARITY_BRIEF_TAIL_TURNS = 8
+_PARITY_BRIEF_MSG_CHARS = 420
+
+
+def _parity_truncate(text: str, cap: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= cap:
+        return text
+    return text[: cap - 22].rstrip() + "\n[...truncated for size]"
+
+
+def worker_parity_enabled() -> bool:
+    """TARGET_ARCHITECTURE gap 10: workers inherit the principal's identity,
+    memory and session context by default. ``delegation.worker_parity: false``
+    restores the old isolated-context children."""
+    try:
+        cfg = _load_config()
+        value = cfg.get("worker_parity")
+        if value is None:
+            return True
+        return bool(value)
+    except Exception:
+        return True
+
+
+def _collect_parent_parity_blocks(parent_agent, goal: str) -> dict:
+    """Snapshot what the principal knows so the worker starts EQUAL, not blank.
+
+    Gap 10 (operator order, 27/08): production evidence showed the principal
+    stopping its own worker because "the worker gets an isolated context,
+    without the continuity and decisions I hold in this session" — the
+    orchestration degraded to the principal's intelligence instead of the
+    process. Three read-only blocks close most of that distance:
+
+    - soul: the profile's SOUL.md (operating conventions/identity the child
+      never saw because child prompts skip SOUL).
+    - memory: the SAME per-turn memory prefetch the principal gets, queried
+      with this child's goal (writes stay blocked — the memory tool is still
+      in DELEGATE_BLOCKED_TOOLS; this is reference material).
+    - session_brief: the latest compaction summary (if any) plus a short
+      tail of recent user/assistant exchanges, so session decisions travel
+      with the work.
+
+    Every block is best-effort and size-capped; a failure yields an empty
+    string and the child simply gets less inherited context.
+    """
+    blocks = {"soul": "", "memory": "", "session_brief": ""}
+
+    try:
+        from hermes_constants import get_hermes_home
+
+        soul_path = get_hermes_home() / "SOUL.md"
+        if soul_path.is_file():
+            blocks["soul"] = _parity_truncate(
+                soul_path.read_text(encoding="utf-8", errors="replace"),
+                _PARITY_SOUL_MAX_CHARS,
+            )
+    except Exception:
+        logger.debug("worker parity: SOUL read failed", exc_info=True)
+
+    try:
+        manager = getattr(parent_agent, "_memory_manager", None)
+        if manager is not None and hasattr(manager, "prefetch_all"):
+            blocks["memory"] = _parity_truncate(
+                manager.prefetch_all(str(goal or "")) or "",
+                _PARITY_MEMORY_MAX_CHARS,
+            )
+    except Exception:
+        logger.debug("worker parity: memory prefetch failed", exc_info=True)
+
+    try:
+        messages = list(getattr(parent_agent, "messages", None) or [])
+        summary = ""
+        for msg in reversed(messages):
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, str) and content.startswith(
+                "[CONTEXT COMPACTION"
+            ):
+                summary = content
+                break
+        tail_lines = []
+        turns = 0
+        for msg in reversed(messages):
+            if turns >= _PARITY_BRIEF_TAIL_TURNS:
+                break
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            content = msg.get("content")
+            if role not in ("user", "assistant") or not isinstance(content, str):
+                continue
+            text = content.strip()
+            if not text or text.startswith("[CONTEXT COMPACTION"):
+                continue
+            if len(text) > _PARITY_BRIEF_MSG_CHARS:
+                text = text[:_PARITY_BRIEF_MSG_CHARS].rstrip() + "…"
+            tail_lines.append(f"{role}: {text}")
+            turns += 1
+        tail_lines.reverse()
+        parts = []
+        if summary:
+            parts.append(summary)
+        if tail_lines:
+            parts.append("Recent exchanges:\n" + "\n".join(tail_lines))
+        blocks["session_brief"] = _parity_truncate(
+            "\n\n".join(parts), _PARITY_BRIEF_MAX_CHARS
+        )
+    except Exception:
+        logger.debug("worker parity: session brief failed", exc_info=True)
+
+    return blocks
+
+
+def _resolve_completion_routing(parent_agent, origin_ui_session_id):
+    """Resolve the ``(session_key, ui_session_id)`` a completion routes to.
+
+    In desktop/TUI, the routable session key is the durable
+    AIAgent.session_id. Context compression can rotate that id during the
+    same turn before the TUI-side session dict is re-anchored; capturing the
+    stale approval/session context key here would orphan the completion and
+    let any desktop poller consume it. Gateway chats keep their platform
+    conversation key (agent:main:...).
+
+    CLI (single-process) path: the approval contextvar is only bound during
+    gateway/TUI turns, so the key resolves empty there. Since #64240 the CLI
+    drains completions through a positive-ownership filter keyed on the
+    durable AIAgent.session_id — an empty session_key would fail closed
+    (#64484) — so the parent's durable session id is stamped instead;
+    compression rotations are handled on the drain side via
+    resolve_resume_session_id lineage resolution.
+
+    Shared by the background dispatch and the foreground crash marker so
+    both route their (eventual) completion events identically.
+    """
+    from tools.approval import get_current_session_key
+
+    session_key = get_current_session_key(default="")
+    try:
+        from gateway.session_context import get_session_env
+
+        source = get_session_env("HERMES_SESSION_SOURCE", "")
+        # Refresh from the same task-local source when available, but retain
+        # the immutable value captured before child construction otherwise.
+        origin_ui_session_id = (
+            get_session_env("HERMES_UI_SESSION_ID", "") or origin_ui_session_id
+        )
+        if source == "tui":
+            agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
+            if agent_session_id:
+                session_key = agent_session_id
+    except Exception:
+        pass
+    if not session_key:
+        agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
+        if agent_session_id:
+            session_key = agent_session_id
+    return session_key, origin_ui_session_id
+
+
 def _build_child_system_prompt(
     goal: str,
     context: Optional[str] = None,
@@ -1178,6 +1340,8 @@ def _build_child_system_prompt(
     role: str = "leaf",
     max_spawn_depth: int = 2,
     child_depth: int = 1,
+    parity: Optional[dict] = None,
+    board_bound: bool = False,
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -1228,19 +1392,72 @@ def _build_child_system_prompt(
                 "below. Their conventions and invariants are binding for "
                 "your work in this workspace.\n\n" + _ctx_files.strip()
             )
+    # Gap 10 — worker parity: the principal's identity, memory and session
+    # context travel with the work so the child does not rediscover the
+    # system or re-derive decisions the session already made.
+    if parity:
+        soul = str(parity.get("soul") or "").strip()
+        if soul:
+            parts.append(
+                "\n## Profile Operating Instructions (inherited from the "
+                "principal)\n"
+                "These are the principal agent's SOUL/operating conventions. "
+                "They are binding for HOW you work (discipline, policies, "
+                "conventions). You are still a focused subagent: do not "
+                "adopt the persona for outward communication.\n\n" + soul
+            )
+        memory = str(parity.get("memory") or "").strip()
+        if memory:
+            parts.append(
+                "\n## Inherited Memory (read-only)\n"
+                "The principal's persistent memory relevant to this task. "
+                "Treat as reference; your memory tool is unavailable — "
+                "report new durable facts in your closeout instead.\n\n"
+                + memory
+            )
+        brief = str(parity.get("session_brief") or "").strip()
+        if brief:
+            parts.append(
+                "\n## Session Brief (from the principal's live session)\n"
+                "Recent decisions and exchanges from the session that "
+                "delegated this task. Honor decisions already made here "
+                "instead of re-deriving them.\n\n" + brief
+            )
+
     parts.append(
-        "\nComplete this task using the tools available to you. "
-        "When finished, provide a clear, concise summary of:\n"
-        "- What you did\n"
-        "- What you found or accomplished\n"
-        "- Any files you created or modified\n"
-        "- Any issues encountered\n\n"
-        "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
+        "\n## Delegated Work Protocol\n"
+        "Run the same working cycle the principal agent runs "
+        "(TARGET_ARCHITECTURE: workers replicate the principal's cycle):\n"
+        "1. SCOPE — restate the requested outcome in one sentence and note "
+        "what is out of scope. Never expand scope on your own.\n"
+        "2. PREFLIGHT — before building anything, check whether it already "
+        "exists (code, commits, docs). Report a duplicate instead of "
+        "rebuilding it.\n"
+        "3. WORK WITH EVIDENCE — validate by running things (tests, "
+        "commands, checks), not by reading them. No completion claim "
+        "without validation evidence; say explicitly when a check was "
+        "skipped or failed.\n"
+        + (
+            "A tracking card for this task is managed by the system — do "
+            "not try to create or move cards yourself.\n\n"
+            if board_bound
+            else "\n"
+        )
+        + "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
         "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
-        "Keep your final summary tight: lead with outcomes, prefer bullet "
-        "points over paragraphs, and don't replay your whole process. Your "
-        "response is returned to the parent agent as a summary, and overlong "
-        "summaries crowd out the parent's context window."
+        "When finished (or blocked), end with a structured CLOSEOUT — your "
+        "final response is relayed to the parent agent and to the "
+        "operator's display as this task's closeout:\n"
+        "- Scope: the one-sentence outcome you worked toward\n"
+        "- Done: what you did, found, created or modified\n"
+        "- Evidence: how it was validated (command + result), or 'not "
+        "validated' with the reason\n"
+        "- Limitations: known gaps, issues encountered; if you are blocked, "
+        "the blocking reason goes here — a clear blocked closeout is a "
+        "valid outcome, not a failure.\n\n"
+        "Keep the closeout tight: lead with outcomes, prefer bullet "
+        "points over paragraphs, and don't replay your whole process. "
+        "Overlong summaries crowd out the parent's context window."
     )
     if role == "orchestrator":
         child_note = (
@@ -1626,6 +1843,10 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Whether this delegation is bound to a project board (Factory OS
+    # layer). Board-specific prompt text (mirror cards) only renders when
+    # True — a plain Hermes install delegating in a DM has no cards.
+    board_bound: bool = False,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1728,6 +1949,9 @@ def _build_child_agent(
         child_toolsets.append("delegation")
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
+    _parity_blocks = None
+    if worker_parity_enabled():
+        _parity_blocks = _collect_parent_parity_blocks(parent_agent, goal)
     child_prompt = _build_child_system_prompt(
         goal,
         context,
@@ -1735,6 +1959,8 @@ def _build_child_agent(
         role=effective_role,
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
+        parity=_parity_blocks,
+        board_bound=board_bound,
     )
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
@@ -3959,6 +4185,7 @@ def delegate_task(
                 override_acp_command=creds.get("command"),
                 override_acp_args=creds.get("args"),
                 role=effective_role,
+                board_bound=bool(kanban_board),
             )
         except ValueError as exc:
             # Explicit-pin preflight failures (e.g. pinned delegation.command
@@ -4185,6 +4412,57 @@ def delegate_task(
             combined["live_transcripts"] = list(live_paths)
         return combined
 
+    def _run_foreground_aggregate(**agg_kwargs) -> dict:
+        """Run the in-process fan-out under a durable crash marker.
+
+        TARGET_ARCHITECTURE gap 7: foreground workers die with the hosting
+        process and nothing re-dispatched them. The marker reuses the
+        async-delegation recovery machine: on the next process start the
+        goals re-enter the conversation as an outcome-unknown turn and the
+        principal re-delegates as process. Normal completion — including an
+        in-turn failure the parent already saw inline — deletes the marker
+        in the finally; only a process death leaves it behind.
+        """
+        _marker_id = None
+        try:
+            from tools.async_delegation import register_foreground_delegation
+
+            _fg_session_key, _fg_origin_ui = _resolve_completion_routing(
+                parent_agent, _origin_ui_session_id
+            )
+            _marker_id = register_foreground_delegation(
+                goals=[t["goal"] for t in task_list],
+                context=context,
+                toolsets=None,
+                role=top_role,
+                model=creds.get("model"),
+                session_key=_fg_session_key,
+                origin_ui_session_id=_fg_origin_ui,
+                origin_session_id=_origin_wake_sid,
+                parent_session_id=getattr(parent_agent, "session_id", None),
+                delegation_id=live_deleg_id,
+                board=kanban_board,
+            )
+        except Exception:
+            logger.debug(
+                "foreground delegation crash marker failed", exc_info=True
+            )
+        try:
+            return _execute_and_aggregate(**agg_kwargs)
+        finally:
+            if _marker_id:
+                try:
+                    from tools.async_delegation import (
+                        complete_foreground_delegation,
+                    )
+
+                    complete_foreground_delegation(_marker_id)
+                except Exception:
+                    logger.debug(
+                        "foreground crash marker completion failed",
+                        exc_info=True,
+                    )
+
     # ----- Background dispatch: run the WHOLE batch as one async unit -----
     # When background is true, the entire fan-out runs on the daemon executor
     # via a single async delegation. _execute_and_aggregate() joins on every
@@ -4194,7 +4472,6 @@ def delegate_task(
     # keep chatting, get the combined summaries back together at the end.
     if background:
         from tools.async_delegation import dispatch_async_delegation_batch
-        from tools.approval import get_current_session_key
 
         # Finite sessions cannot route a detached subagent result back to the
         # agent after their turn/process ends. This includes stateless HTTP
@@ -4236,7 +4513,7 @@ def delegate_task(
                 "delegate_task: async delivery unsupported on this session "
                 "runtime; running the batch synchronously instead."
             )
-            _sync_result = _execute_and_aggregate()
+            _sync_result = _run_foreground_aggregate()
             if isinstance(_sync_result, dict):
                 _sync_result["note"] = (
                     "background=true is not available in this session — it cannot "
@@ -4247,43 +4524,9 @@ def delegate_task(
                 )
             return json.dumps(_sync_result, ensure_ascii=False)
 
-        _session_key = get_current_session_key(default="")
-        try:
-            from gateway.session_context import get_session_env
-
-            _source = get_session_env("HERMES_SESSION_SOURCE", "")
-            # Refresh from the same task-local source when available, but retain
-            # the immutable value captured before child construction otherwise.
-            _origin_ui_session_id = (
-                get_session_env("HERMES_UI_SESSION_ID", "") or _origin_ui_session_id
-            )
-            # In desktop/TUI, the routable session key is the durable
-            # AIAgent.session_id. Context compression can rotate that id during
-            # the same turn before the TUI-side session dict is re-anchored;
-            # if we capture the stale approval/session context key here, the
-            # async completion becomes an orphan and any desktop poller may
-            # consume it. Gateway chats are different: their session_key is the
-            # platform conversation key (agent:main:...), so keep it there.
-            if _source == "tui":
-                _agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
-                if _agent_session_id:
-                    _session_key = _agent_session_id
-        except Exception:
-            _source = ""
-        if not _session_key:
-            # CLI (single-process) path: the approval contextvar is only bound
-            # during gateway/TUI turns and HERMES_SESSION_KEY is not in the CLI
-            # environment, so the key resolves empty here. Since #64240 the CLI
-            # drains completions through a positive-ownership filter keyed on
-            # the durable AIAgent.session_id — an empty session_key would fail
-            # closed and the CLI could never claim its own completions, while
-            # a restored foreign event with an empty key could leak into any
-            # unfiltered consumer (#64484). Stamp the parent's durable session
-            # id instead; compression rotations are handled on the drain side
-            # via resolve_resume_session_id lineage resolution.
-            _agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
-            if _agent_session_id:
-                _session_key = _agent_session_id
+        _session_key, _origin_ui_session_id = _resolve_completion_routing(
+            parent_agent, _origin_ui_session_id
+        )
         _parent_session_id = getattr(parent_agent, "session_id", None)
         _child_agents = [c for (_, _, c) in children]
 
@@ -4431,7 +4674,7 @@ def delegate_task(
             "batch synchronously instead.",
             dispatch.get("error", "rejected"),
         )
-        _cap_result = _execute_and_aggregate()
+        _cap_result = _run_foreground_aggregate()
         if isinstance(_cap_result, dict):
             _cap_result["note"] = (
                 "The background delegation pool was at capacity "
@@ -4443,7 +4686,7 @@ def delegate_task(
         return json.dumps(_cap_result, ensure_ascii=False)
 
     # ----- Synchronous path -----
-    return json.dumps(_execute_and_aggregate(), ensure_ascii=False)
+    return json.dumps(_run_foreground_aggregate(), ensure_ascii=False)
 
 
 def _resolve_child_credential_pool(

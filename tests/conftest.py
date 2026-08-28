@@ -77,13 +77,27 @@ def _hermes_home_points_at_production(value: str) -> bool:
         return True
     try:
         resolved = Path(value).expanduser().resolve()
-        real_root = (Path.home() / ".hermes").resolve()
+        # BOTH production layouts, not just the POSIX one. On Windows the
+        # real home is %LOCALAPPDATA%\hermes (hermes_constants
+        # _get_platform_default_hermes_home); a user-level HERMES_HOME env
+        # pointing there passed this check as "genuinely custom" and the
+        # sandbox never armed — the whole suite ran against the operator's
+        # LIVE install (27/08: real config fed TTS tests that played spoken
+        # audio on the speakers, and /update tests wrote
+        # .update_pending.json into the live home).
+        real_roots = {(Path.home() / ".hermes").resolve()}
+        try:
+            from hermes_constants import _get_platform_default_hermes_home
+
+            real_roots.add(_get_platform_default_hermes_home().resolve())
+        except Exception:
+            pass
     except Exception:
         return True
-    if resolved == real_root:
+    if resolved in real_roots:
         return True
     # Profile home directly under the production root: <root>/profiles/<name>
-    return resolved.parent.name == "profiles" and resolved.parent.parent == real_root
+    return resolved.parent.name == "profiles" and resolved.parent.parent in real_roots
 
 
 if _hermes_home_points_at_production(os.environ.get("HERMES_HOME", "")):
@@ -104,6 +118,21 @@ if _hermes_home_points_at_production(os.environ.get("HERMES_HOME", "")):
 # open a real DB must export HERMES_STATE_DB_GUARD_BYPASS=1 in that child's
 # env instead of stripping markers.
 os.environ["HERMES_TEST_ISOLATION"] = os.environ.get("HERMES_HOME", "") or "1"
+
+# ── Process-wide audio kill switch ──────────────────────────────────────────
+# The fixture-scoped audio guards (see _audio_playback_guard) revert on
+# teardown; voice playback is dispatched on DAEMON THREADS, and a late
+# thread that runs after teardown sees the real functions again — that
+# window played real spoken TTS on the operator's speakers at 22:22 even
+# with all three fixture guards active (ffplay of a tempfile mp3, caught by
+# live process telemetry). HERMES_DISABLE_AUDIO is honored by the product
+# AT CALL TIME (tools.voice_mode._audio_disabled), set here once for the
+# whole pytest process and never reverted, so no thread ever finds the
+# speakers open regardless of fixture lifecycle. Escape hatch for a human
+# deliberately testing real audio OUTSIDE the suite's guarantees: export
+# HERMES_TEST_REAL_AUDIO=1 before invoking pytest.
+if os.environ.get("HERMES_TEST_REAL_AUDIO", "").strip() != "1":
+    os.environ["HERMES_DISABLE_AUDIO"] = "1"
 
 #: HERMES_HOME as it stood when conftest was imported - i.e. before any test
 #: module could import code that configures logging. Recorded so the guard in
@@ -1084,6 +1113,66 @@ def _wal_is_usable() -> bool:
 _AUDIO_GUARD_BYPASS_MARK = "real_audio_playback"
 _ALLOW_MACOS_KEYCHAIN_MARK = "allow_macos_keychain"
 
+
+class _SpeakerBlockedSubprocess:
+    """``subprocess`` proxy installed into ``tools.voice_mode`` during tests.
+
+    Delegates everything to the real module except ``Popen`` of an audio
+    PLAYER (ffplay/aplay/paplay/afplay/play — the binaries
+    ``play_audio_file`` walks), which returns a silent already-finished
+    process instead of opening the speakers. Converters (ffmpeg) pass
+    through untouched. Tests that mock playback themselves patch
+    ``vm.subprocess.Popen`` — that patch lands on this proxy instance and
+    shadows the filter, so their mocks keep working.
+    """
+
+    _PLAYERS = {"ffplay", "aplay", "paplay", "afplay", "play"}
+
+    def __init__(self, real):
+        self._real = real
+        # The Popen that can genuinely open the speakers, captured before
+        # the test body runs. When a test later installs its own mock (at
+        # this proxy OR at global ``subprocess.Popen``), the live attribute
+        # differs from this and the call is honored untouched — mocks don't
+        # make noise, and playback tests keep capturing their players.
+        self._genuine_popen = real.Popen
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def Popen(self, cmd, *args, **kwargs):  # noqa: N802 — mirrors subprocess API
+        current = getattr(self._real, "Popen")
+        if current is not self._genuine_popen:
+            return current(cmd, *args, **kwargs)
+        exe = ""
+        try:
+            if isinstance(cmd, (list, tuple)) and cmd:
+                exe = os.path.basename(str(cmd[0])).lower().split(".")[0]
+        except Exception:
+            exe = ""
+        blocked = exe in self._PLAYERS
+        if not blocked and exe.startswith("powershell"):
+            joined = " ".join(str(part) for part in cmd)
+            blocked = "SoundPlayer" in joined or "PlaySync" in joined
+        if blocked:
+            class _SilentDone:
+                returncode = 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+                def poll(self):
+                    return 0
+
+                def kill(self):
+                    return None
+
+                def terminate(self):
+                    return None
+
+            return _SilentDone()
+        return self._real.Popen(cmd, *args, **kwargs)
+
 # ---------------------------------------------------------------------------
 # OS gating
 #
@@ -1262,6 +1351,23 @@ def pytest_collection_modifyitems(config, items):  # noqa: D401 — pytest hook
     skip is diagnosable rather than mysterious.
     """
     _reject_multiple_os_marks(items)
+
+    # Real-audio tests are skipped, not silenced, while the process-wide
+    # kill switch is armed (the suite default). Letting them run would make
+    # them vacuous — the switch turns their real pipeline into a no-op and
+    # they'd "pass" without testing anything. Skipping keeps them honest
+    # and visible; HERMES_TEST_REAL_AUDIO=1 disarms the switch and runs
+    # them for real (speakers included, deliberately).
+    if os.environ.get("HERMES_DISABLE_AUDIO", "").strip() == "1":
+        skip_real_audio = pytest.mark.skip(
+            reason=(
+                "requires real audio output; run with "
+                "HERMES_TEST_REAL_AUDIO=1 to exercise the real pipeline"
+            )
+        )
+        for item in items:
+            if item.get_closest_marker(_AUDIO_GUARD_BYPASS_MARK) is not None:
+                item.add_marker(skip_real_audio)
 
     for mark_name, (is_host, label) in _OS_MARKS.items():
         if is_host():
@@ -1691,6 +1797,49 @@ def _audio_playback_guard(request, monkeypatch):
         monkeypatch.setattr(_voice, "speak_text", _blocked_speak_text)
     if hasattr(_voice, "play_audio_file"):
         monkeypatch.setattr(_voice, "play_audio_file", _blocked_play_audio_file)
+
+    # Direct-binding hole (27/08 incident): gateway streaming-TTS tests reach
+    # ``tools.voice_mode.play_audio_file`` directly — the hermes_cli.voice
+    # patches above never see that binding — and ffplay opened the operator's
+    # SPEAKERS twice mid-suite (audio PolicyConfig registry + Prefetch traced
+    # ffplay.exe to this suite's runs). Blocking the player spawn at the
+    # module's subprocess seam, rather than the function, keeps the tests
+    # that legitimately exercise ``play_audio_file`` with a mocked backend
+    # working unchanged: they patch this exact seam
+    # (``patch.object(vm.subprocess, "Popen")``) and their mock simply
+    # shadows the proxy's filter.
+    try:
+        import tools.voice_mode as _vm
+
+        monkeypatch.setattr(
+            _vm, "subprocess", _SpeakerBlockedSubprocess(_vm.subprocess)
+        )
+    except Exception:
+        _vm = None
+
+    # Second escape path, caught the same evening: sounddevice. The spoken
+    # "Hello World" at 21:50 played WITH the subprocess proxy active — the
+    # native-audio route (``sd.play`` / ``OutputStream``) never spawns a
+    # process. The thinking-sound blips the operator kept hearing are this
+    # exact path (``_synth_thinking_blip`` + ``sd.play``). Every unmarked
+    # test now sees the audio libraries as absent: all call sites already
+    # treat ImportError as "no audio available" and continue silently, and
+    # tests that fake the audio backend patch these same helpers themselves,
+    # shadowing this stub.
+    def _no_audio_backend(*_args, **_kwargs):
+        raise ImportError("audio backend blocked in tests (speaker guard)")
+
+    if _vm is not None and hasattr(_vm, "_import_audio"):
+        monkeypatch.setattr(_vm, "_import_audio", _no_audio_backend)
+    try:
+        import tools.tts_tool as _tts
+
+        if hasattr(_tts, "_import_sounddevice"):
+            monkeypatch.setattr(
+                _tts, "_import_sounddevice", _no_audio_backend
+            )
+    except Exception:
+        pass
 
     yield
 

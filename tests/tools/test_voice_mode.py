@@ -1490,6 +1490,11 @@ class TestWSL2PowerShellFallback:
         from unittest.mock import patch, MagicMock
         from tools import voice_mode as vm
 
+        # Exercise the real player loop with a MOCKED Popen (no sound).
+        # The suite arms HERMES_DISABLE_AUDIO process-wide, which would
+        # early-return before the loop; disarm it just for this test.
+        monkeypatch.delenv("HERMES_DISABLE_AUDIO", raising=False)
+
         captured_players = []
 
         def _capture_popen(cmd, **kw):
