@@ -154,6 +154,43 @@ def test_foreign_host_reaped_by_heartbeat_only(board, monkeypatch):
     assert _status(fresh)[0] == "running"
 
 
+def test_dead_dispatcher_claim_with_live_worker_is_untouched(board, monkeypatch):
+    """The claim records the dispatcher PID; dispatcher workers are
+    independent subprocesses that survive a gateway restart. Reaping on the
+    dead dispatcher PID would requeue live work into a duplicate."""
+    WORKER_PID = 4242
+    monkeypatch.setattr(gs, "_pid_exists", lambda pid: pid == WORKER_PID)
+    task_id = _make_running(
+        claim=f"{HOST}:{DEAD_PID}", worker_pid=WORKER_PID, heartbeat_age=30,
+    )
+
+    asyncio.run(_runner()._kanban_claim_reaper())
+
+    assert _status(task_id)[0] == "running"
+
+
+def test_live_dispatcher_with_dead_worker_reaps_on_stale_heartbeat(
+    board, monkeypatch
+):
+    LIVE_DISPATCHER = 5151
+    monkeypatch.setattr(gs, "_pid_exists", lambda pid: pid == LIVE_DISPATCHER)
+    stale = _make_running(
+        claim=f"{HOST}:{LIVE_DISPATCHER}", worker_pid=DEAD_PID,
+        heartbeat_age=99999,
+    )
+    fresh = _make_running(
+        claim=f"{HOST}:{LIVE_DISPATCHER}", worker_pid=DEAD_PID,
+        heartbeat_age=30,
+    )
+
+    asyncio.run(_runner()._kanban_claim_reaper())
+
+    assert _status(stale)[0] == "ready"
+    assert _status(fresh)[0] == "running", (
+        "a fresh heartbeat is the grace period for a just-spawned worker"
+    )
+
+
 def test_unclassified_dead_claim_is_left_alone(board, monkeypatch):
     """Principal-turn mirrors (no worker_pid, no delegation comment) keep
     their own idempotent resume path — the reaper must not interfere."""
