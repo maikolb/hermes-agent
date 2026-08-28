@@ -288,3 +288,56 @@ def test_focus_bubble_rerenders_native_tee_and_cli_labels():
     assert "── final: bloco 1 persistido" in out
     # no raw log dialect markers survive re-rendering
     assert "┊" not in out
+
+
+def test_focus_bubble_total_parity_with_principal_renderer():
+    """THE parity guard (operator 28/08: one renderer, no drift): for the
+    same tool events, the FNAT bubble must contain byte-identical lines to
+    what the principal's shared renderer produces — fence, header dedup,
+    verbs, everything."""
+    from agent.display import format_tool_progress_message
+
+    events = [
+        ("terminal", {"command": "git status --short"}, "git status --short"),
+        ("terminal", {"command": "git log --oneline"}, "git log --oneline"),
+        ("read_file", None, "notas/TZ1.md"),
+        ("todo", None, "planning 8 task(s)"),
+    ]
+    expected = []
+    last = False
+    for name, args, preview in events:
+        msg, last = format_tool_progress_message(
+            name, args, preview, code_blocks=True, last_was_terminal_block=last,
+        )
+        expected.append(msg)
+
+    log = "\n".join([
+        "Query: work kanban task t_p",
+        "┊ Tool: terminal(git status --short)",
+        "┊ Tool: terminal(git log --oneline)",
+        "┊ Tool: read_file(notas/TZ1.md)",
+        "┊ Tool: todo(planning 8 task(s))",
+    ])
+    out = kw._render_kanban_worker_focus_output(
+        log, task_id="t_p", code_blocks=True,
+    )
+    assert out == "\n".join(expected)
+
+
+def test_focus_bubble_terminal_fence_mirrors_principal():
+    """With code blocks available (operator 28/08 parity ask), a terminal
+    call renders as the principal's short fenced block; other tools keep
+    the verb line; without the capability the verb line is used."""
+    log = "\n".join([
+        "Query: work kanban task t_f",
+        "┊ Tool: terminal(git status --short)",
+        "┊ Tool: read_file(notas/TZ1.md)",
+    ])
+    fenced = kw._render_kanban_worker_focus_output(
+        log, task_id="t_f", code_blocks=True,
+    )
+    assert "terminal\n```\ngit status --short\n```" in fenced
+    assert "Reading notas/TZ1.md" in fenced
+    plain = kw._render_kanban_worker_focus_output(log, task_id="t_f")
+    assert "```" not in plain
+    assert "Running git status --short" in plain

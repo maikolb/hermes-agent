@@ -420,53 +420,36 @@ _FOCUS_CLI_LABEL_TOOLS = {
     "navigate": "browser_navigate",
 }
 
-_FOCUS_ARGS_MAX_CHARS = 100
 _FOCUS_ERROR_MAX_CHARS = 160
 
-# Core-tool emojis for when the tool registry is not loaded in this
-# process (tests, standalone renders). The live gateway resolves through
-# agent.display.get_tool_emoji → registry, same as the principal.
-_FOCUS_FALLBACK_EMOJIS = {
-    "terminal": "💻",
-    "read_file": "📖",
-    "write_file": "✍️",
-    "patch": "🔧",
-    "search_files": "🔎",
-    "web_search": "🔍",
-    "web_extract": "📄",
-    "browser_navigate": "🌐",
-    "skill_view": "📚",
-    "todo": "📋",
-    "delegate_task": "🤝",
-    "memory": "🧠",
-}
 
+def _focus_rich_tool_line(
+    name: str,
+    args_text: str,
+    *,
+    code_blocks: bool = False,
+    last_was_terminal_block: bool = False,
+    adapter: Any = None,
+) -> tuple[str, bool]:
+    """Render one parsed log line through THE shared progress renderer.
 
-def _focus_rich_tool_line(name: str, args_text: str) -> str:
-    """Render one tool call exactly the way the principal's chat surface does."""
-    from agent.display import (
-        get_tool_emoji,
-        get_tool_verb,
-        tool_verb_connector,
-        verb_drops_preview,
-    )
+    Total RTU parity (operator 28/08): the bubble does not have its own
+    formatting — it reconstructs (tool, args, preview) from the worker log
+    dialect and calls the exact function the principal's progress path
+    uses. Returns ``(message, is_terminal_block)``.
+    """
+    from agent.display import format_tool_progress_message
 
     args_text = " ".join(str(args_text or "").split())
-    if len(args_text) > _FOCUS_ARGS_MAX_CHARS:
-        args_text = args_text[:_FOCUS_ARGS_MAX_CHARS - 3] + "..."
-    emoji = get_tool_emoji(name, default="") or _FOCUS_FALLBACK_EMOJIS.get(
-        name, "⚙️"
+    args = {"command": args_text} if name == "terminal" and args_text else None
+    return format_tool_progress_message(
+        name,
+        args,
+        args_text or None,
+        code_blocks=code_blocks,
+        last_was_terminal_block=last_was_terminal_block,
+        adapter=adapter,
     )
-    verb = get_tool_verb(name)
-    if verb and (verb_drops_preview(name) or not args_text):
-        body = verb
-    elif verb:
-        body = f"{verb}{tool_verb_connector(name)}{args_text}"
-    elif args_text:
-        body = f"{name} {args_text}"
-    else:
-        body = name
-    return f"{emoji} {body}"
 
 
 _FOCUS_OUTPUT_FIELD_RE = re.compile(r'"output"\s*:\s*"(?P<msg>[^"]+)"')
@@ -493,6 +476,8 @@ def _render_kanban_worker_focus_output(
     task_id: str,
     include_tool_progress: bool = True,
     include_reasoning: bool = True,
+    code_blocks: bool = False,
+    adapter: Any = None,
 ) -> str:
     """Project the latest worker attempt into one bounded, redacted message.
 
@@ -521,7 +506,21 @@ def _render_kanban_worker_focus_output(
             reasoning = reasoning[:_WORKER_FOCUS_MAX_REASONING_CHARS].rstrip() + "..."
         if include_reasoning:
             items.append(f"💭 {reasoning}")
+            last_terminal_block[0] = False
         reasoning_lines = []
+
+    last_terminal_block = [False]
+
+    def _append_rendered(name: str, args_text: str) -> None:
+        line, is_terminal = _focus_rich_tool_line(
+            name,
+            args_text,
+            code_blocks=code_blocks,
+            last_was_terminal_block=last_terminal_block[0],
+            adapter=adapter,
+        )
+        last_terminal_block[0] = is_terminal
+        items.append(line)
 
     def _append_tool_item(body: str) -> None:
         stripped = body.strip()
@@ -529,10 +528,10 @@ def _render_kanban_worker_focus_output(
             return
         call = _FOCUS_TOOL_CALL_RE.match(stripped)
         if call:
-            items.append(_focus_rich_tool_line(call.group("name"), call.group("args")))
+            _append_rendered(call.group("name"), call.group("args"))
             return
         if stripped.startswith("Tool: "):
-            items.append(_focus_rich_tool_line(stripped[len("Tool: "):], ""))
+            _append_rendered(stripped[len("Tool: "):], "")
             return
         result = _FOCUS_RESULT_RE.match(stripped)
         if result:
@@ -540,6 +539,7 @@ def _render_kanban_worker_focus_output(
                 items.append(
                     _focus_error_line(result.group("name"), result.group("rest"))
                 )
+                last_terminal_block[0] = False
             # Success results never reach the bubble — the principal's
             # surface doesn't show them either.
             return
@@ -547,13 +547,14 @@ def _render_kanban_worker_focus_output(
         if native:
             label = native.group("label")
             name = _FOCUS_CLI_LABEL_TOOLS.get(label, label)
-            items.append(_focus_rich_tool_line(name, native.group("rest")))
+            _append_rendered(name, native.group("rest"))
             return
         # Unknown dialect: keep a hard-capped plain line rather than hiding
         # activity — but this is the degraded path, not the design.
         if len(stripped) > _WORKER_FOCUS_MAX_LINE_CHARS:
             stripped = stripped[:_WORKER_FOCUS_MAX_LINE_CHARS].rstrip() + "..."
         items.append(stripped)
+        last_terminal_block[0] = False
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -586,12 +587,11 @@ def _render_kanban_worker_focus_output(
                 )
             elif native:
                 # Native tee error line: "⚠ {icon} {name}  {args}  {dur}s" —
-                # re-render rich and keep the warning prefix.
+                # re-render rich (never fenced) and keep the warning prefix.
                 label = native.group("label")
                 name = _FOCUS_CLI_LABEL_TOOLS.get(label, label)
-                items.append(
-                    "⚠ " + _focus_rich_tool_line(name, native.group("rest"))
-                )
+                rendered, _ = _focus_rich_tool_line(name, native.group("rest"))
+                items.append("⚠ " + rendered)
             else:
                 items.append(_focus_error_line("", body))
         elif line.startswith("──"):
@@ -1732,6 +1732,8 @@ class GatewayKanbanWatchersMixin:
             worker_output = _render_kanban_worker_focus_output(
                 raw_log,
                 task_id=task.id,
+                code_blocks=getattr(adapter, "supports_code_blocks", False),
+                adapter=adapter,
                 include_tool_progress=(
                     resolve_display_setting(
                         user_config,

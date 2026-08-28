@@ -759,6 +759,85 @@ def build_status_phrase(tool_name: str, args: dict | None, max_len: int = 49) ->
     return phrase
 
 
+def format_tool_progress_message(
+    tool_name: str,
+    args: dict | None = None,
+    preview: str | None = None,
+    *,
+    code_blocks: bool = False,
+    last_was_terminal_block: bool = False,
+    adapter: Any = None,
+) -> tuple[str, bool]:
+    """Format one compact tool-progress message — THE shared renderer.
+
+    This is the single source of truth for how a tool call looks on chat
+    surfaces in the compact ("all"/"new") modes: the principal turn's
+    progress bubbles (gateway/run.py tool_progress_callback) and the kanban
+    worker-focus bubble (gateway/kanban_watchers.py) both call it, so the
+    two surfaces cannot drift apart (operator requirement 28/08: total RTU
+    parity, one renderer).
+
+    Returns ``(message, is_terminal_block)`` — the second element feeds the
+    caller's ``last_was_terminal_block`` state so back-to-back terminal
+    commands render as adjacent fences under a single "<emoji> terminal"
+    header, exactly like the principal turn does.
+
+    ``adapter`` (optional) is the platform adapter; when given, its
+    ``format_tool_preview`` hook post-processes the prepared preview the
+    same way the principal path does.
+    """
+    emoji = get_tool_emoji(tool_name, default="⚙️")
+
+    # Terminal commands on markdown-capable surfaces: single-line capped
+    # fenced block. No language tag — Slack mrkdwn renders the tag as a
+    # literal first code line, and a bare fence renders correctly
+    # everywhere that supports blocks. (Mirrors gateway/run.py #42634.)
+    command = args.get("command") if isinstance(args, dict) else None
+    if (
+        code_blocks
+        and tool_name == "terminal"
+        and isinstance(command, str)
+        and command.strip()
+    ):
+        _pl = get_tool_preview_max_len()
+        _cap = _pl if _pl > 0 else 40
+        _cmd_full = command.rstrip()
+        _lines = _cmd_full.splitlines()
+        _cmd_short = _lines[0] if _lines else _cmd_full
+        _multiline = len(_lines) > 1
+        if len(_cmd_short) > _cap:
+            _cmd_short = _cmd_short[:_cap - 3] + "..."
+        elif _multiline:
+            _cmd_short = _cmd_short + " ..."
+        _block_header = "" if last_was_terminal_block else f"{emoji} {tool_name}\n"
+        return f"{_block_header}```\n{_cmd_short}\n```", True
+
+    if preview:
+        _pl = get_tool_preview_max_len()
+        _cap = _pl if _pl > 0 else 40
+        _prepared = prepare_tool_preview(
+            tool_name,
+            args,
+            fallback=preview,
+            max_len=_cap,
+        )
+        if adapter is not None and hasattr(adapter, "format_tool_preview"):
+            rendered = adapter.format_tool_preview(_prepared)
+        else:
+            rendered = _prepared.text
+        _verb = get_tool_verb(tool_name)
+        if _verb:
+            if verb_drops_preview(tool_name):
+                return f"{emoji} {_verb}", False
+            return (
+                f"{emoji} {_verb}{tool_verb_connector(tool_name)}{rendered}",
+                False,
+            )
+        return f"{emoji} {tool_name}: \"{rendered}\"", False
+
+    return f"{emoji} {tool_name}...", False
+
+
 def build_tool_label(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
     """Build a human-phrased status label for a tool call.
 

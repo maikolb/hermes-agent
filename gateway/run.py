@@ -5498,51 +5498,22 @@ class TurnRunner:
             ctx.progress_queue.put(msg)
             return
 
-        # "all" / "new" modes: short preview, respects tool_preview_length
-        # config (defaults to 40 chars when unset to keep gateway messages
-        # compact — unlike CLI spinners, these persist as permanent messages).
-        # Terminal commands on markdown platforms get a single-line capped
-        # fenced block (built above) instead of the truncated preview.
-        if _code_block_short is not None:
-            msg = _code_block_short
-            ctx.last_was_terminal_block[0] = True
-        elif preview:
-            from agent.display import (
-                get_tool_preview_max_len,
-                get_tool_verb,
-                prepare_tool_preview,
-                tool_verb_connector,
-                verb_drops_preview,
-            )
-            _pl = get_tool_preview_max_len()
-            _cap = _pl if _pl > 0 else 40
-            _prepared_preview = prepare_tool_preview(
-                tool_name,
-                args,
-                fallback=preview,
-                max_len=_cap,
-            )
-            if _progress_adapter is not None:
-                preview = _progress_adapter.format_tool_preview(_prepared_preview)
-            else:
-                preview = _prepared_preview.text
-            # Friendly labels: render a human-phrased line for built-in
-            # tools ("🔍 Searching the web for ...") by prefixing the verb
-            # onto the preview the callback already computed (so the
-            # command/url/query is preserved).  Custom/plugin/MCP tools
-            # have no verb and fall back to the raw "tool_name: ..." form.
-            _verb = get_tool_verb(tool_name)
-            if _verb:
-                if verb_drops_preview(tool_name):
-                    msg = f"{emoji} {_verb}"
-                else:
-                    msg = f"{emoji} {_verb}{tool_verb_connector(tool_name)}{preview}"
-            else:
-                msg = f"{emoji} {tool_name}: \"{preview}\""
-            ctx.last_was_terminal_block[0] = False
-        else:
-            msg = f"{emoji} {tool_name}..."
-            ctx.last_was_terminal_block[0] = False
+        # "all" / "new" modes: delegate to THE shared compact renderer
+        # (agent.display.format_tool_progress_message) — the same function
+        # the kanban worker-focus bubble uses, so the principal's surface
+        # and the FNAT bubble cannot drift apart (total RTU parity, 28/08).
+        # The fence pre-computed above covers the verbose path; the shared
+        # renderer rebuilds the short fence itself from args["command"].
+        from agent.display import format_tool_progress_message
+        msg, _is_terminal_block = format_tool_progress_message(
+            tool_name,
+            args,
+            preview,
+            code_blocks=_code_block_short is not None,
+            last_was_terminal_block=ctx.last_was_terminal_block[0],
+            adapter=_progress_adapter,
+        )
+        ctx.last_was_terminal_block[0] = _is_terminal_block
 
         # Dedup: collapse consecutive identical progress messages.
         # Common with execute_code where models iterate with the same
