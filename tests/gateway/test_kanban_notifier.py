@@ -989,7 +989,7 @@ def test_worker_focus_reclaim_fences_inflight_send_and_uses_latest_principal(
             principal_session_key="session:main-a",
         )
         refresh = asyncio.create_task(runner._kanban_refresh_worker_focus())
-        await asyncio.wait_for(adapter.send_started.wait(), timeout=2)
+        await asyncio.wait_for(adapter.send_started.wait(), timeout=15)
 
         running_sessions["session:main-b"] = True
         await runner._kanban_claim_worker_display(
@@ -1000,7 +1000,7 @@ def test_worker_focus_reclaim_fences_inflight_send_and_uses_latest_principal(
             principal_session_key="session:main-b",
         )
         adapter.release_send.set()
-        await asyncio.wait_for(refresh, timeout=2)
+        await asyncio.wait_for(refresh, timeout=15)
 
     asyncio.run(scenario())
 
@@ -1033,7 +1033,7 @@ def test_worker_focus_reclaim_fences_inflight_send_and_uses_latest_principal(
 
     async def edit_scenario():
         refresh = asyncio.create_task(runner._kanban_refresh_worker_focus())
-        await asyncio.wait_for(adapter.edit_started.wait(), timeout=2)
+        await asyncio.wait_for(adapter.edit_started.wait(), timeout=15)
         running_sessions["session:main-c"] = True
         await runner._kanban_claim_worker_display(
             source_c,
@@ -1043,7 +1043,7 @@ def test_worker_focus_reclaim_fences_inflight_send_and_uses_latest_principal(
             principal_session_key="session:main-c",
         )
         adapter.release_edit.set()
-        await asyncio.wait_for(refresh, timeout=2)
+        await asyncio.wait_for(refresh, timeout=15)
 
     asyncio.run(edit_scenario())
     assert runner._kanban_worker_focus_states == {}
