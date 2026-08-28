@@ -200,3 +200,67 @@ def test_dispatcher_guard_reason_beats_generic(board, monkeypatch):
     assert "segurado por guard do dispatcher" in text
     assert "PR ativa do projeto" in text
     assert "dispatcher parado" not in text
+
+
+def test_alert_is_edited_to_resolved_after_claim(board, monkeypatch):
+    """Ordem do operador 28/08: quando o card alertado ganha claim, a
+    mensagem do alerta vira '✅ Destravado' editada no lugar; uma vez só."""
+
+    class EditingAdapter(RecordingAdapter):
+        def __init__(self):
+            super().__init__()
+            self.edited = []
+
+        async def edit_message(self, chat_id, message_id, content, **kwargs):
+            from gateway.platforms.base import SendResult
+
+            self.edited.append(
+                {"chat_id": chat_id, "message_id": message_id, "content": content}
+            )
+            return SendResult(success=True, message_id=message_id)
+
+    adapter = EditingAdapter()
+    runner = _runner(adapter, monkeypatch)
+    task_id = _make_ready(600)
+
+    asyncio.run(runner._kanban_ready_watchdog())
+    assert len(adapter.sent) == 1
+    alert_message_id = adapter.sent[0].get("metadata") is not None and "1"
+
+    conn = kb.connect()
+    try:
+        assert kb.claim_task(conn, task_id, claimer="worker:w1") is not None
+    finally:
+        conn.close()
+
+    asyncio.run(runner._kanban_ready_watchdog())
+    assert len(adapter.edited) == 1
+    assert adapter.edited[0]["message_id"] == "1"
+    assert "Destravado" in adapter.edited[0]["content"]
+    assert task_id in adapter.edited[0]["content"]
+
+    asyncio.run(runner._kanban_ready_watchdog())
+    assert len(adapter.edited) == 1  # resolved once, never re-edited
+
+
+def test_alert_not_edited_while_still_stuck(board, monkeypatch):
+    class EditingAdapter(RecordingAdapter):
+        def __init__(self):
+            super().__init__()
+            self.edited = []
+
+        async def edit_message(self, chat_id, message_id, content, **kwargs):
+            from gateway.platforms.base import SendResult
+
+            self.edited.append(content)
+            return SendResult(success=True, message_id=message_id)
+
+    adapter = EditingAdapter()
+    runner = _runner(adapter, monkeypatch)
+    _make_ready(600)
+
+    asyncio.run(runner._kanban_ready_watchdog())
+    asyncio.run(runner._kanban_ready_watchdog())
+
+    assert len(adapter.sent) == 1
+    assert adapter.edited == []

@@ -3170,6 +3170,61 @@ class GatewayKanbanWatchersMixin:
 
         now = time.time()
         for board, targets in targets_by_board.items():
+            # Resolution pass (operator, 28/08): when an alerted card gains
+            # a claim (or moves on), edit the alert in place so the topic
+            # shows the unblock instead of a stale warning.
+            try:
+                resolutions = await asyncio.to_thread(
+                    self._ready_watchdog_collect_resolutions, board,
+                )
+            except Exception:  # noqa: BLE001
+                resolutions = []
+            for task_id, title, status, deliveries in resolutions:
+                fase = {
+                    "done": "entregue",
+                    "review": "em revisão",
+                    "blocked": "bloqueado (ver card)",
+                }.get(status, "em execução")
+                new_text = (
+                    f"✅ Destravado, {fase}: {title}\n[{board}] Kanban {task_id}"
+                )
+                edited_any = False
+                for delivery in deliveries:
+                    message_id = str(delivery.get("message_id") or "")
+                    if not message_id:
+                        continue
+                    try:
+                        platform = _Platform(
+                            str(delivery.get("platform") or "").lower()
+                        )
+                    except ValueError:
+                        continue
+                    adapter = self._authorization_adapter(
+                        platform,
+                        str(delivery.get("profile") or "").strip() or None,
+                    )
+                    if adapter is None:
+                        continue
+                    try:
+                        await adapter.edit_message(
+                            delivery["chat_id"], message_id, new_text,
+                        )
+                        edited_any = True
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "ready watchdog: resolve edit failed for %s/%s",
+                            board, task_id, exc_info=True,
+                        )
+                if edited_any or not deliveries:
+                    try:
+                        await asyncio.to_thread(
+                            self._ready_watchdog_mark_resolved, board, task_id,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "ready watchdog: resolve mark failed for %s/%s",
+                            board, task_id, exc_info=True,
+                        )
             try:
                 stale = await asyncio.to_thread(
                     self._ready_watchdog_collect, board, now, settings,
@@ -3184,7 +3239,7 @@ class GatewayKanbanWatchersMixin:
                     f"⚠️ Card pronto sem ninguém há {age_minutes}min: "
                     f"{title}\n[{board}] Kanban {task_id}\nMotivo: {reason}"
                 )
-                delivered = False
+                deliveries: list = []
                 for target in targets:
                     try:
                         platform = _Platform(
@@ -3207,18 +3262,26 @@ class GatewayKanbanWatchersMixin:
                         result = await adapter.send(
                             target["chat_id"], text, metadata=metadata,
                         )
-                        delivered = delivered or bool(
-                            getattr(result, "success", True)
-                        )
+                        if bool(getattr(result, "success", True)):
+                            deliveries.append({
+                                "platform": platform.value,
+                                "profile": profile or "",
+                                "chat_id": str(target["chat_id"]),
+                                "thread_id": str(target.get("thread_id") or ""),
+                                "message_id": str(
+                                    getattr(result, "message_id", "") or ""
+                                ),
+                            })
                     except Exception:  # noqa: BLE001
                         logger.debug(
                             "ready watchdog: send failed for %s/%s",
                             board, task_id, exc_info=True,
                         )
-                if delivered:
+                if deliveries:
                     try:
                         await asyncio.to_thread(
-                            self._ready_watchdog_mark, board, task_id, reason,
+                            self._ready_watchdog_mark,
+                            board, task_id, reason, deliveries,
                         )
                     except Exception:  # noqa: BLE001
                         logger.debug(
@@ -3266,8 +3329,10 @@ class GatewayKanbanWatchersMixin:
             conn.close()
         return stale
 
-    def _ready_watchdog_mark(self, board: str, task_id: str, reason: str) -> None:
-        """Sync: durable dedupe token — one watchdog comment per card."""
+    def _ready_watchdog_mark(
+        self, board: str, task_id: str, reason: str, deliveries: list,
+    ) -> None:
+        """Sync: durable dedupe token + delivery record for later resolution."""
         from hermes_cli import kanban_db as _kb
 
         conn = _kb.connect(board=board)
@@ -3276,6 +3341,66 @@ class GatewayKanbanWatchersMixin:
                 conn, task_id, "watchdog",
                 f"Alerta de abandono publicado no tópico do projeto: {reason}",
             )
+            with _kb.write_txn(conn):
+                conn.execute(
+                    "INSERT INTO task_events(task_id, kind, payload, created_at) "
+                    "VALUES (?, 'watchdog_alert', ?, strftime('%s','now'))",
+                    (task_id, json.dumps({"deliveries": deliveries})),
+                )
+        finally:
+            conn.close()
+
+    def _ready_watchdog_collect_resolutions(self, board: str) -> list:
+        """Sync: alerted cards that since gained a claim (or moved on).
+
+        Returns ``(task_id, title, status, deliveries)`` for every card
+        with a ``watchdog_alert`` event, no ``watchdog_alert_resolved``
+        yet, whose current state is no longer ready-without-claim.
+        """
+        from hermes_cli import kanban_db as _kb
+
+        resolved: list = []
+        conn = _kb.connect(board=board)
+        try:
+            rows = conn.execute(
+                "SELECT e.task_id, e.payload, t.title, t.status, t.claim_lock "
+                "FROM task_events AS e JOIN tasks AS t ON t.id = e.task_id "
+                "WHERE e.kind = 'watchdog_alert' "
+                "AND NOT EXISTS (SELECT 1 FROM task_events r "
+                "  WHERE r.task_id = e.task_id "
+                "  AND r.kind = 'watchdog_alert_resolved')",
+            ).fetchall()
+            for row in rows:
+                status = str(row["status"] or "")
+                still_stuck = status == "ready" and not row["claim_lock"]
+                if still_stuck:
+                    continue
+                try:
+                    deliveries = (
+                        json.loads(row["payload"] or "{}") or {}
+                    ).get("deliveries") or []
+                except (ValueError, TypeError):
+                    deliveries = []
+                resolved.append(
+                    (str(row["task_id"]), str(row["title"] or ""), status,
+                     deliveries)
+                )
+        finally:
+            conn.close()
+        return resolved
+
+    def _ready_watchdog_mark_resolved(self, board: str, task_id: str) -> None:
+        from hermes_cli import kanban_db as _kb
+
+        conn = _kb.connect(board=board)
+        try:
+            with _kb.write_txn(conn):
+                conn.execute(
+                    "INSERT INTO task_events(task_id, kind, payload, created_at) "
+                    "VALUES (?, 'watchdog_alert_resolved', '{}', "
+                    "strftime('%s','now'))",
+                    (task_id,),
+                )
         finally:
             conn.close()
 
