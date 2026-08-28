@@ -73,3 +73,15 @@ class TestFactoryLayerSeparation(unittest.TestCase):
     def test_board_bound_delegation_keeps_card_wording(self):
         prompt = _build_child_system_prompt("Tarefa no board", board_bound=True)
         self.assertIn("tracking card for this task is managed by the system", prompt)
+
+
+class TestInheritedCloseoutContract(unittest.TestCase):
+    """Acceptance finding (28/08): worker closeouts came out in the generic
+    Scope/Done/Evidence/Limitations shape even under an AOF profile — the
+    template must defer to an inherited closeout contract when one exists."""
+
+    def test_prompt_defers_to_inherited_contract(self):
+        prompt = _build_child_system_prompt("Tarefa")
+        self.assertIn("define a closeout contract of their own", prompt)
+        self.assertIn("follow THAT contract", prompt)
+        self.assertIn("Run Metrics", prompt)
