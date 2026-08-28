@@ -11933,6 +11933,37 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
 _clear_spawn_failures = _clear_failure_counter
 
 
+def _respawn_guard_backoff_remaining(
+    conn: sqlite3.Connection, task_id: str
+) -> float:
+    """Seconds until the next allowed guard re-check for this task (0 = now).
+
+    Streak = consecutive ``respawn_guarded`` events since the last
+    non-guard, non-heartbeat event. Interval = min(3600, 90 * 2**(streak-1)),
+    measured from the newest guard event. The 1098-events-in-27h card from
+    the 28/08 audit collapses to ~24 checks/day at the cap.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT kind, created_at FROM task_events WHERE task_id = ? "
+            "AND kind != 'heartbeat' ORDER BY id DESC LIMIT 12",
+            (task_id,),
+        ).fetchall()
+        if not rows or str(rows[0]["kind"]) != "respawn_guarded":
+            return 0.0
+        streak = 0
+        for row in rows:
+            if str(row["kind"]) == "respawn_guarded":
+                streak += 1
+            else:
+                break
+        interval = min(3600.0, 90.0 * (2 ** min(streak - 1, 6)))
+        elapsed = time.time() - float(rows[0]["created_at"] or 0)
+        return max(0.0, interval - elapsed)
+    except Exception:  # noqa: BLE001 — backoff must never block dispatch
+        return 0.0
+
+
 def check_respawn_guard(
     conn: sqlite3.Connection, task_id: str, *, lane: str = "ready",
 ) -> Optional[str]:
@@ -12910,6 +12941,14 @@ def _dispatch_once_locked(
         # still trips the auto-block circuit breaker after failure_limit
         # consecutive failures, so a persistent auth error eventually
         # blocks via the normal path rather than on first occurrence.
+        # Guard-check backoff (28/08 análise 48h: um card acumulou 1098
+        # eventos respawn_guarded a cada ~90s por ~27h — log inflado e
+        # chamadas gh desperdiçadas no resolver de PR). Enquanto o guard
+        # vem respondendo a mesma coisa, o re-check segue agenda
+        # exponencial (90s → 3min → ... → cap 1h) em vez de todo tick.
+        # Qualquer evento não-guard zera a sequência naturalmente.
+        if _respawn_guard_backoff_remaining(conn, row["id"]) > 0:
+            continue
         guard_reason = check_respawn_guard(conn, row["id"])
         if guard_reason is not None:
             result.respawn_guarded.append((row["id"], guard_reason))
