@@ -129,6 +129,7 @@ class LiveTranscriptWriter:
         # board log the dispatcher workers already write, so in-process
         # workers surface identically — no second dialect, no fallback.
         self._board_log_path: Optional[Path] = None
+        self._rtu_log_path: Optional[Path] = None
         self._board_tool_args: Dict[str, str] = {}
         try:
             base = (root if root is not None else live_transcript_root())
@@ -207,9 +208,19 @@ class LiveTranscriptWriter:
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(header)
             self._board_log_path = path
+            # RTU sidecar (operator 28/08: RTU no log vivo do Vigília):
+            # the same events, rendered AT THE EVENT through the shared
+            # compact renderer, land in <task_id>.rtu.log next to the raw
+            # log. The Vigília activity panel prefers this file; readers
+            # that don't know it keep the raw dialect. Same lifecycle and
+            # best-effort rules as the raw tee.
+            self._rtu_log_path = path.with_name(f"{task_id}.rtu.log")
+            with open(self._rtu_log_path, "a", encoding="utf-8") as fh:
+                fh.write(header)
         except Exception as exc:  # noqa: BLE001
             logger.debug("board worker-log attach failed (%s): %s", task_id, exc)
             self._board_log_path = None
+            self._rtu_log_path = None
 
     def _board_append(self, line: str) -> None:
         if self._board_log_path is None:
@@ -221,6 +232,44 @@ class LiveTranscriptWriter:
         except Exception as exc:  # noqa: BLE001
             logger.debug("board worker-log write failed: %s", exc)
             self._board_log_path = None
+
+    def _rtu_append(self, line: str) -> None:
+        if getattr(self, "_rtu_log_path", None) is None:
+            return
+        try:
+            with self._lock:
+                with open(self._rtu_log_path, "a", encoding="utf-8") as fh:
+                    fh.write(line if line.endswith("\n") else line + "\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("rtu sidecar write failed: %s", exc)
+            self._rtu_log_path = None
+
+    def _rtu_tool_line(self, name: str, args_text: str,
+                       is_error: bool, result: Any) -> None:
+        if getattr(self, "_rtu_log_path", None) is None:
+            return
+        try:
+            from agent.display import (
+                format_tool_error_line,
+                format_tool_progress_message,
+            )
+
+            if is_error:
+                self._rtu_append(
+                    format_tool_error_line(name, _one_line(result, 400))
+                )
+                return
+            args = (
+                {"command": args_text}
+                if name == "terminal" and args_text
+                else None
+            )
+            msg, _ = format_tool_progress_message(
+                name, args, args_text or None, code_blocks=False,
+            )
+            self._rtu_append(msg)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("rtu sidecar render failed: %s", exc)
 
     def _board_tool_line(self, name: str, duration: Any,
                          is_error: bool) -> None:
@@ -235,6 +284,7 @@ class LiveTranscriptWriter:
         prefix = "⚠" if is_error else " ┊"
         label = f"{name:<10}"[:14]
         self._board_append(f"  {prefix} {icon} {label} {args}{dur}")
+        return args
 
     # ── typed helpers ────────────────────────────────────────────────────
     def assistant_text(self, text: str) -> None:
@@ -247,6 +297,7 @@ class LiveTranscriptWriter:
         if t:
             self.event("think", t)
             self._board_append(f"┌─ Reasoning\n│ {_redact(t)}\n└")
+            self._rtu_append(f"💭 {_redact(t)}")
 
     def tool_start(self, name: str, args_preview: Any = None) -> None:
         self.flush_stream()
@@ -270,13 +321,15 @@ class LiveTranscriptWriter:
             pass
         self.event("result", f"{name or '?'} {status}{dur}: "
                              f"{_one_line(result, _RESULT_MAX)}")
-        self._board_tool_line(str(name or "?"), duration, is_error)
+        args_text = self._board_tool_line(str(name or "?"), duration, is_error)
+        self._rtu_tool_line(str(name or "?"), args_text or "", is_error, result)
 
     def marker(self, text: str) -> None:
         """Lifecycle marker: start / final / error / interrupt / budget."""
         self.flush_stream()
         self.event("final", _one_line(text, _ASSISTANT_MAX))
         self._board_append(f"  ── {_redact(_one_line(text, 200))}")
+        self._rtu_append(f"── {_redact(_one_line(text, 200))}")
 
     # ── streamed reply buffering ─────────────────────────────────────────
     def add_stream_delta(self, delta: str) -> None:
