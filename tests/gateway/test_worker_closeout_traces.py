@@ -221,8 +221,8 @@ def test_live_transcript_converts_to_worker_log_dialect():
         converted, task_id="t_x", include_tool_progress=True,
         include_reasoning=True,
     )
-    assert "Reasoning: Bloco 1 revisado" in out
-    assert "┊ Tool: write_file" in out
+    assert "💭 Bloco 1 revisado" in out
+    assert "Writing notas/TZ1.md" in out
 
 
 def test_mirror_live_transcript_read_from_card_comment(tmp_path, monkeypatch):
@@ -252,3 +252,39 @@ def test_mirror_live_transcript_read_from_card_comment(tmp_path, monkeypatch):
     out = kw._read_mirror_live_transcript("b", tid, 64 * 1024)
     assert "┌─ Reasoning" in out
     assert "┊ Tool: read_file(x)" in out
+
+
+def test_focus_bubble_rerenders_log_dialects_like_principal():
+    """Operator requirement 28/08: the FNAT bubble must speak the principal's
+    surface language (emoji + friendly verb), never raw log/result JSON."""
+    converter_log = "\n".join([
+        "Query: work kanban task t_r",
+        '┊ Tool: todo(planning 8 task(s))',
+        '┊ todo ok 0.1s: {"todos": [{"id": "preflight"}]}',
+        '┊ Tool: read_file(notas/TZ1.md)',
+        '┊ read_file ERROR 0.4s: {"content": "", "error": "File not found: notas/TZ1.md"}',
+    ])
+    out = kw._render_kanban_worker_focus_output(converter_log, task_id="t_r")
+    assert "Updating tasks planning 8 task(s)" in out
+    assert "Reading notas/TZ1.md" in out
+    # success results are dropped entirely; error keeps only the message
+    assert '"todos"' not in out
+    assert "⚠ read_file: File not found: notas/TZ1.md" in out
+    assert '"content"' not in out
+
+
+def test_focus_bubble_rerenders_native_tee_and_cli_labels():
+    native_log = "\n".join([
+        "Query: work kanban task t_n",
+        "  ┊ 💻 terminal    git status  0.3s",
+        "  ┊ 📋 plan      8 task(s)  0.1s",
+        "  ┊ 💻 $         git log --oneline  0.4s",
+        "  ── final: bloco 1 persistido",
+    ])
+    out = kw._render_kanban_worker_focus_output(native_log, task_id="t_n")
+    assert "Running git status" in out
+    assert "Updating tasks 8 task(s)" in out
+    assert "Running git log --oneline" in out
+    assert "── final: bloco 1 persistido" in out
+    # no raw log dialect markers survive re-rendering
+    assert "┊" not in out

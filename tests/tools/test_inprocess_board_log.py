@@ -55,8 +55,11 @@ def test_tee_writes_native_dialect(board_env, tmp_path):
         log, task_id="t_abc123", include_tool_progress=True,
         include_reasoning=True,
     )
-    assert "terminal" in out
-    assert "Reasoning: bloco 1 revisado, seguindo" in out
+    # Re-rendered into the principal's surface language (28/08): friendly
+    # verb + args, thought line for reasoning — not raw log dialect.
+    assert "Running git status --short" in out
+    assert "💭 bloco 1 revisado, seguindo" in out
+    assert "┊" not in out
 
 
 def test_no_attach_means_no_board_log(board_env, tmp_path):
