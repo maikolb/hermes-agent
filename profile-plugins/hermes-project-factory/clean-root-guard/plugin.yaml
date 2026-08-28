@@ -1,0 +1,5 @@
+name: clean-root-guard
+version: "1.0.0"
+description: "Blocks mutation or execution that reuses the two rejected Hermes Project Ops roots and artifacts."
+author: Maikol + Hermes Agent
+kind: standalone
