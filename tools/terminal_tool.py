@@ -2727,6 +2727,42 @@ def _looks_like_help_or_version_command(command: str) -> bool:
     )
 
 
+def _long_foreground_notice(elapsed_seconds: float) -> str | None:
+    """Policy notice appended to the tool result after a long foreground run.
+
+    Enforcement at the tool-result layer (both adversarial reviewers landed
+    on this mechanism independently): SOUL/prompt only suggests, but the
+    model always reads its tool results. 28/08 DOVCRM: a principal turn sat
+    ~1h serially blocked on local transcription before fanning out 4 fronts
+    that never depended on it. Fires only in kanban/board-bound contexts
+    (worker env or bound topic) so plain CLI use is never polluted.
+    ``HERMES_LONG_FOREGROUND_NOTICE_SECONDS`` sets the threshold (default
+    300; 0 disables).
+    """
+    try:
+        threshold = float(
+            os.environ.get("HERMES_LONG_FOREGROUND_NOTICE_SECONDS", "300")
+        )
+    except (TypeError, ValueError):
+        threshold = 300.0
+    if threshold <= 0 or elapsed_seconds < threshold:
+        return None
+    if not (
+        os.environ.get("HERMES_KANBAN_TASK")
+        or os.environ.get("HERMES_PROJECT_BOARD")
+        or os.environ.get("HERMES_KANBAN_BOARD")
+    ):
+        return None
+    return (
+        f"\n\n[aviso de política do runtime] Este comando bloqueou o turno "
+        f"em foreground por {int(elapsed_seconds)}s. Política do operador "
+        f"(AOF): trabalho mecânico longo (transcrição, build, processamento "
+        f"em massa) NÃO bloqueia a entrega — crie o card, execute em "
+        f"background/delegue e avance as frentes independentes. Não repita "
+        f"esperas seriais desta duração no mesmo turno."
+    )
+
+
 def _foreground_background_guidance(command: str) -> str | None:
     """Suggest background mode when a foreground command looks long-lived.
 
@@ -3569,6 +3605,7 @@ def terminal_tool(
             retry_count = 0
             result = None
             command_cwd = None
+            _fg_started_at = time.monotonic()
 
             # Clean interrupt slate for an approved command, ONCE before the
             # retry loop: drop a stale bit that landed on this thread during the
@@ -3677,6 +3714,12 @@ def terminal_tool(
                         "cleared. You will be prompted again on the next sudo "
                         "command."
                     )
+
+            _fg_notice = _long_foreground_notice(
+                time.monotonic() - _fg_started_at
+            )
+            if _fg_notice:
+                output += _fg_notice
 
             # Foreground terminal output canonicalization seam: process capture
             # is already bounded by BaseEnvironment before sudo checks and hooks
