@@ -254,3 +254,83 @@ def test_no_board_creates_nothing(kanban_env):
     assert dk.create_delegation_cards([{"goal": "G"}], "deleg_x", None) == {}
     # Closing with no cards is a no-op rather than an error.
     dk.close_delegation_cards(None, {}, [{"task_index": 0, "status": "completed"}])
+
+
+def test_mirror_cards_inherit_origin_scope_and_subscription(kanban_env, monkeypatch):
+    """Acceptance finding (28/08, DOVTest): mirror cards carried no notify
+    sub and no project/session scope, so rotation, focus and per-worker
+    closeouts were structurally blind to in-process fan-outs."""
+    from gateway.session_context import set_session_vars
+    from tools import delegation_kanban as dk
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import projects_db as pdb
+
+    # create_task validates project_id against projects_db and drops
+    # dangling references; in production the auto-provisioned project row
+    # exists. Simulate that here (id + no primary repo → scratch workspace).
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        pdb,
+        "get_project",
+        lambda conn, pid: (
+            SimpleNamespace(id="dovtest", primary_path=None)
+            if pid == "dovtest"
+            else None
+        ),
+    )
+
+    tokens = set_session_vars(
+        platform="telegram",
+        chat_id="-1004309874643",
+        chat_type="supergroup",
+        chat_name="Nexa Factory",
+        thread_id="6321",
+        user_id="996979567",
+        user_id_alt="",
+        user_name="Maikol",
+        scope_id="",
+        session_key="agent:main:telegram:-1004309874643:6321",
+        message_id="1",
+        profile="hermes-project-factory",
+        async_delivery=True,
+        cron_session="",
+        project_id="dovtest",
+        project_board="default",
+        project_workdir="",
+        project_access="allow",
+    )
+    try:
+        cards = dk.create_delegation_cards(
+            [{"goal": "Executar T1"}], "deleg_origin", "default"
+        )
+    finally:
+        for token in tokens:
+            try:
+                token.var.reset(token)
+            except Exception:
+                pass
+
+    task = _get_task(cards[0])
+    assert task.project_id == "dovtest"
+    with kb.connect_closing() as conn:
+        subs = conn.execute(
+            "SELECT platform, chat_id, thread_id FROM kanban_notify_subs "
+            "WHERE task_id = ?", (cards[0],)
+        ).fetchall()
+    assert [tuple(row) for row in subs] == [
+        ("telegram", "-1004309874643", "6321")
+    ]
+
+
+def test_mirror_cards_without_origin_behave_as_before(kanban_env):
+    from tools import delegation_kanban as dk
+    from hermes_cli import kanban_db as kb
+
+    cards = dk.create_delegation_cards([{"goal": "G"}], "deleg_plain", "default")
+    with kb.connect_closing() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM kanban_notify_subs WHERE task_id = ?",
+            (cards[0],),
+        ).fetchone()[0]
+    assert count == 0

@@ -150,6 +150,38 @@ def resolve_delegation_board() -> Optional[str]:
         return None
 
 
+def _origin_subscription_context() -> Dict[str, str]:
+    """Origin chat/scope of the delegating turn, from the session env.
+
+    TARGET_ARCHITECTURE acceptance finding (28/08, DOVTest): mirror cards
+    used to carry NO notify subscription and NO project/session scope, so
+    the notifier never produced rows for them — worker rotation ("now
+    watching"), the focus bubble and the per-worker closeout traces were
+    all structurally blind to in-process fan-outs. Empty dict when there is
+    no chat origin (CLI runs): cards then behave exactly as before.
+    """
+    try:
+        from gateway.session_context import get_session_env
+
+        platform = (get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
+        chat_id = (get_session_env("HERMES_SESSION_CHAT_ID", "") or "").strip()
+        if not platform or not chat_id:
+            return {}
+        return {
+            "platform": platform,
+            "chat_id": chat_id,
+            "thread_id": (get_session_env("HERMES_SESSION_THREAD_ID", "") or "").strip(),
+            "user_id": (get_session_env("HERMES_SESSION_USER_ID", "") or "").strip(),
+            "chat_type": (get_session_env("HERMES_SESSION_CHAT_TYPE", "") or "").strip(),
+            "profile": (get_session_env("HERMES_SESSION_PROFILE", "") or "").strip(),
+            "project_id": (get_session_env("HERMES_PROJECT_ID", "") or "").strip(),
+            "session_id": (get_session_env("HERMES_SESSION_ID", "") or "").strip(),
+        }
+    except Exception:  # noqa: BLE001 - never break delegation
+        logger.debug("delegation kanban: origin context failed", exc_info=True)
+        return {}
+
+
 def create_delegation_cards(
     task_list: List[Dict[str, Any]],
     delegation_id: Optional[str],
@@ -158,12 +190,18 @@ def create_delegation_cards(
 ) -> Dict[int, str]:
     """Create one claimed running mirror card per delegated task.
 
+    Cards inherit the delegating turn's project/session scope and a notify
+    subscription to the originating chat/topic, so the notifier feeds them
+    into worker rotation and per-worker closeout traces (see
+    ``_origin_subscription_context``).
+
     Returns ``{task_index: task_id}`` for every card that was created; on
     any failure the affected index is simply absent.
     """
     if not board or not task_list:
         return {}
     cards: Dict[int, str] = {}
+    origin = _origin_subscription_context()
     try:
         from hermes_cli import kanban_db as kb
 
@@ -182,10 +220,30 @@ def create_delegation_cards(
                         body=body[:_BODY_MAX],
                         created_by=author,
                         board=board,
+                        project_id=origin.get("project_id") or None,
+                        session_id=origin.get("session_id") or None,
                         idempotency_key=(
                             f"{delegation_id}:{index}" if delegation_id else None
                         ),
                     )
+                    if origin:
+                        try:
+                            kb.add_notify_sub(
+                                conn,
+                                task_id=task_id,
+                                platform=origin["platform"],
+                                chat_id=origin["chat_id"],
+                                thread_id=origin.get("thread_id") or None,
+                                user_id=origin.get("user_id") or None,
+                                chat_type=origin.get("chat_type") or None,
+                                notifier_profile=origin.get("profile") or None,
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.debug(
+                                "delegation kanban: notify sub failed (%s)",
+                                task_id,
+                                exc_info=True,
+                            )
                     claimed = kb.claim_task(
                         conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
                     )
