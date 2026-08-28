@@ -1672,7 +1672,16 @@ class GatewayKanbanWatchersMixin:
             attempt_id = (task.id, getattr(task, "current_run_id", None))
             attempt_changed = not state or state.get("attempt_id") != attempt_id
             now = time.time()
-            started_at = float(getattr(task, "started_at", None) or now)
+            # Elapsed must reflect the CURRENT run, not the card's first
+            # claim: worker_started_at is refreshed on every (re)claim,
+            # started_at never is (28/08 Wave 4: the bubble showed
+            # "Trabalhando há 1582 min" from a day-old started_at while
+            # run 118 was 80 minutes old).
+            started_at = float(
+                getattr(task, "worker_started_at", None)
+                or getattr(task, "started_at", None)
+                or now
+            )
             elapsed_seconds = max(0.0, now - started_at)
             activity_text = (
                 str(state.get("activity_text") or "")

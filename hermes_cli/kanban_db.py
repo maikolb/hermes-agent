@@ -1455,6 +1455,12 @@ class Task:
     # (Pre-rename column: ``spawn_failures``.)
     consecutive_failures: int = 0
     worker_pid: Optional[int] = None
+    # Start time (epoch) of the worker process serving the CURRENT run —
+    # refreshed on every (re)claim, unlike ``started_at`` which records the
+    # card's first claim ever. Display surfaces must derive "working for
+    # N min" from this (28/08: a resumed Wave 4 showed 1582 min taken from
+    # a day-old started_at).
+    worker_started_at: Optional[float] = None
     # Short excerpt of the last failure's error text (any outcome, not
     # just spawn). Pre-rename column: ``last_spawn_error``.
     last_failure_error: Optional[str] = None
@@ -1557,6 +1563,9 @@ class Task:
                 else (row["spawn_failures"] if "spawn_failures" in keys else 0)
             ),
             worker_pid=row["worker_pid"] if "worker_pid" in keys else None,
+            worker_started_at=(
+                row["worker_started_at"] if "worker_started_at" in keys else None
+            ),
             last_failure_error=(
                 row["last_failure_error"] if "last_failure_error" in keys
                 # Same belt-and-suspenders fallback as consecutive_failures above.
