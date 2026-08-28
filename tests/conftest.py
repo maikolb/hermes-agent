@@ -1769,6 +1769,30 @@ def _audio_playback_guard(request, monkeypatch):
             _vm, "subprocess", _SpeakerBlockedSubprocess(_vm.subprocess)
         )
     except Exception:
+        _vm = None
+
+    # Second escape path, caught the same evening: sounddevice. The spoken
+    # "Hello World" at 21:50 played WITH the subprocess proxy active — the
+    # native-audio route (``sd.play`` / ``OutputStream``) never spawns a
+    # process. The thinking-sound blips the operator kept hearing are this
+    # exact path (``_synth_thinking_blip`` + ``sd.play``). Every unmarked
+    # test now sees the audio libraries as absent: all call sites already
+    # treat ImportError as "no audio available" and continue silently, and
+    # tests that fake the audio backend patch these same helpers themselves,
+    # shadowing this stub.
+    def _no_audio_backend(*_args, **_kwargs):
+        raise ImportError("audio backend blocked in tests (speaker guard)")
+
+    if _vm is not None and hasattr(_vm, "_import_audio"):
+        monkeypatch.setattr(_vm, "_import_audio", _no_audio_backend)
+    try:
+        import tools.tts_tool as _tts
+
+        if hasattr(_tts, "_import_sounddevice"):
+            monkeypatch.setattr(
+                _tts, "_import_sounddevice", _no_audio_backend
+            )
+    except Exception:
         pass
 
     yield
