@@ -13507,7 +13507,15 @@ def _default_spawn(
 
     profile_arg = normalize_profile_name(task.assignee)
 
-    prompt = f"work kanban task {task.id}"
+    # The bare task pointer plus the AOF protocol block. Delegated
+    # subagents get the protocol from delegate_tool (gap 6); dispatcher
+    # workers ran without it and completed cards with an empty result —
+    # no closeout on the board or in the completion trace (28/08 audit).
+    from hermes_cli.worker_protocol import dispatcher_worker_protocol
+
+    prompt = (
+        f"work kanban task {task.id}\n\n{dispatcher_worker_protocol()}"
+    )
     env = dict(os.environ)
     # The dispatcher is detached from every conversation. Its worker must never
     # inherit routing mirrored by a previous gateway turn, even before the first

@@ -298,10 +298,20 @@ def _read_worker_trace_summary(board: str, task_id: str, kind: str) -> str:
         with _kb.connect_closing(board=board) as conn:
             if kind == "completed":
                 task = _kb.get_task(conn, task_id)
-                return str(getattr(task, "result", "") or "").strip()
+                summary = str(getattr(task, "result", "") or "").strip()
+                if summary:
+                    return summary
+                # Completed with an empty result (worker skipped the
+                # protocol — 28/08 audit): the worker's last substantive
+                # comment is the best available closeout; never let the
+                # trace go out as a bare title + link again.
             comments = _kb.list_comments(conn, task_id)
-            if comments:
-                return str(getattr(comments[-1], "body", "") or "").strip()
+            for comment in reversed(comments):
+                if str(getattr(comment, "author", "") or "") == "watchdog":
+                    continue
+                body = str(getattr(comment, "body", "") or "").strip()
+                if body:
+                    return body
     except Exception:  # noqa: BLE001
         logger.debug("worker trace summary read failed", exc_info=True)
     return ""
