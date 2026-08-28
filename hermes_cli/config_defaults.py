@@ -2062,6 +2062,13 @@ DEFAULT_CONFIG = {
                                        # on changes delegation semantics (results stop
                                        # returning to the principal's turn), so no implicit
                                        # inheritance (TARGET_ARCHITECTURE gap 9).
+        "worker_parity": True,  # TARGET_ARCHITECTURE gap 10: workers inherit the
+                                # principal's SOUL/operating instructions, a read-only
+                                # memory prefetch for their goal, and a session brief
+                                # (latest compaction summary + recent exchanges), so a
+                                # delegated child starts EQUAL to the principal instead
+                                # of rediscovering the system. false = old isolated
+                                # children.
         "mirror_principal_turns": None,  # mirror long principal turns on board-bound
                                          # sessions as claimed running cards with heartbeat,
                                          # so the board stays the authority over ALL work.

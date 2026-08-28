@@ -1170,6 +1170,122 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+_PARITY_SOUL_MAX_CHARS = 14_000
+_PARITY_MEMORY_MAX_CHARS = 9_000
+_PARITY_BRIEF_MAX_CHARS = 7_000
+_PARITY_BRIEF_TAIL_TURNS = 8
+_PARITY_BRIEF_MSG_CHARS = 420
+
+
+def _parity_truncate(text: str, cap: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= cap:
+        return text
+    return text[: cap - 22].rstrip() + "\n[...truncated for size]"
+
+
+def worker_parity_enabled() -> bool:
+    """TARGET_ARCHITECTURE gap 10: workers inherit the principal's identity,
+    memory and session context by default. ``delegation.worker_parity: false``
+    restores the old isolated-context children."""
+    try:
+        cfg = _load_config()
+        value = cfg.get("worker_parity")
+        if value is None:
+            return True
+        return bool(value)
+    except Exception:
+        return True
+
+
+def _collect_parent_parity_blocks(parent_agent, goal: str) -> dict:
+    """Snapshot what the principal knows so the worker starts EQUAL, not blank.
+
+    Gap 10 (operator order, 27/08): production evidence showed the principal
+    stopping its own worker because "the worker gets an isolated context,
+    without the continuity and decisions I hold in this session" — the
+    orchestration degraded to the principal's intelligence instead of the
+    process. Three read-only blocks close most of that distance:
+
+    - soul: the profile's SOUL.md (operating conventions/identity the child
+      never saw because child prompts skip SOUL).
+    - memory: the SAME per-turn memory prefetch the principal gets, queried
+      with this child's goal (writes stay blocked — the memory tool is still
+      in DELEGATE_BLOCKED_TOOLS; this is reference material).
+    - session_brief: the latest compaction summary (if any) plus a short
+      tail of recent user/assistant exchanges, so session decisions travel
+      with the work.
+
+    Every block is best-effort and size-capped; a failure yields an empty
+    string and the child simply gets less inherited context.
+    """
+    blocks = {"soul": "", "memory": "", "session_brief": ""}
+
+    try:
+        from hermes_constants import get_hermes_home
+
+        soul_path = get_hermes_home() / "SOUL.md"
+        if soul_path.is_file():
+            blocks["soul"] = _parity_truncate(
+                soul_path.read_text(encoding="utf-8", errors="replace"),
+                _PARITY_SOUL_MAX_CHARS,
+            )
+    except Exception:
+        logger.debug("worker parity: SOUL read failed", exc_info=True)
+
+    try:
+        manager = getattr(parent_agent, "_memory_manager", None)
+        if manager is not None and hasattr(manager, "prefetch_all"):
+            blocks["memory"] = _parity_truncate(
+                manager.prefetch_all(str(goal or "")) or "",
+                _PARITY_MEMORY_MAX_CHARS,
+            )
+    except Exception:
+        logger.debug("worker parity: memory prefetch failed", exc_info=True)
+
+    try:
+        messages = list(getattr(parent_agent, "messages", None) or [])
+        summary = ""
+        for msg in reversed(messages):
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, str) and content.startswith(
+                "[CONTEXT COMPACTION"
+            ):
+                summary = content
+                break
+        tail_lines = []
+        turns = 0
+        for msg in reversed(messages):
+            if turns >= _PARITY_BRIEF_TAIL_TURNS:
+                break
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            content = msg.get("content")
+            if role not in ("user", "assistant") or not isinstance(content, str):
+                continue
+            text = content.strip()
+            if not text or text.startswith("[CONTEXT COMPACTION"):
+                continue
+            if len(text) > _PARITY_BRIEF_MSG_CHARS:
+                text = text[:_PARITY_BRIEF_MSG_CHARS].rstrip() + "…"
+            tail_lines.append(f"{role}: {text}")
+            turns += 1
+        tail_lines.reverse()
+        parts = []
+        if summary:
+            parts.append(summary)
+        if tail_lines:
+            parts.append("Recent exchanges:\n" + "\n".join(tail_lines))
+        blocks["session_brief"] = _parity_truncate(
+            "\n\n".join(parts), _PARITY_BRIEF_MAX_CHARS
+        )
+    except Exception:
+        logger.debug("worker parity: session brief failed", exc_info=True)
+
+    return blocks
+
+
 def _resolve_completion_routing(parent_agent, origin_ui_session_id):
     """Resolve the ``(session_key, ui_session_id)`` a completion routes to.
 
@@ -1224,6 +1340,7 @@ def _build_child_system_prompt(
     role: str = "leaf",
     max_spawn_depth: int = 2,
     child_depth: int = 1,
+    parity: Optional[dict] = None,
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -1274,6 +1391,38 @@ def _build_child_system_prompt(
                 "below. Their conventions and invariants are binding for "
                 "your work in this workspace.\n\n" + _ctx_files.strip()
             )
+    # Gap 10 — worker parity: the principal's identity, memory and session
+    # context travel with the work so the child does not rediscover the
+    # system or re-derive decisions the session already made.
+    if parity:
+        soul = str(parity.get("soul") or "").strip()
+        if soul:
+            parts.append(
+                "\n## Profile Operating Instructions (inherited from the "
+                "principal)\n"
+                "These are the principal agent's SOUL/operating conventions. "
+                "They are binding for HOW you work (discipline, policies, "
+                "conventions). You are still a focused subagent: do not "
+                "adopt the persona for outward communication.\n\n" + soul
+            )
+        memory = str(parity.get("memory") or "").strip()
+        if memory:
+            parts.append(
+                "\n## Inherited Memory (read-only)\n"
+                "The principal's persistent memory relevant to this task. "
+                "Treat as reference; your memory tool is unavailable — "
+                "report new durable facts in your closeout instead.\n\n"
+                + memory
+            )
+        brief = str(parity.get("session_brief") or "").strip()
+        if brief:
+            parts.append(
+                "\n## Session Brief (from the principal's live session)\n"
+                "Recent decisions and exchanges from the session that "
+                "delegated this task. Honor decisions already made here "
+                "instead of re-deriving them.\n\n" + brief
+            )
+
     parts.append(
         "\n## Delegated Work Protocol\n"
         "Run the same working cycle the principal agent runs "
@@ -1791,6 +1940,9 @@ def _build_child_agent(
         child_toolsets.append("delegation")
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
+    _parity_blocks = None
+    if worker_parity_enabled():
+        _parity_blocks = _collect_parent_parity_blocks(parent_agent, goal)
     child_prompt = _build_child_system_prompt(
         goal,
         context,
@@ -1798,6 +1950,7 @@ def _build_child_agent(
         role=effective_role,
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
+        parity=_parity_blocks,
     )
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)

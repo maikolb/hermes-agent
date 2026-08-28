@@ -86,3 +86,12 @@ funcionamento.
    ligar kanban.agent_wake_on_events para o principal acordar em
    conclusão de card despachado.
 9. route_to_dispatcher default vira opt-in explícito (falso por default).
+10. Paridade do worker com o principal: capacidade, memórias e contexto
+    (ordem do Maikol 27/08 ~21:45, evidência do próprio principal em
+    produção: "o worker recebe um contexto isolado, sem toda a
+    continuidade e decisões que eu mantenho nesta sessão; ele tende a
+    redescobrir o sistema e seguir o contrato literalmente", e o
+    principal parou o worker para fazer ele mesmo). Workers devem
+    receber o que o principal tem: identidade/instruções operacionais
+    do perfil, memórias persistentes e o contexto/decisões da sessão,
+    além de modelo/capacidade equivalentes.
