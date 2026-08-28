@@ -611,6 +611,18 @@ def _render_kanban_worker_focus_output(
                 if len(marker) > _WORKER_FOCUS_MAX_LINE_CHARS:
                     marker = marker[:_WORKER_FOCUS_MAX_LINE_CHARS].rstrip() + "..."
                 items.append(f"── {marker}")
+        elif ord(line[0]) > 0x2600:
+            # Shared-renderer passthrough (28/08): dispatcher workers now
+            # print ALREADY-rendered progress lines to the board log
+            # (worker_progress printer) — emoji-led, the exact surface this
+            # bubble displays. The dialect parser above expected raw log
+            # shapes and silently dropped them (operator: "voltou, mas não
+            # tá mostrando RTU"). ASCII-led lines (closeout paragraphs,
+            # prompts, protocol text) stay filtered out.
+            if len(line) > _WORKER_FOCUS_MAX_LINE_CHARS:
+                line = line[:_WORKER_FOCUS_MAX_LINE_CHARS].rstrip() + "..."
+            items.append(line)
+            last_terminal_block[0] = False
     _flush_reasoning()
 
     if not items:
