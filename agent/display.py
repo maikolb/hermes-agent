@@ -838,6 +838,29 @@ def format_tool_progress_message(
     return f"{emoji} {tool_name}...", False
 
 
+_TOOL_ERROR_FIELD_RE = re.compile(r'"error"\s*:\s*"(?P<msg>[^"]+)"')
+_TOOL_ERROR_OUTPUT_RE = re.compile(r'"output"\s*:\s*"(?P<msg>[^"]+)"')
+_TOOL_ERROR_MAX_CHARS = 160
+
+
+def format_tool_error_line(tool_name: str, detail: Any) -> str:
+    """Short error line for compact surfaces — part of THE shared renderer.
+
+    Prefers the payload's ``"error"`` (then ``"output"``) text over raw
+    JSON, hard-capped. Used by the FNAT bubble and the RTU sidecar so an
+    error reads identically everywhere.
+    """
+    text = str(detail or "").strip()
+    field = _TOOL_ERROR_FIELD_RE.search(text) or _TOOL_ERROR_OUTPUT_RE.search(text)
+    if field:
+        text = field.group("msg")
+    text = " ".join(text.split())
+    if len(text) > _TOOL_ERROR_MAX_CHARS:
+        text = text[:_TOOL_ERROR_MAX_CHARS - 3] + "..."
+    line = f"⚠ {tool_name}" if tool_name else "⚠"
+    return f"{line}: {text}" if text else line
+
+
 def build_tool_label(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
     """Build a human-phrased status label for a tool call.
 

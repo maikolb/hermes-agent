@@ -403,7 +403,6 @@ _FOCUS_RESULT_RE = re.compile(
 _FOCUS_NATIVE_RE = re.compile(
     r"^(?P<icon>[^\w\s]+)\s+(?P<label>\S+)\s*(?P<rest>.*?)(?:\s+[\d.]+s)?$"
 )
-_FOCUS_ERROR_FIELD_RE = re.compile(r'"error"\s*:\s*"(?P<msg>[^"]+)"')
 
 # Dispatcher CLI stdout labels are display aliases, not tool names
 # (agent/display.py _render_tool_line); map the common ones back so the
@@ -420,7 +419,6 @@ _FOCUS_CLI_LABEL_TOOLS = {
     "navigate": "browser_navigate",
 }
 
-_FOCUS_ERROR_MAX_CHARS = 160
 
 
 def _focus_rich_tool_line(
@@ -452,22 +450,11 @@ def _focus_rich_tool_line(
     )
 
 
-_FOCUS_OUTPUT_FIELD_RE = re.compile(r'"output"\s*:\s*"(?P<msg>[^"]+)"')
-
-
 def _focus_error_line(name: str, detail: str) -> str:
-    """Short error line: prefer the payload's error/output text over raw JSON."""
-    detail = str(detail or "").strip()
-    field = _FOCUS_ERROR_FIELD_RE.search(detail) or _FOCUS_OUTPUT_FIELD_RE.search(
-        detail
-    )
-    if field:
-        detail = field.group("msg")
-    detail = " ".join(detail.split())
-    if len(detail) > _FOCUS_ERROR_MAX_CHARS:
-        detail = detail[:_FOCUS_ERROR_MAX_CHARS - 3] + "..."
-    line = f"⚠ {name}" if name else "⚠"
-    return f"{line}: {detail}" if detail else line
+    """Short error line — delegated to THE shared renderer (one source)."""
+    from agent.display import format_tool_error_line
+
+    return format_tool_error_line(name, detail)
 
 
 def _render_kanban_worker_focus_output(
