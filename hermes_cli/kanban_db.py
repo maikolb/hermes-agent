@@ -12064,15 +12064,122 @@ def check_respawn_guard(
             return "recent_success"
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
+    #    The guard exists to prevent a DUPLICATE PR, not to park the card
+    #    waiting for a human: the ecosystem's canonical cycle is
+    #    branch → PR → merge → delete-branch, fully autonomous (operator,
+    #    28/08 — Wave 4 do DOVCRM sat ready for 7.6 days behind an orphaned
+    #    green PR). So before holding, RESOLVE the PR: already
+    #    merged/closed → the guard no longer applies; open with all checks
+    #    green and mergeable → merge it (deleting the branch) and release;
+    #    open with red/pending checks or conflicts → keep holding, that is
+    #    the one case where respawning would duplicate work in flight.
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
     for c in conn.execute(
         "SELECT body FROM task_comments WHERE task_id = ? AND created_at >= ?",
         (task_id, pr_cutoff),
     ).fetchall():
-        if c["body"] and _RESPAWN_GUARD_PR_URL_RE.search(c["body"]):
-            return "active_pr"
+        match = _RESPAWN_GUARD_PR_URL_RE.search(c["body"]) if c["body"] else None
+        if match:
+            return _resolve_active_pr_guard(conn, task_id, match.group(0), now)
 
     return None
+
+
+_AUTO_MERGE_RESOLVED_KINDS = ("pr_automerged", "pr_resolved")
+
+
+def _auto_merge_active_pr_enabled() -> bool:
+    env = os.environ.get("HERMES_KANBAN_AUTO_MERGE_ACTIVE_PR", "").strip().lower()
+    if env in {"0", "false", "no", "off"}:
+        return False
+    if env in {"1", "true", "yes", "on"}:
+        return True
+    try:
+        from hermes_cli.config import load_config
+
+        kanban_cfg = (load_config() or {}).get("kanban", {}) or {}
+        return bool(kanban_cfg.get("auto_merge_active_pr", True))
+    except Exception:
+        return True
+
+
+def _gh_pr_json(pr_url: str) -> "Optional[dict]":
+    """Best-effort `gh pr view` for the guard. None on any failure."""
+    try:
+        proc = subprocess.run(
+            [
+                "gh", "pr", "view", pr_url,
+                "--json", "state,mergeable,statusCheckRollup",
+            ],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        decoded = json.loads(proc.stdout or "{}")
+        return decoded if isinstance(decoded, dict) else None
+    except Exception:
+        return None
+
+
+def _gh_pr_merge(pr_url: str) -> bool:
+    """Complete the canonical cycle: merge the PR and delete its branch."""
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "merge", pr_url, "--merge", "--delete-branch"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _resolve_active_pr_guard(
+    conn: sqlite3.Connection, task_id: str, pr_url: str, now: int
+) -> "Optional[str]":
+    """Resolve an active-PR hold instead of parking the card forever."""
+    already = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND kind IN (?, ?) "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, *_AUTO_MERGE_RESOLVED_KINDS),
+    ).fetchone()
+    if already:
+        return None
+    if not _auto_merge_active_pr_enabled():
+        return "active_pr"
+    info = _gh_pr_json(pr_url)
+    if info is None:
+        return "active_pr"
+    state = str(info.get("state") or "").upper()
+    if state in {"MERGED", "CLOSED"}:
+        _record_pr_guard_event(conn, task_id, "pr_resolved", pr_url, state)
+        return None
+    checks = info.get("statusCheckRollup") or []
+    conclusions = {
+        str(item.get("conclusion") or item.get("state") or "").upper()
+        for item in checks
+        if isinstance(item, dict)
+    }
+    all_green = not conclusions or conclusions <= {"SUCCESS", "NEUTRAL", "SKIPPED"}
+    mergeable = str(info.get("mergeable") or "").upper() == "MERGEABLE"
+    if state == "OPEN" and all_green and mergeable:
+        if _gh_pr_merge(pr_url):
+            _record_pr_guard_event(conn, task_id, "pr_automerged", pr_url, "MERGED")
+            return None
+    return "active_pr"
+
+
+def _record_pr_guard_event(
+    conn: sqlite3.Connection, task_id: str, kind: str, pr_url: str, state: str
+) -> None:
+    try:
+        with write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_events(task_id, kind, payload, created_at) "
+                "VALUES (?, ?, ?, strftime('%s','now'))",
+                (task_id, kind, json.dumps({"pr": pr_url, "state": state})),
+            )
+    except Exception:
+        pass
 
 
 def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
