@@ -377,6 +377,116 @@ def _render_kanban_worker_focus(task: Any, *, board: str, active_count: int) -> 
     )
 
 
+# ── FNAT bubble re-rendering (worker log dialects → principal's surface) ──
+#
+# The focus bubble reads whichever log the worker produced: the in-process
+# tee ("┊ {icon} {name}  {args}  {dur}s"), the live-transcript fallback
+# ("┊ Tool: name(args)" / "┊ name ok 0.1s: {result json}"), or a dispatcher
+# CLI stdout ("┊ 💻 $  cmd  0.1s"). All three are log dialects; the
+# principal's chat surface is semantic ("💻 Running git status"). Rather
+# than passing log lines through verbatim (raw result JSON included —
+# operator regression report 28/08), each line is parsed back to
+# (tool, args) and re-rendered with the same emoji + friendly-verb tables
+# the principal uses. Success results are dropped (the principal never
+# shows them); errors keep a short extracted message.
+
+# Live-transcript fallback: "Tool: name(args)" (args may be truncated).
+_FOCUS_TOOL_CALL_RE = re.compile(
+    r"^Tool: (?P<name>[\w.-]+)\((?P<args>.*)\)$"
+)
+# Live-transcript fallback result: "name ok|ERROR 0.1s: {...}".
+_FOCUS_RESULT_RE = re.compile(
+    r"^(?P<name>[\w.-]+) (?P<status>ok|ERROR)(?: [\d.]+s)?: ?(?P<rest>.*)$"
+)
+# Native tee / CLI stdout: "{icon} {label}  {args}  {dur}s" — the icon is
+# any non-word glyph run; a trailing duration is optional.
+_FOCUS_NATIVE_RE = re.compile(
+    r"^(?P<icon>[^\w\s]+)\s+(?P<label>\S+)\s*(?P<rest>.*?)(?:\s+[\d.]+s)?$"
+)
+_FOCUS_ERROR_FIELD_RE = re.compile(r'"error"\s*:\s*"(?P<msg>[^"]+)"')
+
+# Dispatcher CLI stdout labels are display aliases, not tool names
+# (agent/display.py _render_tool_line); map the common ones back so the
+# friendly-verb lookup works. Unknown labels render as-is with the default
+# gear emoji — degraded but never raw.
+_FOCUS_CLI_LABEL_TOOLS = {
+    "$": "terminal",
+    "plan": "todo",
+    "read": "read_file",
+    "write": "write_file",
+    "patch": "patch",
+    "search": "search_files",
+    "fetch": "web_extract",
+    "navigate": "browser_navigate",
+}
+
+_FOCUS_ARGS_MAX_CHARS = 100
+_FOCUS_ERROR_MAX_CHARS = 160
+
+# Core-tool emojis for when the tool registry is not loaded in this
+# process (tests, standalone renders). The live gateway resolves through
+# agent.display.get_tool_emoji → registry, same as the principal.
+_FOCUS_FALLBACK_EMOJIS = {
+    "terminal": "💻",
+    "read_file": "📖",
+    "write_file": "✍️",
+    "patch": "🔧",
+    "search_files": "🔎",
+    "web_search": "🔍",
+    "web_extract": "📄",
+    "browser_navigate": "🌐",
+    "skill_view": "📚",
+    "todo": "📋",
+    "delegate_task": "🤝",
+    "memory": "🧠",
+}
+
+
+def _focus_rich_tool_line(name: str, args_text: str) -> str:
+    """Render one tool call exactly the way the principal's chat surface does."""
+    from agent.display import (
+        get_tool_emoji,
+        get_tool_verb,
+        tool_verb_connector,
+        verb_drops_preview,
+    )
+
+    args_text = " ".join(str(args_text or "").split())
+    if len(args_text) > _FOCUS_ARGS_MAX_CHARS:
+        args_text = args_text[:_FOCUS_ARGS_MAX_CHARS - 3] + "..."
+    emoji = get_tool_emoji(name, default="") or _FOCUS_FALLBACK_EMOJIS.get(
+        name, "⚙️"
+    )
+    verb = get_tool_verb(name)
+    if verb and (verb_drops_preview(name) or not args_text):
+        body = verb
+    elif verb:
+        body = f"{verb}{tool_verb_connector(name)}{args_text}"
+    elif args_text:
+        body = f"{name} {args_text}"
+    else:
+        body = name
+    return f"{emoji} {body}"
+
+
+_FOCUS_OUTPUT_FIELD_RE = re.compile(r'"output"\s*:\s*"(?P<msg>[^"]+)"')
+
+
+def _focus_error_line(name: str, detail: str) -> str:
+    """Short error line: prefer the payload's error/output text over raw JSON."""
+    detail = str(detail or "").strip()
+    field = _FOCUS_ERROR_FIELD_RE.search(detail) or _FOCUS_OUTPUT_FIELD_RE.search(
+        detail
+    )
+    if field:
+        detail = field.group("msg")
+    detail = " ".join(detail.split())
+    if len(detail) > _FOCUS_ERROR_MAX_CHARS:
+        detail = detail[:_FOCUS_ERROR_MAX_CHARS - 3] + "..."
+    line = f"⚠ {name}" if name else "⚠"
+    return f"{line}: {detail}" if detail else line
+
+
 def _render_kanban_worker_focus_output(
     raw_log: Any,
     *,
@@ -384,7 +494,11 @@ def _render_kanban_worker_focus_output(
     include_tool_progress: bool = True,
     include_reasoning: bool = True,
 ) -> str:
-    """Project the latest worker attempt into one bounded, redacted message."""
+    """Project the latest worker attempt into one bounded, redacted message.
+
+    Log lines are re-rendered into the principal's semantic surface (emoji +
+    friendly verb + short args); raw tool results never reach the bubble.
+    """
     if not raw_log:
         return ""
     text = _WORKER_FOCUS_ANSI_RE.sub("", str(raw_log))
@@ -406,8 +520,40 @@ def _render_kanban_worker_focus_output(
         if len(reasoning) > _WORKER_FOCUS_MAX_REASONING_CHARS:
             reasoning = reasoning[:_WORKER_FOCUS_MAX_REASONING_CHARS].rstrip() + "..."
         if include_reasoning:
-            items.append(f"Reasoning: {reasoning}")
+            items.append(f"💭 {reasoning}")
         reasoning_lines = []
+
+    def _append_tool_item(body: str) -> None:
+        stripped = body.strip()
+        if not stripped:
+            return
+        call = _FOCUS_TOOL_CALL_RE.match(stripped)
+        if call:
+            items.append(_focus_rich_tool_line(call.group("name"), call.group("args")))
+            return
+        if stripped.startswith("Tool: "):
+            items.append(_focus_rich_tool_line(stripped[len("Tool: "):], ""))
+            return
+        result = _FOCUS_RESULT_RE.match(stripped)
+        if result:
+            if result.group("status") == "ERROR":
+                items.append(
+                    _focus_error_line(result.group("name"), result.group("rest"))
+                )
+            # Success results never reach the bubble — the principal's
+            # surface doesn't show them either.
+            return
+        native = _FOCUS_NATIVE_RE.match(stripped)
+        if native:
+            label = native.group("label")
+            name = _FOCUS_CLI_LABEL_TOOLS.get(label, label)
+            items.append(_focus_rich_tool_line(name, native.group("rest")))
+            return
+        # Unknown dialect: keep a hard-capped plain line rather than hiding
+        # activity — but this is the degraded path, not the design.
+        if len(stripped) > _WORKER_FOCUS_MAX_LINE_CHARS:
+            stripped = stripped[:_WORKER_FOCUS_MAX_LINE_CHARS].rstrip() + "..."
+        items.append(stripped)
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -426,12 +572,34 @@ def _render_kanban_worker_focus_output(
             if cleaned and cleaned != "Reasoning":
                 reasoning_lines.append(cleaned)
             continue
-        if include_tool_progress and (
-            line.startswith("┊") or line.startswith("⚠")
-        ):
-            if len(line) > _WORKER_FOCUS_MAX_LINE_CHARS:
-                line = line[:_WORKER_FOCUS_MAX_LINE_CHARS].rstrip() + "..."
-            items.append(line)
+        if not include_tool_progress:
+            continue
+        if line.startswith("┊"):
+            _append_tool_item(line.lstrip("┊").strip())
+        elif line.startswith("⚠"):
+            body = line.lstrip("⚠").strip()
+            result = _FOCUS_RESULT_RE.match(body)
+            native = None if result else _FOCUS_NATIVE_RE.match(body)
+            if result:
+                items.append(
+                    _focus_error_line(result.group("name"), result.group("rest"))
+                )
+            elif native:
+                # Native tee error line: "⚠ {icon} {name}  {args}  {dur}s" —
+                # re-render rich and keep the warning prefix.
+                label = native.group("label")
+                name = _FOCUS_CLI_LABEL_TOOLS.get(label, label)
+                items.append(
+                    "⚠ " + _focus_rich_tool_line(name, native.group("rest"))
+                )
+            else:
+                items.append(_focus_error_line("", body))
+        elif line.startswith("──"):
+            marker = " ".join(line.lstrip("─").split())
+            if marker:
+                if len(marker) > _WORKER_FOCUS_MAX_LINE_CHARS:
+                    marker = marker[:_WORKER_FOCUS_MAX_LINE_CHARS].rstrip() + "..."
+                items.append(f"── {marker}")
     _flush_reasoning()
 
     if not items:

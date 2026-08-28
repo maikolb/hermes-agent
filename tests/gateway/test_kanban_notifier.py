@@ -477,8 +477,8 @@ def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypa
     assert "first worker" in focus_messages[0]["text"]
     assert "other project worker" not in focus_messages[0]["text"]
     assert "⏳ Trabalhando…" in focus_messages[0]["text"]
-    assert "┊ Tool: read current worker file" in focus_messages[0]["text"]
-    assert "Reasoning: Inspecting the current worker attempt" in focus_messages[0]["text"]
+    assert "read current worker file" in focus_messages[0]["text"]
+    assert "💭 Inspecting the current worker attempt" in focus_messages[0]["text"]
     focus_message_id = focus_messages[0]["message_id"]
 
     # A new user turn immediately reclaims the presentation lane. The workers
@@ -651,7 +651,7 @@ def test_worker_rotation_respects_display_flags_and_indicator_edit_cadence(
     )
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     focus = [item for item in adapter.sent if "Now following worker" in item["text"]][-1]
-    assert "┊ Tool: first visible step" in focus["text"]
+    assert "first visible step" in focus["text"]
     assert "Hidden reasoning" not in focus["text"]
 
     worker_log["text"] = worker_log["text"].replace(
@@ -674,7 +674,7 @@ def test_worker_rotation_respects_display_flags_and_indicator_edit_cadence(
     runner._running = True
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert "second throttled step" not in adapter.edited[-1]["content"]
-    assert "Reasoning: Hidden reasoning" in adapter.edited[-1]["content"]
+    assert "💭 Hidden reasoning" in adapter.edited[-1]["content"]
 
     platform_display["worker_rotation"] = False
     runner._running = True
@@ -1115,7 +1115,7 @@ def test_worker_focus_output_is_latest_attempt_redacted_and_bounded():
     assert "Obsolete reasoning" not in rendered
     assert "current step 0" not in rendered
     assert "current step 19" in rendered
-    assert "Reasoning: Finalizing the current attempt" in rendered
+    assert "💭 Finalizing the current attempt" in rendered
     assert secret not in rendered
     assert len(rendered) <= 2800
 
