@@ -21544,7 +21544,21 @@ def main(
                         # _on_tool_progress prints MoA reference blocks before
                         # its mode check. Neutralize them too so -Q stdout
                         # carries only the final response (#93220).
-                        cli.agent.tool_progress_callback = None
+                        # EXCEPT kanban dispatcher workers: their stdout IS
+                        # the board's live log (spawn redirects it), so they
+                        # print one shared-renderer line per tool event —
+                        # without it every surface fed by that file showed a
+                        # dead worker for the whole turn (28/08 Wave 4).
+                        if os.environ.get("HERMES_SESSION_SOURCE") == "kanban":
+                            from hermes_cli.worker_progress import (
+                                make_worker_progress_printer,
+                            )
+
+                            cli.agent.tool_progress_callback = (
+                                make_worker_progress_printer()
+                            )
+                        else:
+                            cli.agent.tool_progress_callback = None
                         cli.agent.tool_start_callback = None
                         cli.agent.tool_complete_callback = None
                         # Belt-and-braces for the executor's direct prints
