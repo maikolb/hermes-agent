@@ -78,6 +78,7 @@ from gateway.project_router import (
     UnknownUserError,
     build_team_resource_namespace,
     normalize_project_slug,
+    topic_creator_grant,
 )
 
 # --- Agent cache tuning ---------------------------------------------------
@@ -27279,16 +27280,55 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ),
         )
         router_config = getattr(getattr(self, "config", None), "project_router", None)
+        grant: Optional[str] = None
         if (
-            project_context is not None
-            and project_context.is_management
-            and project_context.access == "allow"
-            and context.source.platform == Platform.TELEGRAM
+            context.source.platform == Platform.TELEGRAM
             and getattr(router_config, "enabled", False) is True
         ):
+            management_only = (
+                getattr(router_config, "management_only", True) is not False
+            )
+            access = (
+                project_context.access if project_context is not None else None
+            )
+            grant = topic_creator_grant(
+                is_management=is_management,
+                access=access,
+                management_only=management_only,
+                sender_is_admin=False,
+            )
+            if grant is None and management_only and access != "deny":
+                # ACL lookup only when it can change the outcome: one
+                # indexed read against the profile router DB, fail-closed.
+                if not is_management and self._sender_is_project_admin(
+                    context.source
+                ):
+                    grant = "acl"
+        if grant is not None:
             creator = self._project_topic_creator_for_turn(context.source)
             tokens.append(("project_topic_creator", set_project_topic_creator(creator)))
         return tokens
+
+    def _sender_is_project_admin(self, source: SessionSource) -> bool:
+        """allow/admin ACL entry anywhere in the profile → "acl" grant.
+
+        Fail-closed: no sender identity, no router DB, or any lookup
+        failure means no grant (the management Topic path is unaffected).
+        """
+        try:
+            user_id = str(getattr(source, "user_id", None) or "").strip()
+            if not user_id:
+                return False
+            profile = self._effective_project_router_profile(source)
+            db_path = self._project_router_db_path(source)
+            with ProjectRouter(db_path, profile) as router:
+                return router.is_profile_admin(user_id)
+        except Exception:  # noqa: BLE001 — grant check must never break a turn
+            logger.debug(
+                "profile-admin ACL check failed; no topic-creator grant",
+                exc_info=True,
+            )
+            return False
 
     def _project_topic_creator_for_turn(self, source: SessionSource) -> Callable[..., Awaitable[dict]]:
         """Build a management-only creator pinned to this source and profile."""

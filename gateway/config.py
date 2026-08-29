@@ -935,6 +935,11 @@ class ProjectRouterConfig:
     namespace_team_resources: bool = False
     management_topic_names: List[str] = field(default_factory=lambda: ["🧭 Gestão"])
     workspace_root: Optional[Path] = None
+    # When False, the management Topic is not the only gate for
+    # project_topic_create: any allowed thread on this profile may create
+    # and bind Topics (operator order, 28/08 — a standalone group asked
+    # for a bind and the management-only gate had no path for it).
+    management_only: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -949,6 +954,7 @@ class ProjectRouterConfig:
             "workspace_root": (
                 str(self.workspace_root) if self.workspace_root is not None else None
             ),
+            "management_only": self.management_only,
         }
 
     @classmethod
@@ -1020,6 +1026,7 @@ class ProjectRouterConfig:
         namespace_team_resources = _coerce_bool(
             data.get("namespace_team_resources"), False
         )
+        management_only = _coerce_bool(data.get("management_only"), True)
         if enabled and auto_register_topics and workspace_root is None:
             logger.warning(
                 "project_router auto_register_topics is enabled without workspace_root; "
@@ -1037,6 +1044,7 @@ class ProjectRouterConfig:
             namespace_team_resources=namespace_team_resources,
             management_topic_names=management_topic_names,
             workspace_root=workspace_root,
+            management_only=management_only,
         )
 
 
