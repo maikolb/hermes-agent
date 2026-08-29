@@ -13,6 +13,10 @@ def test_status_openers_match_through_markdown_and_emoji():
     assert looks_like_status_not_closeout("Em andamento: subindo o repo")
     assert looks_like_status_not_closeout("- vou criar o contrato em seguida")
     assert looks_like_status_not_closeout("Working on the private repo now")
+    # Spinner/hourglass noise + NFKC (reviewer: "⏳ Em execução" escaped)
+    assert looks_like_status_not_closeout("⏳ Em execução")
+    assert looks_like_status_not_closeout("🔄 Aguardando resposta da API")
+    assert looks_like_status_not_closeout("Ｅm execução")  # fullwidth E, NFKC
 
 
 def test_delivered_closeouts_pass():

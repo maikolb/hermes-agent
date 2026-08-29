@@ -34,6 +34,8 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 
+from tools.closeout_guard import looks_like_status_not_closeout
+
 logger = logging.getLogger(__name__)
 
 _TITLE_MAX = 140
@@ -509,14 +511,23 @@ def close_delegation_cards(
                     # "completed" | "failed" | "interrupted", plus
                     # "timeout" | "error" from the exceptional path.
                     if status == "completed":
-                        kb.complete_task(
-                            conn,
-                            task_id,
-                            result=(
-                                summary[:_SUMMARY_MAX]
-                                or "delegated subagent finished"
-                            ),
+                        final = (
+                            summary[:_SUMMARY_MAX]
+                            or "delegated subagent finished"
                         )
+                        # A status-line summary ("Aguardando...") published
+                        # verbatim makes the DONE mirror lie the same way
+                        # the principal mirror did (28/08 Central_DEC) —
+                        # same honest-note treatment here.
+                        if looks_like_status_not_closeout(final):
+                            snippet = " ".join(final.split())[:160]
+                            final = (
+                                "Subagente delegado encerrou anunciando "
+                                "continuação — o resultado consolidado "
+                                "sai no turno principal. Última "
+                                f"mensagem: “{snippet}”"
+                            )
+                        kb.complete_task(conn, task_id, result=final)
                     else:
                         error = str(
                             entry.get("error")

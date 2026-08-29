@@ -965,14 +965,18 @@ def _handle_complete(args: dict, **kw) -> str:
             if closeout_enforced and looks_like_status_not_closeout(
                 str(result or "")
             ):
+                # Same retry-not-terminal phrasing as the created_cards
+                # rejection below (#22923): without "still in-flight /
+                # retry", models treat tool_error as terminal and block.
                 return tool_error(
-                    "closeout rejected: it opens by declaring work still "
+                    "closeout rejected: it OPENS by declaring work still "
                     "in progress, but completing marks this card DONE. "
-                    "Either finish and resend the closeout stating what "
-                    "was delivered (with evidence), or — if work truly "
-                    "continues — keep the card alive: kanban_block with "
-                    "the blocking reason, or a kanban_comment progress "
-                    "note instead of completion."
+                    "Your task is still in-flight (no state change). "
+                    "If the work is finished, retry kanban_complete with "
+                    "the closeout rewritten to state what WAS delivered, "
+                    "with evidence. If work truly continues, do not "
+                    "complete: call kanban_block with the blocking "
+                    "reason, or post progress via kanban_comment."
                 )
 
             delivery = kb.get_git_delivery_contract(conn, tid)

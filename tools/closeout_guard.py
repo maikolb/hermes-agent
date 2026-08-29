@@ -11,6 +11,7 @@ done, never what is still happening.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 # Openers that declare in-progress/future work. Matched against the
 # normalized OPENING of the closeout only — a legitimate closeout that
@@ -33,18 +34,26 @@ _STATUS_OPENERS = (
     "will ",
 )
 
-_NOISE_RE = re.compile(r"^[\s*_`#>•\-\N{WHITE HEAVY CHECK MARK}✔️☑️]+")
+_NOISE_RE = re.compile(
+    r"^[\s*_`#>•\-\N{WHITE HEAVY CHECK MARK}✔️☑️"
+    r"\N{HOURGLASS WITH FLOWING SAND}\N{HOURGLASS}"
+    r"\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS}"
+    r"\N{CLOCKWISE RIGHTWARDS AND LEFTWARDS OPEN CIRCLE ARROWS}"
+    r"\N{VARIATION SELECTOR-16}]+"
+)
 
 
 def looks_like_status_not_closeout(text: str) -> bool:
     """True when *text* OPENS by declaring work still in progress.
 
-    Normalization strips markdown emphasis, list/quote markers and
-    check-mark emoji so "**Em execução.**" and "✅ Aguardando..." match.
+    Normalization (NFKC + noise class) strips markdown emphasis,
+    list/quote markers, check-mark and spinner/hourglass emoji so
+    "**Em execução.**", "✅ Aguardando..." and "⏳ Em andamento" match.
     Empty text is not a status line (the length guard owns that case).
     """
     head = (text or "").strip()
     if not head:
         return False
+    head = unicodedata.normalize("NFKC", head)
     head = _NOISE_RE.sub("", head).casefold().lstrip()
     return head.startswith(_STATUS_OPENERS)
