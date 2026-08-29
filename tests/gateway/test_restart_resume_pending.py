@@ -1388,3 +1388,18 @@ async def test_startup_boot_sends_still_run_when_they_finish_quickly(monkeypatch
     runner._send_restart_notification.assert_awaited_once()
     runner._clear_delivery_obligation_resume_markers.assert_awaited_once()
     runner._redeliver_pending_obligations.assert_awaited_once()
+
+
+def test_auto_resume_note_carries_readonly_inventory_contract():
+    """G7 (both reviewers, 29/08): the synthesized auto-resume turn opens
+    with a read-only board inventory and NEVER re-delegates (a second
+    re-delegation would duplicate the recovery system's own action)."""
+    from gateway.run import build_resume_recovery_note
+
+    note = build_resume_recovery_note("restart_timeout", "")
+    assert "resume inventory" in note
+    assert "REPORT only" in note
+    assert "Do NOT re-delegate" in note
+    # A turn carrying a REAL user message stays user-directed: no inventory.
+    directed = build_resume_recovery_note("restart_timeout", "novo pedido")
+    assert "resume inventory" not in directed
