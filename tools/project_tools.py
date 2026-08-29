@@ -156,8 +156,10 @@ async def project_topic_create(
         return json.dumps({
             "success": False,
             "error": (
-                "project_topic_create is available only from an authorized Telegram "
-                "management Topic with project routing enabled"
+                "project_topic_create is not available in this turn. It requires "
+                "project routing enabled AND one of: the authorized management "
+                "Topic, a sender holding an admin ACL entry in this profile, or "
+                "`project_router.management_only: false` in the profile config."
             ),
         })
     result = await creator(
@@ -231,8 +233,10 @@ registry.register(
     schema={
         "name": "project_topic_create",
         "description": (
-            "Use only from the authorized Telegram management Topic to create a "
-            "Telegram Topic, project, and Kanban board. Do not use for ordinary tasks."
+            "Create a Telegram Topic, project, and Kanban board. Available from "
+            "the management Topic, from senders with an admin ACL entry in the "
+            "profile, or on profiles with project_router.management_only "
+            "disabled. Do not use for ordinary tasks."
         ),
         "parameters": {
             "type": "object",

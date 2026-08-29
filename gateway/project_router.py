@@ -103,6 +103,35 @@ def _required(value: object, name: str) -> str:
     return normalized
 
 
+def topic_creator_grant(
+    *,
+    is_management: bool,
+    access: object,
+    management_only: bool,
+    sender_is_admin: bool,
+) -> str | None:
+    """Why this turn may create/bind project Topics — or None.
+
+    Precedence (operator order, 28/08 — the management Topic must not be
+    the ONLY gate): the management Topic keeps its historical grant
+    ("management"); outside it, either the profile disabled the gate in
+    config ("config", ``project_router.management_only: false``) or the
+    sender already holds an allow/admin ACL entry in this profile
+    ("acl"). An explicit access denial always wins.
+    """
+    if access == "deny":
+        return None
+    if is_management and access == "allow":
+        return "management"
+    if is_management:
+        return None
+    if not management_only:
+        return "config"
+    if sender_is_admin:
+        return "acl"
+    return None
+
+
 def _id(value: object, name: str) -> str:
     return _required(value, name)
 
@@ -1135,6 +1164,25 @@ class ProjectRouter:
             is_management=bool(row["is_management"]),
             access=access,
         )
+
+    def is_profile_admin(self, user_id: object) -> bool:
+        """One allow/admin ACL entry anywhere in this profile.
+
+        The "acl" grant of the gate opening (28/08): a user the profile
+        already trusts as an admin somewhere may create/bind project
+        Topics from any thread, not only the management Topic. Read-only;
+        empty/blank ids are never admins.
+        """
+        uid = str(user_id or "").strip()
+        if not uid:
+            return False
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM acl_entries WHERE profile=? AND user_id=? "
+                "AND effect='allow' AND role='admin' LIMIT 1",
+                (self.profile, uid),
+            ).fetchone()
+        return row is not None
 
     def resolve_binding_readonly(
         self,
