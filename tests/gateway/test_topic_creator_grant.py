@@ -1,10 +1,11 @@
-"""A+B gate opening for project Topic creation (operator order, 28/08).
+"""A+B gate for project Topic creation — hardened cut (28/08 night).
 
-The management Topic used to be the ONLY grant for project_topic_create;
-a standalone group asked for a bind and the router had no path for it.
-Now: config (``project_router.management_only: false``) or an allow/admin
-ACL entry in the profile also grant the creator, and an explicit access
-denial always wins.
+First cut was REFUTED by adversarial review: deny could never win at
+turn time (denied contexts raise upstream), the per-turn ACL lookup
+blocked the event loop, and a multiplexed secondary profile inherited
+the primary's ``management_only``. Authorization now happens at the
+moment of use, inside the router the creator already opens, with a
+deny-first three-verdict ACL check that also vetoes the config grant.
 """
 
 from __future__ import annotations
@@ -12,88 +13,79 @@ from __future__ import annotations
 from pathlib import Path
 
 from gateway.config import ProjectRouterConfig
-from gateway.project_router import ProjectRouter, topic_creator_grant
+from gateway.project_router import ProjectRouter
 
 
-# --- pure decision --------------------------------------------------------
-
-def test_management_topic_keeps_historical_grant():
-    assert topic_creator_grant(
-        is_management=True, access="allow",
-        management_only=True, sender_is_admin=False,
-    ) == "management"
-
-
-def test_denied_access_always_wins():
-    for is_mgmt in (True, False):
-        assert topic_creator_grant(
-            is_management=is_mgmt, access="deny",
-            management_only=False, sender_is_admin=True,
-        ) is None
+def _seed(router: ProjectRouter, allowed_users: dict) -> None:
+    router.provision_topic_project(
+        "Delivery",
+        "Delivery",
+        "telegram",
+        "chat-a",
+        "thread-1",
+        allowed_users=allowed_users,
+        board_creator=lambda slug, **kw: {"slug": slug},
+    )
 
 
-def test_management_without_explicit_allow_grants_nothing():
-    assert topic_creator_grant(
-        is_management=True, access=None,
-        management_only=False, sender_is_admin=True,
-    ) is None
+# --- topic_grant_at_use: three verdicts, deny-first -----------------------
 
-
-def test_config_disables_the_gate_for_any_thread():
-    assert topic_creator_grant(
-        is_management=False, access=None,
-        management_only=False, sender_is_admin=False,
-    ) == "config"
-    assert topic_creator_grant(
-        is_management=False, access="allow",
-        management_only=False, sender_is_admin=False,
-    ) == "config"
-
-
-def test_profile_admin_grants_outside_management():
-    assert topic_creator_grant(
-        is_management=False, access=None,
-        management_only=True, sender_is_admin=True,
-    ) == "acl"
-
-
-def test_default_stays_closed():
-    assert topic_creator_grant(
-        is_management=False, access=None,
-        management_only=True, sender_is_admin=False,
-    ) is None
-
-
-# --- ACL lookup -----------------------------------------------------------
-
-def test_is_profile_admin_reads_seeded_acl(tmp_path: Path):
+def test_admin_anywhere_in_profile_grants(tmp_path: Path):
     with ProjectRouter(tmp_path / "router.db", "default") as router:
+        _seed(router, {"renan": "allow"})
+        assert router.topic_grant_at_use("renan", "chat-b") == "acl"
+        assert router.topic_grant_at_use("renan", "chat-a") == "acl"
+
+
+def test_deny_in_current_chat_vetoes_even_an_admin(tmp_path: Path):
+    """Reviewer probe C: a user denied in a chat must not create there,
+    even holding admin elsewhere — and the deny verdict is distinct so
+    it also vetoes the config grant."""
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        _seed(router, {"renan": "allow"})
         router.provision_topic_project(
-            "Delivery",
-            "Delivery",
-            "telegram",
-            "chat",
-            "thread",
-            allowed_users={"renan": "allow", "intruso": "deny"},
+            "Outro", "Outro", "telegram", "chat-b", "thread-2",
+            allowed_users={"renan": "deny"},
             board_creator=lambda slug, **kw: {"slug": slug},
         )
-        assert router.is_profile_admin("renan") is True
-        assert router.is_profile_admin("intruso") is False  # effect=deny
-        assert router.is_profile_admin("desconhecido") is False
-        assert router.is_profile_admin("") is False
-        assert router.is_profile_admin(None) is False
+        assert router.topic_grant_at_use("renan", "chat-b") == "deny"
+        assert router.topic_grant_at_use("renan", "chat-a") == "acl"
 
 
-def test_is_profile_admin_is_profile_scoped(tmp_path: Path):
+def test_unknown_user_has_no_acl_opinion(tmp_path: Path):
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        _seed(router, {"renan": "allow"})
+        assert router.topic_grant_at_use("desconhecido", "chat-a") is None
+
+
+def test_blank_sender_is_denied_not_neutral(tmp_path: Path):
+    """A turn with no sender identity must never fall through to the
+    config grant (internal continuations fabricate access without a
+    sender — reviewer trap)."""
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        assert router.topic_grant_at_use("", "chat-a") == "deny"
+        assert router.topic_grant_at_use(None, "chat-a") == "deny"
+
+
+def test_member_role_allow_is_not_an_admin_grant(tmp_path: Path):
+    """Reviewer probe E: effect=allow with role=member must not grant."""
+    with ProjectRouter(tmp_path / "router.db", "default") as router:
+        _seed(router, {"renan": "allow"})
+        with router._lock:
+            router._connection.execute(
+                "INSERT INTO acl_entries(profile, chat_id, user_id, effect, role) "
+                "VALUES ('default', 'chat-m', 'membro', 'allow', 'member')"
+            )
+            router._connection.commit()
+        assert router.topic_grant_at_use("membro", "chat-m") is None
+
+
+def test_verdict_is_profile_scoped(tmp_path: Path):
     db = tmp_path / "router.db"
     with ProjectRouter(db, "default") as router:
-        router.provision_topic_project(
-            "Delivery", "Delivery", "telegram", "chat", "thread",
-            allowed_users={"renan": "allow"},
-            board_creator=lambda slug, **kw: {"slug": slug},
-        )
+        _seed(router, {"renan": "allow"})
     with ProjectRouter(db, "outro-perfil") as router:
-        assert router.is_profile_admin("renan") is False
+        assert router.topic_grant_at_use("renan", "chat-a") is None
 
 
 # --- config ---------------------------------------------------------------

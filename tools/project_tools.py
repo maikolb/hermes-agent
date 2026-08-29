@@ -144,7 +144,12 @@ async def project_topic_create(
     workdir: Optional[str] = None,
     status: str = "active",
 ) -> str:
-    """Delegate management-topic creation to the current gateway turn."""
+    """Delegate project-Topic creation to the current gateway turn.
+
+    The creator callback authorizes at the moment of use: management
+    Topic (historical), admin ACL entry in the profile (deny in the
+    current chat vetoes), or the profile's own management_only=false.
+    """
     normalized_name = (name or "").strip()
     if not normalized_name:
         return json.dumps({"success": False, "error": "name is required"})

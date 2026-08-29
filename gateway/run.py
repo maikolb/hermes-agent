@@ -78,7 +78,6 @@ from gateway.project_router import (
     UnknownUserError,
     build_team_resource_namespace,
     normalize_project_slug,
-    topic_creator_grant,
 )
 
 # --- Agent cache tuning ---------------------------------------------------
@@ -27280,58 +27279,46 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ),
         )
         router_config = getattr(getattr(self, "config", None), "project_router", None)
-        grant: Optional[str] = None
         if (
             context.source.platform == Platform.TELEGRAM
             and getattr(router_config, "enabled", False) is True
         ):
-            management_only = (
-                getattr(router_config, "management_only", True) is not False
+            management_grant = bool(
+                project_context is not None
+                and project_context.is_management
+                and project_context.access == "allow"
             )
-            access = (
-                project_context.access if project_context is not None else None
+            denied_context = bool(
+                project_context is not None
+                and project_context.access == "deny"
             )
-            grant = topic_creator_grant(
-                is_management=is_management,
-                access=access,
-                management_only=management_only,
-                sender_is_admin=False,
-            )
-            if grant is None and management_only and access != "deny":
-                # ACL lookup only when it can change the outcome: one
-                # indexed read against the profile router DB, fail-closed.
-                if not is_management and self._sender_is_project_admin(
-                    context.source
-                ):
-                    grant = "acl"
-        if grant is not None:
-            creator = self._project_topic_creator_for_turn(context.source)
-            tokens.append(("project_topic_creator", set_project_topic_creator(creator)))
+            # Turn-time stays O(0) I/O (adversarial review, 28/08: the
+            # first cut ran an ACL lookup + router open/migration on the
+            # event loop EVERY turn). The creator is injected whenever it
+            # COULD be usable; non-management authorization (per-profile
+            # config, deny-first ACL) is evaluated at the moment of use,
+            # inside the router the creator already opens.
+            if management_grant or not denied_context:
+                creator = self._project_topic_creator_for_turn(
+                    context.source, management_grant=management_grant
+                )
+                tokens.append(
+                    ("project_topic_creator", set_project_topic_creator(creator))
+                )
         return tokens
 
-    def _sender_is_project_admin(self, source: SessionSource) -> bool:
-        """allow/admin ACL entry anywhere in the profile → "acl" grant.
+    def _project_topic_creator_for_turn(
+        self, source: SessionSource, *, management_grant: bool = True
+    ) -> Callable[..., Awaitable[dict]]:
+        """Build a Topic creator pinned to this source and profile.
 
-        Fail-closed: no sender identity, no router DB, or any lookup
-        failure means no grant (the management Topic path is unaffected).
+        ``management_grant=True`` keeps the historical management-Topic
+        behavior. ``False`` defers authorization to the moment of use:
+        per-profile config (``management_only: false`` — honored only for
+        the process's own profile, so a multiplexed secondary profile
+        never inherits it) or a deny-first ACL grant, both evaluated
+        inside the router the creator opens anyway.
         """
-        try:
-            user_id = str(getattr(source, "user_id", None) or "").strip()
-            if not user_id:
-                return False
-            profile = self._effective_project_router_profile(source)
-            db_path = self._project_router_db_path(source)
-            with ProjectRouter(db_path, profile) as router:
-                return router.is_profile_admin(user_id)
-        except Exception:  # noqa: BLE001 — grant check must never break a turn
-            logger.debug(
-                "profile-admin ACL check failed; no topic-creator grant",
-                exc_info=True,
-            )
-            return False
-
-    def _project_topic_creator_for_turn(self, source: SessionSource) -> Callable[..., Awaitable[dict]]:
-        """Build a management-only creator pinned to this source and profile."""
         effective_profile = self._effective_project_router_profile(source)
         active_profile = str(self._active_profile_name() or "default").strip() or "default"
         if effective_profile in {active_profile, "default"}:
@@ -27345,7 +27332,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         db_path = self._project_router_db_path(source)
         chat_id = str(getattr(source, "chat_id", None) or "").strip()
         message_id = str(getattr(source, "message_id", None) or "").strip()
+        sender_user_id = str(getattr(source, "user_id", None) or "").strip()
         router_config = getattr(getattr(self, "config", None), "project_router", None)
+        # The "config" grant is honored only for the process's OWN profile:
+        # a multiplexed secondary profile must never inherit the primary
+        # config's management_only=false (adversarial review, 28/08).
+        config_gate_open = (
+            effective_profile == active_profile
+            and getattr(router_config, "management_only", True) is False
+        )
         raw_managed = getattr(router_config, "managed_chat_ids", [])
         managed_chat_ids = {
             str(value).strip()
@@ -27354,6 +27349,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             and not isinstance(value, bool)
             and str(value).strip()
         } if isinstance(raw_managed, list) else set()
+        # Known asymmetry (documented, reviewer 28/08): team namespacing only
+        # applies to managed_chat_ids, so an admin creating from an unmanaged
+        # chat provisions in the GLOBAL namespace — previously unreachable
+        # (management-only), now reachable via the acl/config grants.
         resource_namespace = (
             build_team_resource_namespace(effective_profile, chat_id)
             if bool(getattr(router_config, "namespace_team_resources", False))
@@ -27416,6 +27415,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     }
 
             with ProjectRouter(db_path, effective_profile) as router:
+                if not management_grant:
+                    # Authorization at the moment of use (never per turn):
+                    # an explicit deny in the current chat vetoes BOTH the
+                    # ACL and the config grants; otherwise an allow/admin
+                    # entry in the profile or the profile's own
+                    # management_only=false opens the gate. Fail-closed.
+                    verdict = router.topic_grant_at_use(
+                        sender_user_id, chat_id
+                    )
+                    if verdict == "deny" or (
+                        verdict is None and not config_gate_open
+                    ):
+                        return {
+                            "success": False,
+                            "error": (
+                                "project_topic_create is not authorized "
+                                "for this sender here. It requires one "
+                                "of: the authorized management Topic, an "
+                                "admin ACL entry in this profile (with "
+                                "no deny in this chat), or "
+                                "`project_router.management_only: false` "
+                                "in this profile's own config."
+                            ),
+                        }
                 existing = router.find_telegram_binding(chat_id, slug)
                 if existing is not None:
                     return _result(existing, created=False)
@@ -27496,6 +27519,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
                 provisioned = None
                 last_error = None
+                # Non-management grants revalidate inside the provision
+                # itself: the sender is passed through (fail-closed
+                # _authorize_sender) and seeded as the new Topic's admin —
+                # the first cut provisioned via the bootstrap path with no
+                # sender at all (adversarial review, 28/08).
+                _sender_kwargs = (
+                    {}
+                    if management_grant
+                    else {
+                        "sender_user_id": sender_user_id,
+                        "verified_sender_user_id": sender_user_id,
+                        "allowed_users": {sender_user_id: "allow"},
+                    }
+                )
                 for _attempt in range(2):
                     try:
                         provisioned = router.provision_topic_project(
@@ -27510,6 +27547,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             workspace_root=workspace_root,
                             resource_namespace=resource_namespace,
                             status=status,
+                            **_sender_kwargs,
                         )
                         break
                     except Exception as exc:

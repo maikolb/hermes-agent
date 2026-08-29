@@ -379,7 +379,7 @@ def test_management_session_env_omits_board_and_workdir_but_preserves_callback(m
     async def creator(**kwargs):
         return kwargs
 
-    runner._project_topic_creator_for_turn = lambda source: creator
+    runner._project_topic_creator_for_turn = lambda source, **kwargs: creator
     monkeypatch.setattr(
         "gateway.session_context.set_session_vars",
         lambda **kwargs: captured.update(kwargs) or [],
@@ -1074,21 +1074,25 @@ def _session_context(source):
     )
 
 
-@pytest.mark.parametrize(
-    ("access", "creator_expected"),
-    [("member", False), ("allow", True)],
-)
-def test_management_topic_creator_requires_explicit_acl_access(
-    access, creator_expected,
+@pytest.mark.parametrize("access", ["member", "allow"])
+def test_management_topic_creator_is_injected_and_authorization_moved_to_use(
+    access, tmp_path,
 ):
+    """Hardened contract (28/08): injection is unconditional for Telegram
+    turns (zero I/O at turn time); non-management authorization happens at
+    the moment of use inside the creator (deny-first ACL / per-profile
+    config — covered by test_topic_creator_grant.py). A member context no
+    longer suppresses the callback; it is refused when it tries to use it
+    without an admin grant."""
     runner = _runner(ProjectRouterConfig(enabled=True))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
     source = _source(message_id="management-access")
     tokens = runner._set_session_env(
         _session_context(source),
         _project(is_management=True, access=access),
     )
     try:
-        assert (get_project_topic_creator() is not None) is creator_expected
+        assert get_project_topic_creator() is not None
     finally:
         runner._clear_session_env(tokens)
 
@@ -1144,24 +1148,31 @@ async def test_management_creator_rejects_workdir_outside_workspace_root_before_
 
 
 @pytest.mark.parametrize(
-    ("source", "project"),
+    ("source", "project", "creator_expected"),
     [
-        (_source(message_id="1"), _project()),
+        # Telegram non-management: creator now INJECTED (hardened
+        # contract — authorization at use, not at turn time).
+        (_source(message_id="1"), _project(), True),
+        # Non-Telegram platforms never get the creator.
         (
             _source(platform=Platform.DISCORD, message_id="1"),
             ProjectContext(**{
                 **_project(is_management=True).__dict__,
                 "platform": "discord",
             }),
+            False,
         ),
     ],
 )
-def test_project_topic_creator_absent_outside_telegram_management(source, project):
+def test_project_topic_creator_injection_by_platform(
+    source, project, creator_expected, tmp_path,
+):
     runner = _runner(ProjectRouterConfig(enabled=True))
+    runner._resolve_profile_home_for_source = lambda source: tmp_path
     runner.adapters = {}
     tokens = runner._set_session_env(_session_context(source), project)
     try:
-        assert get_project_topic_creator() is None
+        assert (get_project_topic_creator() is not None) is creator_expected
     finally:
         runner._clear_session_env(tokens)
     assert get_project_topic_creator() is None
