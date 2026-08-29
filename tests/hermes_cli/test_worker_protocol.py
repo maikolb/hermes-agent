@@ -105,3 +105,15 @@ def test_spawn_prompt_carries_protocol(board, monkeypatch, tmp_path):
     joined = " ".join(str(part) for part in captured["cmd"])
     assert "Worker Protocol (AOF)" in joined
     assert "kanban_complete" in joined
+
+
+def test_protocol_formalizes_deliver_phase():
+    """T6/G6 (spec): the dev loop spec->build->review/evidence->delivery is
+    a single contract in the protocol — delivery is a phase of the cycle,
+    never a wait for a human (A_BASE.md; skill v3)."""
+    text = dispatcher_worker_protocol()
+    assert "4. DELIVER" in text
+    assert "green PR merges" in text
+    assert "never waiting for a human" in text
+    assert "validate the live target" in text
+    assert "5. CLOSEOUT" in text
