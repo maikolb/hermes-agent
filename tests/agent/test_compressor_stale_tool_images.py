@@ -104,6 +104,10 @@ class TestRetireStaleToolImagesInProtectedTail:
                     "text_summary": f"native shot {i}",
                 },
             })
+        # G5: media after the last user message belongs to the current
+        # turn and is protected; close the turn so the keep-newest
+        # history window is what this test exercises.
+        msgs.append({"role": "user", "content": "compare the shots"})
 
         out, _ = _compressor()._prune_old_tool_results(
             msgs, protect_tail_count=20,
