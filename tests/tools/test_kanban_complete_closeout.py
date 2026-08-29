@@ -88,3 +88,50 @@ def test_non_worker_caller_not_enforced(board):
     task_id = _make_claimed_task()
     out = _handle_complete({"task_id": task_id, "summary": "triagem ok"})
     assert "closeout too short" not in out
+
+
+STATUS_CLOSEOUT = (
+    "**Em execução.** Estou preparando o repositório privado e o contrato "
+    "local; em seguida farei o push inicial e a configuração do deploy."
+)
+
+
+def test_worker_status_closeout_is_refused(board, monkeypatch):
+    """A done record must state what WAS done (28/08 Central_DEC: a card
+    closed done in 40s with a status line and the operator read the
+    system as stalled)."""
+    task_id = _make_claimed_task()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    out = _handle_complete({"task_id": task_id, "summary": STATUS_CLOSEOUT})
+    assert "closeout rejected" in out
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, task_id).status != "done"
+    finally:
+        conn.close()
+
+    out2 = _handle_complete({"task_id": task_id, "summary": CLOSEOUT})
+    assert "closeout rejected" not in out2
+    assert _result_of(task_id) == CLOSEOUT
+
+
+def test_status_mention_mid_text_still_passes(board, monkeypatch):
+    """Only the OPENING is judged — a delivered closeout that mentions a
+    pending item mid-text is legitimate."""
+    task_id = _make_claimed_task()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    closeout = (
+        "Done: repo criado e push feito, PR #12 aberto. Evidence: CI verde. "
+        "Limitations: aguardando aprovação do deploy pelo operador."
+    )
+    out = _handle_complete({"task_id": task_id, "summary": closeout})
+    assert "closeout rejected" not in out
+    assert _result_of(task_id) == closeout
+
+
+def test_status_closeout_escape_hatch(board, monkeypatch):
+    task_id = _make_claimed_task()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setenv("HERMES_KANBAN_REQUIRE_CLOSEOUT", "off")
+    out = _handle_complete({"task_id": task_id, "summary": STATUS_CLOSEOUT})
+    assert "closeout rejected" not in out

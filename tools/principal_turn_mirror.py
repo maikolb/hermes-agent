@@ -27,6 +27,7 @@ import threading
 import time
 from typing import Optional
 
+from tools.closeout_guard import looks_like_status_not_closeout
 from tools.delegation_kanban import (
     _BODY_MAX,
     _CLAIM_TTL_SECONDS,
@@ -72,6 +73,28 @@ def _last_assistant_message(session_id: Optional[str]) -> str:
         return str(row["content"]).strip() if row else ""
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _compose_final_result(summary: str, minutes: int) -> str:
+    """The mirror card's DONE record for this turn.
+
+    The turn's own final message is the principal's AOF closeout — unless
+    it is a status line ("**Em execução.**", 28/08 Central_DEC): publishing
+    that as a done result makes the board lie and reads as a stall. Then
+    an honest completion note points at the continuation instead.
+    """
+    if summary and looks_like_status_not_closeout(summary):
+        snippet = " ".join(summary.split())[:160]
+        return (
+            f"Turno principal encerrou (~{minutes} min) anunciando "
+            f"continuação — o trabalho segue fora deste turno (veja os "
+            f"cards de trabalho do board). Última mensagem: “{snippet}”"
+        )
+    if summary:
+        return (
+            f"{summary}\n\n(Turno principal concluído em ~{minutes} min.)"
+        )
+    return f"Turno principal concluído em ~{minutes} min."
 
 
 def _clean_title_hint(raw: str) -> str:
@@ -161,14 +184,9 @@ class PrincipalTurnMirror:
                 # own final message IS that closeout — carry it as the card
                 # result so the completion trace publishes substance, not a
                 # bare duration line.
-                summary = _last_assistant_message(session_id)
-                if summary:
-                    result = (
-                        f"{summary}\n\n"
-                        f"(Turno principal concluído em ~{minutes} min.)"
-                    )
-                else:
-                    result = f"Turno principal concluído em ~{minutes} min."
+                result = _compose_final_result(
+                    _last_assistant_message(session_id), minutes
+                )
                 with kb.connect_closing(board=board) as conn:
                     kb.complete_task(
                         conn, task_id, result=result[:_SUMMARY_MAX],
