@@ -38,6 +38,7 @@ from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import judge_goal
+from tools.closeout_guard import looks_like_status_not_closeout
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 
@@ -941,13 +942,13 @@ def _handle_complete(args: dict, **kw) -> str:
             # closeout — prompts and SOUL only suggest; the tool refuses.
             # Runs after the goal judge so its richer rejection speaks
             # first. HERMES_KANBAN_REQUIRE_CLOSEOUT=off is the escape.
-            if (
+            closeout_enforced = (
                 os.environ.get("HERMES_KANBAN_TASK", "").strip() == str(tid)
                 and os.environ.get(
                     "HERMES_KANBAN_REQUIRE_CLOSEOUT", "on"
                 ).strip().lower() not in ("off", "0", "false")
-                and len(str(result or "").strip()) < 40
-            ):
+            )
+            if closeout_enforced and len(str(result or "").strip()) < 40:
                 return tool_error(
                     "closeout too short: this completion is the card's "
                     "durable record and the operator's completion trace. "
@@ -955,6 +956,32 @@ def _handle_complete(args: dict, **kw) -> str:
                     "`result`) carrying your structured closeout — Scope / "
                     "Done / Evidence / Limitations, or your profile's own "
                     "closeout contract."
+                )
+            # A done record must state what WAS done. A closeout that OPENS
+            # by declaring in-progress/future work ("Em execução",
+            # "Aguardando...") clears the length guard while telling the
+            # board a lie (28/08 Central_DEC: done in 40s, result was a
+            # status line, operator read the system as stalled).
+            # Both are durable surfaces: `result` becomes task.result and
+            # `summary` travels in the completed event / trace, so a
+            # status-line in EITHER lies to the board (reviewer round 2:
+            # validating only result let a separate summary slip through).
+            if closeout_enforced and (
+                looks_like_status_not_closeout(str(result or ""))
+                or looks_like_status_not_closeout(str(summary or ""))
+            ):
+                # Same retry-not-terminal phrasing as the created_cards
+                # rejection below (#22923): without "still in-flight /
+                # retry", models treat tool_error as terminal and block.
+                return tool_error(
+                    "closeout rejected: it OPENS by declaring work still "
+                    "in progress, but completing marks this card DONE. "
+                    "Your task is still in-flight (no state change). "
+                    "If the work is finished, retry kanban_complete with "
+                    "the closeout rewritten to state what WAS delivered, "
+                    "with evidence. If work truly continues, do not "
+                    "complete: call kanban_block with the blocking "
+                    "reason, or post progress via kanban_comment."
                 )
 
             delivery = kb.get_git_delivery_contract(conn, tid)
