@@ -135,3 +135,21 @@ def test_status_closeout_escape_hatch(board, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_REQUIRE_CLOSEOUT", "off")
     out = _handle_complete({"task_id": task_id, "summary": STATUS_CLOSEOUT})
     assert "closeout rejected" not in out
+
+
+def test_status_summary_with_good_result_still_refused(board, monkeypatch):
+    """Reviewer round 2: summary travels in the completed event even when
+    an explicit result is given — a status line in EITHER is refused."""
+    task_id = _make_claimed_task()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    out = _handle_complete({
+        "task_id": task_id,
+        "summary": STATUS_CLOSEOUT,
+        "result": CLOSEOUT,
+    })
+    assert "closeout rejected" in out
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, task_id).status != "done"
+    finally:
+        conn.close()

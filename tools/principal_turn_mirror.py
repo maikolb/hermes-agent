@@ -27,7 +27,10 @@ import threading
 import time
 from typing import Optional
 
-from tools.closeout_guard import looks_like_status_not_closeout
+from tools.closeout_guard import (
+    closeout_rewrite_enabled,
+    looks_like_status_not_closeout,
+)
 from tools.delegation_kanban import (
     _BODY_MAX,
     _CLAIM_TTL_SECONDS,
@@ -80,15 +83,21 @@ def _compose_final_result(summary: str, minutes: int) -> str:
 
     The turn's own final message is the principal's AOF closeout — unless
     it is a status line ("**Em execução.**", 28/08 Central_DEC): publishing
-    that as a done result makes the board lie and reads as a stall. Then
-    an honest completion note points at the continuation instead.
+    that as a done result makes the board lie and reads as a stall. The
+    replacement states only what this mirror KNOWS: the turn ended without
+    a delivery closeout; it does not claim continuation cards exist
+    (reviewer round 2: the earlier wording asserted unverified cards).
     """
-    if summary and looks_like_status_not_closeout(summary):
+    if (
+        summary
+        and closeout_rewrite_enabled()
+        and looks_like_status_not_closeout(summary)
+    ):
         snippet = " ".join(summary.split())[:160]
         return (
-            f"Turno principal encerrou (~{minutes} min) anunciando "
-            f"continuação — o trabalho segue fora deste turno (veja os "
-            f"cards de trabalho do board). Última mensagem: “{snippet}”"
+            f"Turno principal encerrou (~{minutes} min) SEM closeout de "
+            f"entrega: a última mensagem era um status — “{snippet}”. "
+            f"Continuação não verificada por este mirror."
         )
     if summary:
         return (

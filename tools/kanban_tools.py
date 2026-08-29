@@ -962,8 +962,13 @@ def _handle_complete(args: dict, **kw) -> str:
             # "Aguardando...") clears the length guard while telling the
             # board a lie (28/08 Central_DEC: done in 40s, result was a
             # status line, operator read the system as stalled).
-            if closeout_enforced and looks_like_status_not_closeout(
-                str(result or "")
+            # Both are durable surfaces: `result` becomes task.result and
+            # `summary` travels in the completed event / trace, so a
+            # status-line in EITHER lies to the board (reviewer round 2:
+            # validating only result let a separate summary slip through).
+            if closeout_enforced and (
+                looks_like_status_not_closeout(str(result or ""))
+                or looks_like_status_not_closeout(str(summary or ""))
             ):
                 # Same retry-not-terminal phrasing as the created_cards
                 # rejection below (#22923): without "still in-flight /

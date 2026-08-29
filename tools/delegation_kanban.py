@@ -34,7 +34,10 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 
-from tools.closeout_guard import looks_like_status_not_closeout
+from tools.closeout_guard import (
+    closeout_rewrite_enabled,
+    looks_like_status_not_closeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -518,14 +521,16 @@ def close_delegation_cards(
                         # A status-line summary ("Aguardando...") published
                         # verbatim makes the DONE mirror lie the same way
                         # the principal mirror did (28/08 Central_DEC) —
-                        # same honest-note treatment here.
-                        if looks_like_status_not_closeout(final):
+                        # same honest-note treatment, same escape, and no
+                        # unverified claims (reviewer round 2).
+                        if closeout_rewrite_enabled() and (
+                            looks_like_status_not_closeout(final)
+                        ):
                             snippet = " ".join(final.split())[:160]
                             final = (
-                                "Subagente delegado encerrou anunciando "
-                                "continuação — o resultado consolidado "
-                                "sai no turno principal. Última "
-                                f"mensagem: “{snippet}”"
+                                "Subagente delegado encerrou SEM closeout "
+                                "de entrega: a última mensagem era um "
+                                f"status — “{snippet}”."
                             )
                         kb.complete_task(conn, task_id, result=final)
                     else:
