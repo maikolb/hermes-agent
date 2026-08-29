@@ -224,6 +224,16 @@ def _capture_routing_origin() -> Dict[str, Any]:
             ("scope_id", "HERMES_SESSION_SCOPE_ID"),
             ("user_id", "HERMES_SESSION_USER_ID"),
             ("user_name", "HERMES_SESSION_USER_NAME"),
+            # G7 (both reviewers, 29/08): without platform/chat/thread the
+            # post-restart fallback rebuilds a SessionSource with
+            # thread_id=None, the readonly project resolver early-returns,
+            # and the resumed fan-out runs WITHOUT board env (cards and
+            # rotation silently skipped). Persisting the full origin is
+            # additive and closes the reconstruction gap at the source.
+            ("platform", "HERMES_SESSION_PLATFORM"),
+            ("chat_type", "HERMES_SESSION_CHAT_TYPE"),
+            ("chat_id", "HERMES_SESSION_CHAT_ID"),
+            ("thread_id", "HERMES_SESSION_THREAD_ID"),
         ):
             value = get_session_env(env_name, "")
             if value:
@@ -250,10 +260,12 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
             # whether the fan-out was board-bound (Factory OS layer), so
             # recovery only mentions mirror cards when they existed.
             "mode", "board",
-            # Routing origin (scope_id/user_id/user_name): persisted so a
-            # restart-recovered completion can reconstruct a full
-            # SessionSource — see _capture_routing_origin.
+            # Routing origin: persisted so a restart-recovered completion
+            # can reconstruct a full SessionSource — see
+            # _capture_routing_origin (platform/chat/thread added 29/08,
+            # G7: board env was lost on rebuilt sources without them).
             "scope_id", "user_id", "user_name",
+            "platform", "chat_type", "chat_id", "thread_id",
         )
         if key in record
     }
@@ -527,9 +539,13 @@ def recover_abandoned_delegations() -> int:
                 "dispatched_at": dispatched_at, "completed_at": now,
             }
             # Routing origin persisted at dispatch (see _capture_routing_origin):
-            # restores scope_id/user_id for the reconstructed SessionSource so
-            # relay egress priming works after a restart.
-            for _k in ("scope_id", "user_id", "user_name"):
+            # restores the full SessionSource fields so relay egress priming
+            # AND board-env resolution work after a restart (G7 29/08:
+            # thread_id absent → readonly resolver early-return → no board).
+            for _k in (
+                "scope_id", "user_id", "user_name",
+                "platform", "chat_type", "chat_id", "thread_id",
+            ):
                 if task.get(_k):
                     event[_k] = task[_k]
             result = {"status": "unknown", "summary": None, "error": event["error"]}
