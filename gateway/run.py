@@ -1758,7 +1758,14 @@ def build_resume_recovery_note(
             "This is an automatic recovery turn. Do NOT emit a 'session "
             "restored' acknowledgement and do NOT ask what to do next. "
             "Review the durable turn checkpoint and conversation history, "
-            "then CONTINUE the interrupted task from checkpoint.next_action."
+            "then CONTINUE the interrupted task from checkpoint.next_action. "
+            "If this topic is board-bound, START with a one-line resume "
+            "inventory (read the board, e.g. kanban_list): cards left "
+            "running without a live worker, ready cards waiting, and what "
+            "you are resuming — REPORT only. Do NOT re-delegate or requeue "
+            "anything yourself: the recovery system and the claim reaper "
+            "already own those actions, and a second re-delegation "
+            "duplicates work (G7 contract, 29/08)."
         )
         tail_guidance = (
             "Do NOT re-run tool calls whose results already "
