@@ -13961,6 +13961,11 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     lines.append("")
     lines.append(f"Assignee: {task.assignee or '(unassigned)'}")
     lines.append(f"Status:   {task.status}")
+    # G3 (spec T3): point the worker at the conversation that produced
+    # this card — zero I/O here (the stamp is already on the task row);
+    # the worker pulls details on demand via session_search when needed.
+    if getattr(task, "session_id", None):
+        lines.append(f"Origin session: {task.session_id}")
     if task.tenant:
         lines.append(f"Tenant:   {task.tenant}")
     lines.append(f"Workspace: {task.workspace_kind} @ {task.workspace_path or '(unresolved)'}")
