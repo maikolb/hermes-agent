@@ -14028,12 +14028,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         exc_info=True,
                     )
             if rejected_keys:
+                # Name every skipped session (G7 reviewers, 29/08): the
+                # aggregate count let a CheckpointWriteError days earlier
+                # surface here as an anonymous "skipped N" that nobody
+                # could connect back to its session or cause.
                 logger.warning(
                     "Skipped %d resume-pending session(s) without a fresh, "
                     "intact unfinished durable checkpoint; cleared %d stale "
-                    "control marker(s) while preserving transcripts",
+                    "control marker(s) while preserving transcripts. "
+                    "Skipped keys: %s",
                     len(rejected_keys),
                     cleared,
+                    ", ".join(rejected_keys[:20])
+                    + ("…" if len(rejected_keys) > 20 else ""),
                 )
             if unresolved_profile_keys:
                 logger.warning(
@@ -26913,6 +26920,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             chat_id = str(getattr(source, "chat_id", None) or "").strip()
             sender_user_id = str(getattr(source, "user_id", None) or "").strip()
             if not thread_id or not chat_id:
+                if chat_id and not thread_id:
+                    # A chat without a thread on an internal event is the
+                    # invisible board-env-loss signature (G7, 29/08): the
+                    # source was REBUILT without thread_id, so a board-bound
+                    # topic silently loses its project env. Say so.
+                    logger.warning(
+                        "read-only project resolution skipped: internal "
+                        "event source for chat=%s has no thread_id (rebuilt "
+                        "source?) — a board-bound topic would lose its "
+                        "project env this turn",
+                        chat_id,
+                    )
                 return None
             profile = self._effective_project_router_profile(source)
             db_path = self._project_router_db_path(source)
@@ -26949,7 +26968,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     verified_sender_user_id=sender_user_id,
                 )
         except Exception:
-            logger.debug(
+            # WARNING, not debug (G7 reviewers, 29/08): a swallowed failure
+            # here silently drops the board env for the resumed turn — the
+            # next occurrence must be visible in production logs.
+            logger.warning(
                 "read-only project resolution failed for internal event",
                 exc_info=True,
             )
