@@ -3296,14 +3296,18 @@ class GatewayKanbanWatchersMixin:
         cached = getattr(self, "_ready_watchdog_cfg", None)
         if cached is not None:
             return cached
-        settings = {"enabled": True, "threshold": 180.0, "default_assignee": ""}
+        settings = {"enabled": True, "threshold": 600.0, "default_assignee": ""}
         try:
             from hermes_cli.config import load_config as _load_config
 
             kanban_cfg = (_load_config() or {}).get("kanban", {}) or {}
             settings["enabled"] = bool(kanban_cfg.get("ready_watchdog", True))
             interval = float(kanban_cfg.get("dispatch_interval_seconds", 60) or 60)
-            ticks = float(kanban_cfg.get("ready_watchdog_ticks", 3) or 3)
+            # Default tolerance raised 3 → 10 ticks (operator, 29/08): a
+            # 3-4 minute wait alarmed the group during normal queueing;
+            # with measured-reason silence for full queues, 10 minutes is
+            # the floor where a no-claim card is worth a human's attention.
+            ticks = float(kanban_cfg.get("ready_watchdog_ticks", 10) or 10)
             settings["threshold"] = max(interval * ticks, 60.0)
             settings["default_assignee"] = (
                 str(kanban_cfg.get("default_assignee") or "").strip()
@@ -3314,8 +3318,16 @@ class GatewayKanbanWatchersMixin:
         return settings
 
     def _ready_watchdog_reason(
-        self, task: Any, default_assignee: str
+        self, task: Any, default_assignee: str, conn: Any = None
     ) -> str:
+        """MEASURED reason for a no-claim alert, or "" for silence.
+
+        Operator order (29/08): a queue wait is normal operation and must
+        be SILENT; an alert must carry a diagnosis that was measured, not
+        the old three-guess text ("parado, saturado ou indisponível" —
+        all three were false in the 29/08 incident). Every branch below
+        either measures its claim or stays quiet.
+        """
         assignee = str(task["assignee"] or "").strip() if "assignee" in task.keys() else ""
         if not assignee and not default_assignee:
             return (
@@ -3329,9 +3341,40 @@ class GatewayKanbanWatchersMixin:
         )
         if workspace and not Path(workspace).expanduser().exists():
             return f"workspace declarado não existe no host: {workspace}"
+        try:
+            from hermes_cli import kanban_db as _kb
+
+            profile_name = assignee or default_assignee
+            try:
+                from hermes_cli.profiles import profile_exists as _profile_exists
+                if profile_name and not _profile_exists(profile_name):
+                    return (
+                        f"perfil executor '{profile_name}' não existe neste "
+                        "host: o card nunca será spawnado aqui"
+                    )
+            except Exception:  # noqa: BLE001 — probe only
+                pass
+            if conn is not None:
+                # Deliberate dispatcher holds are working-as-designed: quiet.
+                if _kb._respawn_guard_backoff_remaining(conn, task["id"]) > 0:
+                    return ""
+                cap = _kb.resolve_max_in_progress(_kb.configured_max_in_progress())
+                if cap is not None:
+                    running = conn.execute(
+                        "SELECT count(*) FROM tasks WHERE status='running'"
+                    ).fetchone()[0]
+                    if int(running) >= int(cap):
+                        # Full queue = normal waiting, not an anomaly.
+                        return ""
+        except Exception:  # noqa: BLE001 — a probe failure must not block the alert
+            logger.debug("ready watchdog: measured probes failed", exc_info=True)
+        # Everything measurable was measured and nothing explains the wait:
+        # the dispatcher genuinely has not acted on a spawnable card. THIS
+        # is the real anomaly (29/08: tick wedged in the old process).
         return (
-            "pronto sem claim: dispatcher parado, saturado "
-            "(max_in_progress) ou perfil executor indisponível"
+            "nenhuma causa medida explica a espera (slots livres, perfil "
+            "existe, sem guard/backoff): o dispatcher não está agindo "
+            "neste board — checar o journal do gateway dono do lock"
         )
 
     @staticmethod
@@ -3558,9 +3601,13 @@ class GatewayKanbanWatchersMixin:
                 reason = (
                     self._ready_watchdog_guard_reason(conn, task_id)
                     or self._ready_watchdog_reason(
-                        task, settings["default_assignee"]
+                        task, settings["default_assignee"], conn=conn
                     )
                 )
+                if not reason:
+                    # Measured as normal waiting (full queue, deliberate
+                    # backoff): silence, per operator order 29/08.
+                    continue
                 age_minutes = max(
                     1, int((now - float(task["created_at"] or now)) // 60)
                 )
@@ -4154,6 +4201,12 @@ class GatewayKanbanWatchersMixin:
                     except Exception:
                         pass
 
+        # Which board the tick thread is currently visiting — read by the
+        # watchdog timeout below so a wedged tick names its board instead
+        # of vanishing silently (29/08 incident: 65min of zero spawns with
+        # no way to tell WHERE the tick thread was stuck).
+        tick_current_board: dict[str, object] = {"slug": None, "since": None}
+
         def _tick_once() -> "list[tuple[str, Optional[object]]]":
             """Run one dispatch_once per board. Returns (slug, result) pairs.
 
@@ -4168,8 +4221,41 @@ class GatewayKanbanWatchersMixin:
             out: list[tuple[str, "Optional[object]"]] = []
             for b in boards:
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
+                tick_current_board["slug"] = slug
+                tick_current_board["since"] = time.monotonic()
                 out.append((slug, _tick_once_for_board(slug)))
+            tick_current_board["slug"] = None
+            tick_current_board["since"] = None
             return out
+
+        def _tick_diagnosis(results) -> str:
+            """One-line measured summary of why a tick spawned nothing.
+
+            The DispatchResult already carries every skip reason; the old
+            loop threw them away and the stuck-warn guessed. Aggregates
+            only boards that had something to say."""
+            parts: list[str] = []
+            for slug, res in (results or []):
+                if res is None:
+                    continue
+                bits: list[str] = []
+                if getattr(res, "skipped_locked", False):
+                    bits.append("tick lock held elsewhere")
+                guarded = getattr(res, "respawn_guarded", None) or []
+                if guarded:
+                    bits.append(f"respawn_guarded={len(guarded)}")
+                capped = getattr(res, "skipped_per_profile_capped", None) or []
+                if capped:
+                    bits.append(f"per_profile_capped={len(capped)}")
+                unassigned = getattr(res, "skipped_unassigned", None) or []
+                if unassigned:
+                    bits.append(f"unassigned={len(unassigned)}")
+                rate_limited = getattr(res, "rate_limited", None) or []
+                if rate_limited:
+                    bits.append(f"rate_limited={len(rate_limited)}")
+                if bits:
+                    parts.append(f"{slug}: " + ", ".join(bits))
+            return "; ".join(parts) or "no board reported a skip reason"
 
         def _ready_nonempty() -> bool:
             """Cheap probe: is there at least one ready+assigned+unclaimed
@@ -4326,6 +4412,7 @@ class GatewayKanbanWatchersMixin:
             except Exception:
                 logger.exception("kanban dispatcher: zombie reaper failed")
 
+            results: "list[tuple[str, Optional[object]]]" = []
             try:
                 # Global emergency stop (`hermes pause`): skip auto-decompose
                 # and dispatch entirely — no new workers while paused. Running
@@ -4340,7 +4427,34 @@ class GatewayKanbanWatchersMixin:
                     _ad_enabled, _ad_per_tick = _read_auto_decompose_settings()
                     if _ad_enabled:
                         await _to_thread_process_service(_auto_decompose_tick, _ad_per_tick)
-                    results = await _to_thread_process_service(_tick_once)
+                    # Safety timeout: a tick thread wedged in a blocking
+                    # call (DB lock, hung subprocess) used to hang this
+                    # await FOREVER with zero telemetry (29/08: 65min of
+                    # silence, restart was the only cure). The thread
+                    # itself cannot be cancelled — but the loop survives,
+                    # names the board it was visiting, and later ticks on
+                    # unaffected boards keep flowing.
+                    try:
+                        results = await asyncio.wait_for(
+                            _to_thread_process_service(_tick_once),
+                            timeout=600.0,
+                        )
+                    except asyncio.TimeoutError:
+                        stuck_slug = tick_current_board.get("slug")
+                        since = tick_current_board.get("since")
+                        held = (
+                            f"{time.monotonic() - since:.0f}s"
+                            if isinstance(since, float) else "?"
+                        )
+                        logger.error(
+                            "kanban dispatcher: tick thread exceeded 600s and "
+                            "was abandoned — wedged while visiting board=%s "
+                            "(in that board for %s). The stuck thread may "
+                            "still hold that board's dispatch lock; other "
+                            "boards continue on subsequent ticks.",
+                            stuck_slug, held,
+                        )
+                        results = []
                     any_spawned = False
                     for slug, res in (results or []):
                         if res is not None and getattr(res, "spawned", None):
@@ -4367,12 +4481,15 @@ class GatewayKanbanWatchersMixin:
                 if bad_ticks >= HEALTH_WINDOW:
                     now = int(time.time())
                     if now - last_warn_at >= 300:
+                        # Measured diagnosis instead of the old three-guess
+                        # text (29/08 incident: every guess was wrong and
+                        # the real reason was discarded with the results).
                         logger.warning(
-                            "kanban dispatcher stuck: ready queue non-empty for "
-                            "%d consecutive ticks but 0 workers spawned. Check "
-                            "profile health (venv, PATH, credentials) and "
-                            "`hermes kanban list --status ready`.",
+                            "kanban dispatcher stuck: ready queue non-empty "
+                            "for %d consecutive ticks but 0 workers spawned. "
+                            "Last tick diagnosis — %s",
                             bad_ticks,
+                            _tick_diagnosis(results),
                         )
                         last_warn_at = now
             except asyncio.CancelledError:
