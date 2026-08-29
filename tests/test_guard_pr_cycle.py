@@ -1,8 +1,10 @@
-"""Active-PR guard completes the canonical cycle (operator, 28/08).
+"""Active-PR guard completes the canonical cycle — automerge stays.
 
-The ecosystem's flow is branch → PR → merge → delete-branch, fully
-autonomous. The guard exists to prevent duplicate PRs, not to park a
-card behind an orphaned green PR (Wave 4 do DOVCRM: 7.6 days ready).
+Operator contract (29/08, reaffirmed verbatim): branch → PR → merge →
+delete-branch, fully autonomous; a green PR merges itself and a parked
+PR is a failure. Hardening from the adversarial review applies only
+where it does not park a PR: same-PR resolution cache, empty rollup is
+never green, head-commit pinning, method fallback, visible refusals.
 """
 
 from __future__ import annotations
@@ -26,6 +28,13 @@ def board(tmp_path, monkeypatch):
 
 
 PR_URL = "https://github.com/acme/app/pull/38"
+
+GREEN = {
+    "state": "OPEN",
+    "mergeable": "MERGEABLE",
+    "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+    "headRefOid": "abc123def456",
+}
 
 
 def _task_with_pr(monkeypatch):
@@ -56,19 +65,16 @@ def test_merged_pr_releases_guard_and_records_event(board, monkeypatch):
 
 def test_open_green_mergeable_pr_is_merged_and_released(board, monkeypatch):
     conn, task_id = _task_with_pr(monkeypatch)
-    merged: list[str] = []
+    merged: list[tuple[str, str]] = []
+    monkeypatch.setattr(kb, "_gh_pr_json", lambda url: dict(GREEN))
     monkeypatch.setattr(
-        kb, "_gh_pr_json",
-        lambda url: {
-            "state": "OPEN",
-            "mergeable": "MERGEABLE",
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-        },
+        kb, "_gh_pr_merge",
+        lambda url, head_oid="": merged.append((url, head_oid)) or (True, "--merge"),
     )
-    monkeypatch.setattr(kb, "_gh_pr_merge", lambda url: merged.append(url) or True)
 
     assert kb.check_respawn_guard(conn, task_id) is None
-    assert merged == [PR_URL]
+    # merge targeted the cited PR AND pinned the validated head commit
+    assert merged == [(PR_URL, "abc123def456")]
     events = conn.execute(
         "SELECT 1 FROM task_events WHERE task_id=? AND kind='pr_automerged'",
         (task_id,),
@@ -77,22 +83,32 @@ def test_open_green_mergeable_pr_is_merged_and_released(board, monkeypatch):
     conn.close()
 
 
-def test_release_train_head_is_never_automerged(board, monkeypatch):
-    """A green staging→main release PR cited on a card must NOT be shipped
-    to production as a guard side effect (28/08 audit — smoke-gate class)."""
+@pytest.mark.parametrize("head", ["staging", "production", "release/2026.09"])
+def test_release_train_head_is_never_automerged(board, monkeypatch, head):
+    """A green train PR cited on a card must NOT ship to production as a
+    guard side effect. Denylist extended per reviewer round (29/08)."""
     conn, task_id = _task_with_pr(monkeypatch)
     monkeypatch.setattr(
-        kb, "_gh_pr_json",
-        lambda url: {
-            "state": "OPEN",
-            "mergeable": "MERGEABLE",
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-            "headRefName": "staging",
-        },
+        kb, "_gh_pr_json", lambda url: {**GREEN, "headRefName": head}
     )
     monkeypatch.setattr(
         kb, "_gh_pr_merge",
-        lambda url: (_ for _ in ()).throw(AssertionError("must not merge")),
+        lambda url, head_oid="": (_ for _ in ()).throw(AssertionError("must not merge")),
+    )
+
+    assert kb.check_respawn_guard(conn, task_id) == "active_pr"
+    conn.close()
+
+
+def test_empty_check_rollup_is_not_green(board, monkeypatch):
+    """Reviewer counterexample: a repo with no CI must not merge blind."""
+    conn, task_id = _task_with_pr(monkeypatch)
+    monkeypatch.setattr(
+        kb, "_gh_pr_json", lambda url: {**GREEN, "statusCheckRollup": []}
+    )
+    monkeypatch.setattr(
+        kb, "_gh_pr_merge",
+        lambda url, head_oid="": (_ for _ in ()).throw(AssertionError("must not merge")),
     )
 
     assert kb.check_respawn_guard(conn, task_id) == "active_pr"
@@ -111,7 +127,7 @@ def test_red_or_conflicting_pr_keeps_holding(board, monkeypatch):
     )
     monkeypatch.setattr(
         kb, "_gh_pr_merge",
-        lambda url: (_ for _ in ()).throw(AssertionError("must not merge")),
+        lambda url, head_oid="": (_ for _ in ()).throw(AssertionError("must not merge")),
     )
 
     assert kb.check_respawn_guard(conn, task_id) == "active_pr"
@@ -136,6 +152,78 @@ def test_kill_switch_disables_resolution(board, monkeypatch):
 
     assert kb.check_respawn_guard(conn, task_id) == "active_pr"
     conn.close()
+
+
+def test_stale_resolution_for_other_pr_does_not_release(board, monkeypatch):
+    """Reviewer counterexample: one old pr_resolved event must not release
+    every FUTURE PR on the card with zero fresh lookups."""
+    conn, task_id = _task_with_pr(monkeypatch)
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_events(task_id, kind, payload, created_at) "
+            "VALUES (?, 'pr_resolved', ?, strftime('%s','now')-50)",
+            (task_id, json.dumps({"pr": "https://github.com/acme/app/pull/1",
+                                  "state": "MERGED"})),
+        )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        kb, "_gh_pr_json",
+        lambda url: calls.append(url) or {
+            "state": "OPEN",
+            "mergeable": "CONFLICTING",
+            "statusCheckRollup": [{"conclusion": "FAILURE"}],
+        },
+    )
+
+    assert kb.check_respawn_guard(conn, task_id) == "active_pr"
+    assert calls == [PR_URL]  # fresh lookup happened for the NEW pr
+    conn.close()
+
+
+def test_merge_refusal_records_visible_event_once(board, monkeypatch):
+    """The old behavior swallowed gh failures; a refused merge now records
+    pr_merge_refused (once per PR) and retries on later ticks."""
+    conn, task_id = _task_with_pr(monkeypatch)
+    monkeypatch.setattr(kb, "_gh_pr_json", lambda url: dict(GREEN))
+    monkeypatch.setattr(
+        kb, "_gh_pr_merge",
+        lambda url, head_oid="": (False, "GraphQL: Base branch is protected"),
+    )
+
+    assert kb.check_respawn_guard(conn, task_id) == "active_pr"
+    assert kb.check_respawn_guard(conn, task_id) == "active_pr"
+    events = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_merge_refused'",
+        (task_id,),
+    ).fetchall()
+    assert len(events) == 1
+    assert "protected" in events[0]["payload"]
+    conn.close()
+
+
+def test_gh_pr_merge_pins_head_and_falls_back_on_method(board, monkeypatch):
+    """Unit contract of _gh_pr_merge: pins --match-head-commit and falls
+    back --merge → --squash when the repo refuses the merge METHOD
+    (linear-history repos used to park PRs forever)."""
+    calls: list[list[str]] = []
+
+    class P:
+        def __init__(self, rc, err=""):
+            self.returncode = rc
+            self.stderr = err
+            self.stdout = ""
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if "--merge" in argv:
+            return P(1, "Pull request merge method 'merge' is not allowed")
+        return P(0)
+
+    monkeypatch.setattr(kb.subprocess, "run", fake_run)
+    ok, detail = kb._gh_pr_merge(PR_URL, "abc123")
+    assert ok is True and detail == "--squash"
+    assert all("--match-head-commit" in c and "abc123" in c for c in calls)
+    assert ["--merge" in c for c in calls].count(True) == 1
 
 
 def test_rework_requested_after_pr_releases_guard(board, monkeypatch):

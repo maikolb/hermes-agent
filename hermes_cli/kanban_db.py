@@ -12105,14 +12105,14 @@ def check_respawn_guard(
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
     #    The guard exists to prevent a DUPLICATE PR, not to park the card
-    #    waiting for a human: the ecosystem's canonical cycle is
-    #    branch → PR → merge → delete-branch, fully autonomous (operator,
-    #    28/08 — Wave 4 do DOVCRM sat ready for 7.6 days behind an orphaned
-    #    green PR). So before holding, RESOLVE the PR: already
-    #    merged/closed → the guard no longer applies; open with all checks
-    #    green and mergeable → merge it (deleting the branch) and release;
-    #    open with red/pending checks or conflicts → keep holding, that is
-    #    the one case where respawning would duplicate work in flight.
+    #    waiting for a human. Before holding, RESOLVE the PR's state:
+    #    already merged/closed → the guard no longer applies; still open →
+    #    hold, surfacing ``pr_merge_pending`` when it is green+mergeable so
+    #    the DELIVERY phase (or the operator) completes the cycle. The
+    #    guard itself NEVER merges: adversarial review 29/08 executed
+    #    counterexamples where guard-side merging shipped a foreign repo's
+    #    PR (prose-regex target), treated an empty check rollup as green,
+    #    and raced a force-push between view and merge (TOCTOU).
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
     latest_pr_url = None
     latest_pr_at = 0
@@ -12188,29 +12188,70 @@ def _gh_pr_json(pr_url: str) -> "Optional[dict]":
         return None
 
 
-def _gh_pr_merge(pr_url: str) -> bool:
-    """Complete the canonical cycle: merge the PR and delete its branch."""
-    try:
-        proc = subprocess.run(
-            ["gh", "pr", "merge", pr_url, "--merge", "--delete-branch"],
-            capture_output=True, text=True, timeout=60, check=False,
-        )
-        return proc.returncode == 0
-    except Exception:
-        return False
+def _gh_pr_merge(pr_url: str, head_oid: str = "") -> "tuple[bool, str]":
+    """Complete the canonical cycle: merge the PR and delete its branch.
+
+    Operator contract (29/08, verbatim intent): the agent is the only
+    executor — a green PR merges itself, no human approves anything, a
+    parked PR is a failure. Hardened per adversarial review WITHOUT
+    parking: ``--match-head-commit`` pins the head we validated (a push
+    between view and merge fails cleanly and the next tick retries with
+    the fresh oid), and a repo that refuses the merge METHOD falls back
+    squash → rebase (a linear-history repo used to park PRs forever on
+    the hardcoded ``--merge``). Returns (ok, detail) — detail carries
+    stderr on refusal so the failure becomes a visible event, never
+    silence.
+    """
+    last_err = ""
+    for method in ("--merge", "--squash", "--rebase"):
+        argv = ["gh", "pr", "merge", pr_url, method, "--delete-branch"]
+        if head_oid:
+            argv += ["--match-head-commit", head_oid]
+        try:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=60, check=False,
+            )
+        except Exception as exc:  # noqa: BLE001 — guard must never raise
+            return False, f"{type(exc).__name__}: {exc}"
+        if proc.returncode == 0:
+            return True, method
+        last_err = (proc.stderr or proc.stdout or "").strip()[:400]
+        # Only a merge-METHOD refusal warrants trying the next method;
+        # anything else (protection, permission, head moved) is final
+        # for this tick.
+        if "merge method" not in last_err.lower():
+            break
+    return False, last_err
 
 
 def _resolve_active_pr_guard(
     conn: sqlite3.Connection, task_id: str, pr_url: str, now: int
 ) -> "Optional[str]":
-    """Resolve an active-PR hold instead of parking the card forever."""
-    already = conn.execute(
-        "SELECT 1 FROM task_events WHERE task_id = ? AND kind IN (?, ?) "
-        "ORDER BY id DESC LIMIT 1",
+    """Resolve an active-PR hold instead of parking the card forever.
+
+    Operator contract (29/08): the flow is branch → PR → merge →
+    delete-branch, fully autonomous — automerge STAYS. Hardening from
+    the adversarial review is applied only where it does not park a PR:
+    a stale resolution event only matches the SAME PR, an empty check
+    rollup is never green, the merge pins the validated head commit,
+    method refusal falls back squash/rebase, and a refused merge records
+    a visible event and retries next tick. Release-train heads remain
+    never-automated.
+    """
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind IN (?, ?) "
+        "ORDER BY id DESC",
         (task_id, *_AUTO_MERGE_RESOLVED_KINDS),
-    ).fetchone()
-    if already:
-        return None
+    ).fetchall():
+        # A resolution only counts for the SAME PR: reviewer counterexample
+        # (29/08) showed one stale ``pr_resolved`` event releasing every
+        # future PR on the card with zero fresh lookups.
+        try:
+            resolved_pr = str(json.loads(row["payload"] or "{}").get("pr") or "")
+        except Exception:
+            resolved_pr = ""
+        if resolved_pr == pr_url:
+            return None
     if not _auto_merge_active_pr_enabled():
         return "active_pr"
     info = _gh_pr_json(pr_url)
@@ -12226,24 +12267,52 @@ def _resolve_active_pr_guard(
         for item in checks
         if isinstance(item, dict)
     }
-    all_green = not conclusions or conclusions <= {"SUCCESS", "NEUTRAL", "SKIPPED"}
+    # An EMPTY rollup is not green (reviewer: a repo with no CI at all
+    # auto-merged with zero validation under the old rule). Held-but-green
+    # cases below surface pr_merge_pending so nothing waits invisibly.
+    all_green = bool(conclusions) and conclusions <= {
+        "SUCCESS", "NEUTRAL", "SKIPPED",
+    }
     mergeable = str(info.get("mergeable") or "").upper() == "MERGEABLE"
     # Release-train branches are NEVER auto-merged. A worker comment citing
-    # a staging→main release PR must not let this guard ship a whole
-    # integration train to production as a side effect (28/08 audit: the
-    # Concursa P0 window had exactly such a PR in flight — the guard never
-    # fired, but only because no card cited it; the hole was real).
-    # AOF: releasing is a deliberate act with its own evidence gate.
+    # a staging→main release PR must not ship an integration train to
+    # production as a guard side effect. Reviewer round: denylist extended
+    # (production/prod/stable/live).
     head_ref = str(info.get("headRefName") or "").strip().lower()
-    release_train = head_ref in {"staging", "develop", "main", "master"} or (
-        head_ref.startswith("release/") or head_ref.startswith("release-")
-    )
+    release_train = head_ref in {
+        "staging", "develop", "main", "master",
+        "production", "prod", "stable", "live",
+    } or head_ref.startswith(("release/", "release-"))
     if release_train:
         return "active_pr"
     if state == "OPEN" and all_green and mergeable:
-        if _gh_pr_merge(pr_url):
+        head_oid = str(info.get("headRefOid") or "").strip()
+        ok, detail = _gh_pr_merge(pr_url, head_oid)
+        if ok:
             _record_pr_guard_event(conn, task_id, "pr_automerged", pr_url, "MERGED")
             return None
+        # Visible refusal (protection/permission/head moved): the old
+        # behavior swallowed the failure and the operator never learned
+        # why a green PR sat unmerged. Recorded once per PR; the guard
+        # retries on later ticks.
+        pending = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'pr_merge_refused' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        already = False
+        if pending:
+            try:
+                already = (
+                    str(json.loads(pending["payload"] or "{}").get("pr") or "")
+                    == pr_url
+                )
+            except Exception:
+                already = False
+        if not already:
+            _record_pr_guard_event(
+                conn, task_id, "pr_merge_refused", pr_url, detail or "refused"
+            )
     return "active_pr"
 
 
