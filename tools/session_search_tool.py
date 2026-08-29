@@ -432,6 +432,26 @@ def _locate_session_db(session_id: str):
     return None, None
 
 
+def _drop_observed_rows(rows):
+    """Filter out observed group-context rows before shaping (G3 review, 29/08).
+
+    Observed rows are third parties' group messages persisted for ambient
+    context (``observed=1``); cross-profile session reads used to return
+    them verbatim, leaking other users' chatter into any agent that read a
+    session. They are context for the ORIGIN gateway's prompt assembly,
+    never payload for session readers.
+    """
+    out = []
+    for m in rows or []:
+        try:
+            if m.get("observed"):
+                continue
+        except AttributeError:
+            pass
+        out.append(m)
+    return out
+
+
 def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_profile: str = None) -> str:
     """Read shape: dump a whole session by id (head + tail when large).
 
@@ -454,7 +474,7 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_prof
         logging.error("get_messages failed for %s: %s", session_id, e, exc_info=True)
         return tool_error(f"failed to load session: {e}", success=False)
 
-    shaped = [_shape_message(m) for m in rows]
+    shaped = [_shape_message(m) for m in _drop_observed_rows(rows)]
     total = len(shaped)
     truncated = total > head + tail
     window = shaped[:head] + shaped[-tail:] if truncated else shaped
@@ -667,7 +687,7 @@ def _scroll(
             "title": session_meta.get("title"),
         },
         "window": window,
-        "messages": [_shape_message(m, anchor_id=around_message_id) for m in messages],
+        "messages": [_shape_message(m, anchor_id=around_message_id) for m in _drop_observed_rows(messages)],
         "messages_before": view.get("messages_before", 0),
         "messages_after": view.get("messages_after", 0),
     }
@@ -739,9 +759,9 @@ def _title_match_result(
         "matched_role": "session_title",
         "match_message_id": anchor_id,
         "snippet": f"Session title matched: {session_meta.get('title') or title_query}",
-        "bookend_start": [_shape_message(m) for m in (view.get("bookend_start") or messages[:3])],
-        "messages": [_shape_message(m, anchor_id=anchor_id) for m in (view.get("window") or messages[:5])],
-        "bookend_end": [_shape_message(m) for m in (view.get("bookend_end") or messages[-3:])],
+        "bookend_start": [_shape_message(m) for m in _drop_observed_rows(view.get("bookend_start") or messages[:3])],
+        "messages": [_shape_message(m, anchor_id=anchor_id) for m in _drop_observed_rows(view.get("window") or messages[:5])],
+        "bookend_end": [_shape_message(m) for m in _drop_observed_rows(view.get("bookend_end") or messages[-3:])],
         "messages_before": view.get("messages_before", 0),
         "messages_after": view.get("messages_after", max(len(messages) - 5, 0)),
         "detail": "full",

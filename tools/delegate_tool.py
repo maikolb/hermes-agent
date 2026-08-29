@@ -1274,7 +1274,14 @@ def _collect_parent_parity_blocks(parent_agent, goal: str) -> dict:
         tail_lines.reverse()
         parts = []
         if summary:
-            parts.append(summary)
+            # Cap the summary SEPARATELY so a long compaction summary can
+            # never evict the recent exchanges (reviewer finding, 29/08:
+            # summary-first + tail-side truncation dropped exactly the
+            # freshest turns). Recent exchanges get at least half the
+            # budget.
+            parts.append(
+                _parity_truncate(summary, _PARITY_BRIEF_MAX_CHARS // 2)
+            )
         if tail_lines:
             parts.append("Recent exchanges:\n" + "\n".join(tail_lines))
         blocks["session_brief"] = _parity_truncate(
@@ -1284,6 +1291,68 @@ def _collect_parent_parity_blocks(parent_agent, goal: str) -> dict:
         logger.debug("worker parity: session brief failed", exc_info=True)
 
     return blocks
+
+
+_ORIGIN_BRIEF_MAX_CHARS = 2_200
+_ORIGIN_BRIEF_TAIL_TURNS = 8
+
+
+def _collect_origin_brief(parent_agent) -> str:
+    """Sanitized snapshot of the originating conversation for a dispatch card.
+
+    G3 (spec T3, both adversarial reviewers 29/08): a dispatcher worker
+    used to start blank about the discussion that produced its card. The
+    live ``parent_agent.messages`` are captured HERE — in the delegating
+    turn, before the cards are created — so no state.db is ever opened
+    and the snapshot is exactly "the discussion that produced the card".
+
+    Sanitization (reviewer requirements): observed group-context wrappers
+    never enter the brief; compaction markers are skipped; the CURRENT
+    (most recent) message is budgeted first so it can never be evicted by
+    older turns. Board-visibility is by design: the brief only ever lands
+    on the board of the topic that said it.
+    """
+    try:
+        messages = list(getattr(parent_agent, "messages", None) or [])
+        picked: list[str] = []
+        used = 0
+        turns = 0
+        for msg in reversed(messages):
+            if turns >= _ORIGIN_BRIEF_TAIL_TURNS or used >= _ORIGIN_BRIEF_MAX_CHARS:
+                break
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            content = msg.get("content")
+            if role not in ("user", "assistant") or not isinstance(content, str):
+                continue
+            text = content.strip()
+            if (
+                not text
+                or text.startswith("[CONTEXT COMPACTION")
+                or text.startswith("[Observed Telegram group context")
+                or text.startswith("[Your active task list")
+                or text.startswith("[System note")
+            ):
+                continue
+            if len(text) > _PARITY_BRIEF_MSG_CHARS:
+                text = text[:_PARITY_BRIEF_MSG_CHARS].rstrip() + "…"
+            line = f"{role}: {text}"
+            if used + len(line) > _ORIGIN_BRIEF_MAX_CHARS and picked:
+                break
+            picked.append(line)
+            used += len(line) + 1
+            turns += 1
+        if not picked:
+            return ""
+        picked.reverse()
+        return (
+            "Brief da conversa de origem (snapshot na criação do card; "
+            "mais recente por último):\n" + "\n".join(picked)
+        )
+    except Exception:
+        logger.debug("origin brief: collection failed", exc_info=True)
+        return ""
 
 
 def _resolve_completion_routing(parent_agent, origin_ui_session_id):
@@ -4071,7 +4140,14 @@ def delegate_task(
 
     kanban_board = resolve_delegation_board()
     if kanban_board and route_to_dispatcher_enabled():
-        dispatch_cards = create_dispatch_cards(task_list, kanban_board)
+        # G3 (spec T3): capture the origin stamp and a sanitized brief of
+        # the live conversation NOW, in the delegating turn — the worker
+        # then starts knowing the discussion that produced its card, with
+        # zero state.db reads anywhere in the dispatch path.
+        origin_brief = _collect_origin_brief(parent_agent)
+        dispatch_cards = create_dispatch_cards(
+            task_list, kanban_board, brief=origin_brief,
+        )
         if dispatch_cards:
             routed_results = [
                 {

@@ -302,6 +302,7 @@ def create_dispatch_cards(
     task_list: List[Dict[str, Any]],
     board: Optional[str],
     delegation_id: Optional[str] = None,
+    brief: Optional[str] = None,
 ) -> Dict[int, str]:
     """Create one READY (unclaimed) card per task for dispatcher pickup.
 
@@ -309,6 +310,15 @@ def create_dispatch_cards(
     must stay claimable — a real dispatcher worker (isolated process, its own
     heartbeat, board log transcript) executes the goal. Same best-effort
     contract as ``create_delegation_cards``.
+
+    G3 (spec T3, 29/08): dispatch cards were the ONE creation path with no
+    origin stamp — the worker started blank about the conversation that
+    produced its card. Cards now carry the origin ``session_id``/
+    ``project_id`` (same ContextVar-backed source the mirror path uses;
+    never ``os.environ``, which cross-talks between concurrent turns) and,
+    when provided, a sanitized ``brief`` of the live discussion appended
+    AFTER the task's explicit context — the explicit context always wins
+    the budget; the brief only uses what remains of ``_BODY_MAX``.
     """
     if not board or not task_list:
         return {}
@@ -317,6 +327,9 @@ def create_dispatch_cards(
         from hermes_cli import kanban_db as kb
 
         author = _author()
+        origin = _origin_subscription_context()
+        origin_session = str(origin.get("session_id") or "").strip() or None
+        origin_project = str(origin.get("project_id") or "").strip() or None
         with kb.connect_closing(board=board) as conn:
             for index, task in enumerate(task_list):
                 try:
@@ -325,12 +338,18 @@ def create_dispatch_cards(
                         goal = f"delegated task {index}"
                     context = str(task.get("context") or "").strip()
                     body = goal if not context else f"{goal}\n\n{context}"
+                    if brief:
+                        remaining = _BODY_MAX - len(body) - 2
+                        if remaining > 200:
+                            body = f"{body}\n\n{brief[:remaining]}"
                     task_id = kb.create_task(
                         conn,
                         title=goal[:_TITLE_MAX],
                         body=body[:_BODY_MAX],
                         created_by=author,
                         board=board,
+                        session_id=origin_session,
+                        project_id=origin_project,
                         idempotency_key=(
                             f"{delegation_id}:{index}" if delegation_id else None
                         ),
