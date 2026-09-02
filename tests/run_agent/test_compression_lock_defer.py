@@ -27,6 +27,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.conversation_compression import compression_skipped_due_to_lock
+from agent.conversation_loop import _compression_deferred_result
 from run_agent import AIAgent
 import run_agent
 
@@ -307,3 +308,128 @@ class TestPreApiLockDeferDoesNotBurnBudget:
         assert result["final_response"] == "Recovered after lock release"
         assert not result.get("compression_exhausted")
         assert not result.get("compression_deferred")
+
+
+class TestFailedCompactionCooldownSafetyStop:
+    @staticmethod
+    def _blocked_compressor():
+        return SimpleNamespace(
+            protect_first_n=3,
+            protect_last_n=20,
+            threshold_tokens=100_000,
+            context_length=1_000_000,
+            last_prompt_tokens=500_000,
+            last_real_prompt_tokens=500_000,
+            should_compress=lambda _t: False,
+            should_compress_info=lambda t: (
+                (False, "cooldown:59") if t >= 100_000 else (False, None)
+            ),
+            should_defer_preflight_to_real_usage=lambda _t: False,
+            get_active_compression_failure_cooldown=lambda: {
+                "remaining_seconds": 59.0
+            },
+        )
+
+    def test_over_threshold_cooldown_stops_before_provider_and_preserves_checkpoint(
+        self, agent
+    ):
+        """Incident shape: failed summary, live cooldown, oversized request.
+
+        The provider must never receive that request. The soft result keeps the
+        session intact and records the exact recovery action in the already
+        initialized turn checkpoint.
+        """
+        agent.context_compressor = self._blocked_compressor()
+        checkpoint_store = MagicMock()
+        checkpoint_store.transition.return_value = {
+            "phase": "compaction_deferred",
+            "next_action": "run_manual_compression_then_resume_current_turn",
+        }
+        agent._turn_checkpoint_store = checkpoint_store
+        before = list(_PREFILL)
+
+        with (
+            patch(
+                "agent.turn_checkpoint.initialize_agent_turn_checkpoint",
+                return_value={"phase": "turn_started"},
+            ),
+            patch(
+                "agent.turn_context.estimate_request_tokens_rough",
+                return_value=500_000,
+            ),
+            patch(
+                "agent.conversation_loop.estimate_messages_tokens_rough",
+                return_value=500_000,
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "continue the original task", conversation_history=before
+            )
+
+        agent.client.chat.completions.create.assert_not_called()
+        assert result["api_calls"] == 0
+        assert result["compression_deferred"] is True
+        assert result["compression_deferred_reason"] == "cooldown:59"
+        assert result["checkpoint_preserved"] is True
+        assert result["failed"] is False
+        assert result["completed"] is False
+        assert result["partial"] is True
+        assert result["messages"][:2] == _PREFILL
+        assert result["messages"][-1]["content"] == "continue the original task"
+        assert checkpoint_store.transition.call_count == 2
+        planning, transition = checkpoint_store.transition.call_args_list
+        assert planning.kwargs["phase"] == "planning"
+        assert transition.args == (agent.session_id,)
+        assert transition.kwargs["phase"] == "compaction_deferred"
+        assert (
+            transition.kwargs["next_action"]
+            == "run_manual_compression_then_resume_current_turn"
+        )
+
+    def test_below_threshold_cooldown_still_calls_provider(self, agent):
+        """A stale cooldown alone cannot block an otherwise safe request."""
+        agent.context_compressor = self._blocked_compressor()
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="safe request completed"
+        )
+
+        with (
+            patch(
+                "agent.turn_context.estimate_request_tokens_rough",
+                return_value=10_000,
+            ),
+            patch(
+                "agent.conversation_loop.estimate_messages_tokens_rough",
+                return_value=10_000,
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "safe request", conversation_history=list(_PREFILL)
+            )
+
+        agent.client.chat.completions.create.assert_called_once()
+        assert result["completed"] is True
+        assert result["final_response"] == "safe request completed"
+        assert not result.get("compression_deferred")
+
+    def test_checkpoint_write_failure_is_not_reported_as_preserved(self, agent):
+        checkpoint_store = MagicMock()
+        checkpoint_store.transition.side_effect = OSError("disk unavailable")
+        agent._turn_checkpoint_store = checkpoint_store
+
+        result = _compression_deferred_result(
+            agent,
+            list(_PREFILL),
+            0,
+            reason="cooldown:59",
+        )
+
+        assert result["checkpoint_preserved"] is False
+        assert "could not be confirmed" in result["final_response"]
+        assert "checkpoint were preserved" not in result["final_response"]
