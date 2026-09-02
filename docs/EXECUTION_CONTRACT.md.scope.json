@@ -1,0 +1,19 @@
+{
+  "external_scope": [],
+  "generated_at": "2026-09-02T15:01:34.170658+00:00",
+  "repo_scope": [
+    "agent/conversation_loop.py",
+    "agent/turn_checkpoint.py",
+    "agent/turn_context.py",
+    "docs/EXECUTION_CONTRACT.md",
+    "docs/EXECUTION_CONTRACT.md.scope.json",
+    "docs/regressions",
+    "internal/ops/evidence",
+    "tests/agent",
+    "tests/run_agent"
+  ],
+  "repo_scope_count": 8,
+  "schema": 1,
+  "source_sha256": "c2ef944330e5e89da2819233f0ec75a0ae6f8950b3f64db7b1e293ee04c07949",
+  "workspace_root": "C:\\Users\\maiko\\Documents\\Codex\\2026-09-02\\hermes-compaction-safety"
+}
