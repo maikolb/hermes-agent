@@ -1,19 +1,15 @@
 {
   "external_scope": [],
-  "generated_at": "2026-09-02T15:01:34.170658+00:00",
+  "generated_at": "2026-09-02T23:33:47.003192+00:00",
   "repo_scope": [
-    "agent/conversation_loop.py",
-    "agent/turn_checkpoint.py",
-    "agent/turn_context.py",
     "docs/EXECUTION_CONTRACT.md",
     "docs/EXECUTION_CONTRACT.md.scope.json",
-    "docs/regressions",
-    "internal/ops/evidence",
-    "tests/agent",
-    "tests/run_agent"
+    "docs/regressions/REG-2026-09-02-002.md",
+    "internal/ops/evidence/install-e2e-node-ca-20260902.log",
+    "scripts/sandbox/stage2-run.sh"
   ],
-  "repo_scope_count": 8,
+  "repo_scope_count": 4,
   "schema": 1,
-  "source_sha256": "c2ef944330e5e89da2819233f0ec75a0ae6f8950b3f64db7b1e293ee04c07949",
-  "workspace_root": "C:\\Users\\maiko\\Documents\\Codex\\2026-09-02\\hermes-compaction-safety"
+  "source_sha256": "8264a87e7b614184f150d8928c836846b919eb6ab9ee998da29fb04830faa7c0",
+  "workspace_root": "C:\\Users\\maiko\\Documents\\Codex\\2026-09-02\\a\\work\\hermes-agent-node-ca"
 }

@@ -1,0 +1,28 @@
+Incident: GitHub Actions run 33687295780
+Run URL: https://github.com/maikolb/hermes-agent/actions/runs/33687295780
+Head: b89c5ca8af68e36a40af163c34da3af4532fc480
+
+Observed matrix result:
+- update from v2026.3.12: passed
+- update from v2026.4.8: passed
+- update from v2026.5.16: passed
+- update from v2026.6.19: passed
+- update from v2026.8.3: passed
+- installer re-run from all five tags: failed
+
+Common boundary from downloaded artifacts:
+- initial legacy installer: npm install failed or timed out, then continued
+- current installer re-run: npm install failed or timed out, then exit 1
+- sandbox proxy: repeated SSLEOFError UNEXPECTED_EOF_WHILE_READING during client TLS handshake
+
+Configuration correlation at b89c5ca8af:
+- proxy.py signs intercepted host certificates with /work/certs/ca.pem
+- CURL_CA_BUNDLE=/work/certs/ca.pem
+- SSL_CERT_FILE=/work/certs/ca.pem
+- GIT_SSL_CAINFO=/work/certs/ca.pem
+- NODE_EXTRA_CA_CERTS=/work/certs/real-ca.pem
+
+Candidate correction:
+- NODE_EXTRA_CA_CERTS=/work/certs/ca.pem
+
+Live validation: pending
