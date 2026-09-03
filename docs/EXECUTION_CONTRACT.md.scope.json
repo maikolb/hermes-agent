@@ -1,19 +1,32 @@
 {
   "external_scope": [],
-  "generated_at": "2026-09-02T15:01:34.170658+00:00",
+  "generated_at": "2026-09-03T23:50:43.246753+00:00",
   "repo_scope": [
-    "agent/conversation_loop.py",
-    "agent/turn_checkpoint.py",
-    "agent/turn_context.py",
     "docs/EXECUTION_CONTRACT.md",
     "docs/EXECUTION_CONTRACT.md.scope.json",
-    "docs/regressions",
-    "internal/ops/evidence",
-    "tests/agent",
-    "tests/run_agent"
+    "docs/archive/execution-contracts/CEOGAME_NATIVE_MEDIA_DURABLE_DELIVERY_20260825.md",
+    "docs/archive/execution-contracts/FAILED_COMPACTION_SAFETY_STOP_20260902.md",
+    "docs/runtime-supply-chain/NFOS_SQLITE_RUNTIME.md",
+    "hermes_cli/backup.py",
+    "hermes_cli/config_defaults.py",
+    "hermes_cli/main.py",
+    "hermes_cli/sessions_cmd.py",
+    "hermes_state.py",
+    "internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl",
+    "internal/ops/P0-4A_AGENT_LOOP_RUN.json",
+    "internal/ops/aof_runtime",
+    "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
+    "scripts/nfos_checkpoint_job.py",
+    "scripts/nfos_state_maintenance.py",
+    "tests/hermes_cli/test_backup.py",
+    "tests/hermes_cli/test_nfos_archive_cli.py",
+    "tests/hermes_state/test_nfos_archive_safety.py",
+    "tests/scripts/test_nfos_checkpoint_job.py",
+    "tests/scripts/test_nfos_state_maintenance.py",
+    "tests/state/test_nfos_database_pragmas.py"
   ],
-  "repo_scope_count": 8,
+  "repo_scope_count": 21,
   "schema": 1,
-  "source_sha256": "c2ef944330e5e89da2819233f0ec75a0ae6f8950b3f64db7b1e293ee04c07949",
-  "workspace_root": "C:\\Users\\maiko\\Documents\\Codex\\2026-09-02\\hermes-compaction-safety"
+  "source_sha256": "e88f468e07246310de9e72721920c1921a155035d9222511adc51faee5ee901c",
+  "workspace_root": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent"
 }

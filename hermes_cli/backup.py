@@ -384,26 +384,38 @@ def _safe_copy_db(
         # control the full locked-source deadline instead of adding the
         # connection's default timeout before each callback.
         conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=0.0)
-        backup_conn = sqlite3.connect(str(dst))
-        busy_deadline = time.monotonic() + max(0.0, timeout_seconds)
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
 
         def _check_backup_progress(status: int, _remaining: int, _total: int) -> None:
-            nonlocal busy_deadline
             now = time.monotonic()
-            if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
-                if now >= busy_deadline:
-                    raise _SQLiteBackupTimeout(
-                        f"database remained locked for {timeout_seconds:g} seconds"
-                    )
-            else:
-                busy_deadline = now + max(0.0, timeout_seconds)
+            if now >= deadline:
+                state = (
+                    "locked"
+                    if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                    else "did not converge"
+                )
+                raise _SQLiteBackupTimeout(
+                    f"database backup {state} within {timeout_seconds:g} seconds"
+                )
 
-        conn.backup(
-            backup_conn,
-            pages=256,
-            progress=_check_backup_progress,
-            sleep=0.1,
-        )
+        # One backup step (pages=-1) takes a consistent WAL snapshot instead
+        # of yielding between page batches and repeatedly restarting when a
+        # live writer commits. Publish through a hidden sibling only after the
+        # source and destination connections have both closed cleanly.
+        with _atomic_output_path(dst) as partial_dst:
+            source_mode = _preserve_file_mode(src)
+            source_owner = _preserve_file_owner(src)
+            backup_conn = sqlite3.connect(str(partial_dst), timeout=0.0)
+            conn.backup(
+                backup_conn,
+                pages=-1,
+                progress=_check_backup_progress,
+                sleep=0.05,
+            )
+            backup_conn.close()
+            backup_conn = None
+            _restore_file_owner(partial_dst, source_owner)
+            _restore_file_mode(partial_dst, source_mode)
         return True
     except Exception as exc:
         logger.warning("SQLite safe copy failed for %s: %s", src, exc)
@@ -416,10 +428,9 @@ def _safe_copy_db(
             except Exception:
                 pass
             backup_conn = None
-        try:
-            dst.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # _atomic_output_path owns cleanup of the hidden sibling.  Never
+        # unlink ``dst`` here: it may be a previously published good backup
+        # that this failed attempt was meant to replace atomically.
         return False
     finally:
         for connection in (backup_conn, conn):

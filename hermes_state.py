@@ -1466,6 +1466,7 @@ def apply_database_pragmas(
     conn: sqlite3.Connection,
     *,
     db_label: str = "state.db",
+    role: str = "writer",
 ) -> None:
     """Apply optional performance and WAL-sizing PRAGMAs from ``config.yaml``.
 
@@ -1484,9 +1485,16 @@ def apply_database_pragmas(
     * ``temp_store`` — 0=DEFAULT(file), 1=FILE, 2=MEMORY, 3=ALWAYS
     * ``wal_autocheckpoint`` — WAL auto-checkpoint threshold in pages
     * ``journal_size_limit`` — max journal/WAL size in bytes
+    * ``writer_busy_timeout_ms`` — short engine wait under the jittered writer
+      retry loop (default 1000 ms)
+    * ``reader_busy_timeout_ms`` — pooled/read-only connection wait
+      (default 30000 ms)
+    * ``maintenance_busy_timeout_ms`` — explicit maintenance connection wait
+      (default 30000 ms)
 
-    Best-effort: config load or pragma failures are ignored so DB init
-    never breaks on a malformed ``database:`` section.
+    ``synchronous`` is intentionally pinned to FULL. A lower configured value
+    is ignored with a warning instead of weakening durability. Other malformed
+    values remain best-effort so DB init does not fail on old configuration.
     """
     try:
         # Local import avoids a circular import with hermes_cli.config.
@@ -1494,7 +1502,47 @@ def apply_database_pragmas(
 
         cfg = load_config_readonly()
     except Exception:
-        return
+        cfg = {}
+
+        def cfg_get(_cfg, *_keys, default=None):
+            return default
+
+    normalized_role = str(role or "writer").strip().lower()
+    if normalized_role not in {"writer", "reader", "maintenance"}:
+        raise ValueError(f"unsupported database connection role: {role!r}")
+
+    configured_sync = cfg_get(cfg, "database", "synchronous", default="full")
+    if str(configured_sync).strip().lower() not in {"2", "full"}:
+        logger.warning(
+            "%s: refusing database.synchronous=%r; FULL is the durability floor",
+            db_label,
+            configured_sync,
+        )
+    try:
+        conn.execute("PRAGMA synchronous=FULL")
+    except sqlite3.OperationalError:
+        pass
+
+    timeout_key = f"{normalized_role}_busy_timeout_ms"
+    timeout_default = 1000 if normalized_role == "writer" else 30000
+    raw_timeout = cfg_get(cfg, "database", timeout_key, default=timeout_default)
+    try:
+        timeout_ms = int(str(raw_timeout).strip())
+        if timeout_ms < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s: ignoring invalid database.%s=%r; using %d",
+            db_label,
+            timeout_key,
+            raw_timeout,
+            timeout_default,
+        )
+        timeout_ms = timeout_default
+    try:
+        conn.execute(f"PRAGMA busy_timeout={timeout_ms}")
+    except sqlite3.OperationalError:
+        pass
 
     # Performance PRAGMAs (applied to ALL connection types: writer, read_only,
     # and WAL per-thread readers).
@@ -4298,7 +4346,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 # raw-copy for the rest of the process — the writable heal
                 # that follows would then repair WITHOUT its forensic backup.
                 try:
-                    apply_database_pragmas(self._conn, db_label="state.db")
+                    apply_database_pragmas(
+                        self._conn, db_label="state.db", role="reader"
+                    )
                     cursor = self._conn.cursor()
                     self._fts_enabled = (
                         self._fts_table_probe(cursor, "messages_fts") is True
@@ -4376,7 +4426,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 self._wal_active = (
                     apply_wal_with_fallback(self._conn, db_label="state.db") == "wal"
                 )
-                apply_database_pragmas(self._conn, db_label="state.db")
+                apply_database_pragmas(
+                    self._conn, db_label="state.db", role="writer"
+                )
                 self._conn.execute("PRAGMA foreign_keys=ON")
                 self._fts_cjk_loaded = load_fts5_cjk_extension(self._conn)
                 self._init_schema()
@@ -4536,7 +4588,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 isolation_level=None,
             )
             conn.row_factory = sqlite3.Row
-            apply_database_pragmas(conn, db_label="state.db")
+            apply_database_pragmas(conn, db_label="state.db", role="reader")
             # Load the CJK tokenizer extension on this connection so
             # messages_fts_cjk queries work on the read path. The .so
             # registers the tokenizer in the connection's in-memory
@@ -13528,6 +13580,202 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 params,
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _archive_transcript_exists(
+        sessions_dir: Optional[Path], session_id: str
+    ) -> bool:
+        """Return whether a session has a disk transcript dependency.
+
+        Physical archive deletion cannot silently strand these files or make
+        them unreachable. The first bounded implementation therefore protects
+        such sessions instead of attempting a second transcript store.
+        """
+        if sessions_dir is None:
+            return False
+        if any((sessions_dir / f"{session_id}{suffix}").exists() for suffix in (".json", ".jsonl")):
+            return True
+        try:
+            return next(sessions_dir.glob(f"request_dump_{session_id}_*.json"), None) is not None
+        except OSError:
+            return True
+
+    @staticmethod
+    def _archive_external_session_references(
+        database_paths: List[Path], candidate_ids: Set[str]
+    ) -> Tuple[Set[str], List[str]]:
+        """Find indexed cross-database references to candidate session ids.
+
+        The check is deliberately schema-driven and fail-closed. A table with
+        a session-id column but no usable indexed lookup is reported as a
+        blocker instead of being scanned during production maintenance.
+        """
+        referenced: Set[str] = set()
+        blockers: List[str] = []
+        if not candidate_ids:
+            return referenced, blockers
+
+        def _quote(identifier: str) -> str:
+            return '"' + identifier.replace('"', '""') + '"'
+
+        for raw_path in database_paths:
+            path = Path(raw_path)
+            if not path.is_file():
+                blockers.append(f"missing-external-db:{path}")
+                continue
+            conn = None
+            try:
+                conn = sqlite3.connect(
+                    f"file:{path.resolve()}?mode=ro",
+                    uri=True,
+                    timeout=0.0,
+                    isolation_level=None,
+                )
+                tables = conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+                for (table_name,) in tables:
+                    columns = conn.execute(
+                        f"PRAGMA table_info({_quote(str(table_name))})"
+                    ).fetchall()
+                    session_columns = [
+                        str(row[1])
+                        for row in columns
+                        if str(row[1]).lower() in {"session_id", "sessionid"}
+                    ]
+                    for column_name in session_columns:
+                        table_sql = _quote(str(table_name))
+                        column_sql = _quote(column_name)
+                        probe = conn.execute(
+                            f"EXPLAIN QUERY PLAN SELECT 1 FROM {table_sql} "
+                            f"WHERE {column_sql} = ? LIMIT 1",
+                            (next(iter(candidate_ids)),),
+                        ).fetchall()
+                        detail = " ".join(str(row[-1]).upper() for row in probe)
+                        if "SCAN " in detail and "USING INDEX" not in detail:
+                            blockers.append(
+                                f"unindexed-session-reference:{path}:{table_name}.{column_name}"
+                            )
+                            continue
+                        ids = sorted(candidate_ids)
+                        for offset in range(0, len(ids), 500):
+                            chunk = ids[offset : offset + 500]
+                            placeholders = ",".join("?" for _ in chunk)
+                            rows = conn.execute(
+                                f"SELECT DISTINCT {column_sql} FROM {table_sql} "
+                                f"WHERE {column_sql} IN ({placeholders})",
+                                chunk,
+                            ).fetchall()
+                            referenced.update(str(row[0]) for row in rows if row[0])
+            except sqlite3.Error as exc:
+                blockers.append(f"external-db-check-failed:{path}:{exc}")
+            finally:
+                if conn is not None:
+                    conn.close()
+        return referenced, blockers
+
+    def plan_physical_archive(
+        self,
+        *,
+        older_than_days: float = 30,
+        sessions_dir: Optional[Path] = None,
+        external_database_paths: Optional[List[Path]] = None,
+    ) -> Dict[str, Any]:
+        """Plan a dependency-closed, copy-only physical archive.
+
+        The initial P0-4a surface never deletes source rows. That keeps normal
+        list/resume/search/context retrieval byte-for-byte on the active store
+        while a separately verified archive copy is built. A future deletion
+        path requires its own transparent multi-database retrieval layer and
+        is intentionally absent here.
+
+        Eligibility starts from ended, unpinned, unarchived sessions inactive
+        past the cutoff, then conservatively protects compression ancestors of
+        every retained session, any delegate relationship, prompts shared with
+        retained sessions, disk transcripts and indexed references discovered
+        in explicitly supplied external databases.
+        """
+        broad_rows = self.list_prune_candidates(
+            older_than_days=older_than_days,
+            archived=False,
+            include_pinned=False,
+        )
+        broad_ids = {str(row["id"]) for row in broad_rows}
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, parent_session_id, end_reason, model_config, "
+                "system_prompt_hash FROM sessions"
+            ).fetchall()
+        sessions = {str(row["id"]): dict(row) for row in rows}
+        retained_ids = set(sessions) - broad_ids
+        protected: Dict[str, Set[str]] = {}
+
+        def _protect(session_id: str, reason: str) -> None:
+            if session_id in broad_ids:
+                protected.setdefault(session_id, set()).add(reason)
+
+        # Any parent of a retained row is required to preserve that row's
+        # lineage. Walk to a fixed point so a protected ancestor's own parent
+        # is protected too.
+        lineage_seeds = set(retained_ids)
+        while lineage_seeds:
+            child_id = lineage_seeds.pop()
+            parent_id = sessions.get(child_id, {}).get("parent_session_id")
+            if not parent_id or parent_id not in sessions:
+                continue
+            if parent_id in broad_ids and parent_id not in protected:
+                _protect(parent_id, "ancestor-of-retained-session")
+                lineage_seeds.add(parent_id)
+            elif parent_id in retained_ids:
+                lineage_seeds.add(parent_id)
+
+        # Delegate topology has execution and context semantics beyond a plain
+        # parent FK. Keep every participant until transparent archive reads are
+        # implemented, rather than risking a partial recursive closure.
+        for session_id, row in sessions.items():
+            raw_config = row.get("model_config")
+            try:
+                model_config = json.loads(raw_config) if raw_config else {}
+            except (TypeError, json.JSONDecodeError):
+                model_config = {}
+            delegate_parent = model_config.get("_delegate_from") if isinstance(model_config, dict) else None
+            if delegate_parent:
+                _protect(session_id, "delegate-closure")
+                _protect(str(delegate_parent), "delegate-closure")
+
+        retained_prompt_hashes = {
+            sessions[session_id].get("system_prompt_hash")
+            for session_id in retained_ids
+            if sessions[session_id].get("system_prompt_hash")
+        }
+        for session_id in broad_ids:
+            if sessions.get(session_id, {}).get("system_prompt_hash") in retained_prompt_hashes:
+                _protect(session_id, "shared-system-prompt")
+            if self._archive_transcript_exists(sessions_dir, session_id):
+                _protect(session_id, "disk-transcript")
+
+        referenced, blockers = self._archive_external_session_references(
+            list(external_database_paths or []), broad_ids
+        )
+        for session_id in referenced:
+            _protect(session_id, "external-database-reference")
+
+        eligible_ids = sorted(broad_ids - set(protected))
+        if blockers:
+            eligible_ids = []
+        row_by_id = {str(row["id"]): row for row in broad_rows}
+        return {
+            "deletion_enabled": False,
+            "broad_candidate_count": len(broad_ids),
+            "eligible_count": len(eligible_ids),
+            "eligible_sessions": [row_by_id[session_id] for session_id in eligible_ids],
+            "protected": {
+                session_id: sorted(reasons)
+                for session_id, reasons in sorted(protected.items())
+            },
+            "blockers": sorted(set(blockers)),
+        }
 
     def count_prune_matches(
         self,

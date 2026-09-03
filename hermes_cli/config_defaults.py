@@ -15,9 +15,18 @@ DEFAULT_CONFIG = {
     # not crash-safe (for example macOS virtiofs, NFS, or SMB).
     "database": {
         "journal_mode": "wal",
+        # FULL is the durability floor. Hermes deliberately does not expose a
+        # lower synchronous level through this shared configuration surface.
+        "synchronous": "full",
+        # Keep SQLite's internal wait short on the writer so the existing
+        # jittered 20s/60s application retry budgets remain authoritative.
+        # Readers and explicit maintenance can wait without blocking that
+        # writer loop, so they use the longer operational timeout.
+        "writer_busy_timeout_ms": 1000,
+        "reader_busy_timeout_ms": 30000,
+        "maintenance_busy_timeout_ms": 30000,
         # Optional WAL sizing pragmas, applied when set to integers.
-        # None = SQLite defaults (autocheckpoint 1000 pages, no size limit).
-        "wal_autocheckpoint": None,
+        "wal_autocheckpoint": 4000,
         "journal_size_limit": None,
     },
     # Soft file-descriptor limit for long-running Hermes server processes.
