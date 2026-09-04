@@ -58,6 +58,18 @@ The combined adjacent diagnostic suite completed with 305 passed, 7 skipped and 
 
 The pinned Linux x86_64 CPython artifact and publisher API both report SHA-256 `0651dd7157d3debf769e15a52c1de9de7fbcdc36ba72faf79fde3c44f14d9461`. Its immutable build manifest pins SQLite 3.53.1.0 source hash `83e6b2020a034e9a7ad4a72feea59e1ad52f162e09cbd26735a3ffb98359fc4f`. The Windows host has no WSL runtime, so the Linux interpreter was not executed. Runtime execution remains a later staging and target gate.
 
+## Canonical AOF validator authority
+
+- Authority repository: `C:/Users/maiko/Projetos/AgentOperatingFramework`, Git commit `3fdf81f9588683145c20ddd6a4f48ea68581993e`.
+- The `framework/runtime` subtree is clean at that commit. Unrelated files elsewhere in the authority repository are dirty and are not used by these validators.
+- `validate_execution_contract.ps1`: SHA-256 `6aba7a7c9101dbc7a098d8aef4eb4c02f0bc15c28d80631c10b10c27aa2d3cf8`.
+- `validate_agent_loop_run.ps1`: SHA-256 `2b823afa1eec5614768ccf50f978bee371b25a1d9a19487c185d5c1e801ce66a`.
+- `emit_scope_manifest.py`: SHA-256 `0a754ee9badfadeb93fae6e2d3246551603c7c90f36158584c305b45c7c1424a`.
+- `validate_scope_alignment.ps1`: SHA-256 `7ae2c226f0a9aace663db20319a87387c52ab6127882102cbcf8b5144d8c76c4`.
+- Agent-loop run schema: SHA-256 `bc0ab228351676dcf6800524d4abc89556d37c993d0ac4c54b1bc2101954c479`.
+- Agent-loop event schema: SHA-256 `1c54c91d6beb4ec66fe2ccc9a969c9b359dd24176033e688b0c382f12da53ebe`.
+- The seven repository-local runtime copies were removed. Validation executes the scripts above from the canonical external authority.
+
 ## Limitations
 
 - Readiness is `implemented`, not `validated-local`, until all correction gates and required CI complete.

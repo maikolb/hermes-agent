@@ -1,6 +1,9 @@
 {
-  "external_scope": [],
-  "generated_at": "2026-09-03T23:50:43.246753+00:00",
+  "external_scope": [
+    "C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/change-packets/P0-4a/G1_CHANGE_PACKET.md",
+    "C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/evidence/P0-4a/LOCAL_IMPLEMENTATION_VALIDATION.md"
+  ],
+  "generated_at": "2026-09-04T00:24:10.899299+00:00",
   "repo_scope": [
     "docs/EXECUTION_CONTRACT.md",
     "docs/EXECUTION_CONTRACT.md.scope.json",
@@ -14,7 +17,6 @@
     "hermes_state.py",
     "internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl",
     "internal/ops/P0-4A_AGENT_LOOP_RUN.json",
-    "internal/ops/aof_runtime",
     "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
     "scripts/nfos_checkpoint_job.py",
     "scripts/nfos_state_maintenance.py",
@@ -25,8 +27,8 @@
     "tests/scripts/test_nfos_state_maintenance.py",
     "tests/state/test_nfos_database_pragmas.py"
   ],
-  "repo_scope_count": 21,
+  "repo_scope_count": 20,
   "schema": 1,
-  "source_sha256": "e88f468e07246310de9e72721920c1921a155035d9222511adc51faee5ee901c",
+  "source_sha256": "faae4afccee8a8f190d05743ba24ebcb9ccb80bfd6238e35733e74889cb51aec",
   "workspace_root": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent"
 }

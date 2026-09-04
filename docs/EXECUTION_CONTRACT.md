@@ -1,14 +1,15 @@
 # NFOS P0-4a Local Candidate Execution Contract
 
 ## Contract Metadata
-- Contract Version: 3
+- Contract Version: 2
+- Contract Revision: 4, canonical external AOF runtime alignment
 - Contract ID: NFOS-PROD-REPAIR-20260903-P0-4A-LOCAL-v3
 - Mode: REPAIR
 - Risk Level: CRITICAL
 - Canonical Checkout: `C:/Users/maiko/AppData/Local/hermes/hermes-agent`
 - Target Branch: `fix/nfos-p0-4a` from fresh `maikolb/main`
 - Accepted Base: `b89c5ca8af68e36a40af163c34da3af4532fc480`
-- Machine Runtime Authority: `internal/ops/P0-4A_AGENT_LOOP_RUN.json`
+- Machine Runtime Authority: `none: workspace-local AOF runtime vendoring is prohibited; the card-specific RUN is validated separately by the canonical external runtime`
 - Scope Manifest: `docs/EXECUTION_CONTRACT.md.scope.json`
 - Owner and Acceptance Authority: Maikol
 - Single-Writer Executor: Codex
@@ -56,7 +57,6 @@ Implement and validate the smallest complete local P0-4a candidate for NFOS data
 - `docs/runtime-supply-chain/NFOS_SQLITE_RUNTIME.md`
 - `internal/ops/P0-4A_AGENT_LOOP_RUN.json`
 - `internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl`
-- `internal/ops/aof_runtime/`
 - `internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md`
 - `hermes_state.py`
 - `hermes_cli/config_defaults.py`
@@ -102,6 +102,7 @@ Implement and validate the smallest complete local P0-4a candidate for NFOS data
 
 ## Loop Control
 - Controlled micro-loop is required because this is a high-risk, multi-file state-management repair.
+- A workspace-local Machine Runtime Authority is not required because the canonical external AOF runtime validates the retained card-specific RUN and events without shipping framework code in the product release.
 - Runtime authority path: `internal/ops/P0-4A_AGENT_LOOP_RUN.json`.
 - Append-only evidence path: `internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl`.
 - Maximum implementation/test iterations: 10.
@@ -112,7 +113,7 @@ Implement and validate the smallest complete local P0-4a candidate for NFOS data
 - Rollback: revert only the uncommitted candidate edits by an explicit reviewed patch; never use reset, checkout-discard or stash.
 
 ## Validation Plan
-- Validate this frozen contract, runtime definition and scope manifest before source edits.
+- Validate this frozen contract, runtime definition and scope manifest with the canonical external AOF runtime before source edits and at Final.
 - Inspect existing connection, retry, session, prompt, transcript, Kanban, backup, compact-storage and cron surfaces before choosing edit points.
 - Implement the minimum role-specific pragmas while preserving writer timing and FULL.
 - Add a bounded single-call backup helper with atomic publication and cleanup on failure.

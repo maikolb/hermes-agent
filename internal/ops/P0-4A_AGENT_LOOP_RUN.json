@@ -2,7 +2,7 @@
   "schemaVersion": "2.0",
   "contractRef": {
     "path": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\docs\\EXECUTION_CONTRACT.md",
-    "sha256": "e88f468e07246310de9e72721920c1921a155035d9222511adc51faee5ee901c"
+    "sha256": "faae4afccee8a8f190d05743ba24ebcb9ccb80bfd6238e35733e74889cb51aec"
   },
   "identity": {
     "loopId": "nfos-p0-4a-local-20260903",
@@ -54,7 +54,7 @@
     }
   },
   "checkpoint": {
-    "stateSchemaRef": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\internal\\ops\\aof_runtime\\schemas\\agent-loop-run.schema.json",
+    "stateSchemaRef": "C:\\Users\\maiko\\Projetos\\AgentOperatingFramework\\framework\\runtime\\schemas\\agent-loop-run.schema.json",
     "stateSchemaVersion": "2.0",
     "expectedStateVersion": 2,
     "iteration": 1,
@@ -64,7 +64,7 @@
     "priorCheckpointRef": "checkpoint:local-validation",
     "resumePolicy": "reconcile-then-resume",
     "replayPolicy": "reconcile-before-replay",
-    "digest": "a82217dec697d3ef00a84e6cf0e5598340403f4bec04b62709c6a8b59a62229d"
+    "digest": "6e2c36793caa50e2b1a08f007bc8b84b68e4ea27f5b9112fe6fa761618b1024d"
   },
   "concurrency": {
     "mode": "single-writer",
@@ -196,12 +196,12 @@
     "checkerRef": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\scripts\\run_tests.sh",
     "checkerIdentity": "process:scripts-run-tests",
     "checkerIndependent": true,
-    "checkerDigest": "e5f073b02e988d9256172f1ce63d9a31f55ab19467821df1de4a609102a26355",
+    "checkerDigest": "81c8a375c5b737917fd6a77ef4b119d58ce673b72d4823994e534a5d0114edf0",
     "immutableFixtureRefs": [
       "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\docs\\EXECUTION_CONTRACT.md"
     ],
     "immutableFixtureDigests": [
-      "e88f468e07246310de9e72721920c1921a155035d9222511adc51faee5ee901c"
+      "faae4afccee8a8f190d05743ba24ebcb9ccb80bfd6238e35733e74889cb51aec"
     ],
     "feedbackRef": "internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl",
     "requiredAttemptDelta": "changed source or test artifact plus fresh observation",
@@ -274,7 +274,7 @@
   },
   "eventsRef": {
     "path": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\internal\\ops\\P0-4A_AGENT_LOOP_EVENTS.jsonl",
-    "schemaRef": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\internal\\ops\\aof_runtime\\schemas\\agent-loop-event.schema.json"
+    "schemaRef": "C:\\Users\\maiko\\Projetos\\AgentOperatingFramework\\framework\\runtime\\schemas\\agent-loop-event.schema.json"
   },
   "scopePolicy": {
     "schemaVersion": 1,
@@ -299,8 +299,7 @@
       "tests/hermes_cli/test_nfos_archive_cli.py",
       "tests/hermes_cli/test_backup.py",
       "tests/scripts/test_nfos_state_maintenance.py",
-      "tests/scripts/test_nfos_checkpoint_job.py",
-      "internal/ops/aof_runtime/"
+      "tests/scripts/test_nfos_checkpoint_job.py"
     ],
     "deniedWritePaths": [
       "plugins/kanban/**",
@@ -309,7 +308,7 @@
       "run_agent.py"
     ],
     "allowDeletions": false,
-    "manifestDigest": "b88275ff1f05f14c178951ed9705e2a821a0e07de5609be6c8cdf25503db72ab"
+    "manifestDigest": "86115866fedba88a3b7ce9bbea8f3bfe14bb27d0a341515f0ab0283d57688f46"
   },
   "current": {
     "status": "success",
@@ -355,7 +354,7 @@
       "evidenceRef": "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
       "passed": true,
       "postconditionsPassed": true,
-      "checkerDigest": "e5f073b02e988d9256172f1ce63d9a31f55ab19467821df1de4a609102a26355"
+      "checkerDigest": "81c8a375c5b737917fd6a77ef4b119d58ce673b72d4823994e534a5d0114edf0"
     },
     "transition": {
       "from": "running",
