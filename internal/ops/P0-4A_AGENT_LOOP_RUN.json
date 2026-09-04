@@ -2,7 +2,7 @@
   "schemaVersion": "2.0",
   "contractRef": {
     "path": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\docs\\EXECUTION_CONTRACT.md",
-    "sha256": "faae4afccee8a8f190d05743ba24ebcb9ccb80bfd6238e35733e74889cb51aec"
+    "sha256": "6c2bcf77f4d07394935b21296bfd5d9c7328dfe565ab5fe39d8d62957be0c94a"
   },
   "identity": {
     "loopId": "nfos-p0-4a-local-20260903",
@@ -56,15 +56,15 @@
   "checkpoint": {
     "stateSchemaRef": "C:\\Users\\maiko\\Projetos\\AgentOperatingFramework\\framework\\runtime\\schemas\\agent-loop-run.schema.json",
     "stateSchemaVersion": "2.0",
-    "expectedStateVersion": 2,
-    "iteration": 1,
+    "expectedStateVersion": 3,
+    "iteration": 2,
     "atomicWritePolicy": "atomic-replace",
     "lastEventSequence": 3,
     "lastKnownGoodRef": "git:b89c5ca8af68e36a40af163c34da3af4532fc480",
-    "priorCheckpointRef": "checkpoint:local-validation",
+    "priorCheckpointRef": "checkpoint:implementation-review-correction",
     "resumePolicy": "reconcile-then-resume",
     "replayPolicy": "reconcile-before-replay",
-    "digest": "6e2c36793caa50e2b1a08f007bc8b84b68e4ea27f5b9112fe6fa761618b1024d"
+    "digest": "cb78702899e8abce3f59c79388abfab8d4dd4c76f96d259ed36280d963d7ca59"
   },
   "concurrency": {
     "mode": "single-writer",
@@ -196,12 +196,12 @@
     "checkerRef": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\scripts\\run_tests.sh",
     "checkerIdentity": "process:scripts-run-tests",
     "checkerIndependent": true,
-    "checkerDigest": "81c8a375c5b737917fd6a77ef4b119d58ce673b72d4823994e534a5d0114edf0",
+    "checkerDigest": "d523e141815e496f8b24dc03cc3d5d470b259e07ff179317713f64a8197d466d",
     "immutableFixtureRefs": [
       "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\docs\\EXECUTION_CONTRACT.md"
     ],
     "immutableFixtureDigests": [
-      "faae4afccee8a8f190d05743ba24ebcb9ccb80bfd6238e35733e74889cb51aec"
+      "6c2bcf77f4d07394935b21296bfd5d9c7328dfe565ab5fe39d8d62957be0c94a"
     ],
     "feedbackRef": "internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl",
     "requiredAttemptDelta": "changed source or test artifact plus fresh observation",
@@ -311,8 +311,8 @@
     "manifestDigest": "86115866fedba88a3b7ce9bbea8f3bfe14bb27d0a341515f0ab0283d57688f46"
   },
   "current": {
-    "status": "success",
-    "iteration": 1,
+    "status": "running",
+    "iteration": 2,
     "stagnantIterations": 0,
     "retryCount": 0,
     "toolCallCount": 0,
@@ -320,10 +320,10 @@
     "startedAt": "2026-09-03T23:13:41.7570308Z",
     "observation": {
       "ref": "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
-      "digest": "3b560a02a1c7bfb9cc14c5e06f747ba3d6753da066d597c1c7f2968607190ed1",
-      "observedAt": "2026-09-03T23:13:41.7570308Z",
+      "digest": "40b42ed9a48b113192e6a5e74b73c77b7507b0b31cf9d6b73e76f38cb01db90f",
+      "observedAt": "2026-09-04T00:30:00Z",
       "freshnessCeilingSeconds": 28800,
-      "stateVersion": 2
+      "stateVersion": 3
     },
     "decision": {
       "ref": "contract:implement-local-only",
@@ -352,13 +352,13 @@
     },
     "verification": {
       "evidenceRef": "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
-      "passed": true,
-      "postconditionsPassed": true,
-      "checkerDigest": "81c8a375c5b737917fd6a77ef4b119d58ce673b72d4823994e534a5d0114edf0"
+      "passed": false,
+      "postconditionsPassed": false,
+      "checkerDigest": "d523e141815e496f8b24dc03cc3d5d470b259e07ff179317713f64a8197d466d"
     },
     "transition": {
-      "from": "running",
-        "to": "success"
+      "from": "success",
+        "to": "running"
     },
     "cancellation": {
       "requested": false,
