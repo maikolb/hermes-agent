@@ -2,7 +2,7 @@
   "schemaVersion": "2.0",
   "contractRef": {
     "path": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\docs\\EXECUTION_CONTRACT.md",
-    "sha256": "d7c82a68cdcc2118805176183fd03739bf082978e940049d5f303f8d7bca87c9"
+    "sha256": "6680c07ae07ebe9a0e42464411c4a2ecbb90706a570d88758dbd726c09666973"
   },
   "identity": {
     "loopId": "nfos-p0-4a-local-20260903",
@@ -196,12 +196,12 @@
     "checkerRef": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\scripts\\run_tests.sh",
     "checkerIdentity": "process:scripts-run-tests",
     "checkerIndependent": true,
-    "checkerDigest": "7d6e3c4500a29d15f1d7a283f3a6d7a6d86e5b3cc71d5ec15ad5b06354da28a8",
+    "checkerDigest": "ca72fb37509fa4f29c7d21a3a879228db4c64d0b876d9416d67ad2c88b70cdec",
     "immutableFixtureRefs": [
       "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\docs\\EXECUTION_CONTRACT.md"
     ],
     "immutableFixtureDigests": [
-      "d7c82a68cdcc2118805176183fd03739bf082978e940049d5f303f8d7bca87c9"
+      "6680c07ae07ebe9a0e42464411c4a2ecbb90706a570d88758dbd726c09666973"
     ],
     "feedbackRef": "internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl",
     "requiredAttemptDelta": "changed source or test artifact plus fresh observation",
@@ -320,8 +320,8 @@
     "startedAt": "2026-09-03T23:13:41.7570308Z",
     "observation": {
       "ref": "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
-      "digest": "80384e9b1bdadab699e379be7afa0318531434a12ce6de410bf7fa638ef9a9d7",
-      "observedAt": "2026-09-04T01:22:43Z",
+      "digest": "9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea",
+      "observedAt": "2026-09-04T02:50:13Z",
       "freshnessCeilingSeconds": 28800,
       "stateVersion": 3
     },
@@ -354,7 +354,7 @@
       "evidenceRef": "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
       "passed": false,
       "postconditionsPassed": false,
-      "checkerDigest": "7d6e3c4500a29d15f1d7a283f3a6d7a6d86e5b3cc71d5ec15ad5b06354da28a8"
+      "checkerDigest": "ca72fb37509fa4f29c7d21a3a879228db4c64d0b876d9416d67ad2c88b70cdec"
     },
     "transition": {
       "from": "success",
