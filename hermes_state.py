@@ -1486,15 +1486,17 @@ def apply_database_pragmas(
     * ``wal_autocheckpoint`` — WAL auto-checkpoint threshold in pages
     * ``journal_size_limit`` — max journal/WAL size in bytes
     * ``writer_busy_timeout_ms`` — short engine wait under the jittered writer
-      retry loop (default 1000 ms)
+      retry loop
     * ``reader_busy_timeout_ms`` — pooled/read-only connection wait
-      (default 30000 ms)
+      override
     * ``maintenance_busy_timeout_ms`` — explicit maintenance connection wait
-      (default 30000 ms)
+      override
 
-    ``synchronous`` is intentionally pinned to FULL. A lower configured value
-    is ignored with a warning instead of weakening durability. Other malformed
-    values remain best-effort so DB init does not fail on old configuration.
+    All role settings are neutral when absent, preserving each connection's
+    historical constructor defaults. If ``synchronous`` is configured, FULL
+    is the only accepted value. A lower configured value is refused and FULL
+    is enforced instead. Other malformed values remain best-effort so DB init
+    does not fail on old configuration.
     """
     try:
         # Local import avoids a circular import with hermes_cli.config.
@@ -1511,38 +1513,38 @@ def apply_database_pragmas(
     if normalized_role not in {"writer", "reader", "maintenance"}:
         raise ValueError(f"unsupported database connection role: {role!r}")
 
-    configured_sync = cfg_get(cfg, "database", "synchronous", default="full")
-    if str(configured_sync).strip().lower() not in {"2", "full"}:
-        logger.warning(
-            "%s: refusing database.synchronous=%r; FULL is the durability floor",
-            db_label,
-            configured_sync,
-        )
-    try:
-        conn.execute("PRAGMA synchronous=FULL")
-    except sqlite3.OperationalError:
-        pass
+    configured_sync = cfg_get(cfg, "database", "synchronous", default=None)
+    if configured_sync is not None:
+        if str(configured_sync).strip().lower() not in {"2", "full"}:
+            logger.warning(
+                "%s: refusing database.synchronous=%r; FULL is the durability floor",
+                db_label,
+                configured_sync,
+            )
+        try:
+            conn.execute("PRAGMA synchronous=FULL")
+        except sqlite3.OperationalError:
+            pass
 
     timeout_key = f"{normalized_role}_busy_timeout_ms"
-    timeout_default = 1000 if normalized_role == "writer" else 30000
-    raw_timeout = cfg_get(cfg, "database", timeout_key, default=timeout_default)
-    try:
-        timeout_ms = int(str(raw_timeout).strip())
-        if timeout_ms < 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        logger.warning(
-            "%s: ignoring invalid database.%s=%r; using %d",
-            db_label,
-            timeout_key,
-            raw_timeout,
-            timeout_default,
-        )
-        timeout_ms = timeout_default
-    try:
-        conn.execute(f"PRAGMA busy_timeout={timeout_ms}")
-    except sqlite3.OperationalError:
-        pass
+    raw_timeout = cfg_get(cfg, "database", timeout_key, default=None)
+    if raw_timeout is not None:
+        try:
+            timeout_ms = int(str(raw_timeout).strip())
+            if timeout_ms < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            logger.warning(
+                "%s: ignoring invalid database.%s=%r",
+                db_label,
+                timeout_key,
+                raw_timeout,
+            )
+        else:
+            try:
+                conn.execute(f"PRAGMA busy_timeout={timeout_ms}")
+            except sqlite3.OperationalError:
+                pass
 
     # Performance PRAGMAs (applied to ALL connection types: writer, read_only,
     # and WAL per-thread readers).
