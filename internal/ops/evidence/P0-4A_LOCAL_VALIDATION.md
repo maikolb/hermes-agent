@@ -4,7 +4,7 @@ Date: 2026-09-03 America/Sao_Paulo
 
 ## Result
 
-The local candidate preserves `synchronous=FULL`, adds role-specific connection waits, raises WAL auto-checkpoint to 4000 pages, makes SQLite backup publication atomic and bounded, adds dependency-closed archive planning with source deletion mechanically absent, reuses the existing compact-storage VACUUM, and adds one explicit profile checkpoint script. Production was not contacted or changed.
+Claude's implementation review invalidated the earlier `validated-local` claim. The original compact-storage test exercised a fake call graph and did not represent the real `SessionDB.optimize_fts_storage` path. The candidate remains `implemented` while the correction gates are running. Production was not contacted or changed.
 
 Physical archive deletion remains disabled. `archive-copy` creates a consistent full database snapshot and an eligibility manifest. Existing list, resume, search and context paths therefore continue to read the unchanged active database. No transparent multi-database retrieval claim is made.
 
@@ -18,9 +18,9 @@ Physical archive deletion remains disabled. `archive-copy` creates a consistent 
 - The two workflow YAML files parse successfully.
 - `tests/run_agent/test_compression_lock_defer.py`: 10 passed.
 
-## Objective gates
+## Objective gates from the superseded validation run
 
-- P0-4a focused tests: 15 passed.
+- The prior P0-4a focused result is retained only as historical evidence and is not a current readiness gate.
 - Existing SQLite pragma tests: 6 passed.
 - Existing lock patience tests: 6 passed.
 - Existing compact-storage migration tests: 13 passed.
@@ -29,8 +29,7 @@ Physical archive deletion remains disabled. `archive-copy` creates a consistent 
 - Changed Python files: Ruff passed.
 - Changed Python files: `py_compile` passed.
 - `git diff --check`: passed.
-- AOF v3 contract preflight: passed before implementation.
-- AOF runtime Definition and scope alignment: passed before implementation.
+- AOF v3 contract preflight, Runtime Definition and scope alignment passed before the original implementation. They must be rerun with the canonical external runtime after correction.
 
 The combined adjacent diagnostic suite completed with 305 passed, 7 skipped and 3 failures. The failures are existing Windows-only assertion mismatches outside the P0-4a paths: a profile wrapper test expects a POSIX filename instead of the emitted Windows `.cmd`, a Kanban path assertion checks `/` against a Windows path, and a POSIX `0600` mode assertion is not representable by the observed NTFS mode. The P0-4a backup class passed 4 of 4. No product or test change was made to hide those unrelated platform failures.
 
@@ -49,8 +48,8 @@ The combined adjacent diagnostic suite completed with 305 passed, 7 skipped and 
 ## VACUUM and checkpoint evidence
 
 - The maintenance wrapper calls the existing `optimize_fts_storage(vacuum=True)` path.
-- A noncompact fixture records exactly one call to the existing VACUUM owner.
-- A repeated already-compact fixture records zero VACUUM calls.
+- The earlier fake `db.vacuum()` counter was invalid and has been removed.
+- Current correction tests must prove that a real legacy database returns `ok=True` and `vacuumed=True`, that `vacuumed=False` fails closed, and that an already-compact database does not request another VACUUM.
 - The checkpoint requires an absolute profile home whose basename exactly matches the named profile.
 - It uses one `PRAGMA wal_checkpoint(PASSIVE)`, preserves FULL and enforces a bounded busy timeout.
 - No scheduler, cron entry, service or production process was created or changed.
@@ -61,6 +60,7 @@ The pinned Linux x86_64 CPython artifact and publisher API both report SHA-256 `
 
 ## Limitations
 
+- Readiness is `implemented`, not `validated-local`, until all correction gates and required CI complete.
 - No active database row is deleted, so this candidate alone does not reclaim session-row space.
 - The archive copy is a full consistent snapshot, not a transparent second live store.
 - No production or Telegram interface validation occurred.

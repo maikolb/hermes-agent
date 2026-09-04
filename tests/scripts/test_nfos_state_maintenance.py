@@ -2,12 +2,17 @@ import sqlite3
 import threading
 import time
 
+import pytest
+
 from hermes_state import SessionDB
 from scripts.nfos_state_maintenance import (
     archive_plan,
     compact_storage,
     create_archive_copy,
     create_backup,
+)
+from tests.test_hermes_state import (
+    TestFTSExternalContentMigration as _LegacyFTSFixture,
 )
 
 
@@ -79,37 +84,41 @@ def test_archive_copy_preserves_active_read_behavior_and_exact_mode(tmp_path):
     assert archive.with_suffix(".db.manifest.json").is_file()
 
 
-def test_already_compact_path_executes_zero_vacuums(tmp_path):
+def test_already_compact_path_does_not_request_vacuum(tmp_path):
     db = SessionDB(tmp_path / "state.db")
     db.close()
     result = compact_storage(tmp_path / "state.db")
     assert result["already_compact"] is True
-    assert result["vacuum_count"] == 0
+    assert result["vacuumed"] is False
 
 
-def test_noncompact_path_executes_exactly_one_vacuum(tmp_path, monkeypatch):
-    source = tmp_path / "state.db"
-    source.touch()
+def test_noncompact_real_legacy_db_compacts_and_vacuums(tmp_path):
+    source = tmp_path / "legacy-v22.db"
+    _LegacyFTSFixture._build_v22_db(source)
 
-    class FakeDB:
-        def __init__(self, _path):
-            self.vacuum_calls = 0
-
-        def fts_optimize_available(self):
-            return True
-
-        def vacuum(self):
-            self.vacuum_calls += 1
-            return 1
-
-        def optimize_fts_storage(self, *, vacuum):
-            assert vacuum is True
-            self.vacuum()
-            return {"ok": True, "vacuumed": True}
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr("scripts.nfos_state_maintenance.SessionDB", FakeDB)
     result = compact_storage(source)
-    assert result["vacuum_count"] == 1
+    assert result["ok"] is True
+    assert result["vacuumed"] is True
+    assert result["already_compact"] is False
+
+    reopened = SessionDB(source)
+    try:
+        assert reopened.fts_optimize_available() is False
+        assert len(reopened.search_messages("deployment")) == 1
+        assert len(reopened.search_messages("TOOLBLOB")) == 1
+    finally:
+        reopened.close()
+
+
+def test_noncompact_rejects_missing_vacuum_confirmation(tmp_path, monkeypatch):
+    source = tmp_path / "legacy-v22.db"
+    _LegacyFTSFixture._build_v22_db(source)
+    original = SessionDB.optimize_fts_storage
+
+    def without_vacuum_confirmation(self, *, vacuum):
+        result = original(self, vacuum=False)
+        return {**result, "vacuumed": False}
+
+    monkeypatch.setattr(SessionDB, "optimize_fts_storage", without_vacuum_confirmation)
+    with pytest.raises(RuntimeError, match="did not complete VACUUM"):
+        compact_storage(source)

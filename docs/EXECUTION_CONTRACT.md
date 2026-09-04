@@ -71,6 +71,8 @@ Implement and validate the smallest complete local P0-4a candidate for NFOS data
 - `tests/hermes_cli/test_backup.py`
 - `tests/scripts/test_nfos_state_maintenance.py`
 - `tests/scripts/test_nfos_checkpoint_job.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/evidence/P0-4a/LOCAL_IMPLEMENTATION_VALIDATION.md`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/change-packets/P0-4a/G1_CHANGE_PACKET.md`
 
 ## Out of Scope
 - Any SSH, VPS, production DB, service, process, systemd, symlink, release or credential operation.
@@ -156,7 +158,7 @@ Implement and validate the smallest complete local P0-4a candidate for NFOS data
       "criterionId":"AC-006","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Public surface and before-after retrieval test","target":"nfos_state_maintenance archive-copy","procedure":"Inspected parser and callable API, created an archive copy, then compared active list, export and search results.","expected":"No deletion surface and unchanged active retrieval.","observed":"Deletion is absent and all compared active retrieval results were equal.","performedAtUtc":"2026-09-03T23:43:30Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"3b560a02a1c7bfb9cc14c5e06f747ba3d6753da066d597c1c7f2968607190ed1"}]
     },
     {
-      "criterionId":"AC-007","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Instrumented compact-storage tests","target":"existing optimize_fts_storage VACUUM owner","procedure":"Ran noncompact and repeated already-compact fixtures with a counted VACUUM method.","expected":"One VACUUM when needed and zero when already compact.","observed":"Counts were exactly one and zero respectively; 13 adjacent migration tests passed.","performedAtUtc":"2026-09-03T23:43:30Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"3b560a02a1c7bfb9cc14c5e06f747ba3d6753da066d597c1c7f2968607190ed1"}]
+      "criterionId":"AC-007","status":"pending","performedBy":"agent","verificationMode":"direct","method":"Real legacy database compact-storage tests","target":"existing optimize_fts_storage VACUUM owner","procedure":"Replace the invalid fake db.vacuum counter with a real v22 legacy database test and fail closed unless optimize_fts_storage reports ok=True and vacuumed=True.","expected":"A real required compaction confirms VACUUM; vacuumed=False fails; an already-compact run requests no VACUUM.","observed":"The earlier validated-local evidence was invalidated by implementation review. Correction gates are in progress.","performedAtUtc":"2026-09-04T00:00:00Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"pending-after-corrections"}]
     },
     {
       "criterionId":"AC-008","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Profile mismatch and bounded checkpoint tests","target":"scripts/nfos_checkpoint_job.py","procedure":"Ran PASSIVE checkpoint on a matching temp profile and attempted a mismatched profile.","expected":"Bounded matching profile succeeds; mismatch fails closed; no schedule created.","observed":"Matching checkpoint completed within bound, mismatch raised, and no scheduler code changed.","performedAtUtc":"2026-09-03T23:43:30Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"3b560a02a1c7bfb9cc14c5e06f747ba3d6753da066d597c1c7f2968607190ed1"}]
@@ -181,11 +183,11 @@ Implement and validate the smallest complete local P0-4a candidate for NFOS data
 ```
 
 ## Status
-- Contract preflight: passed with the workspace-local AOF v3 validator.
-- Runtime Definition and scope alignment: passed before source edits; terminal validation is the final local gate.
-- Implementation: complete locally, with archive deletion disabled.
-- Validation: objective P0-4a gates passed; exact evidence is in `internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md`.
-- Completion: complete for local implementation and validation; publication follows this Final gate.
-- Publication: pending atomic commit, push, PR creation and remote readback.
+- Contract preflight: must be rerun with the canonical external AOF runtime after corrections.
+- Runtime Definition and scope alignment: must be regenerated and rerun after removal of the vendored runtime.
+- Implementation: correction work is in progress, with archive deletion disabled.
+- Validation: the earlier `validated-local` claim is invalidated. Current readiness is `implemented`.
+- Completion: pending correction gates and required CI.
+- Publication: PR #79 exists; correction commits are not yet pushed.
 - Production: unchanged and forbidden.
-- Readiness ceiling: `validated-local`.
+- Readiness ceiling after all local gates and required CI pass: `validated-local`.

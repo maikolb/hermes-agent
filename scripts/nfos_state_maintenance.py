@@ -204,24 +204,17 @@ def pragma_readback(source: Path, role: str) -> dict[str, Any]:
 
 def compact_storage(source: Path) -> dict[str, Any]:
     db = SessionDB(source)
-    vacuum_calls = 0
-    original_vacuum = db.vacuum
-
-    def counted_vacuum() -> int:
-        nonlocal vacuum_calls
-        vacuum_calls += 1
-        return original_vacuum()
-
-    db.vacuum = counted_vacuum  # type: ignore[method-assign]
     try:
         if not db.fts_optimize_available():
-            return {"ok": True, "already_compact": True, "vacuum_count": 0}
+            return {"ok": True, "already_compact": True, "vacuumed": False}
         result = db.optimize_fts_storage(vacuum=True)
     finally:
         db.close()
-    if vacuum_calls != 1:
-        raise RuntimeError(f"compact-storage executed {vacuum_calls} VACUUM paths")
-    return {**result, "vacuum_count": vacuum_calls}
+    if result.get("ok") is not True:
+        raise RuntimeError(f"compact-storage did not complete: {result!r}")
+    if result.get("vacuumed") is not True:
+        raise RuntimeError(f"compact-storage did not complete VACUUM: {result!r}")
+    return {**result, "already_compact": False}
 
 
 def build_parser() -> argparse.ArgumentParser:
