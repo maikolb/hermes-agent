@@ -13719,8 +13719,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # lineage. Walk to a fixed point so a protected ancestor's own parent
         # is protected too.
         lineage_seeds = set(retained_ids)
+        visited_lineage: Set[str] = set()
         while lineage_seeds:
             child_id = lineage_seeds.pop()
+            if child_id in visited_lineage:
+                continue
+            visited_lineage.add(child_id)
             parent_id = sessions.get(child_id, {}).get("parent_session_id")
             if not parent_id or parent_id not in sessions:
                 continue

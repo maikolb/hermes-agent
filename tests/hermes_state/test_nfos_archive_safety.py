@@ -63,6 +63,35 @@ def test_archive_plan_protects_dependency_closure(tmp_path):
         db.close()
 
 
+def test_archive_plan_terminates_on_retained_lineage_cycle(tmp_path):
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("retained-a", "cli")
+        db.create_session("retained-b", "cli")
+        db.create_session("old-independent", "cli")
+        with db._lock:
+            db._conn.execute(
+                "UPDATE sessions SET parent_session_id=? WHERE id=?",
+                ("retained-b", "retained-a"),
+            )
+            db._conn.execute(
+                "UPDATE sessions SET parent_session_id=? WHERE id=?",
+                ("retained-a", "retained-b"),
+            )
+        _old_and_ended(db, "old-independent")
+
+        plan = db.plan_physical_archive(older_than_days=90)
+
+        assert plan["deletion_enabled"] is False
+        assert [row["id"] for row in plan["eligible_sessions"]] == [
+            "old-independent"
+        ]
+        assert "retained-a" not in plan["protected"]
+        assert "retained-b" not in plan["protected"]
+    finally:
+        db.close()
+
+
 def test_archive_plan_protects_indexed_external_reference_and_blocks_scan(tmp_path):
     db = SessionDB(tmp_path / "state.db")
     db.create_session("candidate", "cli")
