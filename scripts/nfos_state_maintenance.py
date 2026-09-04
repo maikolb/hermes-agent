@@ -68,10 +68,13 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
         partial.unlink(missing_ok=True)
 
 
-def verify_database(path: Path) -> dict[str, Any]:
+def verify_database(path: Path, *, full_integrity: bool = False) -> dict[str, Any]:
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.0)
     try:
-        quick_check = str(conn.execute("PRAGMA quick_check").fetchone()[0])
+        integrity_pragma = "integrity_check" if full_integrity else "quick_check"
+        integrity_rows = [
+            str(row[0]) for row in conn.execute(f"PRAGMA {integrity_pragma}").fetchall()
+        ]
         foreign_key_rows = conn.execute("PRAGMA foreign_key_check").fetchmany(1)
         table_names = {
             str(row[0])
@@ -91,10 +94,10 @@ def verify_database(path: Path) -> dict[str, Any]:
         )
     finally:
         conn.close()
-    if quick_check != "ok" or foreign_key_rows:
+    if integrity_rows != ["ok"] or foreign_key_rows:
         raise RuntimeError("database verification failed")
     return {
-        "quick_check": quick_check,
+        integrity_pragma: "ok",
         "foreign_key_check": "ok",
         "session_count": session_count,
         "message_count": message_count,
@@ -109,6 +112,11 @@ def create_backup(source: Path, destination: Path, timeout_seconds: float) -> di
     if not _safe_copy_db(source, destination, timeout_seconds=timeout_seconds):
         raise RuntimeError("bounded SQLite backup did not converge")
     return verify_database(destination)
+
+
+def restore_check(path: Path) -> dict[str, Any]:
+    """Run the decisive full integrity gate on an isolated backup copy."""
+    return verify_database(path, full_integrity=True)
 
 
 def archive_plan(
@@ -230,9 +238,11 @@ def build_parser() -> argparse.ArgumentParser:
     archive.add_argument("--sessions-dir")
     archive.add_argument("--external-db", action="append", default=[])
     archive.add_argument("--max-broad-candidates", type=int, required=True)
-    for name in ("verify", "verify-archive"):
-        command = sub.add_parser(name)
-        command.add_argument("--db", required=True)
+    verify = sub.add_parser("verify")
+    verify.add_argument("--db", required=True)
+    verify.add_argument("--integrity", choices=("quick", "full"), default="quick")
+    restore = sub.add_parser("restore-check")
+    restore.add_argument("--db", required=True)
     pragma = sub.add_parser("pragma-readback")
     pragma.add_argument("--db", required=True)
     pragma.add_argument("--role", choices=("writer", "reader", "maintenance"), required=True)
@@ -263,8 +273,10 @@ def main(argv: list[str] | None = None) -> int:
                 timeout_seconds=args.timeout_seconds,
                 plan=plan,
             )
-        elif args.command in {"verify", "verify-archive"}:
-            result = verify_database(source)
+        elif args.command == "verify":
+            result = verify_database(source, full_integrity=args.integrity == "full")
+        elif args.command == "restore-check":
+            result = restore_check(source)
         elif args.command == "pragma-readback":
             result = pragma_readback(source, args.role)
         else:

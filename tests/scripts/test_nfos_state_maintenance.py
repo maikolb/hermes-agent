@@ -10,6 +10,8 @@ from scripts.nfos_state_maintenance import (
     compact_storage,
     create_archive_copy,
     create_backup,
+    build_parser,
+    restore_check,
 )
 from tests.test_hermes_state import (
     TestFTSExternalContentMigration as _LegacyFTSFixture,
@@ -44,6 +46,28 @@ def test_backup_converges_under_continuous_wal_writer(tmp_path):
     assert report["quick_check"] == "ok"
     with sqlite3.connect(destination) as conn:
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] >= 0
+
+
+def test_restore_check_runs_full_integrity_on_copy(tmp_path):
+    source = tmp_path / "state.db"
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE TABLE records(id INTEGER PRIMARY KEY, value TEXT UNIQUE)")
+        conn.execute("INSERT INTO records(value) VALUES('preserved')")
+    backup = tmp_path / "backup.db"
+    create_backup(source, backup, 5.0)
+
+    result = restore_check(backup)
+
+    assert result["integrity_check"] == "ok"
+    assert "quick_check" not in result
+    assert result["foreign_key_check"] == "ok"
+    assert result["sha256"]
+
+
+def test_maintenance_surface_has_restore_check_but_no_archive_verifier_claim():
+    help_text = build_parser().format_help()
+    assert "restore-check" in help_text
+    assert "verify-archive" not in help_text
 
 
 def test_archive_copy_preserves_active_read_behavior_and_exact_mode(tmp_path):
