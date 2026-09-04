@@ -2,7 +2,7 @@
   "schemaVersion": "2.0",
   "contractRef": {
     "path": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\docs\\EXECUTION_CONTRACT.md",
-    "sha256": "6c2bcf77f4d07394935b21296bfd5d9c7328dfe565ab5fe39d8d62957be0c94a"
+    "sha256": "d7c82a68cdcc2118805176183fd03739bf082978e940049d5f303f8d7bca87c9"
   },
   "identity": {
     "loopId": "nfos-p0-4a-local-20260903",
@@ -59,12 +59,12 @@
     "expectedStateVersion": 3,
     "iteration": 2,
     "atomicWritePolicy": "atomic-replace",
-    "lastEventSequence": 3,
+    "lastEventSequence": 8,
     "lastKnownGoodRef": "git:b89c5ca8af68e36a40af163c34da3af4532fc480",
     "priorCheckpointRef": "checkpoint:implementation-review-correction",
     "resumePolicy": "reconcile-then-resume",
     "replayPolicy": "reconcile-before-replay",
-    "digest": "cb78702899e8abce3f59c79388abfab8d4dd4c76f96d259ed36280d963d7ca59"
+    "digest": "46b3a1d138af5c073e6e22957650e658ca9ec4e52ca02099641dd8e2f11185fb"
   },
   "concurrency": {
     "mode": "single-writer",
@@ -196,12 +196,12 @@
     "checkerRef": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\scripts\\run_tests.sh",
     "checkerIdentity": "process:scripts-run-tests",
     "checkerIndependent": true,
-    "checkerDigest": "d523e141815e496f8b24dc03cc3d5d470b259e07ff179317713f64a8197d466d",
+    "checkerDigest": "7d6e3c4500a29d15f1d7a283f3a6d7a6d86e5b3cc71d5ec15ad5b06354da28a8",
     "immutableFixtureRefs": [
       "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\docs\\EXECUTION_CONTRACT.md"
     ],
     "immutableFixtureDigests": [
-      "6c2bcf77f4d07394935b21296bfd5d9c7328dfe565ab5fe39d8d62957be0c94a"
+      "d7c82a68cdcc2118805176183fd03739bf082978e940049d5f303f8d7bca87c9"
     ],
     "feedbackRef": "internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl",
     "requiredAttemptDelta": "changed source or test artifact plus fresh observation",
@@ -320,8 +320,8 @@
     "startedAt": "2026-09-03T23:13:41.7570308Z",
     "observation": {
       "ref": "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
-      "digest": "40b42ed9a48b113192e6a5e74b73c77b7507b0b31cf9d6b73e76f38cb01db90f",
-      "observedAt": "2026-09-04T00:30:00Z",
+      "digest": "80384e9b1bdadab699e379be7afa0318531434a12ce6de410bf7fa638ef9a9d7",
+      "observedAt": "2026-09-04T01:22:43Z",
       "freshnessCeilingSeconds": 28800,
       "stateVersion": 3
     },
@@ -354,7 +354,7 @@
       "evidenceRef": "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
       "passed": false,
       "postconditionsPassed": false,
-      "checkerDigest": "d523e141815e496f8b24dc03cc3d5d470b259e07ff179317713f64a8197d466d"
+      "checkerDigest": "7d6e3c4500a29d15f1d7a283f3a6d7a6d86e5b3cc71d5ec15ad5b06354da28a8"
     },
     "transition": {
       "from": "success",

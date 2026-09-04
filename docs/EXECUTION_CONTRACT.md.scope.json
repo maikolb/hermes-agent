@@ -3,7 +3,7 @@
     "C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/change-packets/P0-4a/G1_CHANGE_PACKET.md",
     "C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/evidence/P0-4a/LOCAL_IMPLEMENTATION_VALIDATION.md"
   ],
-  "generated_at": "2026-09-04T00:37:00.209887+00:00",
+  "generated_at": "2026-09-04T01:27:13.779302+00:00",
   "repo_scope": [
     "docs/EXECUTION_CONTRACT.md",
     "docs/EXECUTION_CONTRACT.md.scope.json",
@@ -29,6 +29,6 @@
   ],
   "repo_scope_count": 20,
   "schema": 1,
-  "source_sha256": "6c2bcf77f4d07394935b21296bfd5d9c7328dfe565ab5fe39d8d62957be0c94a",
+  "source_sha256": "d7c82a68cdcc2118805176183fd03739bf082978e940049d5f303f8d7bca87c9",
   "workspace_root": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent"
 }

@@ -4,7 +4,7 @@ Date: 2026-09-03 America/Sao_Paulo
 
 ## Result
 
-Claude's implementation review invalidated the original `validated-local` claim. Findings F1 through F8 are corrected in the local branch. The exact local suites are green, but readiness remains `implemented` until the correction commits are pushed and required remote CI is read back. Production was not contacted or changed.
+Claude's implementation review invalidated the original `validated-local` claim. Findings F1 through F8 are corrected and pushed. The exact local suites are green, but required remote CI is not: Python failed and Nix remains queued. Readiness stays `implemented`. Production was not contacted or changed.
 
 Archive deletion remains mechanically unavailable. `archive-copy` creates a complete SQLite copy plus an eligibility manifest, while all operational reads continue to use the unchanged active database. It reclaims zero session-row bytes.
 
@@ -25,8 +25,9 @@ Archive deletion remains mechanically unavailable. `archive-copy` creates a comp
 - Ruff 0.15.10 over 11 changed Python files: passed.
 - `py_compile` over the same 11 files: passed.
 - `git diff --check` from accepted base: passed.
-- Canonical external AOF contract Preflight, RUN Definition and scope alignment: passed before final evidence refresh and must be rerun after it.
-- Required GitHub `Python tests / Run tests` and `nix flake check`: pending correction push.
+- Canonical external AOF contract Preflight, Final, RUN Definition and scope alignment: passed after the final evidence refresh.
+- GitHub `Python tests / Run tests`: failed with 78 tests across 47 files on run `33822614809`.
+- GitHub `nix flake check`: still queued on run `33822614270` after the bounded wait.
 
 One diagnostic command initially named `tests/state/test_wal_checkpoint_strategy.py`; that path does not exist, so no tests ran in that attempt. The corrected existing path `tests/test_wal_checkpoint_strategy.py` is included in the 37-pass adjacent result.
 
@@ -48,3 +49,5 @@ The contract validator runs from the canonical external script against the produ
 The pinned Linux x86_64 CPython artifact hash is `0651dd7157d3debf769e15a52c1de9de7fbcdc36ba72faf79fde3c44f14d9461`; publisher metadata and the local download matched. Its build manifest pins SQLite 3.53.1.0 source hash `83e6b2020a034e9a7ad4a72feea59e1ad52f162e09cbd26735a3ffb98359fc4f`.
 
 The Linux interpreter has not run on staging or the target. No restored production snapshot rehearsal has proved the below-1-GB gate. No systemd profile pin or Telegram canary has been validated. Production readiness is blocked regardless of local and CI results.
+
+The Python failure is not green and blocks `validated-local`. For comparison, the accepted-base PR #78 run `33651194711` failed 76 tests across 46 files, and main run `33258501033` failed 71 across 45. Failed file membership changed between runs, consistent with the existing concurrent CI instability, but this packet does not waive the required Python gate. macOS also repeated the previously documented voice test failure. Nix has no result and is reported pending, not passed.
