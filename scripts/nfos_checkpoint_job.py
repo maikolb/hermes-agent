@@ -13,18 +13,24 @@ from pathlib import Path
 def checkpoint(
     profile_home: Path, profile_name: str, *, timeout_seconds: float
 ) -> dict[str, int | float | str]:
+    if timeout_seconds <= 0:
+        raise ValueError("timeout-seconds must be positive")
     home = profile_home.expanduser().resolve()
     if not profile_name.strip() or home.name != profile_name:
         raise ValueError("profile-home basename must exactly match profile-name")
     db_path = home / "state.db"
     if not db_path.is_file():
         raise ValueError(f"profile state database does not exist: {db_path}")
-    deadline = time.monotonic() + timeout_seconds
+    started = time.monotonic()
+    busy_timeout_ms = max(1, int(timeout_seconds * 1000))
     conn = sqlite3.connect(
         f"file:{db_path}?mode=rw", uri=True, timeout=0.0, isolation_level=None
     )
     try:
-        conn.execute(f"PRAGMA busy_timeout={max(0, int(timeout_seconds * 1000))}")
+        # PASSIVE does not wait for readers to release WAL read marks. The
+        # SQLite busy timeout bounds lock acquisition, which is the enforceable
+        # timeout for this synchronous sqlite3 call.
+        conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         conn.execute("PRAGMA synchronous=FULL")
         synchronous = int(conn.execute("PRAGMA synchronous").fetchone()[0])
         busy, log_pages, checkpointed_pages = conn.execute(
@@ -32,13 +38,13 @@ def checkpoint(
         ).fetchone()
     finally:
         conn.close()
-    elapsed = timeout_seconds - max(0.0, deadline - time.monotonic())
-    if elapsed > timeout_seconds + 0.1:
-        raise RuntimeError("checkpoint exceeded its deadline")
+    elapsed = time.monotonic() - started
     if synchronous != 2:
         raise RuntimeError("synchronous is not FULL")
     return {
         "profile": profile_name,
+        "mode": "PASSIVE",
+        "busy_timeout_ms": busy_timeout_ms,
         "busy": int(busy),
         "log_pages": int(log_pages),
         "checkpointed_pages": int(checkpointed_pages),
@@ -52,8 +58,6 @@ def main() -> int:
     parser.add_argument("--profile-name", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=10.0)
     args = parser.parse_args()
-    if args.timeout_seconds <= 0:
-        parser.error("--timeout-seconds must be positive")
     try:
         result = checkpoint(
             Path(args.profile_home), args.profile_name, timeout_seconds=args.timeout_seconds
