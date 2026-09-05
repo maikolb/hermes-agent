@@ -1827,9 +1827,9 @@ def _handle_create(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            # A project link is safe to inherit because ``create_task`` turns
-            # it into a fresh per-task worktree. Never inherit the parent's
-            # literal workspace kind/path; directory sharing must be explicit.
+            # Inherit project identity, never the parent's literal workspace.
+            # Repository work gets a fresh worktree; explicit non-code work
+            # keeps scratch while retaining the same project identity.
             if _inherit_project and project_id is None:
                 _self_tid = os.environ.get("HERMES_KANBAN_TASK")
                 if _self_tid:
@@ -1849,6 +1849,7 @@ def _handle_create(args: dict, **kw) -> str:
                 workspace_path=workspace_path,
                 project_id=project_id,
                 project_source_task_id=project_source_task_id,
+                requires_repo=requires_repo if "requires_repo" in args else None,
                 triage=triage,
                 backlog=backlog,
                 idempotency_key=idempotency_key,
@@ -2641,7 +2642,8 @@ KANBAN_CREATE_SCHEMA = {
                     "Optional project id or slug to link the task to. When "
                     "set, the task becomes a git worktree under the project's "
                     "primary repo with a deterministic branch (project slug + "
-                    "task id), instead of a random branch."
+                    "task id), unless requires_repo is explicitly false for "
+                    "non-code work."
                 ),
             },
             "requires_repo": {
@@ -2652,7 +2654,11 @@ KANBAN_CREATE_SCHEMA = {
                     "repo when absent, registers it as the project's primary repo, "
                     "and gives the task an isolated worktree. This never creates a "
                     "remote repository. Defaults to true when workspace_kind is "
-                    "worktree inside a bound project Topic; otherwise false."
+                    "worktree inside a bound project Topic. Explicit false marks "
+                    "non-code reports/audits: retain project context in scratch "
+                    "without a Git delivery obligation; complete with verified "
+                    "artifacts. Cannot be combined with workspace_kind=worktree. "
+                    "Omission preserves existing project/repository inheritance."
                 ),
             },
             "backlog": {

@@ -3797,6 +3797,7 @@ def create_task(
     board: Optional[str] = None,
     project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
+    requires_repo: Optional[bool] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3838,6 +3839,10 @@ def create_task(
     in its own projects.db, a matching canonical project-linked task in this
     board can supply the repo and branch convention. Its literal worktree is
     never reused; the new task still gets its own task-id-keyed path.
+
+    ``requires_repo=False`` explicitly classifies a non-code task: keep its
+    project identity without converting a scratch workspace into a worktree.
+    Omission preserves repository inheritance and its sealed Git review gate.
     """
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
@@ -3846,6 +3851,10 @@ def create_task(
         raise ValueError("triage and backlog are mutually exclusive")
     if provider_override and not model_override:
         raise ValueError("provider_override requires a model_override")
+    if requires_repo is not None and not isinstance(requires_repo, bool):
+        raise ValueError("requires_repo must be a boolean when provided")
+    if requires_repo is False and workspace_kind == "worktree":
+        raise ValueError("requires_repo=false conflicts with workspace_kind=worktree")
     assignee = _canonical_assignee((assignee or "").strip() or None)
     if not title or not title.strip():
         raise ValueError("title is required")
@@ -3941,7 +3950,7 @@ def create_task(
                             created_at=0,
                             primary_path=project_repo,
                         )
-                        if workspace_kind == "scratch":
+                        if workspace_kind == "scratch" and requires_repo is not False:
                             workspace_kind = "worktree"
 
         if project_obj is None:
@@ -3953,7 +3962,11 @@ def create_task(
             # Canonicalise (a slug may have been passed) and anchor the
             # worktree under the project's primary repo.
             project_id = project_obj.id
-            if workspace_kind == "scratch" and project_obj.primary_path:
+            if (
+                workspace_kind == "scratch"
+                and project_obj.primary_path
+                and requires_repo is not False
+            ):
                 workspace_kind = "worktree"
             if (
                 workspace_kind == "worktree"
