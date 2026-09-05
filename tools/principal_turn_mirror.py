@@ -228,15 +228,24 @@ class PrincipalTurnMirror:
             if self._title_hint:
                 body += f"\n\nTurn prompt (truncated):\n{self._title_hint}"
             with kb.connect_closing(board=self._board) as conn:
-                task_id = kb.create_task(
-                    conn,
-                    title=title,
-                    body=body[:_BODY_MAX],
-                    created_by=author,
-                    board=self._board,
-                    idempotency_key=self._idempotency_key,
-                )
-                existing = kb.get_task(conn, task_id)
+                from hermes_cli.profiles import get_active_profile_name
+
+                with kb.write_txn(conn):
+                    task_id = kb.create_task(
+                        conn,
+                        title=title,
+                        body=body[:_BODY_MAX],
+                        created_by=author,
+                        assignee=get_active_profile_name(),
+                        board=self._board,
+                        idempotency_key=self._idempotency_key,
+                    )
+                    existing = kb.get_task(conn, task_id)
+                    claimed = None
+                    if existing is not None and existing.status == "ready":
+                        claimed = kb.claim_task(
+                            conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
+                        )
                 if (
                     existing is not None
                     and existing.status == "running"
@@ -252,9 +261,10 @@ class PrincipalTurnMirror:
                         reason="principal turn resumed after interruption",
                     )
                     self.resumed = True
-                claimed = kb.claim_task(
-                    conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
-                )
+                if claimed is None:
+                    claimed = kb.claim_task(
+                        conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
+                    )
                 if claimed is None:
                     logger.debug(
                         "principal mirror: card %s not claimable", task_id

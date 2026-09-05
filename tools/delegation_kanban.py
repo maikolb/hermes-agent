@@ -231,6 +231,8 @@ def create_delegation_cards(
         from hermes_cli import kanban_db as kb
 
         author = _author()
+        from hermes_cli.profiles import get_active_profile_name
+
         with kb.connect_closing(board=board) as conn:
             for index, task in enumerate(task_list):
                 try:
@@ -239,18 +241,23 @@ def create_delegation_cards(
                         goal = f"delegated task {index}"
                     context = str(task.get("context") or "").strip()
                     body = goal if not context else f"{goal}\n\n{context}"
-                    task_id = kb.create_task(
-                        conn,
-                        title=goal[:_TITLE_MAX],
-                        body=body[:_BODY_MAX],
-                        created_by=author,
-                        board=board,
-                        project_id=origin.get("project_id") or None,
-                        session_id=origin.get("session_id") or None,
-                        idempotency_key=(
-                            f"{delegation_id}:{index}" if delegation_id else None
-                        ),
-                    )
+                    with kb.write_txn(conn):
+                        task_id = kb.create_task(
+                            conn,
+                            title=goal[:_TITLE_MAX],
+                            body=body[:_BODY_MAX],
+                            created_by=author,
+                            assignee=get_active_profile_name(),
+                            board=board,
+                            project_id=origin.get("project_id") or None,
+                            session_id=origin.get("session_id") or None,
+                            idempotency_key=(
+                                f"{delegation_id}:{index}" if delegation_id else None
+                            ),
+                        )
+                        claimed = kb.claim_task(
+                            conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
+                        )
                     if origin:
                         try:
                             kb.add_notify_sub(
@@ -269,9 +276,6 @@ def create_delegation_cards(
                                 task_id,
                                 exc_info=True,
                             )
-                    claimed = kb.claim_task(
-                        conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
-                    )
                     if claimed is None:
                         logger.debug(
                             "delegation kanban: card %s not claimable "

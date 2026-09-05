@@ -1173,6 +1173,8 @@ def _set_status_direct(
                 return False
 
         was_running = prev["status"] == "running"
+        if effective_status == "ready":
+            kanban_db._ensure_ready_assignee(conn, task_id)
         reopening_satisfied_parent = (
             prev["status"] in {"done", "archived"}
             and effective_status not in {"done", "archived"}

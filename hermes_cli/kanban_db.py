@@ -3664,6 +3664,44 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+    """Require an explicit executor or the current context's configured default."""
+    from hermes_cli.profiles import profile_exists, validate_profile_name
+
+    candidate = (assignee or "").strip()
+    if not candidate:
+        from hermes_cli.config import load_config
+
+        kanban_config = load_config().get("kanban") or {}
+        candidate = (kanban_config.get("default_assignee") or "").strip()
+    if not candidate:
+        raise ValueError(
+            "Executable task requires an assignee. Choose an existing profile "
+            "or set kanban.default_assignee in the current profile's config.yaml."
+        )
+    candidate = _canonical_assignee(candidate)
+    validate_profile_name(candidate)
+    if not profile_exists(candidate):
+        raise ValueError(
+            f"Assignee profile {candidate!r} does not exist. Choose an existing "
+            "profile or correct kanban.default_assignee in config.yaml."
+        )
+    return candidate
+
+
+def _ensure_ready_assignee(conn: sqlite3.Connection, task_id: str) -> None:
+    """Persist a valid executor inside the caller's readiness transaction."""
+    row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        return
+    assignee = _resolve_executable_assignee(row["assignee"])
+    if assignee != row["assignee"]:
+        conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (assignee, task_id))
+        _append_event(conn, task_id, "assigned", {
+            "assignee": assignee, "source": "kanban.default_assignee",
+        })
+
+
 def _canonical_delivery_document(value: Mapping[str, Any]) -> tuple[str, str]:
     """Return canonical JSON plus a stable SHA-256 fingerprint."""
 
@@ -3759,6 +3797,7 @@ def create_task(
     board: Optional[str] = None,
     project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
+    requires_repo: Optional[bool] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3800,6 +3839,10 @@ def create_task(
     in its own projects.db, a matching canonical project-linked task in this
     board can supply the repo and branch convention. Its literal worktree is
     never reused; the new task still gets its own task-id-keyed path.
+
+    ``requires_repo=False`` explicitly classifies a non-code task: keep its
+    project identity without converting a scratch workspace into a worktree.
+    Omission preserves repository inheritance and its sealed Git review gate.
     """
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
@@ -3808,7 +3851,11 @@ def create_task(
         raise ValueError("triage and backlog are mutually exclusive")
     if provider_override and not model_override:
         raise ValueError("provider_override requires a model_override")
-    assignee = _canonical_assignee(assignee)
+    if requires_repo is not None and not isinstance(requires_repo, bool):
+        raise ValueError("requires_repo must be a boolean when provided")
+    if requires_repo is False and workspace_kind == "worktree":
+        raise ValueError("requires_repo=false conflicts with workspace_kind=worktree")
+    assignee = _canonical_assignee((assignee or "").strip() or None)
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -3903,7 +3950,7 @@ def create_task(
                             created_at=0,
                             primary_path=project_repo,
                         )
-                        if workspace_kind == "scratch":
+                        if workspace_kind == "scratch" and requires_repo is not False:
                             workspace_kind = "worktree"
 
         if project_obj is None:
@@ -3915,7 +3962,11 @@ def create_task(
             # Canonicalise (a slug may have been passed) and anchor the
             # worktree under the project's primary repo.
             project_id = project_obj.id
-            if workspace_kind == "scratch" and project_obj.primary_path:
+            if (
+                workspace_kind == "scratch"
+                and project_obj.primary_path
+                and requires_repo is not False
+            ):
                 workspace_kind = "worktree"
             if (
                 workspace_kind == "worktree"
@@ -4048,6 +4099,8 @@ def create_task(
                         ).fetchall()
                         if any(r["status"] != "done" for r in rows):
                             task_status = "todo"
+                if task_status == "ready":
+                    assignee = _resolve_executable_assignee(assignee)
                 # Even in backlog/triage mode we still need to validate parent
                 # ids so the eventual link rows don't dangle.
                 if (backlog or triage) and parents:
@@ -4298,13 +4351,15 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
     Refuses to reassign a task that's currently running (claim_lock set).
     Reassign after the current run completes if needed.
     """
-    profile = _canonical_assignee(profile)
+    profile = _canonical_assignee((profile or "").strip() or None)
     with write_txn(conn):
         row = conn.execute(
             "SELECT status, claim_lock, assignee FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if not row:
             return False
+        if row["status"] == "ready":
+            profile = _resolve_executable_assignee(profile)
         if row["claim_lock"] is not None and row["status"] == "running":
             raise RuntimeError(
                 f"cannot reassign {task_id}: currently running (claimed). "
@@ -5174,12 +5229,24 @@ def recompute_ready(
                     )
                     if failures >= effective_limit:
                         continue
+                    if resume_status == "ready":
+                        try:
+                            _ensure_ready_assignee(conn, task_id)
+                        except ValueError as exc:
+                            _log.warning("kanban promotion refused for %s: %s", task_id, exc)
+                            continue
                     conn.execute(
                         "UPDATE tasks SET status = ? "
                         "WHERE id = ? AND status = 'blocked'",
                         (resume_status, task_id),
                     )
                 else:
+                    if resume_status == "ready":
+                        try:
+                            _ensure_ready_assignee(conn, task_id)
+                        except ValueError as exc:
+                            _log.warning("kanban promotion refused for %s: %s", task_id, exc)
+                            continue
                     conn.execute(
                         "UPDATE tasks SET status = ? WHERE id = ? AND status = 'todo'",
                         (resume_status, task_id),
@@ -5222,7 +5289,9 @@ def claim_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
+    # Inline mirrors compose creation and claim under one commit so the
+    # dispatcher never observes their assigned but unclaimed ready state.
+    with write_txn(conn, allow_nested=True):
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -8633,6 +8702,11 @@ def request_changes(
         # reset nor incremented). Review transitions are not evidence the
         # pathology cleared — only complete_task's success path resets the
         # breaker counter (mirrors unblock_task, #35072).
+        if new_status == "ready":
+            try:
+                implementer = _resolve_executable_assignee(implementer)
+            except ValueError as exc:
+                return False, str(exc)
         cur = conn.execute(
             """
             UPDATE tasks
@@ -8684,8 +8758,9 @@ def promote_task(
     Mirrors the automatic promotion done by ``recompute_ready`` but
     drives it from a deliberate operator action with an audit-trail
     entry. Refuses to promote if any parent dep is not in a terminal
-    state (`done`/`archived`) unless ``force=True``. Does NOT change
-    assignee or claim state. Returns ``(True, None)`` on success and
+    state (`done`/`archived`) unless ``force=True``. Resolves an absent
+    assignee from configuration; preserves claim state. Returns success as
+    ``(True, None)`` and
     ``(False, reason)`` if refused. ``dry_run=True`` validates the
     promotion would succeed without mutating state.
     """
@@ -8719,10 +8794,19 @@ def promote_task(
                 f"{', '.join(unsatisfied)} (use --force to override)"
             )
 
-    if dry_run:
-        return True, None
-
     with write_txn(conn):
+        candidate = conn.execute(
+            "SELECT assignee FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if candidate is None:
+            return False, f"task {task_id} not found"
+        try:
+            _resolve_executable_assignee(candidate["assignee"])
+        except ValueError as exc:
+            return False, str(exc)
+        if dry_run:
+            return True, None
+        _ensure_ready_assignee(conn, task_id)
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready' "
             "WHERE id = ? AND status IN ('todo', 'blocked')",
@@ -8822,6 +8906,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             if landing_status == "ready" and resume_status == "review"
             else landing_status
         )
+        if new_status == "ready":
+            _ensure_ready_assignee(conn, task_id)
         # NOTE: deliberately does NOT touch ``block_recurrences`` or
         # ``block_kind``. Resetting the recurrence counter on unblock is exactly
         # the amnesia that let a cron unblock → worker re-block loop run
@@ -8889,6 +8975,11 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
         implementer = handoff.get("implementer")
         if not isinstance(implementer, str) or not implementer.strip():
             implementer = None
+        if new_status == "ready":
+            if implementer:
+                implementer = _resolve_executable_assignee(implementer)
+            else:
+                _ensure_ready_assignee(conn, task_id)
         assignee_sql = ", assignee = ?" if implementer else ""
         params: tuple[Any, ...] = (
             (new_status, implementer, task_id)
