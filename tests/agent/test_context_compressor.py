@@ -709,7 +709,9 @@ class TestNonStringContent:
 
         assert summary.startswith(f"{SUMMARY_PREFIX}\n{HISTORICAL_TASK_HEADING}\n")
         assert "do something" in summary
-        assert summary.endswith("plain summary text")
+        body, quotes = summary.split("\n\n## User Messages", 1)
+        assert body.endswith("plain summary text")
+        assert "do something" in quotes
 
 
 
