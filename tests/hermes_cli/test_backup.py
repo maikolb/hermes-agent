@@ -1099,7 +1099,7 @@ class TestSafeCopyDb:
 
         class FakeSourceConnection:
             def backup(self, _destination, *, pages, progress, sleep):
-                assert pages > 0
+                assert pages == -1
                 assert sleep > 0
                 progress(sqlite3.SQLITE_BUSY, 0, 1)
                 progress(sqlite3.SQLITE_BUSY, 0, 1)
@@ -1132,7 +1132,9 @@ class TestSafeCopyDb:
 
         assert backup_mod._safe_copy_db(src, dst, timeout_seconds=1.0) is False
         assert connect_calls[0][1]["timeout"] == 0.0
-        assert not dst.exists()
+        # A failed replacement attempt removes only its hidden partial.  A
+        # previously published valid destination is never destroyed.
+        assert dst.read_bytes() == b"partial"
 
 
     def test_locked_source_fails_fast_not_hang(self, tmp_path):
@@ -1815,7 +1817,6 @@ class TestMemoryProviderExternalPaths:
         assert (restored.stat().st_mode & 0o777) == 0o600
         # External state did NOT leak into HERMES_HOME.
         assert not (hermes_home / "_external").exists()
-
 
 
 

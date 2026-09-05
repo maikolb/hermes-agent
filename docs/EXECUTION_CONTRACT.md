@@ -1,82 +1,129 @@
-# Failed-Compaction Safety Stop
+# NFOS P0-4a Local Candidate Execution Contract
 
 ## Contract Metadata
-- Contract Version: 3
+- Contract Version: 2
+- Contract Revision: 5, CI baseline reconciliation
+- Contract ID: NFOS-PROD-REPAIR-20260903-P0-4A-LOCAL-v3
 - Mode: REPAIR
-- Risk Level: HIGH
-- Workspace: `C:\Users\maiko\Documents\Codex\2026-09-02\hermes-compaction-safety`
-- Target Branch: `fix/compaction-failure-stop`
-- Updated At: 2026-09-02T17:05:00Z
-- Machine Runtime Authority: none: one bounded core repair with behavior tests and no live deployment before merge
-- Authorisation: Maikol requested that every Hermes stop unsafe continuation after failed compaction, preserve quality and memory, and be deployed only after direct proof.
+- Risk Level: CRITICAL
+- Canonical Checkout: `C:/Users/maiko/AppData/Local/hermes/hermes-agent`
+- Target Branch: `fix/nfos-p0-4a` from fresh `maikolb/main`
+- Accepted Base: `b89c5ca8af68e36a40af163c34da3af4532fc480`
+- Machine Runtime Authority: `none: workspace-local AOF runtime vendoring is prohibited; the card-specific RUN is validated separately by the canonical external runtime`
+- Scope Manifest: `docs/EXECUTION_CONTRACT.md.scope.json`
+- Owner and Acceptance Authority: Maikol
+- Single-Writer Executor: Codex
+- Independent Reviewer: Claude
+- Production Authorization: absent
 
 ## Requested Outcome
-- When failed compaction leaves a Hermes request above its configured threshold, preserve its durable turn checkpoint and stop before another ordinary model call, without substituting a lower-quality summary or weakening memory.
+Implement and validate the smallest complete local P0-4a candidate for NFOS database safety, bounded backup, non-destructive archive planning, compact storage and profile-scoped checkpoint maintenance, without mutating any VPS, production database, service, symlink or release.
 
 ## Acceptance Criteria
-- AC-001: Current `maikolb/main` reproduces an over-threshold request blocked by the same-session compression failure cooldown that would otherwise continue to the provider.
-- AC-002: The repaired path emits an actionable terminal response and makes zero provider calls for that unsafe request.
-- AC-003: The existing durable turn checkpoint is retained and marked for resumable recovery before the turn closes.
-- AC-004: Successful compression and requests below threshold retain their current behavior.
-- AC-005: No conversation content, recent message, memory hook, compression timeout, summary model, or AOF enforcement is removed or weakened.
-- AC-006: The turn cannot spin through tools or consume another model iteration while the failed-compaction cooldown blocks an over-threshold request.
-- AC-007: Focused behavior tests, adjacent compression/checkpoint tests, lint, and diff checks pass on the exact branch.
-- AC-008: The regression is recorded in `docs/regressions` with incident evidence, prevention, and readiness ceiling.
+- AC-001: The branch is based exactly on fresh `maikolb/main` and includes the three accepted production-to-main commits.
+- AC-002: Product defaults remain neutral. Explicit NFOS profile settings enforce `synchronous=FULL`; writer, pooled-reader and maintenance busy timeouts are role-specific and covered against the 20 s routine, 60 s transcript and 0.5 s activity paths.
+- AC-003: Connections using the explicit NFOS profile settings read back `wal_autocheckpoint=4000`, with no durability downgrade.
+- AC-004: Backup uses one bounded SQLite backup call, publishes by atomic replace only after success, preserves source mode where supported and leaves no final partial file on failure.
+- AC-005: Archive eligibility excludes open and pinned sessions, compression ancestors of every retained session, recursive delegate closure, referenced shared prompts, disk transcript dependencies and session IDs referenced by external Kanban databases.
+- AC-006: Source deletion is unavailable unless transparent list, resume, search and context retrieval across active and archive databases is implemented and proven. If the bounded candidate does not implement full retrieval, it must remain copy-only.
+- AC-007: The existing compact-storage path executes no more than one VACUUM per invocation and a repeated already-compact run does not execute an unnecessary VACUUM.
+- AC-008: The checkpoint maintenance surface is profile-scoped, uses PASSIVE mode with SQLite busy timeout as its enforceable lock-wait bound, and is not scheduled or activated by this branch.
+- AC-009: A reproducible local runtime supply-chain document identifies a Python build linked to SQLite 3.50.0 or newer, including authoritative source URLs, artifact hashes and verification commands. No VPS installation occurs.
+- AC-010: Focused and adjacent regression tests, changed-file lint/type checks, compile checks, contract/runtime/scope validators and `git diff --check` pass. Python CI is evaluated for P0-4a delta regressions by exact terminal test node; baseline-red failures remain limitations. Advisory Nix and baseline-preexisting macOS failures do not block `validated-local` unless repository protection or rulesets later require them.
+- AC-011: No test shows loss of context, memory, answer quality, role alternation or performance. Any statistically meaningful regression blocks `validated-local`.
+- AC-012: The candidate diff changes only declared scope, configured GitHub authentication is available, and publication remains ordered after every local gate is green. Push, PR creation and remote readback are delivery actions performed only after this local contract reaches Final.
+- AC-013: Production remains unchanged and readiness cannot exceed `validated-local`.
 
 ## Failure Signal / Repro
-- `C:\Users\maiko\AppData\Local\hermes\logs\gateway-hidden-launch.log` records a preflight above 231,200 tokens, a 300-second auxiliary compression timeout, exhausted fallback authentication, continuation at approximately 266,692 tokens during cooldown, then 121-second and 303-second tool failures.
-- User screenshot: `C:\Users\maiko\AppData\Local\Temp\codex-clipboard-bfd7c908-761a-480c-9f89-96b6e1ae6eb5.png`.
-- Repository evidence: `internal/ops/evidence/failed-compaction-safety-stop-20260902.log`.
+- Approved G0 evidence: `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/evidence/P0-4a/PREFLIGHT.md`.
+- G0 observed a 4,602,044,416-byte `state.db`, SQLite 3.45.1, 22 bounded-window lock lines and 7 lease-refresh failures on the NFOS target.
+- Current main supports only a partial database pragma set, uses writer timeout 1 s and pooled-reader timeout 5 s, and has application retry budgets of 20 s routine, 60 s transcript and 0.5 s activity.
+- Existing archive is soft-hide and existing prune is destructive without a same-schema retrieval layer.
+- Existing compact-storage already owns a VACUUM, so a second maintenance VACUUM would duplicate gigabyte-scale work.
+- These are historical/current-baseline facts from approved G0 evidence. This local contract does not refresh or mutate the target.
 
 ## Root-Cause Hypothesis
-- Fact: `agent/turn_context.py` and `agent/conversation_loop.py` only warn when the same-session failure cooldown blocks compression above threshold.
-- Fact: the turn checkpoint is initialized before preflight compression, and raw session history remains durable when `abort_on_summary_failure` preserves the input list.
-- Fact: changing `abort_on_summary_failure` to false would substitute a deterministic fallback summary and is excluded because quality parity has not been proven.
-- Chosen fix point: the existing pre-provider pressure boundary and existing turn checkpoint state, using a terminal safety stop instead of another oversized model call.
+- Large legacy dual-FTS storage amplifies write work and maintenance cost.
+- Connection-local busy waits are not configured by role; a global 30 s wait would conflict with the deliberate short writer retry loop and activity deadline.
+- SQLite 3.45.1 is inside the affected WAL-reset version range identified by the approved evidence.
+- Existing deletion semantics do not preserve compression lineage, delegate closure, shared prompt/transcript dependencies or cross-database Kanban references.
+- A safe repair must preserve FULL, use role-aware contention settings, make backup bounded, keep deletion disabled without transparent retrieval, and reuse exactly one existing compact-storage VACUUM.
 
 ## In Scope
 - `docs/EXECUTION_CONTRACT.md`
 - `docs/EXECUTION_CONTRACT.md.scope.json`
-- `agent/turn_context.py`
-- `agent/conversation_loop.py`
-- `agent/turn_checkpoint.py` only if the existing checkpoint API lacks a safe terminal transition
-- focused tests under `tests/agent/`
-- focused tests under `tests/run_agent/`
-- `docs/regressions/`
-- `internal/ops/evidence/`
+- `docs/archive/execution-contracts/CEOGAME_NATIVE_MEDIA_DURABLE_DELIVERY_20260825.md`
+- `docs/archive/execution-contracts/FAILED_COMPACTION_SAFETY_STOP_20260902.md`
+- `docs/runtime-supply-chain/NFOS_SQLITE_RUNTIME.md`
+- `internal/ops/P0-4A_AGENT_LOOP_RUN.json`
+- `internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl`
+- `internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md`
+- `hermes_state.py`
+- `hermes_cli/config_defaults.py`
+- `hermes_cli/main.py`
+- `hermes_cli/sessions_cmd.py`
+- `hermes_cli/backup.py`
+- `scripts/nfos_state_maintenance.py`
+- `scripts/nfos_checkpoint_job.py`
+- `tests/state/test_nfos_database_pragmas.py`
+- `tests/hermes_state/test_nfos_archive_safety.py`
+- `tests/hermes_cli/test_nfos_archive_cli.py`
+- `tests/hermes_cli/test_backup.py`
+- `tests/scripts/test_nfos_state_maintenance.py`
+- `tests/scripts/test_nfos_checkpoint_job.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/evidence/P0-4a/LOCAL_IMPLEMENTATION_VALIDATION.md`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/change-packets/P0-4a/G1_CHANGE_PACKET.md`
 
 ## Out of Scope
-- Changing compression threshold, timeout, provider, model, summary prompt, fallback credentials, or `abort_on_summary_failure`.
-- Discarding history, disabling memory, reducing recent-message protection, or silently accepting a fallback summary.
-- Gateway auto-reset architecture, a new daemon, a new agent, or unrelated session work.
-- Live profile deployment before PR CI, merge, and merged-SHA readback.
+- Any SSH, VPS, production DB, service, process, systemd, symlink, release or credential operation.
+- Repointing `/usr/local/bin/hermes` or implementing global release activation.
+- Homolog, `/lux`, worker-capacity activation, dispatcher, lease redesign or principal-worker parity.
+- `synchronous=NORMAL` or any durability downgrade.
+- Deleting sessions without complete dependency closure and transparent operational retrieval.
+- New core model tools, broad refactors, new databases, daemons or schedulers.
+- Removing FTS triggers as part of P1-1.
 
 ## Forbidden Actions
-- Do not make an oversized provider request after the guard proves compaction is blocked.
-- Do not claim continuity from a warning alone; require checkpoint state and zero provider calls.
-- Do not ask the user to be the first tester.
+- Do not contact or mutate production.
+- Do not build or install a runtime on the VPS.
+- Do not restart, stop, start or signal any service or process.
+- Do not repoint any symlink or edit an immutable release.
+- Do not read or expose credentials, message bodies or personal data.
+- Do not stash, reset, discard or overwrite unrelated work.
+- Do not push or open a PR while any local gate is red.
+- Do not expose a destructive archive flag unless transparent retrieval and the complete protected closure are tested.
 
 ## Claim Discipline
-- `implemented` means the branch contains the guard and its regression fixture.
-- `validated-local` requires direct reproduction, zero-provider-call proof, checkpoint proof, adjacent green tests, and exact diff review.
-- `validated-target` requires merged source installed on a supported Hermes profile and a fresh real incident-shaped canary.
-- Fleet completion requires every supported readable local and VPS profile to report the same merged source identity and pass its probe.
+- `implemented` means the candidate branch contains the bounded local source and tests.
+- `validated-local` requires every objective local gate in this contract plus exact diff/scope validation.
+- `validated-target` requires later approved evidence from the NFOS production interface and cannot be claimed here.
+- `released` and `accepted` are impossible under this contract.
+- Internal tests do not substitute for the later Telegram canary.
 
 ## Loop Control
-- Qualification: a controlled micro-loop is not required because this repair has one incident-shaped fixture, one pre-provider guard, and at most two manually invoked correction iterations.
-- Maximum build/test/fix iterations: two.
-- Stop condition: any successful-compression regression, missing checkpoint, provider call after the guard, content loss, memory regression, or need for new architecture.
-- Escalation rule: revert the candidate, preserve the red fixture, and report the missing primitive.
-- Runtime authority path: none.
-- Append-only evidence path: `internal/ops/evidence/failed-compaction-safety-stop-20260902.log`.
+- Controlled micro-loop is required because this is a high-risk, multi-file state-management repair.
+- A workspace-local Machine Runtime Authority is not required because the canonical external AOF runtime validates the retained card-specific RUN and events without shipping framework code in the product release.
+- Runtime authority path: `internal/ops/P0-4A_AGENT_LOOP_RUN.json`.
+- Append-only evidence path: `internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl`.
+- Maximum implementation/test iterations: 10.
+- Maximum materially different environment attempts: 2.
+- Retry requires a source/test delta or a fresh observation.
+- Stagnation stop: the same failure with the same code and checker twice.
+- Stop conditions: dirty preflight, non-fast-forward main, scope violation, runtime validator failure, need for external mutation, inability to keep deletion disabled without retrieval, unbounded backup, durability regression, performance/context/memory/quality regression or unavailable configured GitHub authentication.
+- Rollback: revert only the uncommitted candidate edits by an explicit reviewed patch; never use reset, checkout-discard or stash.
 
 ## Validation Plan
-- Reproduce the current warning-and-continue branch with a real conversation-loop fixture.
-- Add the minimum guard at the existing pre-provider pressure boundary.
-- Prove zero provider calls, terminal response, preserved messages, and resumable checkpoint state.
-- Run successful-compression, cooldown, turn-checkpoint, and current-turn media tests.
-- Run repository lint for changed Python, contract validation, and `git diff --check`.
-- Open PR, wait for CI, merge only when green, then deploy and canary under a separate target contract.
+- Validate this frozen contract, runtime definition and scope manifest with the canonical external AOF runtime before source edits and at Final.
+- Inspect existing connection, retry, session, prompt, transcript, Kanban, backup, compact-storage and cron surfaces before choosing edit points.
+- Implement the minimum role-specific pragmas while preserving writer timing and FULL.
+- Add a bounded single-call backup helper with atomic publication and cleanup on failure.
+- Implement dependency-closed archive planning first. Implement transparent reads only if the change remains bounded; otherwise ship copy-only archive creation with deletion mechanically unavailable.
+- Reuse the existing compact-storage implementation and prove one-or-zero VACUUM behavior as appropriate.
+- Add a profile-scoped checkpoint script without registering a schedule.
+- Document a reproducible SQLite 3.50+ runtime source with hashes and local verification.
+- Run focused tests, adjacent session/backup/compact-storage regressions, Ruff or the repository's changed-Python lint, Python compilation, scope alignment, runtime validation, contract validation and diff checks.
+- Update append-only local evidence and coordination artifacts without target claims.
+- Commit, push and create a PR only after all local checks pass; read back PR and CI state.
 
 ## Validation Evidence
 ```json
@@ -84,67 +131,64 @@
   "schemaVersion": 1,
   "checks": [
     {
-      "criterionId": "AC-001", "status": "passed", "performedBy": "agent", "verificationMode": "direct",
-      "method": "Incident log and current-main branch inspection", "target": "pre-provider cooldown branch on maikolb/main 5e073855c8",
-      "procedure": "Correlated the 266,692/231,200 cooldown incident with the branch that warned and had no return before provider dispatch.",
-      "expected": "The pre-repair request remains eligible for provider dispatch.", "observed": "The incident continued into tool execution and current main contained only the warning at that boundary.",
-      "performedAtUtc": "2026-09-02T17:35:00Z", "artifacts": [{"path":"internal/ops/evidence/failed-compaction-safety-stop-20260902.log","sha256":"906a1650e86df009827e0aa525564396f7a5efb711a9ec247246a6e63e6208b3"}]
+      "criterionId": "AC-001",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Git branch and ancestry inspection",
+      "target": "canonical checkout before source edits",
+      "procedure": "Fetched maikolb/main, switched canonical main, fast-forwarded only, then created fix/nfos-p0-4a.",
+      "expected": "Clean branch at fresh accepted main.",
+      "observed": "Branch fix/nfos-p0-4a at b89c5ca8af68e36a40af163c34da3af4532fc480; prior checkout was clean.",
+      "performedAtUtc": "2026-09-03T23:43:30Z",
+      "artifacts": [{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
     },
     {
-      "criterionId": "AC-002", "status": "passed", "performedBy": "agent", "verificationMode": "direct",
-      "method": "Full conversation-loop behavior test", "target": "over-threshold request with cooldown:59",
-      "procedure": "Ran AIAgent.run_conversation with the incident-shaped compressor state and asserted the model client was never called.",
-      "expected": "Zero provider calls and an actionable soft terminal result.", "observed": "Provider calls=0, api_calls=0, completed=false, compression_deferred=true, and the response names /compress and /new.",
-      "performedAtUtc": "2026-09-02T17:35:00Z", "artifacts": [{"path":"internal/ops/evidence/failed-compaction-safety-stop-20260902.log","sha256":"906a1650e86df009827e0aa525564396f7a5efb711a9ec247246a6e63e6208b3"}]
+      "criterionId":"AC-002","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Neutral fallback, explicit profile and lock-patience tests","target":"writer, reader and maintenance SQLite connections","procedure":"Proved absent settings preserve constructor values, then applied explicit NFOS values and ran existing patience coverage.","expected":"Neutral fallback plus explicit FULL and role waits without changing application patience behavior.","observed":"Fallback remained unchanged; explicit settings read FULL=2 and 1000/30000/30000 ms; patience tests passed.","performedAtUtc":"2026-09-04T00:30:00Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
     },
     {
-      "criterionId": "AC-003", "status": "passed", "performedBy": "agent", "verificationMode": "direct",
-      "method": "Checkpoint transition behavior test", "target": "existing turn checkpoint",
-      "procedure": "Observed the exact transition calls during the full conversation-loop fixture.",
-      "expected": "The checkpoint follows planning with compaction_deferred and a recovery action.", "observed": "The second transition set phase=compaction_deferred and next_action=run_manual_compression_then_resume_current_turn; checkpoint_preserved=true.",
-      "performedAtUtc": "2026-09-02T17:35:00Z", "artifacts": [{"path":"internal/ops/evidence/failed-compaction-safety-stop-20260902.log","sha256":"906a1650e86df009827e0aa525564396f7a5efb711a9ec247246a6e63e6208b3"}]
+      "criterionId":"AC-003","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Explicit NFOS SQLite pragma readback","target":"all three connection roles","procedure":"Applied explicit profile values to isolated databases and read back synchronous and wal_autocheckpoint.","expected":"FULL and 4000 pages only when explicitly configured.","observed":"Each role returned synchronous 2 and wal_autocheckpoint 4000; empty configuration retained 1000.","performedAtUtc":"2026-09-04T00:30:00Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
     },
     {
-      "criterionId": "AC-004", "status": "passed", "performedBy": "agent", "verificationMode": "direct",
-      "method": "Below-threshold control and adjacent successful-compression suites", "target": "safe request and normal compaction paths",
-      "procedure": "Ran the below-threshold cooldown control plus preflight cap, summary continuity, checkpoint compaction, and current-turn media suites.",
-      "expected": "Safe requests still call the provider and successful compression stays green.", "observed": "The control called the provider once and completed; all 41 adjacent tests passed.",
-      "performedAtUtc": "2026-09-02T17:35:00Z", "artifacts": [{"path":"internal/ops/evidence/failed-compaction-safety-stop-20260902.log","sha256":"906a1650e86df009827e0aa525564396f7a5efb711a9ec247246a6e63e6208b3"}]
+      "criterionId":"AC-004","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Continuous-writer backup and failure tests","target":"hermes_cli.backup._safe_copy_db","procedure":"Backed up under a continuous WAL writer and injected a bounded busy failure over an existing destination.","expected":"One pages=-1 operation, verified atomic output and prior-good preservation.","observed":"Backup verified; failure removed only hidden partial and preserved the prior destination.","performedAtUtc":"2026-09-03T23:43:30Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
     },
     {
-      "criterionId": "AC-005", "status": "passed", "performedBy": "agent", "verificationMode": "direct",
-      "method": "Changed-path and behavior inspection", "target": "exact feature worktree",
-      "procedure": "Inspected the complete diff and ran the memory-adjacent summary, checkpoint, and media tests.",
-      "expected": "No quality, memory, timeout, provider, model, protected-tail, or AOF weakening.", "observed": "Only conversation-loop handling, focused tests, contract, regression, and evidence changed; no excluded setting or lifecycle changed.",
-      "performedAtUtc": "2026-09-02T17:35:00Z", "artifacts": [{"path":"internal/ops/evidence/failed-compaction-safety-stop-20260902.log","sha256":"906a1650e86df009827e0aa525564396f7a5efb711a9ec247246a6e63e6208b3"}]
+      "criterionId":"AC-005","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Archive dependency fixtures","target":"SessionDB.plan_physical_archive","procedure":"Created retained lineage, delegate, shared prompt, disk transcript and indexed or unindexed external reference fixtures.","expected":"Every dependency protected and unindexed external lookup blocks.","observed":"Only the independent ended fixture remained eligible; every required dependency was protected.","performedAtUtc":"2026-09-03T23:43:30Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
     },
     {
-      "criterionId": "AC-006", "status": "passed", "performedBy": "agent", "verificationMode": "direct",
-      "method": "Provider-call and iteration-budget assertions", "target": "incident-shaped turn",
-      "procedure": "Asserted no provider create call, api_calls=0, soft defer, and refunded unmade iteration.",
-      "expected": "No model or tool-loop continuation is possible in the blocked oversized turn.", "observed": "The function returned from the pre-provider branch before any response or tool iteration.",
-      "performedAtUtc": "2026-09-02T17:35:00Z", "artifacts": [{"path":"internal/ops/evidence/failed-compaction-safety-stop-20260902.log","sha256":"906a1650e86df009827e0aa525564396f7a5efb711a9ec247246a6e63e6208b3"}]
+      "criterionId":"AC-006","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Public surface and before-after retrieval test","target":"nfos_state_maintenance archive-copy","procedure":"Inspected parser and callable API, created an archive copy, then compared active list, export and search results.","expected":"No deletion surface and unchanged active retrieval.","observed":"Deletion is absent and all compared active retrieval results were equal.","performedAtUtc":"2026-09-03T23:43:30Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
     },
     {
-      "criterionId": "AC-007", "status": "passed", "performedBy": "agent", "verificationMode": "direct",
-      "method": "Focused, adjacent, gateway, lint, compile, and diff gates", "target": "exact feature worktree",
-      "procedure": "Ran 41 agent tests, 8 gateway tests, Ruff 0.15.10, py_compile, and git diff --check.",
-      "expected": "All declared source gates pass.", "observed": "41+8 tests passed, Ruff and compilation passed, and diff check reported no whitespace error.",
-      "performedAtUtc": "2026-09-02T17:35:00Z", "artifacts": [{"path":"internal/ops/evidence/failed-compaction-safety-stop-20260902.log","sha256":"906a1650e86df009827e0aa525564396f7a5efb711a9ec247246a6e63e6208b3"}]
+      "criterionId":"AC-007","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Real legacy database compact-storage tests","target":"existing optimize_fts_storage VACUUM owner","procedure":"Ran a real v22 legacy database through compact-storage and injected a missing VACUUM confirmation.","expected":"Required compaction returns ok=True and vacuumed=True; vacuumed=False fails; already-compact requests no VACUUM.","observed":"Real compaction and search preservation passed; false VACUUM confirmation failed closed; repeated compact path was skipped.","performedAtUtc":"2026-09-04T00:30:00Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
     },
     {
-      "criterionId": "AC-008", "status": "passed", "performedBy": "agent", "verificationMode": "direct",
-      "method": "Canonical regression record inspection", "target": "docs/regressions/REG-2026-09-02-001.md",
-      "procedure": "Recorded feedback, incident evidence, reproduction, root cause, prevention, validations, exclusions, and readiness ceiling.",
-      "expected": "The bug class has one repository-owned prevention artifact.", "observed": "REG-2026-09-02-001 binds the prevention to zero provider calls and preserved checkpoint state.",
-      "performedAtUtc": "2026-09-02T17:35:00Z", "artifacts": [{"path":"internal/ops/evidence/failed-compaction-safety-stop-20260902.log","sha256":"906a1650e86df009827e0aa525564396f7a5efb711a9ec247246a6e63e6208b3"}]
+      "criterionId":"AC-008","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Profile, PASSIVE mode and busy-timeout tests","target":"scripts/nfos_checkpoint_job.py","procedure":"Ran PASSIVE checkpoint on a matching temp profile, checked the exact busy timeout and rejected mismatch and nonpositive timeout.","expected":"PASSIVE mode, enforceable SQLite wait bound, fail-closed profile and no schedule.","observed":"PASSIVE and 2000 ms readback passed; invalid inputs failed; no scheduler code changed.","performedAtUtc":"2026-09-04T00:30:00Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
+    },
+    {
+      "criterionId":"AC-009","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Publisher API, immutable manifest and two-sided hash inspection","target":"Astral CPython 3.13.15 Linux x86_64 artifact","procedure":"Read release metadata, build manifest and publisher digest, downloaded once and independently hashed locally.","expected":"Matching SHA-256 and declared SQLite at least 3.50.0.","observed":"Both artifact hashes matched; manifest pins SQLite 3.53.1.0 and its source hash.","performedAtUtc":"2026-09-03T23:43:30Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
+    },
+    {
+      "criterionId":"AC-010","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Local gates plus exact terminal-node CI delta reconciliation","target":"declared changed files and PR #79","procedure":"Ran local gates, compared final PR Python terminal failures with accepted main and PR #78 by exact node, then replayed residual nodes on PR head and exact accepted base.","expected":"Local gates pass and no Python failure is attributable to P0-4a; advisory lanes are reported without being promoted to requirements.","observed":"Local gates passed. PR had 78 terminal failures; 62 matched main, 10 more matched accepted PR #78, and the remaining 6 produced identical 5-pass/1-skip results on PR and b89c5ca8af. Failed-file intersection with the P0-4a diff was zero. Nix is advisory and macOS is baseline-preexisting.","performedAtUtc":"2026-09-04T02:50:13Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
+    },
+    {
+      "criterionId":"AC-011","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Retrieval equality and adjacent conversation-loop regression tests","target":"active list, export, search, compaction deferral and lock behavior","procedure":"Compared pre and post archive-copy read results and ran accepted-main compaction plus state regressions.","expected":"No loss or regression in covered context, persistence or timing invariants.","observed":"Read results were equal and no objective regression test failed.","performedAtUtc":"2026-09-03T23:43:30Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
+    },
+    {
+      "criterionId":"AC-012","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Scope alignment, remote and authentication preflight","target":"candidate diff and maikolb remote","procedure":"Validated all changed paths against the manifest, inspected the maikolb URL and queried configured GitHub authentication without printing credentials.","expected":"Exact scope and publication authority ready after local Final.","observed":"26 changed files fit 21 declared scope paths; maikolb remote and authenticated account are configured.","performedAtUtc":"2026-09-03T23:43:30Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
+    },
+    {
+      "criterionId":"AC-013","status":"passed","performedBy":"agent","verificationMode":"direct","method":"Command and scope audit","target":"external target boundary","procedure":"Reviewed executed commands and changed paths for SSH, service, database, release or symlink operations.","expected":"No production contact or mutation and no target-validation claim.","observed":"No SSH or production command was issued; all writes are local candidate or coordination artifacts.","performedAtUtc":"2026-09-03T23:43:30Z","artifacts":[{"path":"internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md","sha256":"9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea"}]
     }
   ]
 }
 ```
 
 ## Status
-- Contract preflight: completed
-- Implementation: completed in the isolated feature worktree
-- Validation: validated-local with incident-shaped, control, adjacent, gateway, lint, compile, and diff evidence
-- Completion: completed for source readiness; PR CI, merge, release, fleet deployment, and target canary remain pending
+- Contract preflight: passed with the canonical external AOF runtime after the final evidence refresh.
+- RUN Definition and scope alignment: passed with the canonical external AOF runtime after the final evidence refresh.
+- Implementation: findings F1 through F8 are corrected locally, with archive deletion disabled.
+- Validation: local code and behavior gates pass; exact Python failure reconciliation found no P0-4a delta regression. Nix is advisory and macOS is baseline-preexisting.
+- Completion: completed for the local candidate at `validated-local`; target validation, release and acceptance remain outside this contract.
+- Publication: correction commits are pushed to PR #79; this final evidence commit follows without force-push.
+- Production: unchanged and forbidden.
+- Readiness ceiling after all local gates and required CI pass: `validated-local`.

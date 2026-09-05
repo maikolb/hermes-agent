@@ -1,0 +1,371 @@
+{
+  "schemaVersion": "2.0",
+  "contractRef": {
+    "path": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\docs\\EXECUTION_CONTRACT.md",
+    "sha256": "6680c07ae07ebe9a0e42464411c4a2ecbb90706a570d88758dbd726c09666973"
+  },
+  "identity": {
+    "loopId": "nfos-p0-4a-local-20260903",
+    "runId": "5fe015fd-c1cd-4194-a41b-e1128d27891f",
+    "attemptId": "e4d25252-e92e-4d46-8fe9-76db401d647a",
+    "traceId": "trace-nfos-p0-4a-local-20260903"
+  },
+  "qualification": {
+    "reasons": [
+      "high-risk",
+      "resumable"
+    ]
+  },
+  "trigger": {
+    "type": "manual",
+    "provenance": "user:codex-g1-local-implementation",
+    "deduplicationKey": "nfos-p0-4a-local:b89c5ca8",
+    "deduplicationWindowSeconds": 0,
+    "overlapPolicy": "reject"
+  },
+  "authorities": {
+    "stateSourceIds": [
+      "canonical-git-checkout",
+      "execution-contract",
+      "approved-g0-evidence"
+    ],
+    "gateRefs": [
+      "gate:contract",
+      "gate:runtime",
+      "gate:scope",
+      "gate:focused-tests",
+      "gate:diff-check"
+    ],
+    "approvalAuthorityRefs": [
+      "authority:maikol"
+    ]
+  },
+  "budgets": {
+    "maxIterations": 10,
+    "maxWallClockSeconds": 28800,
+    "maxToolCalls": 400,
+    "maxRetries": 6,
+    "maxStagnantIterations": 2,
+    "maxOutputBytes": 8388608,
+    "maxConcurrency": 1,
+    "sideEffectCeiling": {
+      "enabled": false,
+      "maxConsequentialActions": 0
+    }
+  },
+  "checkpoint": {
+    "stateSchemaRef": "C:\\Users\\maiko\\Projetos\\AgentOperatingFramework\\framework\\runtime\\schemas\\agent-loop-run.schema.json",
+    "stateSchemaVersion": "2.0",
+    "expectedStateVersion": 3,
+    "iteration": 2,
+    "atomicWritePolicy": "atomic-replace",
+    "lastEventSequence": 8,
+    "lastKnownGoodRef": "git:b89c5ca8af68e36a40af163c34da3af4532fc480",
+    "priorCheckpointRef": "checkpoint:implementation-review-correction",
+    "resumePolicy": "reconcile-then-resume",
+    "replayPolicy": "reconcile-before-replay",
+    "digest": "46b3a1d138af5c073e6e22957650e658ca9ec4e52ca02099641dd8e2f11185fb"
+  },
+  "concurrency": {
+    "mode": "single-writer",
+    "casEnabled": false,
+    "partitions": []
+  },
+  "failurePolicies": [
+    {
+      "class": "transient",
+      "retryable": true,
+      "limit": 3,
+      "backoff": {
+        "type": "exponential",
+        "baseSeconds": 1,
+        "maxSeconds": 30
+      },
+      "requireReobservation": true,
+      "safetyMechanism": "idempotency-key",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "invalid-input",
+      "retryable": false,
+      "limit": 0,
+      "backoff": {
+        "type": "none",
+        "baseSeconds": 0,
+        "maxSeconds": 0
+      },
+      "requireReobservation": false,
+      "safetyMechanism": "no-retry",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "precondition-failed",
+      "retryable": true,
+      "limit": 1,
+      "backoff": {
+        "type": "fixed",
+        "baseSeconds": 1,
+        "maxSeconds": 1
+      },
+      "requireReobservation": true,
+      "safetyMechanism": "reconciliation",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "validation-failed",
+      "retryable": true,
+      "limit": 6,
+      "backoff": {
+        "type": "fixed",
+        "baseSeconds": 1,
+        "maxSeconds": 1
+      },
+      "requireReobservation": true,
+      "safetyMechanism": "reconciliation",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "policy-blocked",
+      "retryable": false,
+      "limit": 0,
+      "backoff": {
+        "type": "none",
+        "baseSeconds": 0,
+        "maxSeconds": 0
+      },
+      "requireReobservation": false,
+      "safetyMechanism": "no-retry",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "ambiguous-side-effect",
+      "retryable": false,
+      "limit": 0,
+      "backoff": {
+        "type": "none",
+        "baseSeconds": 0,
+        "maxSeconds": 0
+      },
+      "requireReobservation": true,
+      "safetyMechanism": "reconciliation",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "unsafe-to-retry",
+      "retryable": false,
+      "limit": 0,
+      "backoff": {
+        "type": "none",
+        "baseSeconds": 0,
+        "maxSeconds": 0
+      },
+      "requireReobservation": false,
+      "safetyMechanism": "no-retry",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "environment-unavailable",
+      "retryable": true,
+      "limit": 2,
+      "backoff": {
+        "type": "exponential",
+        "baseSeconds": 2,
+        "maxSeconds": 60
+      },
+      "requireReobservation": true,
+      "safetyMechanism": "idempotency-key",
+      "escalationRef": "contract:Loop Control"
+    },
+    {
+      "class": "stagnated",
+      "retryable": false,
+      "limit": 0,
+      "backoff": {
+        "type": "none",
+        "baseSeconds": 0,
+        "maxSeconds": 0
+      },
+      "requireReobservation": false,
+      "safetyMechanism": "no-retry",
+      "escalationRef": "contract:Loop Control"
+    }
+  ],
+  "verificationPolicy": {
+    "oracleRef": "deterministic:scripts/run_tests.sh",
+    "executorIdentity": "agent:codex-single-writer",
+    "checkerRef": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\scripts\\run_tests.sh",
+    "checkerIdentity": "process:scripts-run-tests",
+    "checkerIndependent": true,
+    "checkerDigest": "ca72fb37509fa4f29c7d21a3a879228db4c64d0b876d9416d67ad2c88b70cdec",
+    "immutableFixtureRefs": [
+      "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\docs\\EXECUTION_CONTRACT.md"
+    ],
+    "immutableFixtureDigests": [
+      "6680c07ae07ebe9a0e42464411c4a2ecbb90706a570d88758dbd726c09666973"
+    ],
+    "feedbackRef": "internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl",
+    "requiredAttemptDelta": "changed source or test artifact plus fresh observation",
+    "highRisk": true
+  },
+  "approvalPolicy": {
+    "requiredForConsequentialActions": true,
+    "authorityRefs": [
+      "authority:maikol"
+    ],
+    "bindingFields": [
+      "actionDigest",
+      "argumentDigest",
+      "preconditions",
+      "stateVersion"
+    ],
+    "maxAgeSeconds": 28800,
+    "reapprovalOnStateChange": true
+  },
+  "tracePolicy": {
+    "allowedEventFields": [
+      "sequence",
+      "timestamp",
+      "eventType",
+      "traceId",
+      "loopId",
+      "runId",
+      "attemptId",
+      "iteration",
+      "stateVersion",
+      "observationSequence",
+      "intentSequence",
+      "observationRef",
+      "observationDigest",
+      "decisionRef",
+      "decisionDigest",
+      "actionFingerprint",
+      "actionDigest",
+      "argumentDigest",
+      "preconditionDigest",
+      "idempotencyKeyDigest",
+      "approval",
+      "resultRef",
+      "resultDigest",
+      "checkerDigest",
+      "verificationPassed",
+      "postconditionsPassed",
+      "failureClass",
+      "transition",
+      "checkpointDigest",
+      "retryAfterSeconds",
+      "reconciled",
+      "childrenPending",
+      "redactedFields"
+    ],
+    "redactedFields": [
+      "arguments",
+      "toolPayload",
+      "credentials",
+      "tokens"
+    ],
+    "prohibitedContent": [
+      "raw-chain-of-thought",
+      "secrets",
+      "credentials",
+      "unrestricted-payloads"
+    ],
+    "retentionDays": 30,
+    "accessPolicyRef": "policy:workspace-maintainers"
+  },
+  "eventsRef": {
+    "path": "C:\\Users\\maiko\\AppData\\Local\\hermes\\hermes-agent\\internal\\ops\\P0-4A_AGENT_LOOP_EVENTS.jsonl",
+    "schemaRef": "C:\\Users\\maiko\\Projetos\\AgentOperatingFramework\\framework\\runtime\\schemas\\agent-loop-event.schema.json"
+  },
+  "scopePolicy": {
+    "schemaVersion": 1,
+    "allowedWritePaths": [
+      "docs/EXECUTION_CONTRACT.md",
+      "docs/EXECUTION_CONTRACT.md.scope.json",
+      "docs/archive/execution-contracts/CEOGAME_NATIVE_MEDIA_DURABLE_DELIVERY_20260825.md",
+      "docs/archive/execution-contracts/FAILED_COMPACTION_SAFETY_STOP_20260902.md",
+      "docs/runtime-supply-chain/NFOS_SQLITE_RUNTIME.md",
+      "internal/ops/P0-4A_AGENT_LOOP_RUN.json",
+      "internal/ops/P0-4A_AGENT_LOOP_EVENTS.jsonl",
+      "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
+      "hermes_state.py",
+      "hermes_cli/config_defaults.py",
+      "hermes_cli/main.py",
+      "hermes_cli/sessions_cmd.py",
+      "hermes_cli/backup.py",
+      "scripts/nfos_state_maintenance.py",
+      "scripts/nfos_checkpoint_job.py",
+      "tests/state/test_nfos_database_pragmas.py",
+      "tests/hermes_state/test_nfos_archive_safety.py",
+      "tests/hermes_cli/test_nfos_archive_cli.py",
+      "tests/hermes_cli/test_backup.py",
+      "tests/scripts/test_nfos_state_maintenance.py",
+      "tests/scripts/test_nfos_checkpoint_job.py"
+    ],
+    "deniedWritePaths": [
+      "plugins/kanban/**",
+      "apps/**",
+      "gateway/**",
+      "run_agent.py"
+    ],
+    "allowDeletions": false,
+    "manifestDigest": "86115866fedba88a3b7ce9bbea8f3bfe14bb27d0a341515f0ab0283d57688f46"
+  },
+  "current": {
+    "status": "running",
+    "iteration": 2,
+    "stagnantIterations": 0,
+    "retryCount": 0,
+    "toolCallCount": 0,
+    "outputBytes": 0,
+    "startedAt": "2026-09-03T23:13:41.7570308Z",
+    "observation": {
+      "ref": "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
+      "digest": "9804053faafada43e2a454cfd8bd0da4d4597154f28f966d50bfb9b713ce2aea",
+      "observedAt": "2026-09-04T02:50:13Z",
+      "freshnessCeilingSeconds": 28800,
+      "stateVersion": 3
+    },
+    "decision": {
+      "ref": "contract:implement-local-only",
+      "digest": "689d52c6b1b71284d939dc7bf02acac06febdb8f11beea06375bfc0db7a9452a"
+    },
+    "action": {
+      "id": "implement-nfos-p0-4a-local",
+      "capabilityClass": "workspace-write",
+      "consequential": false,
+      "fingerprint": "5c872ff2abdaa301b479369389eea886514c79ee97739dbad39e09a911d5cc85",
+      "actionDigest": "90fc0b55cbb713ae7fbd901d6f85e61893e80f455bb46e877541f2efefb199bd",
+      "argumentDigest": "32427557b7f4692d88aff399ba6b8b456bec305ff63d64e4e433dcd414a7a1ea",
+      "idempotencyKey": "nfos-p0-4a-local-b89c5ca8",
+      "preconditions": [
+        "contract correction revision 2 approved",
+        "fresh maikolb/main selected",
+        "runtime authority validated"
+      ],
+      "postconditions": [
+        "focused and adjacent gates pass",
+        "scope remains exact",
+        "production remains unchanged"
+      ],
+      "reconciliationRef": "git-status+contract+tests",
+      "noRetry": false
+    },
+    "verification": {
+      "evidenceRef": "internal/ops/evidence/P0-4A_LOCAL_VALIDATION.md",
+      "passed": false,
+      "postconditionsPassed": false,
+      "checkerDigest": "ca72fb37509fa4f29c7d21a3a879228db4c64d0b876d9416d67ad2c88b70cdec"
+    },
+    "transition": {
+      "from": "success",
+        "to": "running"
+    },
+    "cancellation": {
+      "requested": false,
+      "propagateToChildren": true,
+      "childrenPending": 0
+    },
+    "ambiguityResolved": true,
+    "budgetExhausted": false
+  }
+}

@@ -15,8 +15,14 @@ DEFAULT_CONFIG = {
     # not crash-safe (for example macOS virtiofs, NFS, or SMB).
     "database": {
         "journal_mode": "wal",
-        # Optional WAL sizing pragmas, applied when set to integers.
-        # None = SQLite defaults (autocheckpoint 1000 pages, no size limit).
+        # Optional role settings remain neutral for general Hermes installs.
+        # Profile operators can set them explicitly without changing global
+        # behavior. A configured synchronous downgrade is still refused.
+        "synchronous": None,
+        "writer_busy_timeout_ms": None,
+        "reader_busy_timeout_ms": None,
+        "maintenance_busy_timeout_ms": None,
+        # None keeps SQLite's default autocheckpoint threshold.
         "wal_autocheckpoint": None,
         "journal_size_limit": None,
     },
