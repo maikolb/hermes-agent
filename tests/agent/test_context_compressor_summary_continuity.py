@@ -187,7 +187,9 @@ def test_resume_handoff_after_default_protected_head_decays_initial_turns():
     # Grounding (761a0b124e) may prepend a deterministic task-snapshot
     # section — pin the contract, not the exact stored string.
     stored_summary = compressor._previous_summary or ""
-    assert stored_summary.endswith("fresh summary")
+    body, quotes = stored_summary.split("\n\n## User Messages", 1)
+    assert body.endswith("fresh summary")
+    assert "new user turn after restart" in quotes
     assert old_summary not in stored_summary
     assert all(
         "original task before first compaction" not in str(msg.get("content", ""))
