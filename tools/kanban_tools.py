@@ -671,6 +671,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "children": children,
         "parent_count": len(parents),
         "child_count": len(children),
+        **kb.task_presentation(conn, task),
     }
 
 
@@ -713,6 +714,7 @@ def _handle_show(args: dict, **kw) -> str:
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
                     "provider_override": t.provider_override,
+                    **kb.task_presentation(conn, t),
                 }
 
             def _run_dict(r):
@@ -1370,7 +1372,17 @@ def _handle_comment(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            cid = kb.add_comment(conn, tid, author=author, body=str(body))
+            if args.get("updates_instruction") is True:
+                if _is_dispatcher_owned_worker() or _is_delegated_child_context():
+                    return tool_error("Only the coordinating conversation can replace the operator instruction.")
+                revision = args.get("instruction_revision")
+                if not isinstance(revision, int) or isinstance(revision, bool):
+                    return tool_error("Read kanban_show and supply its instruction_revision.")
+                cid = kb.update_task_instruction(
+                    conn, tid, body=str(body), author=author, expected_revision=revision,
+                )
+            else:
+                cid = kb.add_comment(conn, tid, author=author, body=str(body))
             return _ok(task_id=tid, comment_id=cid)
         finally:
             conn.close()
@@ -1850,6 +1862,7 @@ def _handle_create(args: dict, **kw) -> str:
                 project_id=project_id,
                 project_source_task_id=project_source_task_id,
                 requires_repo=requires_repo if "requires_repo" in args else None,
+                delivery_type=args.get("delivery_type"),
                 triage=triage,
                 backlog=backlog,
                 idempotency_key=idempotency_key,
@@ -2441,7 +2454,9 @@ KANBAN_COMMENT_SCHEMA = {
         "Append a comment to a task's thread. Use for durable notes "
         "that should outlive this run (questions for the next worker, "
         "partial findings, rationale). Ephemeral reasoning doesn't "
-        "belong here — use your normal response instead."
+        "belong here. When the user changes the request, the coordinating conversation "
+        "sets updates_instruction=true, supplies the current instruction_revision from "
+        "kanban_show, and writes the complete current request in body. Reuse this card."
     ),
     "parameters": {
         "type": "object",
@@ -2457,6 +2472,8 @@ KANBAN_COMMENT_SCHEMA = {
                 "type": "string",
                 "description": "Markdown-supported comment body.",
             },
+            "updates_instruction": {"type": "boolean", "description": "Replace the current request after an explicit user correction; coordinator only."},
+            "instruction_revision": {"type": "integer", "description": "Current revision from kanban_show, required when replacing the instruction."},
             "board": _board_schema_prop(),
         },
         "required": ["task_id", "body"],
@@ -2660,6 +2677,10 @@ KANBAN_CREATE_SCHEMA = {
                     "artifacts. Cannot be combined with workspace_kind=worktree. "
                     "Omission preserves existing project/repository inheritance."
                 ),
+            },
+            "delivery_type": {
+                "type": "string", "enum": ["code", "report", "operation"],
+                "description": "Requested output. Reports and operations use scratch or dir and finish with evidence; code follows project Git delivery rules.",
             },
             "backlog": {
                 "type": "boolean",

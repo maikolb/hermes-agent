@@ -2601,6 +2601,15 @@ class GatewayKanbanWatchersMixin:
                     wake_handoff = ""
                     for ev in d["events"]:
                         kind = ev.kind
+                        expected_states = {
+                            "claimed": {"running"}, "completed": {"done", "archived"},
+                            "blocked": {"blocked"}, "block_loop_detected": {"blocked"},
+                            "review_requested": {"review"},
+                        }
+                        if task and (task.task_role == "activity" or (
+                            kind in expected_states and task.status not in expected_states[kind]
+                        )):
+                            continue
                         # Identity prefix: attribute terminal pings to the
                         # worker that did the work. Makes fleets (where one
                         # chat subscribes to many tasks) legible at a glance.
@@ -2608,8 +2617,8 @@ class GatewayKanbanWatchersMixin:
                         tag = f"@{who} " if who else ""
                         if kind == "claimed":
                             msg = (
-                                f"▶ {board_tag}{tag}Kanban {sub['task_id']} started"
-                                f" — {title}"
+                                f"▶ {board_tag}{tag}Kanban {sub['task_id']} reservado para execução"
+                                f": {title}"
                             )
                         elif kind == "completed":
                             # Prefer the run's summary (the worker's
@@ -2677,13 +2686,7 @@ class GatewayKanbanWatchersMixin:
                                 f" — {title}{handoff}"
                             )
                         elif kind == "block_loop_detected":
-                            # A task re-blocked for the same cause past the
-                            # recurrence limit and was routed to `triage` for a
-                            # human decision. This is the ONE transition that
-                            # exists to force human attention, yet it emits no
-                            # `blocked`/`status` event — so before adding it to
-                            # TERMINAL_KINDS it produced zero notification and
-                            # the task stalled in triage silently. Ping loudly.
+                            # Keep the same task and report the concrete impediment.
                             reason = ""
                             recurrences = None
                             if ev.payload:
@@ -2692,8 +2695,8 @@ class GatewayKanbanWatchersMixin:
                                 recurrences = ev.payload.get("recurrences")
                             rc = f" (blocked {recurrences}x for the same cause)" if recurrences else ""
                             msg = (
-                                f"🛑 {board_tag}{tag}Kanban {sub['task_id']} routed to TRIAGE"
-                                f" — needs a human decision{rc}{reason}"
+                                f"⏸ {board_tag}{tag}Kanban {sub['task_id']} continua aguardando"
+                                f"{rc}{reason}"
                             )
                         else:
                             # archived / unblocked are claimed by TERMINAL_KINDS
@@ -3131,7 +3134,7 @@ class GatewayKanbanWatchersMixin:
         conn = _kb.connect(board=board)
         try:
             rows = conn.execute(
-                "SELECT id, title, claim_lock, worker_pid, last_heartbeat_at "
+                "SELECT id, title, claim_lock, worker_pid, last_heartbeat_at, current_run_id, task_role "
                 "FROM tasks WHERE status = 'running' "
                 "AND claim_lock IS NOT NULL",
             ).fetchall()
@@ -3174,7 +3177,7 @@ class GatewayKanbanWatchersMixin:
                     ) > heartbeat_secs
                 if not dead:
                     continue
-                is_mirror = conn.execute(
+                is_mirror = row["task_role"] == "activity" or conn.execute(
                     "SELECT 1 FROM task_comments WHERE task_id = ? AND "
                     "body LIKE 'Mirror card for in-process delegation%' "
                     "LIMIT 1",
@@ -3182,43 +3185,35 @@ class GatewayKanbanWatchersMixin:
                 ).fetchone() is not None
                 out.append(
                     (str(row["id"]), str(row["title"] or ""), is_mirror,
-                     row["worker_pid"] is not None)
+                     row["worker_pid"] is not None, row["current_run_id"], claim,
+                     row["last_heartbeat_at"])
                 )
         finally:
             conn.close()
         return out
 
     def _claim_reaper_apply(
-        self, board: str, task_id: str, disposition: str
+        self, board: str, task_id: str, disposition: str,
+        run_id: int | None, claim: str, heartbeat: int | None,
     ) -> None:
         from hermes_cli import kanban_db as _kb
 
-        new_status = (
-            "archived" if disposition == "archived_stale_mirror" else "ready"
-        )
         conn = _kb.connect(board=board)
         try:
-            with _kb.write_txn(conn):
-                conn.execute(
-                    "UPDATE tasks SET status = ?, claim_lock = NULL, "
-                    "claim_expires = NULL, worker_pid = NULL "
-                    "WHERE id = ? AND status = 'running'",
-                    (new_status, task_id),
-                )
-                conn.execute(
-                    "INSERT INTO task_events"
-                    "(task_id, kind, payload, created_at) "
-                    "VALUES (?, 'claim_reaped', ?, strftime('%s','now'))",
-                    (task_id, json.dumps({"disposition": disposition})),
-                )
+            recovered = _kb.recover_interrupted_task(
+                conn, task_id, expected_run_id=run_id, expected_claim=claim,
+                expected_heartbeat=heartbeat,
+            )
+            if not recovered:
+                return
             note = (
                 "Card espelho de subagente arquivado."
                 if disposition == "archived_stale_mirror"
-                else "Card devolvido pra fila (ready); o dispatcher respawna."
+                else "Tarefa disponível para retomar quando suas dependências permitirem."
             )
             _kb.add_comment(
-                conn, task_id, "watchdog",
-                "Claim morto colhido pelo reaper: o processo dono sumiu ou o "
+                conn, task_id, "hermes",
+                "Execução interrompida: o processo terminou. "
                 f"heartbeat parou. {note}",
             )
         finally:
@@ -3270,7 +3265,7 @@ class GatewayKanbanWatchersMixin:
                 )
             except Exception:  # noqa: BLE001
                 continue
-            for task_id, _title, is_mirror, is_worker in stale:
+            for task_id, _title, is_mirror, is_worker, run_id, claim, heartbeat in stale:
                 if is_mirror:
                     disposition = "archived_stale_mirror"
                 elif is_worker:
@@ -3279,7 +3274,7 @@ class GatewayKanbanWatchersMixin:
                     continue
                 try:
                     await asyncio.to_thread(
-                        self._claim_reaper_apply, board, task_id, disposition,
+                        self._claim_reaper_apply, board, task_id, disposition, run_id, claim, heartbeat,
                     )
                     logger.info(
                         "claim reaper: %s/%s -> %s",
@@ -3627,7 +3622,7 @@ class GatewayKanbanWatchersMixin:
         conn = _kb.connect(board=board)
         try:
             _kb.add_comment(
-                conn, task_id, "watchdog",
+                conn, task_id, "hermes",
                 f"Alerta de abandono publicado no tópico do projeto: {reason}",
             )
             with _kb.write_txn(conn):

@@ -1521,6 +1521,10 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    task_role: str = "work"
+    delivery_type: Optional[str] = None
+    requires_repo: Optional[bool] = None
+    instruction_revision: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1537,6 +1541,10 @@ class Task:
         return cls(
             id=row["id"],
             title=row["title"],
+            task_role=row["task_role"] if "task_role" in keys else "work",
+            delivery_type=row["delivery_type"] if "delivery_type" in keys else None,
+            requires_repo=(bool(row["requires_repo"]) if "requires_repo" in keys and row["requires_repo"] is not None else None),
+            instruction_revision=row["instruction_revision"] if "instruction_revision" in keys else 0,
             body=row["body"],
             assignee=row["assignee"],
             status=row["status"],
@@ -3029,6 +3037,19 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "tasks", "tenant", "tenant TEXT")
     if "result" not in cols:
         _add_column_if_missing(conn, "tasks", "result", "result TEXT")
+    for name, declaration in (
+        ("task_role", "task_role TEXT NOT NULL DEFAULT 'work'"),
+        ("delivery_type", "delivery_type TEXT"),
+        ("requires_repo", "requires_repo INTEGER"),
+        ("instruction_revision", "instruction_revision INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if name not in cols:
+            _add_column_if_missing(conn, "tasks", name, declaration)
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS tasks_instruction_revision
+        AFTER UPDATE OF title, body ON tasks
+        WHEN OLD.title IS NOT NEW.title OR OLD.body IS NOT NEW.body
+        BEGIN UPDATE tasks SET instruction_revision = instruction_revision + 1
+        WHERE id = NEW.id; END""")
     if "branch_name" not in cols:
         _add_column_if_missing(conn, "tasks", "branch_name", "branch_name TEXT")
     if "project_id" not in cols:
@@ -3669,7 +3690,7 @@ def _resolve_executable_assignee(assignee: Optional[str]) -> str:
     from hermes_cli.profiles import profile_exists, validate_profile_name
 
     candidate = (assignee or "").strip()
-    if not candidate:
+    if not candidate or candidate.casefold() == "unassigned":
         from hermes_cli.config import load_config
 
         kanban_config = load_config().get("kanban") or {}
@@ -3798,6 +3819,8 @@ def create_task(
     project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
     requires_repo: Optional[bool] = None,
+    task_role: str = "work",
+    delivery_type: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3851,6 +3874,17 @@ def create_task(
         raise ValueError("triage and backlog are mutually exclusive")
     if provider_override and not model_override:
         raise ValueError("provider_override requires a model_override")
+    if task_role not in {"work", "activity", "aggregate"}:
+        raise ValueError("task_role must be work, activity or aggregate")
+    if delivery_type not in {None, "code", "report", "operation"}:
+        raise ValueError("delivery_type must be code, report or operation")
+    if delivery_type == "code" and requires_repo is False:
+        raise ValueError("code delivery conflicts with requires_repo=false")
+    if delivery_type in {"report", "operation"} or task_role == "activity":
+        if workspace_kind == "worktree":
+            raise ValueError("non-code work must use scratch or dir, not a worktree")
+        if requires_repo is None:
+            requires_repo = False
     if requires_repo is not None and not isinstance(requires_repo, bool):
         raise ValueError("requires_repo must be a boolean when provided")
     if requires_repo is False and workspace_kind == "worktree":
@@ -3950,7 +3984,7 @@ def create_task(
                             created_at=0,
                             primary_path=project_repo,
                         )
-                        if workspace_kind == "scratch" and requires_repo is not False:
+                        if workspace_kind == "scratch" and requires_repo is not False and delivery_type not in {"report", "operation"}:
                             workspace_kind = "worktree"
 
         if project_obj is None:
@@ -3966,6 +4000,8 @@ def create_task(
                 workspace_kind == "scratch"
                 and project_obj.primary_path
                 and requires_repo is not False
+                and delivery_type not in {"report", "operation"}
+                and delivery_type not in {"report", "operation"}
             ):
                 workspace_kind = "worktree"
             if (
@@ -4024,16 +4060,13 @@ def create_task(
             )
         skills_list = cleaned
 
-    # Idempotency check — return the existing task instead of creating a
-    # duplicate. Done BEFORE entering write_txn to keep the fast path fast
-    # and to avoid holding a write lock during the lookup. Race is
-    # acceptable: two concurrent creators with the same key might both
-    # insert, at which point both rows exist but the next lookup stabilises.
+    if delivery_type == "code" and workspace_kind != "worktree":
+        raise ValueError("code delivery requires a worktree and project Git delivery checks")
+    # Fast lookup; repeat under the insertion lock to prevent duplicate requests.
     if idempotency_key:
         row = conn.execute(
             "SELECT id FROM tasks WHERE idempotency_key = ? "
-            "AND status != 'archived' "
-            "ORDER BY created_at DESC LIMIT 1",
+            "ORDER BY created_at ASC LIMIT 1",
             (idempotency_key,),
         ).fetchone()
         if row:
@@ -4072,6 +4105,15 @@ def create_task(
             # compose create_task calls under one outer commit so the
             # dispatcher can never observe a partially constructed graph.
             with write_txn(conn, allow_nested=True):
+                # Serialize identity lookup with insertion across connections.
+                if idempotency_key:
+                    existing = conn.execute(
+                        "SELECT id FROM tasks WHERE idempotency_key = ? "
+                        "ORDER BY created_at ASC LIMIT 1",
+                        (idempotency_key,),
+                    ).fetchone()
+                    if existing:
+                        return existing["id"]
                 # Determine task status from parent status, unless the caller
                 # parks it directly in blocked for human-ops review, backlog
                 # pending approval, or triage for a specifier.
@@ -4163,6 +4205,14 @@ def create_task(
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
                     ),
+                )
+                resolved_delivery = delivery_type or (
+                    "report" if requires_repo is False else
+                    "code" if workspace_kind == "worktree" else "operation"
+                )
+                conn.execute(
+                    "UPDATE tasks SET task_role = ?, delivery_type = ?, requires_repo = ? WHERE id = ?",
+                    (task_role, resolved_delivery, requires_repo if requires_repo is not None else workspace_kind == "worktree", task_id),
                 )
                 if workspace_kind == "worktree":
                     _insert_git_delivery_obligation(
@@ -4272,6 +4322,71 @@ def _inherit_notify_subs(
             *parent_ids,
         ),
     )
+
+
+def task_presentation(conn: sqlite3.Connection, task: Task) -> dict[str, Any]:
+    """Canonical read-only operator projection. Raw status remains authoritative."""
+    import socket
+
+    column = task.status if task.status in {"running", "review", "done", "archived"} else "todo"
+    state = {
+        "backlog": "aguardando autorização", "triage": "aguardando esclarecimento",
+        "todo": "aguardando dependência", "ready": "na fila", "scheduled": "agendado",
+        "review": "conferindo", "done": "entregue", "archived": "arquivado",
+    }.get(task.status, "aguardando")
+    reason = None
+    executing = False
+    process_verified = None
+    signal = "unknown"
+    if task.status == "blocked":
+        column = "running" if task.started_at is not None else "todo"
+        event = conn.execute(
+            "SELECT kind,payload,run_id FROM task_events WHERE task_id=? AND kind IN "
+            "('blocked','block_loop_detected','dependency_wait','unblocked','claimed','status',"
+            "'reclaimed','claim_reaped','completed','archived','changes_requested','gave_up') "
+            "ORDER BY id DESC LIMIT 1", (task.id,),
+        ).fetchone()
+        if event and event["kind"] in {"blocked", "block_loop_detected", "gave_up"}:
+            try:
+                payload = json.loads(event["payload"] or "{}")
+            except (ValueError, TypeError):
+                payload = {}
+            if isinstance(payload, dict):
+                reason = payload.get("reason") or payload.get("error")
+                if any(payload.get(k) == "review" for k in ("source_status", "retry_status", "resume_status")):
+                    column = "review"
+            if not reason and event["run_id"]:
+                row = conn.execute("SELECT summary FROM task_runs WHERE id=? AND task_id=?", (event["run_id"], task.id)).fetchone()
+                reason = row["summary"] if row else None
+    if task.status == "running":
+        run = conn.execute("SELECT * FROM task_runs WHERE id=? AND task_id=?", (task.current_run_id, task.id)).fetchone()
+        valid = bool(run and run["status"] == "running" and run["ended_at"] is None and run["claim_lock"] == task.claim_lock and task.claim_lock)
+        heartbeat = (run["last_heartbeat_at"] if run else None) or task.last_heartbeat_at
+        fresh = heartbeat is not None and 0 <= time.time() - heartbeat <= 90
+        signal = "recent" if valid and task.worker_pid and fresh else "stale" if heartbeat is not None else "unknown"
+        local = str(task.claim_lock or "").rpartition(":")[0] == socket.gethostname()
+        if task.worker_pid and local:
+            process_verified = _process_identity_matches(task.worker_pid, task.worker_started_at)
+        executing = bool(valid and signal == "recent" and process_verified is True)
+        state = "executando" if executing else "interrompido" if process_verified is False else "iniciando" if not task.worker_pid else "execução sem confirmação atual"
+        if _retry_status_for_run(conn, task.id) == "review":
+            column = "review"
+    if task.task_role == "activity":
+        column, state, executing = "activity", "registro de atividade", False
+    elif task.task_role == "aggregate":
+        executing = False
+        if task.status not in {"done", "archived"}:
+            state = "aguardando entregas"
+    if task.status not in VALID_STATUSES:
+        column, state = task.status, "estado não reconhecido: " + task.status
+    return {
+        "task_role": task.task_role, "delivery_type": task.delivery_type,
+        "requires_repo": task.requires_repo, "instruction_revision": task.instruction_revision,
+        "board_column": column, "execution_state": state, "is_executing": executing,
+        "process_verified": process_verified, "execution_signal": signal,
+        "work_in_progress": task.task_role == "work" and task.started_at is not None and task.status not in {"done", "archived"},
+        "block_reason": reason,
+    }
 
 
 def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
@@ -4995,14 +5110,25 @@ def _end_run(
     if not row or not row["current_run_id"]:
         return None
     run_id = int(row["current_run_id"])
+    prior = conn.execute("SELECT metadata FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+    try:
+        prior_metadata = json.loads(prior["metadata"]) if prior and prior["metadata"] else {}
+    except (ValueError, TypeError):
+        prior_metadata = {}
+    if isinstance(prior_metadata, dict):
+        merged_metadata = dict(prior_metadata)
+        merged_metadata.update(metadata or {})
+        if prior_metadata.get("worker_session_id"):
+            merged_metadata["worker_session_id"] = prior_metadata["worker_session_id"]
+        metadata = merged_metadata
     conn.execute(
         """
         UPDATE task_runs
            SET status        = ?,
                outcome       = ?,
-               summary       = ?,
-               error         = ?,
-               metadata      = ?,
+               summary       = COALESCE(?, summary),
+               error         = COALESCE(?, error),
+               metadata      = COALESCE(?, metadata),
                ended_at      = ?,
                claim_lock    = NULL,
                claim_expires = NULL,
@@ -5024,6 +5150,76 @@ def _end_run(
         "UPDATE tasks SET current_run_id = NULL WHERE id = ?", (task_id,),
     )
     return run_id
+
+
+def recover_interrupted_task(
+    conn: sqlite3.Connection, task_id: str, *, expected_run_id: Optional[int],
+    expected_claim: str, expected_heartbeat: Optional[int],
+) -> bool:
+    """Recover the observed dead attempt without touching a newer owner."""
+    import socket
+
+    with write_txn(conn):
+        task = get_task(conn, task_id)
+        if (
+            task is None or task.status != "running"
+            or task.current_run_id != expected_run_id
+            or task.claim_lock != expected_claim
+            or task.last_heartbeat_at != expected_heartbeat
+        ):
+            return False
+        host, _, owner = expected_claim.rpartition(":")
+        if host != socket.gethostname():
+            return False
+        if task.worker_pid is not None:
+            if _process_identity_matches(task.worker_pid, task.worker_started_at):
+                return False
+        elif not owner.isdigit() or _pid_alive(int(owner)):
+            return False
+        legacy_activity = task.delivery_type is None and conn.execute(
+            "SELECT 1 FROM task_comments WHERE task_id=? AND body LIKE "
+            "'Mirror card for in-process delegation%' LIMIT 1", (task_id,),
+        ).fetchone() is not None
+        status = "archived" if task.task_role == "activity" or legacy_activity else _landing_status_after_parents(conn, task_id)
+        run_id = _end_run(
+            conn, task_id, outcome="reclaimed", status="reclaimed",
+            # Preserve partial run summary and metadata for the next attempt.
+        )
+        conn.execute(
+            "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, "
+            "worker_pid = NULL, worker_started_at = NULL WHERE id = ?",
+            (status, task_id),
+        )
+        _append_event(conn, task_id, "claim_reaped", {
+            "disposition": "archived_stale_mirror" if status == "archived" else "requeued",
+            "status": status,
+        }, run_id=run_id)
+        return True
+
+
+def update_task_instruction(
+    conn: sqlite3.Connection, task_id: str, *, body: str, author: str,
+    expected_revision: int,
+) -> int:
+    """Record an explicit operator correction on the existing card."""
+    if not body.strip():
+        raise ValueError("current instruction cannot be empty")
+    with write_txn(conn):
+        task = get_task(conn, task_id)
+        if task is None or task.instruction_revision != expected_revision:
+            raise ValueError("instruction changed; read the current card before updating")
+        if task.status in {"done", "archived"}:
+            raise ValueError("completed work requires an explicit follow-up task")
+        conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (body, task_id))
+        cur = conn.execute(
+            "INSERT INTO task_comments(task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, author, "Current operator instruction:\n" + body, int(time.time())),
+        )
+        _append_event(conn, task_id, "instruction_updated", {
+            "previous_body": task.body, "revision": expected_revision + int(task.body != body),
+            "comment_id": cur.lastrowid,
+        })
+        return int(cur.lastrowid)
 
 
 def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
@@ -5119,11 +5315,11 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """
     row = conn.execute(
         "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "WHERE task_id = ? AND kind IN ('blocked', 'block_loop_detected', 'unblocked') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] == "blocked"
+    return bool(row) and row["kind"] in {"blocked", "block_loop_detected"}
 
 
 def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
@@ -5190,10 +5386,11 @@ def recompute_ready(
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
+    aggregates = []
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
-            "FROM tasks WHERE status IN ('todo', 'blocked')"
+            "SELECT id, status, consecutive_failures, max_retries, task_role "
+            "FROM tasks WHERE status IN ('todo', 'blocked') AND task_role IN ('work', 'aggregate')"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
@@ -5211,6 +5408,13 @@ def recompute_ready(
                 (task_id,),
             ).fetchall()
             if all(p["status"] in ("done", "archived") for p in parents):
+                if row["task_role"] == "aggregate":
+                    # Archived/cancelled pieces are not evidence of delivery.
+                    if not parents or any(p["status"] != "done" for p in parents):
+                        continue
+                    conn.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (task_id,))
+                    aggregates.append(task_id)
+                    continue
                 resume_status = _resume_status_from_events(conn, task_id)
                 if cur_status == "blocked":
                     # Don't auto-recover tasks that have hit the
@@ -5256,6 +5460,13 @@ def recompute_ready(
                     {"status": resume_status} if resume_status != "ready" else None,
                 )
                 promoted += 1
+    for task_id in aggregates:
+        evidence = parent_results(conn, task_id)
+        result = "Entregas conferidas:\n" + "\n\n".join(
+            f"{parent_id}: {text or 'Sem resultado registrado'}" for parent_id, text in evidence
+        )
+        if evidence and all(text and text.strip() for _, text in evidence):
+            complete_task(conn, task_id, result=result)
     return promoted
 
 
@@ -5280,6 +5491,7 @@ def claim_task(
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    allow_activity: bool = False,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
@@ -5292,6 +5504,9 @@ def claim_task(
     # Inline mirrors compose creation and claim under one commit so the
     # dispatcher never observes their assigned but unclaimed ready state.
     with write_txn(conn, allow_nested=True):
+        task = get_task(conn, task_id)
+        if task is None or (task.task_role != "work" and not allow_activity):
+            return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -5420,6 +5635,9 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        task = get_task(conn, task_id)
+        if task is None or task.task_role != "work":
+            return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -6729,6 +6947,11 @@ def complete_task(
     now = int(time.time())
     # Fail before validating cards or staging artifacts; re-check inside the
     # final write transaction below to close the parent-reopen race.
+    task = get_task(conn, task_id)
+    if task is None or (expected_run_id is not None and task.current_run_id != expected_run_id):
+        return False
+    if task.task_role == "work" and task.delivery_type is not None and not (result or summary or "").strip():
+        return False
     if not _parents_satisfied(conn, task_id):
         return False
 
@@ -8145,9 +8368,8 @@ def block_task(
       "Type 1"). Lands in ``blocked`` for a human. BUT: each time such a task
       is re-blocked for the SAME kind after having been unblocked, the
       unblock-loop counter (``block_recurrences``) increments. When it reaches
-      :data:`BLOCK_RECURRENCE_LIMIT`, the task is routed to ``triage`` instead
-      of ``blocked`` — breaking the cron-unblock ↔ worker-re-block loop and
-      forcing a human-in-the-loop triage decision.
+      :data:`BLOCK_RECURRENCE_LIMIT`, it remains blocked with a durable
+      recurrence event. Repetition never requests a new decomposition.
 
     * ``transient`` — treated like a generic block for routing, but a worker
       can use it to signal "this might clear on its own"; it still participates
@@ -8242,12 +8464,11 @@ def block_task(
         recurrences = prev_recurrences + 1 if same_cause else 1
 
         if recurrences >= BLOCK_RECURRENCE_LIMIT:
-            # Loop detected — stop letting the unblocker spin this task. Route
-            # to triage for a human-in-the-loop decision instead of blocked.
+            # Preserve the impediment. Recurrence is not a request for a new graph.
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status        = 'triage',
+                   SET status        = 'blocked',
                        claim_lock    = NULL,
                        claim_expires = NULL,
                        worker_pid    = NULL,
@@ -9196,6 +9417,7 @@ def specify_triage_task(
     assignee: Optional[str] = None,
     author: Optional[str] = None,
     expected_instruction: tuple[Optional[str], Optional[str]] | None = None,
+    expected_revision: Optional[int] = None,
 ) -> bool:
     """Flesh out a triage task and promote it to ``todo``.
 
@@ -9218,14 +9440,15 @@ def specify_triage_task(
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
         existing = conn.execute(
-            "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",
+            "SELECT title, body, assignee, instruction_revision FROM tasks WHERE id = ? AND status = 'triage'",
             (task_id,),
         ).fetchone()
         if existing is None:
             return False
         if (
-            expected_instruction is not None
-            and (existing["title"], existing["body"]) != expected_instruction
+            (expected_instruction is not None
+             and (existing["title"], existing["body"]) != expected_instruction)
+            or (expected_revision is not None and existing["instruction_revision"] != expected_revision)
         ):
             _append_event(conn, task_id, "decomposition_discarded", {
                 "reason": "instruction_changed",
@@ -9296,13 +9519,13 @@ def decompose_triage_task(
     author: Optional[str] = None,
     auto_promote: bool = True,
     expected_instruction: tuple[Optional[str], Optional[str]] | None = None,
+    expected_revision: Optional[int] = None,
 ) -> Optional[list[str]]:
     """Fan a triage task out into child tasks and promote the root to ``todo``.
 
-    The root task stays alive and becomes the parent of every child —
-    when all children reach ``done``, the root promotes to ``ready`` and
-    its assignee (typically the orchestrator profile) wakes back up to
-    judge completion or spawn more work.
+    The root becomes an aggregate dependent on the independent deliveries.
+    Once all are done with persisted results, their evidence closes the root
+    without another worker. Cancelled work does not prove completion.
 
     ``children`` is a list of dicts, each shaped like::
 
@@ -9375,17 +9598,13 @@ def decompose_triage_task(
 
     # We do the full decomposition in a SINGLE write_txn so it's
     # atomic: either every child is created AND the root flips to
-    # ``todo``, or nothing changes. We deliberately do NOT call any
-    # kb helper that opens its own write_txn (create_task, link_tasks,
-    # add_comment) from inside this block — see architecture.md
-    # write_txn pitfalls. Instead we inline the INSERTs and
-    # _append_event calls.
+    # ``todo``, or nothing changes. create_task explicitly supports this
+    # enclosing transaction, preserving its creation and delivery checks.
     now = int(time.time())
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, title, body, status, tenant, workspace_kind, workspace_path "
-            "FROM tasks WHERE id = ? AND status = 'triage'",
+            "SELECT * FROM tasks WHERE id = ? AND status = 'triage'",
             (task_id,),
         ).fetchone()
         if root_row is None:
@@ -9393,13 +9612,23 @@ def decompose_triage_task(
         if root_row["status"] != "triage":
             return None
         if (
-            expected_instruction is not None
-            and (root_row["title"], root_row["body"]) != expected_instruction
+            (expected_instruction is not None
+             and (root_row["title"], root_row["body"]) != expected_instruction)
+            or (expected_revision is not None and root_row["instruction_revision"] != expected_revision)
         ):
             _append_event(conn, task_id, "decomposition_discarded", {
                 "reason": "instruction_changed",
             })
             return []
+        if root_row["task_role"] != "work" or root_row["block_kind"] is not None:
+            return None
+        if root_row["started_at"] is not None or root_row["current_run_id"] is not None:
+            return None
+        if conn.execute(
+            "SELECT 1 FROM task_git_delivery WHERE task_id = ? "
+            "AND (request_json IS NOT NULL OR receipt_json IS NOT NULL)", (task_id,),
+        ).fetchone():
+            return None
         tenant = root_row["tenant"]
         root_delivery = conn.execute(
             "SELECT policy_json, policy_fingerprint FROM task_git_delivery "
@@ -9418,7 +9647,6 @@ def decompose_triage_task(
         # sees a coherent state, and recompute_ready() at the end
         # promotes parent-free children to 'ready'.
         for idx, child in enumerate(children):
-            new_id = _new_task_id()
             title = child["title"].strip()
             body = child.get("body")
             assignee = _canonical_assignee(child.get("assignee"))
@@ -9443,41 +9671,28 @@ def decompose_triage_task(
                 child_ws_path = root_ws_path
             else:
                 child_ws_path = None
-            conn.execute(
-                "INSERT INTO tasks "
-                "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
-                (
-                    new_id,
-                    title,
-                    body if isinstance(body, str) else None,
-                    assignee,
-                    child_ws_kind,
-                    child_ws_path,
-                    tenant,
-                    now,
-                    (author or "decomposer"),
-                ),
+            repo_required = child.get("requires_repo", root_row["requires_repo"])
+            delivery_type = child.get("delivery_type") or root_row["delivery_type"]
+            if repo_required is not None:
+                if not isinstance(repo_required, (bool, int)) or repo_required not in (0, 1):
+                    raise ValueError("requires_repo must be a boolean")
+                repo_required = bool(repo_required)
+            if repo_required is False or delivery_type in {"report", "operation"}:
+                child_ws_kind = "dir" if repo_required else "scratch"
+                child_ws_path = root_ws_path if child_ws_kind == "dir" else None
+            new_id = create_task(
+                conn, title=title, body=body if isinstance(body, str) else None,
+                assignee=assignee, created_by=author or "decomposer",
+                workspace_kind=child_ws_kind, workspace_path=child_ws_path,
+                tenant=tenant, requires_repo=repo_required, delivery_type=delivery_type,
+                session_id=root_row["session_id"], project_id=root_row["project_id"],
             )
-            if child_ws_kind == "worktree":
-                _insert_git_delivery_obligation(
-                    conn,
-                    new_id,
-                    now,
-                    policy_json=(
-                        root_delivery["policy_json"] if root_delivery else None
-                    ),
-                    policy_fingerprint=(
-                        root_delivery["policy_fingerprint"]
-                        if root_delivery
-                        else None
-                    ),
+            conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (new_id,))
+            if child_ws_kind == "worktree" and root_delivery:
+                conn.execute(
+                    "UPDATE task_git_delivery SET policy_json = ?, policy_fingerprint = ? WHERE task_id = ?",
+                    (root_delivery["policy_json"], root_delivery["policy_fingerprint"], new_id),
                 )
-            _append_event(
-                conn, new_id, "created",
-                {"by": author or "decomposer", "from_decompose_of": task_id},
-            )
             _inherit_notify_subs(conn, new_id, (task_id,), created_at=now)
             child_ids.append(new_id)
 
@@ -9508,7 +9723,9 @@ def decompose_triage_task(
             )
 
         # Flip the root: triage -> todo, set assignee to the orchestrator.
-        sets = ["status = 'todo'"]
+        # A fresh triage item has no implementation to deliver itself. Its
+        # independently completed children supply the aggregate evidence.
+        sets = ["status = 'todo'", "task_role = 'aggregate'", "delivery_type = 'report'", "requires_repo = 0"]
         params: list[Any] = []
         if root_assignee is not None:
             sets.append("assignee = ?")
@@ -9518,6 +9735,9 @@ def decompose_triage_task(
             f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?",
             tuple(params),
         )
+        if root_ws_kind == "worktree":
+            conn.execute("UPDATE tasks SET workspace_kind = 'dir' WHERE id = ?", (task_id,))
+        conn.execute("UPDATE task_git_delivery SET required = 0 WHERE task_id = ?", (task_id,))
 
         # Audit comment + event on the root so the timeline shows the fan-out.
         if author and author.strip():
@@ -9529,7 +9749,7 @@ def decompose_triage_task(
                     author.strip(),
                     "Decomposed into "
                     + ", ".join(child_ids)
-                    + ". Root will wake when all children complete.",
+                    + ". Root will collect the verified results when all children complete.",
                     now,
                 ),
             )
@@ -12458,7 +12678,7 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     """
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
-        "WHERE status = 'ready' AND assignee IS NOT NULL "
+        "WHERE status = 'ready' AND task_role = 'work' AND assignee IS NOT NULL "
         "    AND claim_lock IS NULL"
     ).fetchall()
     if not rows:
@@ -12637,6 +12857,7 @@ def count_running_tasks(conn: sqlite3.Connection) -> int:
         return int(
             conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+                + (" AND task_role = 'work'" if "task_role" in {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")} else "")
             ).fetchone()[0]
         )
     except Exception:
@@ -12955,7 +13176,7 @@ def _dispatch_once_locked(
 
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
-        "WHERE status = 'ready' AND claim_lock IS NULL "
+        "WHERE status = 'ready' AND task_role = 'work' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
     # Review rows are enumerated up front (not after the ready loop) so the
@@ -12964,7 +13185,7 @@ def _dispatch_once_locked(
     if review_dispatch_enabled():
         review_rows = conn.execute(
             "SELECT id, assignee FROM tasks "
-            "WHERE status = 'review' AND claim_lock IS NULL "
+            "WHERE status = 'review' AND task_role = 'work' AND claim_lock IS NULL "
             "ORDER BY priority DESC, created_at ASC"
         ).fetchall()
     # Review-lane reservation (OOF-30 review finding): the ready loop runs
@@ -13011,7 +13232,7 @@ def _dispatch_once_locked(
     if _per_profile_cap is not None:
         for prow in conn.execute(
             "SELECT assignee, COUNT(*) AS n FROM tasks "
-            "WHERE status = 'running' AND assignee IS NOT NULL "
+            "WHERE status = 'running' AND task_role = 'work' AND assignee IS NOT NULL "
             "GROUP BY assignee"
         ):
             _per_profile_running[prow["assignee"]] = int(prow["n"])
@@ -14949,6 +15170,62 @@ def worker_log_path(task_id: str, *, board: Optional[str] = None) -> Path:
     board explicitly to avoid any resolution ambiguity when multiple
     boards exist."""
     return worker_logs_dir(board=board) / f"{task_id}.log"
+
+
+def bind_worker_session(
+    conn: sqlite3.Connection, task_id: str, *, run_id: int,
+    claim_lock: str, session_id: str,
+) -> bool:
+    """Bind a session to its still-owned running attempt, once and atomically."""
+    if not task_id or not run_id or not claim_lock or not session_id:
+        return False
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT r.metadata FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+            "WHERE r.id = ? AND r.task_id = ? AND r.claim_lock = ? "
+            "AND t.current_run_id = r.id AND t.claim_lock = r.claim_lock "
+            "AND t.status = 'running' AND r.status = 'running' AND r.ended_at IS NULL",
+            (run_id, task_id, claim_lock),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(metadata, dict):
+            return False
+        existing = metadata.get("worker_session_id")
+        if existing:
+            return existing == session_id
+        metadata["worker_session_id"] = session_id
+        conn.execute(
+            "UPDATE task_runs SET metadata = ? WHERE id = ? AND task_id = ? AND claim_lock = ?",
+            (json.dumps(metadata, ensure_ascii=False), run_id, task_id, claim_lock),
+        )
+        _append_event(conn, task_id, "worker_session_linked",
+                      {"worker_session_id": session_id}, run_id=run_id)
+    return True
+
+
+def bind_dispatcher_session(session_id: str) -> bool:
+    """Publish the worker's session using the dispatcher's existing identity fence."""
+    from agent.delegation_context import is_delegated_child_context
+
+    if is_delegated_child_context():
+        return False
+    task_id = os.environ.get("HERMES_KANBAN_TASK", "")
+    run_id = os.environ.get("HERMES_KANBAN_RUN_ID", "")
+    claim_lock = os.environ.get("HERMES_KANBAN_CLAIM_LOCK", "")
+    if not task_id or not run_id or not claim_lock:
+        return False
+    try:
+        with connect_closing(board=os.environ.get("HERMES_KANBAN_BOARD") or None) as conn:
+            return bind_worker_session(conn, task_id, run_id=int(run_id),
+                                       claim_lock=claim_lock, session_id=session_id)
+    except Exception:
+        _log.warning("Could not bind dispatcher session to its claimed run", exc_info=True)
+        return False
 
 
 def read_worker_log(

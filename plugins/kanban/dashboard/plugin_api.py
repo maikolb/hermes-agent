@@ -161,8 +161,11 @@ def _task_dict(
     task: kanban_db.Task,
     *,
     latest_summary: Optional[str] = None,
+    conn=None,
 ) -> dict[str, Any]:
     d = asdict(task)
+    if conn is not None:
+        d.update(kanban_db.task_presentation(conn, task))
     # Add derived age metrics so the UI can colour stale cards without
     # computing deltas client-side.
     try:
@@ -468,7 +471,7 @@ def get_board(
             preview = (
                 full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None
             )
-            d = _task_dict(t, latest_summary=preview)
+            d = _task_dict(t, latest_summary=preview, conn=conn)
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
@@ -549,7 +552,7 @@ def get_task(
         # operators can read the complete worker handoff without making
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
-        task_d = _task_dict(task, latest_summary=full_summary)
+        task_d = _task_dict(task, latest_summary=full_summary, conn=conn)
         links = _links_for(conn, task_id)
         child_ids = links["children"]
         child_summaries = kanban_db.latest_summaries(conn, child_ids)
@@ -599,6 +602,8 @@ def get_task(
 
 class CreateTaskBody(BaseModel):
     title: str
+    delivery_type: Optional[str] = None
+    requires_repo: Optional[bool] = None
     body: Optional[str] = None
     assignee: Optional[str] = None
     tenant: Optional[str] = None
@@ -631,6 +636,8 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
         task_id = kanban_db.create_task(
             conn,
             title=payload.title,
+            delivery_type=payload.delivery_type,
+            requires_repo=payload.requires_repo,
             body=payload.body,
             assignee=payload.assignee,
             created_by="dashboard",
@@ -653,7 +660,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             board=board,
         )
         task = kanban_db.get_task(conn, task_id)
-        body: dict[str, Any] = {"task": _task_dict(task) if task else None}
+        body: dict[str, Any] = {"task": _task_dict(task, conn=conn) if task else None}
         # Surface a dispatcher-presence warning so the UI can show a
         # banner when a `ready` task would otherwise sit idle because no
         # gateway is running (or dispatch_in_gateway=false). Only emit
@@ -1054,7 +1061,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
             )
 
         updated = kanban_db.get_task(conn, task_id)
-        return {"task": _task_dict(updated) if updated else None}
+        return {"task": _task_dict(updated, conn=conn) if updated else None}
     finally:
         conn.close()
 

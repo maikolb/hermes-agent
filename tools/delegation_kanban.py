@@ -212,6 +212,7 @@ def create_delegation_cards(
     delegation_id: Optional[str],
     board: Optional[str],
     live_paths: Optional[List[str]] = None,
+    run_bindings: Optional[Dict[int, tuple[int, str]]] = None,
 ) -> Dict[int, str]:
     """Create one claimed running mirror card per delegated task.
 
@@ -245,6 +246,8 @@ def create_delegation_cards(
                         task_id = kb.create_task(
                             conn,
                             title=goal[:_TITLE_MAX],
+                            task_role="activity",
+                            requires_repo=False,
                             body=body[:_BODY_MAX],
                             created_by=author,
                             assignee=get_active_profile_name(),
@@ -256,8 +259,10 @@ def create_delegation_cards(
                             ),
                         )
                         claimed = kb.claim_task(
-                            conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
+                            conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS, allow_activity=True
                         )
+                    if run_bindings is not None and claimed is not None:
+                        run_bindings[index] = (claimed.current_run_id, claimed.claim_lock)
                     if origin:
                         try:
                             kb.add_notify_sub(
@@ -300,6 +305,23 @@ def create_delegation_cards(
     except Exception as exc:  # noqa: BLE001
         logger.debug("delegation kanban: batch create failed: %s", exc)
     return cards
+
+
+def bind_delegation_session(
+    board: str, task_id: str, run_binding: tuple[int, str], session_id: str,
+) -> bool:
+    """Bind the constructed child to the exact attempt captured at card creation."""
+    try:
+        from hermes_cli import kanban_db as kb
+
+        with kb.connect_closing(board=board) as conn:
+            return kb.bind_worker_session(
+                conn, task_id, run_id=run_binding[0],
+                claim_lock=run_binding[1], session_id=session_id,
+            )
+    except Exception:
+        logger.warning("Could not bind delegated session to its captured run", exc_info=True)
+        return False
 
 
 def create_dispatch_cards(
@@ -354,6 +376,8 @@ def create_dispatch_cards(
                         board=board,
                         session_id=origin_session,
                         project_id=origin_project,
+                        delivery_type=task.get("delivery_type"),
+                        requires_repo=task.get("requires_repo"),
                         idempotency_key=(
                             f"{delegation_id}:{index}" if delegation_id else None
                         ),
@@ -514,6 +538,7 @@ def close_delegation_cards(
     board: Optional[str],
     cards: Dict[int, str],
     results: List[Dict[str, Any]],
+    run_bindings: Optional[Dict[int, tuple[int, str]]] = None,
 ) -> None:
     """Terminal transition per mirror card from the aggregated results."""
     if not board or not cards:
@@ -531,6 +556,12 @@ def close_delegation_cards(
                 if not task_id:
                     continue
                 try:
+                    binding = (run_bindings or {}).get(index)
+                    task = kb.get_task(conn, task_id)
+                    if task is None or (task.task_role == "activity" and binding is None):
+                        continue
+                    if binding and (task.current_run_id != binding[0] or task.claim_lock != binding[1]):
+                        continue
                     status = str(entry.get("status") or "")
                     summary = str(entry.get("summary") or "").strip()
                     # Terminal statuses stamped by _execute_and_aggregate:
@@ -555,7 +586,7 @@ def close_delegation_cards(
                                 "de entrega: a última mensagem era um "
                                 f"status — “{snippet}”."
                             )
-                        kb.complete_task(conn, task_id, result=final)
+                        kb.complete_task(conn, task_id, result=final, expected_run_id=binding[0] if binding else None)
                     else:
                         error = str(
                             entry.get("error")
@@ -570,6 +601,7 @@ def close_delegation_cards(
                                 f"delegation {status or 'failed'}: {error}"
                             )[:_REASON_MAX],
                             kind="needs_input",
+                            expected_run_id=binding[0] if binding else None,
                         )
                         if summary:
                             kb.add_comment(

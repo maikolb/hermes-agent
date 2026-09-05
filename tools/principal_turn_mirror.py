@@ -153,6 +153,7 @@ class PrincipalTurnMirror:
         self._idempotency_key = (idempotency_key or "").strip() or None
         self._session_id = (session_id or "").strip() or None
         self._task_id: Optional[str] = None
+        self._run_id: Optional[int] = None
         self._started = False
         self._finished = False
         self.resumed = False
@@ -199,6 +200,7 @@ class PrincipalTurnMirror:
                 with kb.connect_closing(board=board) as conn:
                     kb.complete_task(
                         conn, task_id, result=result[:_SUMMARY_MAX],
+                        expected_run_id=self._run_id,
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("principal mirror: close failed: %s", exc)
@@ -234,6 +236,8 @@ class PrincipalTurnMirror:
                     task_id = kb.create_task(
                         conn,
                         title=title,
+                        task_role="activity",
+                        requires_repo=False,
                         body=body[:_BODY_MAX],
                         created_by=author,
                         assignee=get_active_profile_name(),
@@ -244,7 +248,7 @@ class PrincipalTurnMirror:
                     claimed = None
                     if existing is not None and existing.status == "ready":
                         claimed = kb.claim_task(
-                            conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
+                            conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS, allow_activity=True
                         )
                 if (
                     existing is not None
@@ -255,15 +259,17 @@ class PrincipalTurnMirror:
                     # turn's orphan. Reclaim it from the dead process and
                     # re-claim it here so the resumed turn continues the SAME
                     # traceable card.
-                    kb.reclaim_task(
-                        conn,
-                        task_id,
-                        reason="principal turn resumed after interruption",
-                    )
+                    # Never steal another live turn's ownership.
+                    if not kb.recover_interrupted_task(
+                        conn, task_id, expected_run_id=existing.current_run_id,
+                        expected_claim=existing.claim_lock,
+                        expected_heartbeat=existing.last_heartbeat_at,
+                    ):
+                        return
                     self.resumed = True
                 if claimed is None:
                     claimed = kb.claim_task(
-                        conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS
+                        conn, task_id, ttl_seconds=_CLAIM_TTL_SECONDS, allow_activity=True
                     )
                 if claimed is None:
                     logger.debug(
@@ -281,7 +287,9 @@ class PrincipalTurnMirror:
                         f"{author} (delegation.mirror_principal_turns)."
                     ),
                 )
-            self._task_id = task_id
+            if claimed is not None:
+                self._task_id = task_id
+                self._run_id = claimed.current_run_id
         except Exception as exc:  # noqa: BLE001
             logger.debug("principal mirror: start failed: %s", exc)
 

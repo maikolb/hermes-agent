@@ -1,90 +1,86 @@
-# Hermes Native-Media Durable Delivery Repair Execution Contract
+# NFOS Kanban Whiteboard Implementation
 
 ## Contract Metadata
-- Contract Version: 2
+- Contract Version: 3
+- Contract ID: NFOS-WHITEBOARD-20260905
 - Mode: REPAIR
 - Risk Level: HIGH
-- Canonical Runtime Checkout: `C:\Users\maiko\AppData\Local\hermes\hermes-agent`
-- Isolated Candidate Clone: `C:\Users\maiko\AppData\Local\hermes\scratch\fix-ceogame-delivery`
-- Target Branch: `main` via PR `#17`
-- Updated At: 2026-08-25
-- Active Target Before Repair: shared Windows checkout at `f67c919480`, CeoGame gateway PID `94124`
-- Accepted Baseline Before Repair: `maikolb/main` at `c7015aadf8` during preflight; it advanced and was reconciled before merge
-- Final Accepted Baseline: `maikolb/main` merge commit `fcd4794c22ed24d2662bd8a8e0ee0ca42774879f`
-- Immutable Target Release: `C:\Users\maiko\AppData\Local\hermes\releases\hermes-agent-fcd4794c22`
-- Target Evidence Artifact: `C:\Users\maiko\AppData\Local\hermes\profiles\hermes-ceogame\repair-media-delivery-result.json`
-- Machine Runtime Authority: none: this bounded repair used deterministic tests and a single profile-scoped recovery/restart rather than an AOF autonomous implementation loop
+- Machine Runtime Authority: none: user authorized this fixed single-writer implementation with focused regressions and target readback, without autonomous multi-agent loops.
+- Acceptance Authority: Maikol
+- Base: c2bbb6bec5bb78803904fa0636f2b7618c957031, descended from efa3b7835e34600890a952b4f89d84d08e7290fe, in the existing assignee-publish-worktree
 
 ## Requested Outcome
-Restore the CeoGame Telegram bot so a generated response containing native image attachments is delivered as text plus images, without weakening exact-once text delivery or changing unrelated profiles.
+One durable request, one responsible executor, truthful task/run state, proportional completion and recovery of the affected Concursa and DOV cards through the existing Hermes.
 
 ## Acceptance Criteria
-- The exact user message at 22:03 BRT remains present in the CeoGame session source.
-- A response containing `MEDIA:` directives is resealed to the exact post-extraction text before a delivery obligation is bound.
-- Text delivery, native image delivery, ledger completion, and checkpoint digest/status all succeed in regression coverage.
-- Stale or already-bound checkpoint rewrites remain fail-closed.
-- The stranded CeoGame checkpoint is repaired only after proving no Telegram send and no ledger row occurred.
-- Only the CeoGame gateway is restarted for target validation; no visible Windows UI is created.
-- The recovered text and three original PNGs are delivered to Telegram topic `2` and confirmed by transport receipts/readback evidence.
+- AC-001: All creation paths preserve task role, repository need, delivery type and current instruction; activity records are never dispatched.
+- AC-002: Decomposition respects latest instructions and completed work; repeated operational failures do not create new graphs.
+- AC-003: Taking, transferring, completing and recovering work keep task, run and claim consistent; stale attempts cannot finish new ones.
+- AC-004: Reports finish with evidence without PR; code keeps project delivery checks.
+- AC-005: Board and notification show queued, actually executing, waiting, checking and delivered truthfully.
+- AC-006: Existing affected cards are reconciled individually with preserved results and history.
+- AC-007: Scoped tests and target readback demonstrate the published candidate; acceptance remains Maikol's.
 
 ## In Scope
-- `agent/turn_checkpoint.py`
-- `gateway/run.py`
-- `gateway/platforms/base.py`
-- `tests/gateway/test_delivery_ledger_producer.py`
-- `docs/regressions/REG-2026-08-25-004.md`
-- This execution contract
-- The exact CeoGame checkpoint and gateway process required for recovery
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/agent/agent_init.py`
+- `agent/agent_init.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tools/delegate_tool.py`
+- `tools/delegate_tool.py`
+- `docs/EXECUTION_CONTRACT.md`
+- `docs/EXECUTION_CONTRACT.md.scope.json`
+- `work/whiteboard_*.py`
+- `outputs/kanban-whiteboard/**`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/hermes_cli/kanban_db.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/hermes_cli/kanban_decompose.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/gateway/kanban_watchers.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tools/kanban_tools.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tools/delegation_kanban.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tools/principal_turn_mirror.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/plugins/kanban/dashboard/**`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/**`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/EXECUTION_CONTRACT.md`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/EXECUTION_CONTRACT.md.scope.json`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/kanban-whiteboard.md`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/hermes_cli/kanban.py`
+- hermes_cli/kanban_db.py
+- hermes_cli/kanban_decompose.py
+- gateway/kanban_watchers.py
+- tools/kanban_tools.py
+- tools/delegation_kanban.py
+- tools/principal_turn_mirror.py
+- plugins/kanban/dashboard/
+- Focused Kanban tests and docs, this contract and its manifest
+- Existing project-scoped AOF adapter/validator failure handling with controls preserved
+- Concursa and DOV task data, consistent backups, exact release preparation, entrypoint and affected VPS services
+- Local outputs/kanban-whiteboard evidence and one-shot project recovery artifacts
 
 ## Out of Scope
-- Telegram bindings, bot identity, credentials, model/provider settings, sessions other than the affected CeoGame session, other Hermes profiles, Project Ops implementations, architecture, authentication, and unrelated working-tree changes.
+NFO-Homolog-Lab, P0-4a, retention, VACUUM, unrelated dirty checkout work, new worktrees, rebuilding existing PRs/commits, new global scripts or release gates, model/capacity changes, Titan local restart.
 
 ## Failure Signal / Repro
-- Telegram update `620925243` was received and the model generated a 458-character reply in 8.4 seconds, but the gateway logged `delivery obligation content does not match its checkpoint digest`; no text or image reached the topic.
-- Automatic recovery repeated the same failure because the checkpoint had been bound without a ledger row.
-- The durable incident evidence and exact prevention surface are recorded in `docs/regressions/REG-2026-08-25-004.md`.
+- Evidence: C:/Users/maiko/Documents/Codex/2026-09-05/quero-corrigir-a-configura-o-operacional/outputs/activation/active-behavior-readback.json
+- Target inspection: t_449a8a34 report hit delivery_review_required then acquired five worktree children; t_af3159a0 archived with running attempt; DOV literal unassigned and executed activity mirror; AOF terminal TimeoutExpired.
+- Evidence-Absent: these exact live incident excerpts were inspected read-only in the planning turn and will be captured with the implementation evidence before recovery mutations.
 
 ## Root-Cause Hypothesis
-- Fact: the checkpoint sealed the full response containing three `MEDIA:` directives.
-- Fact: platform extraction reduced the text obligation to 241 characters.
-- Fact: `record_obligation` rejected the SHA-256 mismatch after the checkpoint had been bound; no ledger row or network send existed, and attachments were suppressed.
-- Confirmed root cause: the durable text boundary was sealed before platform media extraction instead of to the exact text actually passed to the transport.
+Confirmed independent paths omit durable delivery classification and bypass common lifecycle updates. Decomposition treats recurrence triage as unfinished implementation and ignores current human clarification. AOF timeout incident is confirmed; exact expensive validator phase requires measurement before changing behavior.
 
 ## Claim Discipline
-- `implemented` means the isolated candidate contains the shared reseal helper, platform-boundary call, and regression test.
-- `validated-local` requires focused and adjacent tests, Ruff, diff checks, and the AOF execution-contract validator.
-- `validated-target` requires a new CeoGame gateway PID, connected Telegram adapter, zero visible descendant windows, successful text/image receipts, and checkpoint/ledger delivery readback.
-- `released` requires the committed candidate merged into `main`, materialized as an immutable release, and loaded by the restarted CeoGame gateway.
-- `accepted` requires natural user confirmation or later normal use after target validation.
+Only direct tests justify validated-local; active process and user-route evidence justify validated-target/released. Existing artifacts are reused, never counted as proof of this candidate.
 
 ## Forbidden Actions
-- Do not weaken or disable the durable delivery ledger.
-- Do not restart another Hermes profile or mutate another session, binding, credential, workspace, or bot.
-- Do not discard, stash, reset, or overwrite unrelated modified/untracked files in the canonical checkout.
-- Do not send a fabricated substitute response or regenerate the three existing image artifacts.
-- Do not use either rejected Hermes Project Ops implementation or introduce new authentication, services, databases, routes, or protocols.
+No credentials in output, global permission/hook disablement, retired release scripts, editing existing releases, bulk completion of unverified work, duplicate external actions, unrelated checkout edits, visible UI or forced interruption of live workers.
 
 ## Loop Control
-- A controlled autonomous micro-loop is not required because this repair has one deterministic failing delivery boundary, one bounded source change, one focused regression, and one profile-scoped target probe with exact rollback.
-- Maximum implementation/test iterations: 3.
-- Green condition: local gates pass and the recovered CeoGame turn reaches delivered text plus three native image receipts with matching checkpoint/ledger state.
-- Stop condition: any evidence of a prior external send, divergent checkpoint/ledger ownership, failure to preserve unrelated work, or inability to isolate the CeoGame restart.
-- Rollback: revert the repair commit, restore the checkpoint backup, and restart only CeoGame.
+A controlled autonomous micro-loop is not required: this is a fixed single-writer implementation with at most three focused fix/test iterations per affected behavior and no delegated execution. Pause only the affected phase on new business decisions, incompatible concurrent work or non-proportional validation requirements. At thirty active minutes report actual delivered slice and remaining cost before expanding.
 
 ## Validation Plan
-- Run focused delivery/checkpoint tests and adjacent completion/media tests.
-- Run Ruff, `git diff --check`, and the canonical AOF execution-contract validator.
-- Preserve the live checkout's unrelated modified/untracked files by releasing from an isolated accepted commit rather than rewriting the live shared checkout.
-- Commit, push, review, and merge the candidate into `main`; materialize the exact merge commit as an immutable release.
-- Repair the stranded checkpoint using the proven no-send/no-ledger evidence.
-- Restart only `hermes-ceogame` through the canonical base-`pythonw.exe`/WMI/Scheduled Task path.
-- Verify new PID, Telegram connection, zero visible descendant windows, delivery receipts, checkpoint `delivered`, and ledger `delivered`.
+Use canonical per-file Python test runner with hidden Windows subprocesses and temporary HERMES_HOME, restricting tests to changed behavior and adjacent contract checks. The shell wrapper performs repository-wide compilation, which conflicts with the user's explicit focused-test limit. Validate contract before source edits and at closeout. Record baseline and diff, preserve prior commit provenance, prepare immutable SHA candidate, snapshot affected data/config, atomically update entrypoint after idle check, restart only affected VPS services and allow measured cold-start time. Roll back entrypoint on failed health; do not restore data over new user activity.
+
+## Validation Evidence
+```json
+{"schemaVersion":1,"checks":[]}
+```
 
 ## Status
-- Preflight: complete.
-- Implementation: complete and merged through PR `#17`.
-- Validation: `validated-local`; 92 focused/adjacent tests passed, Ruff passed, and diff check passed.
-- Contract validation: passed with the canonical AOF validator before release; final contract revalidation passed after closeout.
-- Release: `released` from accepted `main` commit `fcd4794c22ed24d2662bd8a8e0ee0ca42774879f` through the immutable release path.
-- Target validation: `validated-target`; CeoGame restarted from PID `94124` to PID `48496`, Telegram is `connected`, visible descendant windows are empty, the checkpoint and ledger both report `delivered`, the previous digest error did not recur, and the Telegram adapter completed the three-photo media-group path without an attachment error.
-- Acceptance: pending natural confirmation in the Telegram topic.
+Backend implemented; focused native lifecycle, HTTP and notifier checks passed locally. Reused RTU binding delta from fa0f1e6ff0e5f475e015dba836103f2b46a60a93 without merging its ancestry. Lux delta coordinated with its existing owner thread. Production activation and individual card recovery remain pending.
