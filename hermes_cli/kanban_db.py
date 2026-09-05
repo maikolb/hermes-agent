@@ -9195,13 +9195,14 @@ def specify_triage_task(
     body: Optional[str] = None,
     assignee: Optional[str] = None,
     author: Optional[str] = None,
+    expected_instruction: tuple[Optional[str], Optional[str]] | None = None,
 ) -> bool:
     """Flesh out a triage task and promote it to ``todo``.
 
     Atomically updates ``title`` / ``body`` / ``assignee`` (when provided)
     and transitions ``status: triage -> todo`` in a single write txn. Returns
-    False when the task is missing or not in the ``triage`` column — callers
-    should surface that as "nothing to specify" rather than an error.
+    False when the instruction changed, the task is missing or not in triage.
+    Callers should surface that as "nothing to specify" rather than an error.
 
     ``todo`` (not ``ready``) is the correct landing column: ``recompute_ready``
     promotes parent-free / parent-done todos to ``ready`` on the next
@@ -9221,6 +9222,14 @@ def specify_triage_task(
             (task_id,),
         ).fetchone()
         if existing is None:
+            return False
+        if (
+            expected_instruction is not None
+            and (existing["title"], existing["body"]) != expected_instruction
+        ):
+            _append_event(conn, task_id, "decomposition_discarded", {
+                "reason": "instruction_changed",
+            })
             return False
         sets: list[str] = ["status = 'todo'"]
         params: list[Any] = []
@@ -9286,6 +9295,7 @@ def decompose_triage_task(
     children: list[dict],
     author: Optional[str] = None,
     auto_promote: bool = True,
+    expected_instruction: tuple[Optional[str], Optional[str]] | None = None,
 ) -> Optional[list[str]]:
     """Fan a triage task out into child tasks and promote the root to ``todo``.
 
@@ -9304,7 +9314,10 @@ def decompose_triage_task(
         }
 
     Returns the list of created child task ids (in input order) on
-    success. Returns ``None`` when:
+    success. Returns an empty list when the supplied title/body snapshot
+    changed, recording a discarded-output event without materializing a graph.
+    The comparison runs under the same write lock as every child/link insert.
+    Returns ``None`` when:
       - The root task does not exist
       - The root task is not in ``triage``
       - A cycle would result (caller built a bad graph)
@@ -9371,7 +9384,7 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, title, body, status, tenant, workspace_kind, workspace_path "
             "FROM tasks WHERE id = ? AND status = 'triage'",
             (task_id,),
         ).fetchone()
@@ -9379,6 +9392,14 @@ def decompose_triage_task(
             return None
         if root_row["status"] != "triage":
             return None
+        if (
+            expected_instruction is not None
+            and (root_row["title"], root_row["body"]) != expected_instruction
+        ):
+            _append_event(conn, task_id, "decomposition_discarded", {
+                "reason": "instruction_changed",
+            })
+            return []
         tenant = root_row["tenant"]
         root_delivery = conn.execute(
             "SELECT policy_json, policy_fingerprint FROM task_git_delivery "

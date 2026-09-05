@@ -305,6 +305,9 @@ def decompose_task(
         logger.debug("decompose: auxiliary client import failed: %s", exc)
         return DecomposeOutcome(task_id, False, "auxiliary client unavailable")
 
+    # Keep the originating fields, including any truncated tail. A later edit
+    # must invalidate this output even if triage status did not change.
+    instruction_snapshot = (task.title, task.body)
     user_msg = _USER_TEMPLATE.format(
         task_id=task.id,
         title=_truncate(task.title or "", 400),
@@ -371,10 +374,11 @@ def decompose_task(
                 body=body_val,
                 assignee=assignee_val,
                 author=audit_author,
+                expected_instruction=instruction_snapshot,
             )
         if not ok:
             return DecomposeOutcome(
-                task_id, False, "task moved out of triage before promotion",
+                task_id, False, "task instruction changed or task moved out of triage before promotion",
             )
         return DecomposeOutcome(
             task_id, True, "single task (no fanout)",
@@ -440,12 +444,18 @@ def decompose_task(
                 children=children,
                 author=audit_author,
                 auto_promote=auto_promote,
+                expected_instruction=instruction_snapshot,
             )
     except ValueError as exc:
         return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
     except Exception as exc:
         logger.exception("decompose: DB error on task %s", task_id)
         return DecomposeOutcome(task_id, False, f"DB error: {type(exc).__name__}")
+
+    if child_ids == []:
+        return DecomposeOutcome(
+            task_id, False, "instruction changed during decomposition; stale output discarded",
+        )
 
     if child_ids is None:
         return DecomposeOutcome(
