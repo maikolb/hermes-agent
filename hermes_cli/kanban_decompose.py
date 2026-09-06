@@ -282,11 +282,16 @@ def decompose_task(
     fanout=true with empty task list) — those surface via ``ok=False``.
     """
     with kb.connect_closing() as conn:
-        row = conn.execute(
-            "SELECT * FROM tasks WHERE id = ? AND status = 'triage'",
-            (task_id,),
-        ).fetchone()
-        task = kb.Task.from_row(row) if row else None
+        conn.execute("BEGIN")
+        try:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE id = ? AND status = 'triage'",
+                (task_id,),
+            ).fetchone()
+            task = kb.Task.from_row(row) if row else None
+            context_snapshot = kb.decomposition_context(conn, task_id) if task else None
+        finally:
+            conn.rollback()
     if task is None:
         return DecomposeOutcome(
             task_id, False, "task is not in triage or does not exist"
@@ -315,6 +320,7 @@ def decompose_task(
         roster=_format_roster(roster),
         default_assignee=default_assignee,
     )
+    user_msg += context_snapshot or ""
 
     try:
         # Route through call_llm so auxiliary.kanban_decomposer.* config
@@ -375,6 +381,7 @@ def decompose_task(
                 assignee=assignee_val,
                 author=audit_author,
                 expected_instruction=instruction_snapshot,
+                expected_context=context_snapshot,
             )
         if not ok:
             return DecomposeOutcome(
@@ -445,6 +452,7 @@ def decompose_task(
                 author=audit_author,
                 auto_promote=auto_promote,
                 expected_instruction=instruction_snapshot,
+                expected_context=context_snapshot,
             )
     except ValueError as exc:
         return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
