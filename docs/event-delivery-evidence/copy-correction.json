@@ -1,0 +1,6 @@
+{
+  "stopped_own_copy_pid": 3785102,
+  "manifest": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013019Z/activation.json",
+  "entry_unchanged": true,
+  "next_action": "Finish already-authorized exact candidate activation with Kanban-only snapshots."
+}

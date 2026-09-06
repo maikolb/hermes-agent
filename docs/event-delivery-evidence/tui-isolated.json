@@ -1,0 +1,10 @@
+{
+  "runtime_sha": "3c6418ae9edb6130a30634efe722e5e7358c4711",
+  "returncode": 0,
+  "seconds": 46.1,
+  "stdout": "..............                                                           [100%]\n============================= slowest 3 durations ==============================\n5.78s call     tests/tui_gateway/test_kanban_notify_poller.py::TestCollectKanbanNotifications::test_done_reopen_notifies_once_per_event_until_archive\n4.30s call     tests/tui_gateway/test_kanban_notify_poller.py::TestCollectKanbanNotifications::test_matching_tui_sub_delivers_and_advances_cursor\n3.91s call     tests/tui_gateway/test_kanban_notify_poller.py::TestNotificationPollerLoopKanbanWiring::test_idle_session_gets_status_update_and_agent_turn\n14 passed in 42.30s\n",
+  "stderr": "",
+  "fixture_change": "The test session has no scheduled /loop; isolate its unrelated database bootstrap.",
+  "changed_candidate": false,
+  "production_data_used": false
+}

@@ -19,6 +19,7 @@ Retain Kanban event delivery until confirmed, recover an interrupted delivery in
 - AC-004: Focused tests demonstrate interruption boundaries. Publish the scoped exact Git revision and activate the immutable candidate on the verified VPS if the affected services can be safely restarted; otherwise record the concrete pending activation condition.
 
 ## In Scope
+- `docs/regressions/REG-2026-09-05-001.md`
 - `tui_gateway/server.py`
 - `tests/tui_gateway/test_kanban_notify_poller.py`
 - `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tui_gateway/server.py`
@@ -85,11 +86,103 @@ Stop the affected operation on concurrent edits, target mismatch, failed health 
 
 ## Validation Evidence
 ```json
-{"schemaVersion":1,"checks":[]}
+{
+  "schemaVersion": 1,
+  "checks": [
+    {
+      "criterionId": "AC-001",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused behavior test and exact target readback",
+      "target": "srv1918217 exact runtime 3c6418ae9edb6130a30634efe722e5e7358c4711",
+      "procedure": "Read linked test and deployment artifacts.",
+      "expected": "Meet the stated durable delivery criterion.",
+      "observed": "Interrupted reservation remains pending; dead owner recovery and stale token tests passed.",
+      "performedAtUtc": "2026-09-06T01:44:23.427469+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/focused-tests.log",
+          "sha256": "5c561c6f088d365852cf07025ce11f0d7cf48d691ae5390fa7ae23e1ee1a0939"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-002",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused behavior test and exact target readback",
+      "target": "srv1918217 exact runtime 3c6418ae9edb6130a30634efe722e5e7358c4711",
+      "procedure": "Read linked test and deployment artifacts.",
+      "expected": "Meet the stated durable delivery criterion.",
+      "observed": "Confirmed text is not resent when wake delivery fails; repeated failure retains pending delivery.",
+      "performedAtUtc": "2026-09-06T01:44:23.427469+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/focused-tests.log",
+          "sha256": "5c561c6f088d365852cf07025ce11f0d7cf48d691ae5390fa7ae23e1ee1a0939"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-003",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused behavior test and exact target readback",
+      "target": "srv1918217 exact runtime 3c6418ae9edb6130a30634efe722e5e7358c4711",
+      "procedure": "Read linked test and deployment artifacts.",
+      "expected": "Meet the stated durable delivery criterion.",
+      "observed": "Real push adapter starts one turn; checkpoint recovers lost ACK without a second handoff.",
+      "performedAtUtc": "2026-09-06T01:44:23.427469+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/focused-tests.log",
+          "sha256": "5c561c6f088d365852cf07025ce11f0d7cf48d691ae5390fa7ae23e1ee1a0939"
+        },
+        {
+          "path": "docs/event-delivery-evidence/target-tests.json",
+          "sha256": "603192ba9ef2a9b03f26100a1782dac77730ef947c10fbc352f1492221cfcaea"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-004",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused behavior test and exact target readback",
+      "target": "srv1918217 exact runtime 3c6418ae9edb6130a30634efe722e5e7358c4711",
+      "procedure": "Read linked test and deployment artifacts.",
+      "expected": "Meet the stated durable delivery criterion.",
+      "observed": "Exact runtime published and active; both gateways/Telegram PIDs verified; corrected TUI fixture passes.",
+      "performedAtUtc": "2026-09-06T01:44:23.427469+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/activation.json",
+          "sha256": "294fd7c950d8f085069cb0509686207690085787fab9034e404dae5546213bb2"
+        },
+        {
+          "path": "docs/event-delivery-evidence/verified.json",
+          "sha256": "af06df2bceb8b3e1322e9bdd3e0712b0d1c20a8ddc98226a7eafab1cc0e7ddd8"
+        },
+        {
+          "path": "docs/event-delivery-evidence/tui-isolated.json",
+          "sha256": "6c399cb14ab0dbacbac23077e2848fa96dd52063f96015e4e1369f2027c49155"
+        },
+        {
+          "path": "docs/event-delivery-evidence/activation-zero-ui.json",
+          "sha256": "4b35110e0c722980149a7e6e26c1c1ff8ecd9c43b36991db311b5b1277a38fde"
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ## Status
 - Contract preflight: validated
-- Implementation: complete locally; exact publication and activation pending
-- Validation: focused local delivery checks passed; target check pending
-- Completion: in progress
+- Implementation: published and active on the exact runtime SHA
+- Validation: all four acceptance criteria passed with direct evidence and the documented test-fixture correction
+- Completion: complete; final acceptance remains Maikol

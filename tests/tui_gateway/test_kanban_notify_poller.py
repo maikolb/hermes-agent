@@ -277,6 +277,9 @@ class TestNotificationPollerLoopKanbanWiring:
 
         emits: list = []
         submits: list = []
+        # This session has no scheduled /loop. Its unrelated database bootstrap
+        # must not consume the five-second Kanban delivery assertion window.
+        monkeypatch.setattr(server, "_maybe_fire_tui_loop_tick", lambda *args, **kwargs: None)
         monkeypatch.setattr(server, "_KANBAN_POLL_SECONDS", 0.01)
         monkeypatch.setattr(
             server, "_emit", lambda event, sid, payload=None: emits.append((event, payload))

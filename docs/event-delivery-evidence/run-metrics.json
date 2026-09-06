@@ -1,0 +1,9 @@
+{
+  "observed_at": "2026-09-06T01:39:23.935Z",
+  "account_usage_percent": 57,
+  "account_remaining_percent": 43,
+  "window_minutes": 10080,
+  "thread_tokens": null,
+  "thread_cost": null,
+  "note": "Account quota only; per-turn token/cost counters are unavailable."
+}

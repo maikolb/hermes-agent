@@ -1,0 +1,292 @@
+{
+  "host": "srv1918217",
+  "sha": "3c6418ae9edb6130a30634efe722e5e7358c4711",
+  "base": "7d5fa695c0a75cafd8c8c8ef4a03e328a57c1c03",
+  "old_entrypoint": "/usr/local/lib/hermes-agent.release-20260905-7d5fa695c0a75cafd8c8c8ef4a03e328a57c1c03/venv/bin/hermes",
+  "target": "/usr/local/lib/hermes-agent.release-20260905-3c6418ae9edb6130a30634efe722e5e7358c4711/venv/bin/hermes",
+  "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z",
+  "before": {
+    "hermes-gateway@default.service": {
+      "MainPID": "0",
+      "NRestarts": "0",
+      "ActiveState": "inactive",
+      "SubState": "dead",
+      "argv": [],
+      "telegram": {
+        "state": "disconnected",
+        "writer_pid": 3441007,
+        "updated_at": "2026-09-06T01:30:22.440716+00:00",
+        "needs_attention": false,
+        "error_code": null
+      }
+    },
+    "hermes-gateway@hermes-project-factory.service": {
+      "MainPID": "0",
+      "NRestarts": "0",
+      "ActiveState": "inactive",
+      "SubState": "dead",
+      "argv": [],
+      "telegram": {
+        "state": "disconnected",
+        "writer_pid": 3441781,
+        "updated_at": "2026-09-06T01:30:22.535678+00:00",
+        "needs_attention": false,
+        "error_code": null
+      }
+    }
+  },
+  "started_at": 1788658699.1398637,
+  "phase": "released",
+  "databases": [
+    {
+      "source": "/srv/hermes/kanban/boards/ceogame/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__ceogame__kanban.db",
+      "sha256": "a944ea2dbb5c1f71be917b2e3d6674fd06f0ec240ca64a0865684c817e9c9382"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/concursa-ai/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__concursa-ai__kanban.db",
+      "sha256": "ba872b9a67598cbdf48cc11ac0c24dcfe4b9841149702f6149830e82b6a0dbd0"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--17min-gerando-um/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--17min-gerando-um__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--ainda-esta-acont/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--ainda-esta-acont__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--coloque-isso-tam/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--coloque-isso-tam__kanban.db",
+      "sha256": "f991f0292433375411cb25496974f43f9b907931abfec388b4ff302480ae11f7"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--de-novo-quebrand/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--de-novo-quebrand__kanban.db",
+      "sha256": "785909a745c854e7407ab7a44e45a097090dd3f5d92018d486866bf1551073bb"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--ele-esta-ignoran/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--ele-esta-ignoran__kanban.db",
+      "sha256": "785909a745c854e7407ab7a44e45a097090dd3f5d92018d486866bf1551073bb"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--esta-rodando-ou/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--esta-rodando-ou__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--new-chat-09b4f32d13/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--new-chat-09b4f32d13__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--new-chat-4d75dcf9bf/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--new-chat-4d75dcf9bf__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--new-chat-709cfa2196/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--new-chat-709cfa2196__kanban.db",
+      "sha256": "785909a745c854e7407ab7a44e45a097090dd3f5d92018d486866bf1551073bb"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--new-chat-c297550eb3/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--new-chat-c297550eb3__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--new-chat-d7d6b0074e/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--new-chat-d7d6b0074e__kanban.db",
+      "sha256": "785909a745c854e7407ab7a44e45a097090dd3f5d92018d486866bf1551073bb"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--new-chat-ec0c1f1120/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--new-chat-ec0c1f1120__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--new-chat-f97616bddf/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--new-chat-f97616bddf__kanban.db",
+      "sha256": "785909a745c854e7407ab7a44e45a097090dd3f5d92018d486866bf1551073bb"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--pode-ativar-a-co/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--pode-ativar-a-co__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/default-64c4270e467b6d39--tira-isso-cara/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__default-64c4270e467b6d39--tira-isso-cara__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/dovcrm/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__dovcrm__kanban.db",
+      "sha256": "12d3a69cb7b0b8f932927960559c6fd21bf0a48cab865caf4011e869112df242"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/hermes-project-facto-786f51f34a055368--central-dec/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__hermes-project-facto-786f51f34a055368--central-dec__kanban.db",
+      "sha256": "bbf44dd16bad71b1ba9a31a19563528c2e7ab249bec18d33f8934271203d52d6"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/hermes-project-facto-786f51f34a055368--dovtest/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__hermes-project-facto-786f51f34a055368--dovtest__kanban.db",
+      "sha256": "4e748a69737ba8905debed0c6f1605d1e407b51f126acb7e536d2fb59963a0a2"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/hermes-project-facto-786f51f34a055368--infotributos/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__hermes-project-facto-786f51f34a055368--infotributos__kanban.db",
+      "sha256": "a96bfb5c8f1af871fe9860d512a3b3c31494438c7efd9543b7bc28d43a2ac789"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/mulher-mais-segura/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__mulher-mais-segura__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/new-chat/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__new-chat__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/project-factory/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__project-factory__kanban.db",
+      "sha256": "d7614295ffed44050f7d343ab70a0f2a501fec77cb0b8bb0913068b368bdb2ce"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/project-ops-final-qa/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__project-ops-final-qa__kanban.db",
+      "sha256": "20fca05bf91707a1b4b3632d73a950ae68bc2025c068becdeb4472ff800888f1"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/project-ops-qa/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__project-ops-qa__kanban.db",
+      "sha256": "f03af6e11975002388fbf31dbe6c284f55da9ea8f50a0a05d2c4d3d004e6c5e1"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/recuperacli/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__recuperacli__kanban.db",
+      "sha256": "b97e992aeb8226ab2160d3af1d6647db576e91eaf39cf326a809380bb2e65773"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/sommus/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__sommus__kanban.db",
+      "sha256": "08004a57a9363a598f60400f54c3b47aaa49b675220a427cfdd1340c15df5ade"
+    },
+    {
+      "source": "/srv/hermes/kanban/boards/trabalho/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban__boards__trabalho__kanban.db",
+      "sha256": "5b5abbb01b5a42887ddc71134aebfbe2c3b4576164f1f822c1873086d4262dee"
+    },
+    {
+      "source": "/srv/hermes/kanban.db",
+      "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z/kanban.db",
+      "sha256": "5c055544f9d3059d571212ac4281196e913acf6df3c679aeb1f128c5cf8e12d0"
+    }
+  ],
+  "after": {
+    "hermes-gateway@default.service": {
+      "MainPID": "3796491",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "argv": [
+        "/usr/local/lib/hermes-agent.release-20260905-3c6418ae9edb6130a30634efe722e5e7358c4711/venv/bin/python3",
+        "/usr/local/bin/hermes",
+        "--profile",
+        "default",
+        "gateway",
+        "run",
+        "--replace"
+      ],
+      "telegram": {
+        "state": "connected",
+        "writer_pid": 3796491,
+        "updated_at": "2026-09-06T01:39:46.744178+00:00",
+        "needs_attention": false,
+        "error_code": null
+      }
+    },
+    "hermes-gateway@hermes-project-factory.service": {
+      "MainPID": "3797320",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "argv": [
+        "/usr/local/lib/hermes-agent.release-20260905-3c6418ae9edb6130a30634efe722e5e7358c4711/venv/bin/python3",
+        "/usr/local/bin/hermes",
+        "--profile",
+        "hermes-project-factory",
+        "gateway",
+        "run",
+        "--replace"
+      ],
+      "telegram": {
+        "state": "connected",
+        "writer_pid": 3797320,
+        "updated_at": "2026-09-06T01:40:02.553478+00:00",
+        "needs_attention": false,
+        "error_code": null
+      }
+    }
+  },
+  "finished_at": 1788658810.0418432,
+  "summary": {
+    "host": "srv1918217",
+    "sha": "3c6418ae9edb6130a30634efe722e5e7358c4711",
+    "phase": "released",
+    "backup": "/var/backups/hermes/event-delivery-3c6418ae9edb6130a30634efe722e5e7358c4711/activation-20260906T013819Z",
+    "error": null,
+    "after": {
+      "hermes-gateway@default.service": {
+        "MainPID": "3796491",
+        "NRestarts": "0",
+        "ActiveState": "active",
+        "SubState": "running",
+        "argv": [
+          "/usr/local/lib/hermes-agent.release-20260905-3c6418ae9edb6130a30634efe722e5e7358c4711/venv/bin/python3",
+          "/usr/local/bin/hermes",
+          "--profile",
+          "default",
+          "gateway",
+          "run",
+          "--replace"
+        ],
+        "telegram": {
+          "state": "connected",
+          "writer_pid": 3796491,
+          "updated_at": "2026-09-06T01:39:46.744178+00:00",
+          "needs_attention": false,
+          "error_code": null
+        }
+      },
+      "hermes-gateway@hermes-project-factory.service": {
+        "MainPID": "3797320",
+        "NRestarts": "0",
+        "ActiveState": "active",
+        "SubState": "running",
+        "argv": [
+          "/usr/local/lib/hermes-agent.release-20260905-3c6418ae9edb6130a30634efe722e5e7358c4711/venv/bin/python3",
+          "/usr/local/bin/hermes",
+          "--profile",
+          "hermes-project-factory",
+          "gateway",
+          "run",
+          "--replace"
+        ],
+        "telegram": {
+          "state": "connected",
+          "writer_pid": 3797320,
+          "updated_at": "2026-09-06T01:40:02.553478+00:00",
+          "needs_attention": false,
+          "error_code": null
+        }
+      }
+    }
+  }
+}
