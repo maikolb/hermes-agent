@@ -185,7 +185,7 @@ gateway:
       status_joiner:       ", "
       message:             "[kanban] Task {task_id} {status}.\nTitle: {title}\nAssignee: @{assignee}\nBoard: {board}\n\nCheck the result or decide the next step."
       handoff:             "Result: {summary}"
-      guidance:            "This is an automatic task-status notification, not a request to decompose the task again. Inspect the current board before creating follow-up tasks; do not recreate tasks or graphs that already exist."
+      guidance:            "This is an automatic continuation of already authorized work. Inspect the current card, its latest instructions, result and execution log before acting. For a blocked task or exhausted retries, diagnose the actual cause. If you can resolve it within the existing scope, record the diagnosis and changed recovery approach, correct the precondition if needed, assign a valid executor when missing, and use kanban_unblock on the same card so its worker continues. If a dependency or human decision is genuinely required, state the exact missing action on the card and notify its owner. Preserve existing results, commits, PRs and task identity. Do not relaunch the same failed approach without addressing its cause, recreate task graphs, invent permissions, or declare completion without target evidence. When the worker has completed, inspect dependent existing work and continue the authorized workflow."
 
   personality:
     none_configured:       "No personalities configured in `{path}/config.yaml`"

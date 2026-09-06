@@ -1,0 +1,44 @@
+{
+  "host": "srv1918217",
+  "entry": "/usr/local/lib/hermes-agent.release-20260905-3c6418ae9edb6130a30634efe722e5e7358c4711/venv/bin/hermes",
+  "services": {
+    "hermes-gateway@default.service": {
+      "MainPID": "3796491",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running"
+    },
+    "hermes-gateway@hermes-project-factory.service": {
+      "MainPID": "3797320",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running"
+    }
+  },
+  "running_cards": [],
+  "active_sessions": [],
+  "retired_scripts": {
+    "/root/promote-full.sh": false,
+    "/root/release-build-param.sh": false
+  },
+  "summary": {
+    "host": "srv1918217",
+    "entry": "/usr/local/lib/hermes-agent.release-20260905-3c6418ae9edb6130a30634efe722e5e7358c4711/venv/bin/hermes",
+    "services": {
+      "hermes-gateway@default.service": {
+        "MainPID": "3796491",
+        "NRestarts": "0",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "hermes-gateway@hermes-project-factory.service": {
+        "MainPID": "3797320",
+        "NRestarts": "0",
+        "ActiveState": "active",
+        "SubState": "running"
+      }
+    },
+    "running_cards": [],
+    "active_sessions": []
+  }
+}

@@ -14088,6 +14088,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             marker = entry.last_resume_marked_at or entry.updated_at
             if (
                 entry.resume_reason != "provider_rate_limit"
+                and window > 0
                 and marker is not None
                 and (now - marker).total_seconds() > window
             ):
@@ -14298,7 +14299,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         fallback = 0
         try:
             agent_timeout = max(1.0, _float_env("HERMES_AGENT_TIMEOUT", 1800))
-            marker_max_age = max(60 * 60, int(agent_timeout * 2))
+            freshness = _auto_continue_freshness_window()
+            marker_max_age = 0 if freshness <= 0 else max(int(freshness), int(agent_timeout * 2))
             exact = await self.async_session_store.recover_interrupted_turns(
                 max_age_seconds=marker_max_age
             )

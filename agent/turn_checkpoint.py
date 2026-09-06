@@ -1680,6 +1680,19 @@ def initialize_agent_turn_checkpoint(
                                session_id=str(agent.session_id))
         routing["kanban_wake_delivery"] = dict(receipt)
     resume_existing = bool(getattr(agent, "_resume_turn_from_checkpoint", False))
+    kanban_task = os.environ.get("HERMES_KANBAN_TASK", "")
+    if kanban_task and os.environ.get("HERMES_SESSION_SOURCE") == "kanban":
+        routing["kanban_task_id"] = kanban_task
+        routing["kanban_db"] = os.environ.get("HERMES_KANBAN_DB", "")
+        try:
+            prior = store.load(str(agent.session_id))
+        except FileNotFoundError:
+            prior = None
+        prior_route = (prior or {}).get("routing") or {}
+        if (checkpoint_is_resumable(prior)
+                and prior_route.get("kanban_task_id") == kanban_task
+                and prior_route.get("kanban_db") == routing["kanban_db"]):
+            resume_existing = True
     try:
         state = store.start_turn(
             str(agent.session_id),

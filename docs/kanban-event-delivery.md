@@ -1,43 +1,36 @@
-# Entrega durável de eventos do Kanban
+# Continuidade automática do Kanban
 
-O cursor da assinatura representa entrega confirmada. A reserva de um evento fica em
-`kanban_notify_claims`, no mesmo banco do board, com identidade estável e confirmação
-independente do aviso e do encaminhamento ao agente.
+O Kanban mantém a tarefa, as tentativas e os eventos. O distribuidor existente reserva
+o card para um único worker. Eventos persistentes encaminham bloqueios e conclusão
+ao coordenador do projeto. O Vigília lê os mesmos cards e as sessões dos workers.
 
-O consumidor existente recupera reservas de processos mortos ou expiradas. Cada tentativa
-tem um token próprio; confirmação e liberação antigas não alteram outra tentativa.
-O aviso confirmado não é reenviado quando apenas o encaminhamento precisa ser repetido.
-Falhas de transporte não apagam a assinatura depois de doze tentativas.
+Criar o card e registrar sua assinatura agora usa uma única transação. Uma interrupção
+antes do commit não confirma uma tarefa sem encaminhamento; repetir a criação com a
+mesma chave não duplica o card. O cursor de eventos só avança após aceitação durável.
 
-No gateway com adaptador push, incluindo Telegram, uma sessão ocupada deixa o evento no
-banco. Uma sessão livre recebe o evento interno pela entrada habitual. A confirmação do
-encaminhamento ocorre depois da escrita atômica do checkpoint, antes do trabalho do agente.
-Uma confirmação perdida pode ser recuperada pelo mesmo identificador no checkpoint.
-Antes de substituir esse checkpoint, o Hermes confirma a entrada anterior. A recuperação
-da execução interrompida continua pertencendo ao mecanismo de checkpoint existente.
+Ao substituir um worker interrompido, o distribuidor reutiliza a sessão persistida da
+última tentativa do mesmo card e perfil. O prompt exige ler as instruções atuais e
+conferir o alvo antes de repetir uma operação de resultado incerto. Checkpoints de
+workers novos identificam card e board e preservam a etapa interrompida na retomada.
 
-Não há um novo watchdog, varredura para adivinhar tarefas esquecidas, alteração dos modos
-de assinatura nem reexecução em lote dos cards antigos. Os dezesseis cards de Concursa
-continuam exigindo análise individual do bloqueio, já registrada no handoff anterior.
+O valor zero de gateway_auto_continue_freshness significa retomada sem expiração.
+O agendamento e a recuperação de encerramento inesperado agora respeitam esse valor.
+No NFOS, os dois gateways recebem essa configuração e agent_wake_on_events=true.
+A pausa explícita continua sendo respeitada.
 
-## Fronteiras da garantia
+O evento orienta o coordenador a diagnosticar e corrigir a causa dentro do escopo
+autorizado, registrar a mudança de abordagem e liberar o mesmo card. Dependências
+humanas reais continuam explícitas. Cards históricos exigem reconciliação individual;
+resultados prontos, duplicados e trabalho substituído não devem ser reexecutados.
 
-A correção de aceitação durável cobre o gateway push usado no NFOS. O coletor TUI foi
-adaptado ao token de reserva para manter seu comportamento existente; a API mantém a
-confirmação pela resposta HTTP. Eles não receberam um protocolo novo de entrada durável.
-Uma resposta de rede perdida após um envio externo ainda pode gerar repetição do aviso.
-Isto não promete execução exatamente uma vez de efeitos externos arbitrários.
+## Evidência e fronteiras
 
-## Verificação
+51 testes locais focados passaram. Incluem morte real de processo entre card e
+assinatura, repetição idempotente da criação, histórico e checkpoint após morte do
+worker, retomada sete dias depois e reserva única da sessão. Ativação e leitura do
+alvo são registradas em artefatos separados, identificados pelo SHA real.
 
-Foram aprovados 19 testes focados de banco, entrega e notificações, 38 de checkpoint,
-14 de compatibilidade TUI e 3 da entrega por adaptador. Incluem morte real de processo
-depois da reserva, token antigo, aviso entregue com encaminhamento falho, confirmação
-perdida depois do checkpoint e adaptador real recebendo o mesmo encaminhamento duas vezes.
-
-O arquivo legado `tests/hermes_cli/test_kanban_notify.py` possui 26 falhas de preparação:
-executores fictícios inexistentes ou ausentes, rejeitados antes de chegar à entrega.
-Comparação da AST confirmou que criação e validação de executor não mudaram em relação
-à base 7d5fa69. Esse reparo não amplia escopo para reescrever tais fixtures.
-
-Ativação e leitura do alvo são registradas separadamente, identificadas pelo SHA real.
+Persistência protege o trabalho gravado. Não é garantia contra perda física de disco
+nem execução exatamente uma vez de operações externas arbitrárias. Resultados de
+operações externas interrompidas precisam de leitura do alvo antes de repetição.
+Não foram adicionados watchdog, fila paralela, login ou gate global de publicação.

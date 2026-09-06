@@ -13949,6 +13949,46 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
         _log.debug("kanban worker: legacy session retag skipped (%s)", exc)
 
 
+def _worker_resume_context(task: Task, home: str, *, board=None) -> tuple[Optional[str], str]:
+    """Recover only the last interrupted attempt of this task and profile."""
+    db_path = kanban_db_path(board=board)
+    if not db_path.is_file() or task.current_run_id is None:
+        return None, ""
+    with sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        prior = conn.execute(
+            "SELECT profile,outcome,metadata FROM task_runs WHERE task_id=? AND id<? "
+            "ORDER BY id DESC LIMIT 1", (task.id, task.current_run_id),
+        ).fetchone()
+    if not prior or (prior["profile"] or "default") != (task.assignee or "default"):
+        return None, ""
+    if prior["outcome"] not in {"crashed", "timed_out", "reclaimed", "stale", "rate_limited", "blocked", "gave_up"}:
+        return None, ""
+    metadata = json.loads(prior["metadata"] or "{}")
+    session_id = metadata.get("worker_session_id")
+    state_db = Path(home) / "state.db"
+    if not isinstance(session_id, str) or not session_id or not state_db.is_file():
+        return None, ""
+    with sqlite3.connect(state_db.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+        if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone():
+            return None, ""
+    note = (
+        "Resume this task from its persisted session and existing workspace. Read the current card "
+        "and latest instructions before acting. Preserve completed work and existing PRs. "
+        "Check the target before repeating an external operation whose result is uncertain."
+    )
+    from agent.turn_checkpoint import TurnCheckpointStore, build_checkpoint_resume_note, checkpoint_is_resumable
+    checkpoint_root = Path(home) / "sessions" / "turn-checkpoints"
+    if checkpoint_root.is_dir():
+        try:
+            checkpoint = TurnCheckpointStore(checkpoint_root).load(session_id)
+        except FileNotFoundError:
+            checkpoint = None
+        if checkpoint_is_resumable(checkpoint):
+            note += "\n\n" + build_checkpoint_resume_note(checkpoint)
+    return session_id, note
+
+
 def _default_spawn(
     task: Task,
     workspace: str,
@@ -14135,10 +14175,12 @@ def _default_spawn(
     worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
     if worker_toolsets:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
-    cmd.extend([
-        "chat",
-        "-q", prompt,
-    ])
+    resume_session, resume_note = _worker_resume_context(task, env.get("HERMES_HOME", ""), board=board)
+    cmd.append("chat")
+    if resume_session:
+        cmd.extend(["--resume", resume_session])
+        prompt += "\n\n" + resume_note
+    cmd.extend(["-q", prompt])
     if task.goal_mode:
         # Goal-mode workers must take the fully-quiet single-query path:
         # the kanban goal-loop hook (_run_kanban_goal_loop_q) only runs in
@@ -14704,7 +14746,7 @@ def add_notify_sub(
     insert_chat_type = chat_type or "dm"
     now = int(time.time())
     metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         conn.execute(
             """
             INSERT OR IGNORE INTO kanban_notify_subs

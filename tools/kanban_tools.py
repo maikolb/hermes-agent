@@ -1849,41 +1849,42 @@ def _handle_create(args: dict, **kw) -> str:
                     if _self_task is not None and _self_task.project_id:
                         project_id = _self_task.project_id
                         project_source_task_id = _self_task.id
-            new_tid = kb.create_task(
-                conn,
-                title=str(title).strip(),
-                body=body,
-                assignee=str(assignee),
-                parents=tuple(parents),
-                tenant=tenant,
-                priority=int(priority) if priority is not None else 0,
-                workspace_kind=str(workspace_kind),
-                workspace_path=workspace_path,
-                project_id=project_id,
-                project_source_task_id=project_source_task_id,
-                requires_repo=requires_repo if "requires_repo" in args else None,
-                delivery_type=args.get("delivery_type"),
-                triage=triage,
-                backlog=backlog,
-                idempotency_key=idempotency_key,
-                max_runtime_seconds=(
-                    int(max_runtime_seconds)
-                    if max_runtime_seconds is not None else None
-                ),
-                skills=skills,
-                model_override=model_override,
-                provider_override=provider_override,
-                goal_mode=goal_mode,
-                goal_max_turns=(
-                    int(goal_max_turns) if goal_max_turns is not None else None
-                ),
-                initial_status=str(initial_status),
-                created_by=os.environ.get("HERMES_PROFILE") or "worker",
-                session_id=session_id,
-                board=board,
-            )
-            new_task = kb.get_task(conn, new_tid)
-            subscribed = _maybe_auto_subscribe(conn, new_tid)
+            with kb.write_txn(conn):
+                new_tid = kb.create_task(
+                    conn,
+                    title=str(title).strip(),
+                    body=body,
+                    assignee=str(assignee),
+                    parents=tuple(parents),
+                    tenant=tenant,
+                    priority=int(priority) if priority is not None else 0,
+                    workspace_kind=str(workspace_kind),
+                    workspace_path=workspace_path,
+                    project_id=project_id,
+                    project_source_task_id=project_source_task_id,
+                    requires_repo=requires_repo if "requires_repo" in args else None,
+                    delivery_type=args.get("delivery_type"),
+                    triage=triage,
+                    backlog=backlog,
+                    idempotency_key=idempotency_key,
+                    max_runtime_seconds=(
+                        int(max_runtime_seconds)
+                        if max_runtime_seconds is not None else None
+                    ),
+                    skills=skills,
+                    model_override=model_override,
+                    provider_override=provider_override,
+                    goal_mode=goal_mode,
+                    goal_max_turns=(
+                        int(goal_max_turns) if goal_max_turns is not None else None
+                    ),
+                    initial_status=str(initial_status),
+                    created_by=os.environ.get("HERMES_PROFILE") or "worker",
+                    session_id=session_id,
+                    board=board,
+                )
+                new_task = kb.get_task(conn, new_tid)
+                subscribed = _maybe_auto_subscribe(conn, new_tid, strict=True)
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
@@ -1901,7 +1902,7 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(f"kanban_create: {e}")
 
 
-def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
+def _maybe_auto_subscribe(conn: Any, task_id: str, *, strict: bool = False) -> bool:
     """Auto-subscribe the calling session to task completion / block events.
 
     Returns True if a subscription row was written, False otherwise (no
@@ -1934,10 +1935,9 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     - **CLI / cron / test / unattached**: no persistent delivery channel,
       no-op.
 
-    Failure mode: any exception inside the function is logged at WARNING
-    with the offending exception + diagnostic env vars and swallowed.
-    We never want a notification bookkeeping failure to fail the
-    kanban_create that the agent is mid-conversation about.
+    Creation uses strict mode inside the card transaction: a subscription
+    write failure rolls back the card too, so accepted work cannot be left
+    without its continuation channel. Other callers retain best-effort mode.
     """
     try:
         cfg = load_config()
@@ -2026,6 +2026,8 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             "_maybe_auto_subscribe failed: %r (platform=%r key_set=%r)",
             _exc, platform, bool(chat_id),
         )
+        if strict:
+            raise
         return False
 
 
