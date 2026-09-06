@@ -1,0 +1,146 @@
+{
+  "at_utc": "2026-09-06T07:38:41.152858+00:00",
+  "runtime_commit": "b011553a62865aefa8226b0c12b553b343457c30",
+  "vigilia_commit": "0d67d6f6dc28136bb4648c945ad1d33555bf44be",
+  "cards": [
+    {
+      "board": "concursa-ai",
+      "task": {
+        "id": "t_d61b19ea",
+        "status": "running",
+        "current_run_id": 356,
+        "worker_pid": 94637,
+        "last_heartbeat_at": 1788679592,
+        "consecutive_failures": 0,
+        "last_failure_error": null,
+        "result": null,
+        "pid_exists": true,
+        "process_state": "S"
+      },
+      "run": {
+        "id": 356,
+        "status": "running",
+        "started_at": 1788679450,
+        "ended_at": null,
+        "error": null
+      },
+      "session": "20260906_043517_a6380b",
+      "checkpoint": {
+        "turn_id": "20260906_043517_a6380b:20260906_043517_a6380b:8a9e7162",
+        "phase": "tool_attempting",
+        "next_action": "await_tool_results",
+        "revision": 21,
+        "recovery": {
+          "resolution": "new_turn",
+          "restored": false
+        }
+      },
+      "new_tool_names": [
+        "execute_code",
+        "kanban_show",
+        "process",
+        "read_file",
+        "skill_view",
+        "terminal"
+      ],
+      "new_message_ids": [
+        375704,
+        375705,
+        375706,
+        375707,
+        375708,
+        375709,
+        375710,
+        375711,
+        375798,
+        375799,
+        375800,
+        375801,
+        375802,
+        375803,
+        375804,
+        375805,
+        375806,
+        375807,
+        375808,
+        375809,
+        375810
+      ]
+    },
+    {
+      "board": "dovcrm",
+      "task": {
+        "id": "t_9ce8e0e3",
+        "status": "blocked",
+        "current_run_id": null,
+        "worker_pid": null,
+        "last_heartbeat_at": 1788679028,
+        "consecutive_failures": 0,
+        "last_failure_error": null,
+        "result": null,
+        "pid_exists": false
+      },
+      "run": {
+        "id": 399,
+        "status": "blocked",
+        "started_at": 1788678742,
+        "ended_at": 1788679074,
+        "error": null
+      },
+      "session": "20260906_042325_19b4a8",
+      "checkpoint": {
+        "turn_id": "20260906_042325_19b4a8:20260906_042325_19b4a8:96b1013c",
+        "phase": "deliverable_composed",
+        "next_action": "finalize_delivery",
+        "revision": 30,
+        "recovery": {
+          "resolution": "new_turn",
+          "restored": false
+        }
+      },
+      "new_tool_names": [
+        "kanban_block",
+        "kanban_comment",
+        "kanban_show",
+        "read_file",
+        "skill_view",
+        "terminal",
+        "web_extract",
+        "write_file"
+      ],
+      "new_message_ids": [
+        375078,
+        375129,
+        375130,
+        375211,
+        375212,
+        375213,
+        375216,
+        375217,
+        375218,
+        375219,
+        375222,
+        375225,
+        375229,
+        375233,
+        375234,
+        375235,
+        375236,
+        375241,
+        375244,
+        375249,
+        375250,
+        375253,
+        375254,
+        375256
+      ]
+    }
+  ],
+  "visible_windows": 0,
+  "business_tasks_completed": false,
+  "limitations": [
+    "No actual VPS power outage was performed. Abrupt process death and durable replay were exercised in an isolated Linux fixture.",
+    "DOV is blocked by AOF selecting a historical repository contract and treating preexisting files as current changes. Its business audit is not complete.",
+    "Concursa business tests are still in progress; passed counts do not imply business acceptance."
+  ]
+}

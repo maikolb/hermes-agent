@@ -1,0 +1,98 @@
+{
+  "at": "2026-09-06T07:33:19.351Z",
+  "results": [
+    {
+      "url": "https://vigilia.187.127.60.126.sslip.io/lux/#kanban/concursa-ai/t_d61b19ea/356",
+      "task": "t_d61b19ea",
+      "run": "356",
+      "meta": "t_d61b19ea · hermes-project-factory · Sinal recente de execução",
+      "source": "Execução 356",
+      "worker": {
+        "id": "concursa-ai:concursa-ai:356",
+        "run_id": 356,
+        "profile": "hermes-project-factory",
+        "step_key": null,
+        "status": "running",
+        "state": "working",
+        "is_active": true,
+        "is_fresh": true,
+        "location": "srv1918217",
+        "started_at": 1788679450,
+        "ended_at": null,
+        "heartbeat_at": 1788679909,
+        "heartbeat_age_seconds": 64.72930979728699,
+        "heartbeat_ttl_seconds": 90,
+        "outcome": null,
+        "execution_signal": "recent",
+        "process_verified": null
+      },
+      "records": 19,
+      "newRecordIds": [
+        "session:356:375804",
+        "session:356:375711",
+        "session:356:375805",
+        "session:356:375806",
+        "session:356:375807",
+        "session:356:375808",
+        "session:356:375809",
+        "session:356:375810"
+      ],
+      "dimensions": {
+        "client": 390,
+        "scroll": 390
+      }
+    },
+    {
+      "url": "https://vigilia.187.127.60.126.sslip.io/lux/#kanban/dovcrm/t_9ce8e0e3/399",
+      "task": "t_9ce8e0e3",
+      "run": "399",
+      "meta": "t_9ce8e0e3 · hermes-project-factory · bloqueado",
+      "source": "Execução 399",
+      "worker": {
+        "id": "dovcrm:dovcrm:399",
+        "run_id": 399,
+        "profile": "hermes-project-factory",
+        "step_key": null,
+        "status": "blocked",
+        "state": "blocked",
+        "is_active": false,
+        "is_fresh": false,
+        "location": null,
+        "started_at": 1788678742,
+        "ended_at": 1788679074,
+        "heartbeat_at": 1788679028,
+        "heartbeat_age_seconds": 968.7275750637054,
+        "heartbeat_ttl_seconds": 90,
+        "outcome": "blocked",
+        "execution_signal": "stale",
+        "process_verified": null
+      },
+      "records": 19,
+      "newRecordIds": [
+        "session:399:375213",
+        "session:399:375216",
+        "session:399:375217",
+        "session:399:375218",
+        "session:399:375219",
+        "session:399:375222",
+        "session:399:375225",
+        "session:399:375229",
+        "session:399:375233",
+        "session:399:375234",
+        "session:399:375235",
+        "session:399:375236",
+        "session:399:375241",
+        "session:399:375244",
+        "session:399:375249",
+        "session:399:375250",
+        "session:399:375253",
+        "session:399:375254",
+        "session:399:375256"
+      ],
+      "dimensions": {
+        "client": 390,
+        "scroll": 390
+      }
+    }
+  ]
+}

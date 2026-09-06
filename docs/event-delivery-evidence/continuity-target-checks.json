@@ -1,0 +1,9 @@
+{
+  "sha": "b011553a62865aefa8226b0c12b553b343457c30",
+  "returncode": 0,
+  "seconds": 81.50106739997864,
+  "fixture": "/var/tmp/nfos-continuity-validation-z3ar9pq3",
+  "stdout": "Discovered 2 test files (~8 tests) under ['tests/hermes_cli/test_kanban_worker_continuity.py', 'tests/hermes_cli/test_kanban_blocked_sticky.py']; running with -j 1\n[ 37.5% |     3/~8 | ✓3 | ✗0] ✓ tests/hermes_cli/test_kanban_blocked_sticky.py (3✓, 20.4s)\n[100.0% |     8/~8 | ✓10 | ✗ 0] ✓ tests/hermes_cli/test_kanban_worker_continuity.py (7✓, 60.9s)\n\n=== Summary: 2 files, 10 tests passed, 0 failed (100% complete) in 81.3s (1 workers) ===\n  Durations cached to /var/tmp/nfos-continuity-validation-z3ar9pq3/durations.json (2 files)\n\n=== Per-file subprocess time distribution ===\n  Files:   2\n  Total subprocess CPU-wall: 81.3s  (runner wall: 81.3s, parallelism: 1x)\n  P50: 60.92s  P90: 60.92s  P95: 60.92s  P99: 60.92s  Max: 60.92s\n  <1s: 0 files (0%)  <2s: 0 files (0%)\n  Top 10 slowest:\n     60.92s  tests/hermes_cli/test_kanban_worker_continuity.py\n     20.38s  tests/hermes_cli/test_kanban_blocked_sticky.py\n",
+  "stderr": "",
+  "production_data_used": false
+}

@@ -1,0 +1,43 @@
+{
+  "requested_at_utc": "2026-09-06T07:26:43.121380+00:00",
+  "target": "srv1918217",
+  "revision": "0d67d6f6dc28136bb4648c945ad1d33555bf44be",
+  "branch": "codex/vigilia-lux-vps",
+  "application_id": "_KYsPrD8OAUzqCS0e6XZH",
+  "service": "app-synthesize-primary-array-bdqzzk",
+  "prior_image": "ghcr.io/maikolb/vigilia-live-view@sha256:9915cb18da83933251b9bb0fbbaa1eb1a9e1aa1d69b8e66ac6f81e094dc97090",
+  "phase": "public-transport-validated",
+  "image": "ghcr.io/maikolb/vigilia-live-view@sha256:d50ab48296e03b68bb154137636dafa5812ccba7f305f14dbb0bb078392c6e01",
+  "config_changed_keys": [
+    "dockerImage"
+  ],
+  "container": "82bed2781657",
+  "runtime_user": "999:988",
+  "health": "healthy",
+  "mounts_env_healthcheck_preserved": true,
+  "public_checks": {
+    "/lux/": {
+      "status": 200,
+      "bytes": 9112,
+      "sha256": "504ca0a1c77d9b67a596d7b2072b7e2a11af173284278ba2963610b1209c2ccb"
+    },
+    "/live-log.js?v=rtu-mobile-v2": {
+      "status": 200,
+      "bytes": 33157,
+      "sha256": "6f6bf0058117b8732032dd1f1c9bc5f77e82c656fe06c5f20c4faa1881a2dbac"
+    },
+    "/live-log.css?v=rtu-mobile-v2": {
+      "status": 200,
+      "bytes": 11695,
+      "sha256": "61981038c0905319a8cb2cc8895aed283892665c3a801149256f7fec96a37e50"
+    },
+    "/api/kanban/task_activity?slug=concursa-ai&task_id=t_15dee703&run_id=297": {
+      "status": 200,
+      "bytes": 275529,
+      "sha256": "63848d572a90ddef821975365230e76b25b4ccf3802c768127130661e4ec4ef6",
+      "records": 19,
+      "source": "session"
+    }
+  },
+  "validated_at_utc": "2026-09-06T07:32:15.124649+00:00"
+}

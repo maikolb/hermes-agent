@@ -69,7 +69,130 @@ Only claim the evidence level actually reached. Local tests alone never establis
 A controlled micro-loop is not required because this bounded repair uses the existing dispatcher and checkpoint APIs with incident-specific direct verification. Use the existing implementation and shortest reversible route. Stop the affected operation on target mismatch, competing writer or destructive requirement outside authorization. Escalate only the concrete decision. No new broad audit or multiagent run.
 
 ## Validation Evidence
-Pending direct validation of the incident-shaped paths and exact active runtime.
+```json
+{
+  "schemaVersion": 1,
+  "checks": [
+    {
+      "criterionId": "AC-001",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Exact runtime readback, focused incident tests and real public UI observation",
+      "target": "srv1918217 Kanban worker runtime and existing Vigilia application",
+      "procedure": "Read persisted incident sessions and attempts, exercise isolated process interruption, activate the exact code, resume via existing APIs and inspect public task state and new RTU.",
+      "expected": "Executable continuation retains existing work and operator UI reflects measured worker state.",
+      "observed": "Ten focused checks passed on the exact Linux release, including abrupt process death and checkpoint/history preservation. Real incident sessions executed new tools after terminal answers without rebuilding prior work.",
+      "performedAtUtc": "2026-09-06T07:38:41.152858+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/continuity-target-checks.json",
+          "sha256": "042554b1e68ab0c42fe7e64c586867f171dbb5e36d9317bd01b9319f45a7b968"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-activation.json",
+          "sha256": "6d78314b82b6d60e1714aa13d758af48f48ae3a63c0b4583705b789dfe53ad76"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-browser.json",
+          "sha256": "c204cf11e8b0632365b40be227ac0a621ecd5312d7ea118e82e8eecbbccdb7d2"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-projection-activation.json",
+          "sha256": "64ed7fdade95a079335a3a809f95942b064445bbbfc23cbeb7b94b145bd2d1ad"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-verification.json",
+          "sha256": "70ae668ad71dd1af0c357f1fcbf6556f555fba49233934b64cb76b09692f4c2d"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-projection-tests.txt",
+          "sha256": "11b84c569f06649415c34dfb17d406ad3ef87f07378621ba25f665949274ca63"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-002",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Exact runtime readback, focused incident tests and real public UI observation",
+      "target": "srv1918217 Kanban worker runtime and existing Vigilia application",
+      "procedure": "Read persisted incident sessions and attempts, exercise isolated process interruption, activate the exact code, resume via existing APIs and inspect public task state and new RTU.",
+      "expected": "Executable continuation retains existing work and operator UI reflects measured worker state.",
+      "observed": "The actual next dispatch cycle after protocol exhaustion remains blocked until the existing unblock API; no retries increased or database/checkpoint surgery.",
+      "performedAtUtc": "2026-09-06T07:38:41.152858+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/continuity-target-checks.json",
+          "sha256": "042554b1e68ab0c42fe7e64c586867f171dbb5e36d9317bd01b9319f45a7b968"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-activation.json",
+          "sha256": "6d78314b82b6d60e1714aa13d758af48f48ae3a63c0b4583705b789dfe53ad76"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-browser.json",
+          "sha256": "c204cf11e8b0632365b40be227ac0a621ecd5312d7ea118e82e8eecbbccdb7d2"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-projection-activation.json",
+          "sha256": "64ed7fdade95a079335a3a809f95942b064445bbbfc23cbeb7b94b145bd2d1ad"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-verification.json",
+          "sha256": "70ae668ad71dd1af0c357f1fcbf6556f555fba49233934b64cb76b09692f4c2d"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-projection-tests.txt",
+          "sha256": "11b84c569f06649415c34dfb17d406ad3ef87f07378621ba25f665949274ca63"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-003",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Exact runtime readback, focused incident tests and real public UI observation",
+      "target": "srv1918217 Kanban worker runtime and existing Vigilia application",
+      "procedure": "Read persisted incident sessions and attempts, exercise isolated process interruption, activate the exact code, resume via existing APIs and inspect public task state and new RTU.",
+      "expected": "Executable continuation retains existing work and operator UI reflects measured worker state.",
+      "observed": "Exact runtime and image read back, real incident continuation and public mobile activity verified. Concursa continued through a new technical diagnosis into run356; DOV now has a separately evidenced AOF blocker. Power-loss was not tested on the live VPS.",
+      "performedAtUtc": "2026-09-06T07:38:41.152858+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/continuity-target-checks.json",
+          "sha256": "042554b1e68ab0c42fe7e64c586867f171dbb5e36d9317bd01b9319f45a7b968"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-activation.json",
+          "sha256": "6d78314b82b6d60e1714aa13d758af48f48ae3a63c0b4583705b789dfe53ad76"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-browser.json",
+          "sha256": "c204cf11e8b0632365b40be227ac0a621ecd5312d7ea118e82e8eecbbccdb7d2"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-projection-activation.json",
+          "sha256": "64ed7fdade95a079335a3a809f95942b064445bbbfc23cbeb7b94b145bd2d1ad"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-verification.json",
+          "sha256": "70ae668ad71dd1af0c357f1fcbf6556f555fba49233934b64cb76b09692f4c2d"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-projection-tests.txt",
+          "sha256": "11b84c569f06649415c34dfb17d406ad3ef87f07378621ba25f665949274ca63"
+        }
+      ]
+    }
+  ]
+}
+```
 
 ## Status
-In progress. Production runtime repair and direct recovery validation remain pending.
+- Contract preflight: validated
+- Implementation: scoped runtime and live-log repairs released
+- Validation: direct target evidence and public UI verified; see docs/event-delivery-evidence/CONTINUATION_HANDOFF.md
+- Completion: scoped corrections complete; owner acceptance pending. Full business operation remains incomplete because DOV has a separately evidenced AOF contract-selection/baseline blocker.

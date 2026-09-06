@@ -1,6 +1,6 @@
 {
   "external_scope": [],
-  "generated_at": "2026-09-06T06:46:28.798303+00:00",
+  "generated_at": "2026-09-06T07:38:42.354204+00:00",
   "repo_scope": [
     "agent/turn_checkpoint.py",
     "cli.py",
@@ -20,6 +20,6 @@
   ],
   "repo_scope_count": 14,
   "schema": 1,
-  "source_sha256": "13d9d7be782853e695941e571d5727188179295ec260fbf7dcddec239956a1c6",
+  "source_sha256": "4ac5e40cf213800dcbe9e43da56e243a1fe184197554346fa137ab35e7be7222",
   "workspace_root": "C:\\Users\\maiko\\Projetos\\default-64c4270e467b6d39\\new-chat-f520c76c60\\assignee-publish-worktree"
 }

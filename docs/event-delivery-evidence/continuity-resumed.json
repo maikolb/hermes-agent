@@ -1,0 +1,20 @@
+{
+  "sha": "b011553a62865aefa8226b0c12b553b343457c30",
+  "dispatcher_pid": "73364",
+  "cards": [
+    {
+      "board": "concursa-ai",
+      "task_id": "t_d61b19ea",
+      "comment_id": 641,
+      "status": "ready",
+      "current_run_id": null
+    },
+    {
+      "board": "dovcrm",
+      "task_id": "t_9ce8e0e3",
+      "comment_id": 766,
+      "status": "ready",
+      "current_run_id": null
+    }
+  ]
+}

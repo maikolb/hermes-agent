@@ -1,0 +1,754 @@
+diff --git a/agent/turn_checkpoint.py b/agent/turn_checkpoint.py
+index 7086ff53c8..97843b280e 100644
+--- a/agent/turn_checkpoint.py
++++ b/agent/turn_checkpoint.py
+@@ -69,6 +69,20 @@ def checkpoint_is_resumable(state: Mapping[str, Any] | None) -> bool:
+     )
+ 
+ 
++def checkpoint_is_worker_resumable(state: Mapping[str, Any] | None) -> bool:
++    """A worker resumes unfinished execution, not a composed answer.
++
++    Gateway delivery may still need to replay a sealed answer. A replacement
++    Kanban worker must instead read the current card in a new turn of the same
++    session. Otherwise delivery replay exits without invoking any task tools.
++    Pending verification remains executable work and retains its checkpoint.
++    """
++    return checkpoint_is_resumable(state) and not (
++        state.get("phase") in {"deliverable_composed", "delivery_pending"}
++        and not (state.get("verification") or {}).get("pending")
++    )
++
++
+ _LOCKS_GUARD = threading.Lock()
+ _LOCKS: dict[str, threading.RLock] = {}
+ _REDACTED_SENTINEL_RE = re.compile(r"«redacted(?::[^»]*)?»")
+@@ -486,8 +500,16 @@ class TurnCheckpointStore:
+             existing = self.restore(session_id, messages)
+         except FileNotFoundError:
+             existing = None
++        prior_routing = (existing or {}).get("routing") or {}
++        worker_next_turn = bool(
++            routing and routing.get("kanban_task_id")
++            and prior_routing.get("kanban_task_id") == routing["kanban_task_id"]
++            and prior_routing.get("kanban_db") == routing.get("kanban_db")
++            and not checkpoint_is_worker_resumable(existing)
++        )
+         if (
+             existing
++            and not worker_next_turn
+             and existing.get("phase") not in {"terminal", "delivered", "cancelled"}
+             and (
+                 resume_existing
+@@ -1689,7 +1711,7 @@ def initialize_agent_turn_checkpoint(
+         except FileNotFoundError:
+             prior = None
+         prior_route = (prior or {}).get("routing") or {}
+-        if (checkpoint_is_resumable(prior)
++        if (checkpoint_is_worker_resumable(prior)
+                 and prior_route.get("kanban_task_id") == kanban_task
+                 and prior_route.get("kanban_db") == routing["kanban_db"]):
+             resume_existing = True
+diff --git a/docs/EXECUTION_CONTRACT.md b/docs/EXECUTION_CONTRACT.md
+index 259f1283cc..956ea381ac 100644
+--- a/docs/EXECUTION_CONTRACT.md
++++ b/docs/EXECUTION_CONTRACT.md
+@@ -1,184 +1,75 @@
+-# Hermes durable Kanban event delivery
++# Durable worker continuation repair
+ 
+ ## Contract Metadata
+ - Contract Version: 3
+-- Contract ID: NFOS-ALERT-INTEGRITY-20260906
++- Contract ID: NFOS-WORKER-CONTINUATION-20260906
+ - Mode: REPAIR
+ - Risk Level: HIGH
+-- Machine Runtime Authority: none: bounded owner-authorized repair in the existing consumer.
++- Machine Runtime Authority: none: existing owner-authorized srv1918217 repair, no new machine policy.
+ - Acceptance Authority: Maikol
+-- Base: 029770242618ee23a317cfdee70ae61846c6e701 in the existing checkout.
+ 
+ ## Requested Outcome
+-Correct the screenshot-confirmed regression: internal recovery instructions must not be published as worker failures; ready-card alerts must use the current queue episode and a measured cause, without duplicate messages. Preserve autonomous work and prove t_f1ce5125 execution plus target behavior.
++Finish the existing autonomous Kanban execution path: resume saved work without replaying a finished answer, enforce exhausted attempts, and reflect real worker state in the existing operator interfaces.
+ 
+ ## Acceptance Criteria
+-- AC-001: A recently unblocked old card does not inherit its creation age; an unresolved alert is not emitted every poll; lack of a measured impediment is not reported as a proven dispatcher failure.
+-- AC-002: Administrative reassessment remains a durable coordinator wake but produces no worker-exit trace or leaked instructions. Genuine blocked-worker notices retain their actual cause.
+-- AC-003: Focused tests pass and the exact immutable release is published, activated and read back, preserving current tasks and their persisted work.
+-- AC-004: Target t_f1ce5125 has a real worker/run with RTU or a measured current impediment; no new framework, broad suite, auth change, unrelated project change or extra recovery batch.
++- AC-001: A persisted terminal worker turn starts an executable continuation preserving its transcript, task and workspace; an interrupted operational turn resumes from its durable checkpoint.
++- AC-002: A gave_up task cannot be claimed on a subsequent dispatcher tick without a recorded continuation decision, including protocol exhaustion below the generic failure count.
++- AC-003: Exact affected runtime is published and read back; an existing incident task produces new execution after supported continuation and its real state is visible through Vigilia. An interruption recovery is exercised without losing prior artifacts or duplicating claims.
+ 
+ ## In Scope
+-- `gateway/kanban_watchers.py`
+-- `tests/gateway/test_kanban_alert_integrity.py`
+-- `tests/gateway/test_ready_watchdog.py`
+-- `tests/gateway/test_worker_closeout_traces.py`
+-- `tests/gateway/test_kanban_whiteboard_notifications.py`
+ - `docs/EXECUTION_CONTRACT.md`
+ - `docs/EXECUTION_CONTRACT.md.scope.json`
+ - `docs/event-delivery-evidence/`
+-- `docs/regressions/REG-2026-09-06-002.md`
++- `docs/REGRESSION_LOG.md`
++- `hermes_cli/kanban_db.py`
++- `agent/turn_checkpoint.py`
++- `cli.py`
++- `gateway/kanban_watchers.py`
++- `tests/hermes_cli/test_kanban_blocked_sticky.py`
++- `tests/hermes_cli/test_kanban_worker_continuity.py`
++- `tests/agent/test_turn_checkpoint.py`
++- `tests/gateway/test_kanban_notifier.py`
++- `work/whiteboard_*.py`
++- `work/whiteboard_*.cjs`
++- `outputs/rtu-ui/`
++- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/hermes_cli/kanban_db.py`
++- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/agent/turn_checkpoint.py`
++- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/cli.py`
+ - `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/gateway/kanban_watchers.py`
+-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/gateway/test_kanban_alert_integrity.py`
+-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/gateway/test_ready_watchdog.py`
+-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/gateway/test_worker_closeout_traces.py`
+-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/gateway/test_kanban_whiteboard_notifications.py`
++- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/hermes_cli/test_kanban_blocked_sticky.py`
++- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/hermes_cli/test_kanban_worker_continuity.py`
++- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/agent/test_turn_checkpoint.py`
++- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/gateway/test_kanban_notifier.py`
+ - `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/EXECUTION_CONTRACT.md`
+ - `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/EXECUTION_CONTRACT.md.scope.json`
+ - `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/event-delivery-evidence/`
+-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/regressions/REG-2026-09-06-002.md`
+-- `work/whiteboard_*.py`
+-- `outputs/kanban-whiteboard/`
+-- Existing fork branch, new exact-SHA release and affected VPS gateways. Controlled gateway restart using the existing interruption/session recovery, after scoped operational snapshots; never restore stale databases over current work.
+-- Read-only current board, worker, Telegram delivery and public Vigilia evidence.
++- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/REGRESSION_LOG.md`
++- Existing branch, immutable SHA release, affected NFOS service activation and supported continuation of incident cards t_d61b19ea and t_9ce8e0e3 after reading current instructions and ownership. Bounded temporary recovery fixture through the existing execution path.
+ 
+ ## Out of Scope
+-FNAT/Telegram visual redesign, Vigilia authentication, NFO-Homolog-Lab, P0-4a, retention, VACUUM, unrelated application code, new worktrees, general sweeper, new agent framework, broad suites or multiagent rounds.
++New architecture, frameworks, worktrees, PRs, broad test suites, multiagent rounds, global release controls, login, permissions, hooks, unrelated business changes, NFO-Homolog-Lab, P0-4a, retention or VACUUM. Vigilia RTU UI delivery remains preserved.
+ 
+ ## Failure Signal / Repro
+-- Evidence: `docs/event-delivery-evidence/alert-incident-before.json`
+-Owner screenshots show internal owner-continuity instructions as Worker bloqueado and 6556-minute wait. Target events: unblocked 1788668039, alerts 1788668058 and 1788668122, claim 1788668144. The first alert followed unblock by 19 seconds; worker PID 4024658, run 300, heartbeat and session binding exist.
++- Evidence: `C:/Users/maiko/Documents/Codex/2026-09-05/quero-corrigir-a-configura-o-operacional/outputs/rtu-ui/terminal-replay-current.json`
++The same persisted session returned four byte-identical answers without tools. Event 10124 gave_up was followed by promoted and claimed run 334 in the next second. DOV repeated process losses while Telegram still displayed working.
+ 
+ ## Root-Cause Hypothesis
+-Confirmed code paths: ready age uses created_at; dedupe searches comment author watchdog while mark writes hermes; unknown probe outcome asserts dispatcher inactivity; synthetic blocked events enter worker-exit rendering and last-comment fallback exposes operator instructions.
++The protocol violation breaker can trip below the generic failure counter used by recompute_ready. Worker resume selects an old session whose deliverable checkpoint can replay its sealed answer. DOV process death and notifier state require incident-specific evidence before edits.
+ 
+-## Claim Discipline
+-No historical incident attribution beyond inspected evidence. Delivery deduplication does not imply exactly-once arbitrary external tool effects. Do not claim all blocked cards autonomously resolved or production fixed before exact activation readback.
++## Validation Plan
++Reproduce the observed transitions using real database and checkpoint code; run only incident-focused tests. Verify exact runtime and process ownership on srv1918217. Publish immutable code with scoped rollback, resume the existing card through supported APIs, read new tool activity and public status, and exercise interruption recovery through an isolated temporary fixture. Preserve existing business artifacts and approvals.
+ 
+ ## Forbidden Actions
+-No global release scripts, no hook disabling, no existing-release edits, no data deletion/restore over new activity, no blind bulk-unblock, no local Titan restart, no secret output, no unrequested login or external message outside the authorized project/task continuation.
++No fabricated approval, completion or tests; no manual DB/checkpoint surgery; no credential disclosure, visible UI, local Titan restart, unrelated service restart, unauthorized login or gate, overwriting competing work.
+ 
+-## Validation Plan
+-Focused tests reproduce the incident without broad suites. Keep administrative wake delivery intact. Prepare a new immutable source release, preserve existing work/session/checkpoints and restart only affected VPS gateways through native recovery. Read exact services, source hashes and t_f1ce5125 run/activity. Do not restart local Titan or repeat the historical recovery batch.
++## Claim Discipline
++Only claim the evidence level actually reached. Local tests alone never establish functioning production or completed business work.
+ 
+ ## Loop Control
+-A controlled micro-loop is not required because this repair uses focused tests and the existing recovery components, without a new autonomous development loop. One bounded implementation/recovery cycle, with targeted iterations for reproduced failures. Stop on target mismatch, destructive data risk, competing writer, or a material requirement for a new component. At thirty active minutes report concrete progress and remaining shortest path.
++A controlled micro-loop is not required because this bounded repair uses the existing dispatcher and checkpoint APIs with incident-specific direct verification. Use the existing implementation and shortest reversible route. Stop the affected operation on target mismatch, competing writer or destructive requirement outside authorization. Escalate only the concrete decision. No new broad audit or multiagent run.
+ 
+ ## Validation Evidence
+-```json
+-{
+-  "schemaVersion": 1,
+-  "checks": [
+-    {
+-      "criterionId": "AC-001",
+-      "status": "passed",
+-      "performedBy": "agent",
+-      "verificationMode": "direct",
+-      "method": "Focused regression tests and current production readback",
+-      "target": "srv1918217 project notifier and public Vigilia",
+-      "procedure": "Reproduce native notification paths in isolation; verify source hashes, connected PID, preserved dispatcher and worker run log.",
+-      "expected": "Accurate queue and worker notices without interrupting autonomous work.",
+-      "observed": "Current queue age, durable per-episode alert dedupe and measured reasons passed focused local and target tests. Incident claim happened 105 seconds after unblock.",
+-      "performedAtUtc": "2026-09-06T05:14:18.149880+00:00",
+-      "artifacts": [
+-        {
+-          "path": "docs/event-delivery-evidence/alert-release.json",
+-          "sha256": "1f2668b73d8bd28e58e5711f1333758804e7200cb83f55b08256958391ead026"
+-        },
+-        {
+-          "path": "docs/event-delivery-evidence/alert-local-tests.log",
+-          "sha256": "012e4a2940ac682ff8136793ccacc3fc3bf89532288f54b0fa73ad88d258f8ff"
+-        },
+-        {
+-          "path": "docs/event-delivery-evidence/alert-target-tests.json",
+-          "sha256": "d022eab0af20c164d38055c734b447aeb19e5e4a1a9b7df9c4c3c784cc4a6b7f"
+-        }
+-      ]
+-    },
+-    {
+-      "criterionId": "AC-002",
+-      "status": "passed",
+-      "performedBy": "agent",
+-      "verificationMode": "direct",
+-      "method": "Focused regression tests and current production readback",
+-      "target": "srv1918217 project notifier and public Vigilia",
+-      "procedure": "Reproduce native notification paths in isolation; verify source hashes, connected PID, preserved dispatcher and worker run log.",
+-      "expected": "Accurate queue and worker notices without interrupting autonomous work.",
+-      "observed": "Native notifier test emits a brief reassessment without internal prompt; focus remains active and actual block cause wins. Durable wake path is unchanged.",
+-      "performedAtUtc": "2026-09-06T05:14:18.149880+00:00",
+-      "artifacts": [
+-        {
+-          "path": "docs/event-delivery-evidence/alert-release.json",
+-          "sha256": "1f2668b73d8bd28e58e5711f1333758804e7200cb83f55b08256958391ead026"
+-        },
+-        {
+-          "path": "docs/event-delivery-evidence/alert-local-tests.log",
+-          "sha256": "012e4a2940ac682ff8136793ccacc3fc3bf89532288f54b0fa73ad88d258f8ff"
+-        },
+-        {
+-          "path": "docs/event-delivery-evidence/alert-target-tests.json",
+-          "sha256": "d022eab0af20c164d38055c734b447aeb19e5e4a1a9b7df9c4c3c784cc4a6b7f"
+-        }
+-      ]
+-    },
+-    {
+-      "criterionId": "AC-003",
+-      "status": "passed",
+-      "performedBy": "agent",
+-      "verificationMode": "direct",
+-      "method": "Focused regression tests and current production readback",
+-      "target": "srv1918217 project notifier and public Vigilia",
+-      "procedure": "Reproduce native notification paths in isolation; verify source hashes, connected PID, preserved dispatcher and worker run log.",
+-      "expected": "Accurate queue and worker notices without interrupting autonomous work.",
+-      "observed": "Exact published source verified in the active project notifier; Telegram connected. Default dispatcher PID remained unchanged; the existing run log persisted and new workers started.",
+-      "performedAtUtc": "2026-09-06T05:14:18.149880+00:00",
+-      "artifacts": [
+-        {
+-          "path": "docs/event-delivery-evidence/alert-release.json",
+-          "sha256": "1f2668b73d8bd28e58e5711f1333758804e7200cb83f55b08256958391ead026"
+-        },
+-        {
+-          "path": "docs/event-delivery-evidence/alert-local-tests.log",
+-          "sha256": "012e4a2940ac682ff8136793ccacc3fc3bf89532288f54b0fa73ad88d258f8ff"
+-        },
+-        {
+-          "path": "docs/event-delivery-evidence/alert-target-tests.json",
+-          "sha256": "d022eab0af20c164d38055c734b447aeb19e5e4a1a9b7df9c4c3c784cc4a6b7f"
+-        }
+-      ]
+-    },
+-    {
+-      "criterionId": "AC-004",
+-      "status": "passed",
+-      "performedBy": "agent",
+-      "verificationMode": "direct",
+-      "method": "Focused regression tests and current production readback",
+-      "target": "srv1918217 project notifier and public Vigilia",
+-      "procedure": "Reproduce native notification paths in isolation; verify source hashes, connected PID, preserved dispatcher and worker run log.",
+-      "expected": "Accurate queue and worker notices without interrupting autonomous work.",
+-      "observed": "Public Vigilia returns HTTP 200 and the session-bound RTU for task t_f1ce5125 run 300 with reasoning and tools. No batch replay or extra component.",
+-      "performedAtUtc": "2026-09-06T05:14:18.149880+00:00",
+-      "artifacts": [
+-        {
+-          "path": "docs/event-delivery-evidence/alert-release.json",
+-          "sha256": "1f2668b73d8bd28e58e5711f1333758804e7200cb83f55b08256958391ead026"
+-        },
+-        {
+-          "path": "docs/event-delivery-evidence/alert-local-tests.log",
+-          "sha256": "012e4a2940ac682ff8136793ccacc3fc3bf89532288f54b0fa73ad88d258f8ff"
+-        },
+-        {
+-          "path": "docs/event-delivery-evidence/alert-target-tests.json",
+-          "sha256": "d022eab0af20c164d38055c734b447aeb19e5e4a1a9b7df9c4c3c784cc4a6b7f"
+-        }
+-      ]
+-    }
+-  ]
+-}
+-```
++Pending direct validation of the incident-shaped paths and exact active runtime.
+ 
+ ## Status
+-- Contract preflight: validated
+-- Implementation: released as 6ffe7f4fbf156cb5d20e0d74641f5fa186555326 in the project notifier
+-- Validation: 26 local and 5 target tests passed; exact source, Telegram and RTU read back
+-- Completion: complete for alert integrity; business tasks continue; owner acceptance pending
++In progress. Production runtime repair and direct recovery validation remain pending.
+diff --git a/docs/EXECUTION_CONTRACT.md.scope.json b/docs/EXECUTION_CONTRACT.md.scope.json
+index 8d8e30779f..b80703bbfb 100644
+--- a/docs/EXECUTION_CONTRACT.md.scope.json
++++ b/docs/EXECUTION_CONTRACT.md.scope.json
+@@ -1,21 +1,25 @@
+ {
+   "external_scope": [],
+-  "generated_at": "2026-09-06T05:14:24.370189+00:00",
++  "generated_at": "2026-09-06T06:46:28.798303+00:00",
+   "repo_scope": [
++    "agent/turn_checkpoint.py",
++    "cli.py",
+     "docs/EXECUTION_CONTRACT.md",
+     "docs/EXECUTION_CONTRACT.md.scope.json",
++    "docs/REGRESSION_LOG.md",
+     "docs/event-delivery-evidence",
+-    "docs/regressions/REG-2026-09-06-002.md",
+     "gateway/kanban_watchers.py",
+-    "outputs/kanban-whiteboard",
+-    "tests/gateway/test_kanban_alert_integrity.py",
+-    "tests/gateway/test_kanban_whiteboard_notifications.py",
+-    "tests/gateway/test_ready_watchdog.py",
+-    "tests/gateway/test_worker_closeout_traces.py",
++    "hermes_cli/kanban_db.py",
++    "outputs/rtu-ui",
++    "tests/agent/test_turn_checkpoint.py",
++    "tests/gateway/test_kanban_notifier.py",
++    "tests/hermes_cli/test_kanban_blocked_sticky.py",
++    "tests/hermes_cli/test_kanban_worker_continuity.py",
++    "work/whiteboard_*.cjs",
+     "work/whiteboard_*.py"
+   ],
+-  "repo_scope_count": 10,
++  "repo_scope_count": 14,
+   "schema": 1,
+-  "source_sha256": "68c20e808c8febe126b710be24fa56010e1057b302152d4e692e90d023a1ff6e",
++  "source_sha256": "13d9d7be782853e695941e571d5727188179295ec260fbf7dcddec239956a1c6",
+   "workspace_root": "C:\\Users\\maiko\\Projetos\\default-64c4270e467b6d39\\new-chat-f520c76c60\\assignee-publish-worktree"
+ }
+diff --git a/docs/event-delivery-evidence/continuation-tests-20.log b/docs/event-delivery-evidence/continuation-tests-20.log
+new file mode 100644
+index 0000000000..7a215b785e
+--- /dev/null
++++ b/docs/event-delivery-evidence/continuation-tests-20.log
+@@ -0,0 +1,94 @@
++Discovered 1 test files (~3 tests) under ['tests\\hermes_cli\\test_kanban_blocked_sticky.py']; running with -j 1
++[100.0% |     3/~3 | ✓2 | ✗1] ✗ tests\hermes_cli\test_kanban_blocked_sticky.py (2✓ 1✗, 12.7s)
++
++  ╔╍ Failed: tests\hermes_cli\test_kanban_blocked_sticky.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
++  ║ E     + running
++  ║ ------------------------------ Captured log call ------------------------------
++  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
++  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
++  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
++  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
++  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
++  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
++  ║ INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
++  ║ WARNING  hermes_cli.kanban_db:kanban_db.py:8284 kanban: scratch workspaces are ephemeral — they're deleted when the task completes. Use --workspace worktree: (git worktree) or --workspace dir:/abs/path (existing dir) to preserve worker output. (task t_f3edc2fd)
++  ║ =========================== short test summary info ===========================
++  ║ FAILED tests/hermes_cli/test_kanban_blocked_sticky.py::test_protocol_exhaustion_survives_next_dispatch_tick
++  ║ 1 failed, 2 passed in 4.64s
++  ║
++  ║  Repro: python -m pytest tests\hermes_cli\test_kanban_blocked_sticky.py -q --tb=short
++  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
++
++
++=== Summary: 1 files, 2 tests passed, 1 failed (100% complete) in 12.7s (1 workers) ===
++  Durations cached to test_durations.json (1 files)
++
++=== Per-file subprocess time distribution ===
++  Files:   1
++  Total subprocess CPU-wall: 12.7s  (runner wall: 12.7s, parallelism: 1x)
++  P50: 12.72s  P90: 12.72s  P95: 12.72s  P99: 12.72s  Max: 12.72s
++  <1s: 0 files (0%)  <2s: 0 files (0%)
++  Top 10 slowest:
++     12.72s  tests\hermes_cli\test_kanban_blocked_sticky.py
++
++=== Failure output ===
++
++--- tests\hermes_cli\test_kanban_blocked_sticky.py ---
++F..                                                                      [100%]
++================================== FAILURES ===================================
++____________ test_protocol_exhaustion_survives_next_dispatch_tick _____________
++tests\hermes_cli\test_kanban_blocked_sticky.py:57: in test_protocol_exhaustion_survives_next_dispatch_tick
++    assert kb.get_task(conn, tid).status == 'blocked'
++E   AssertionError: assert 'running' == 'blocked'
++E     
++E     - blocked
++E     + running
++------------------------------ Captured log call ------------------------------
++INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
++INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
++INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
++INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
++INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
++INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
++INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
++WARNING  hermes_cli.kanban_db:kanban_db.py:8284 kanban: scratch workspaces are ephemeral — they're deleted when the task completes. Use --workspace worktree: (git worktree) or --workspace dir:/abs/path (existing dir) to preserve worker output. (task t_f3edc2fd)
++=========================== short test summary info ===========================
++FAILED tests/hermes_cli/test_kanban_blocked_sticky.py::test_protocol_exhaustion_survives_next_dispatch_tick
++1 failed, 2 passed in 4.64s
++
++=== 1 file with test failures (1 test failed) ===
++  tests\hermes_cli\test_kanban_blocked_sticky.py  (1 test failed)
+diff --git a/docs/event-delivery-evidence/continuation-tests-21.log b/docs/event-delivery-evidence/continuation-tests-21.log
+new file mode 100644
+index 0000000000..708ea69c46
+--- /dev/null
++++ b/docs/event-delivery-evidence/continuation-tests-21.log
+@@ -0,0 +1,96 @@
++Discovered 2 test files (~8 tests) under ['tests\\hermes_cli\\test_kanban_worker_continuity.py', 'tests\\hermes_cli\\test_kanban_blocked_sticky.py']; running with -j 1
++[ 37.5% |     3/~8 | ✓2 | ✗1] ✗ tests\hermes_cli\test_kanban_blocked_sticky.py (2✓ 1✗, 13.2s)
++
++  ╔╍ Failed: tests\hermes_cli\test_kanban_blocked_sticky.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
++  ║ E     + running
++  ║ ------------------------------ Captured log call ------------------------------
++  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
++  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
++  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
++  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
++  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
++  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
++  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
++  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
++  ║ INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
++  ║ WARNING  hermes_cli.kanban_db:kanban_db.py:8284 kanban: scratch workspaces are ephemeral — they're deleted when the task completes. Use --workspace worktree: (git worktree) or --workspace dir:/abs/path (existing dir) to preserve worker output. (task t_51cb2ffe)
++  ║ =========================== short test summary info ===========================
++  ║ FAILED tests/hermes_cli/test_kanban_blocked_sticky.py::test_protocol_exhaustion_survives_next_dispatch_tick
++  ║ 1 failed, 2 passed in 4.90s
++  ║
++  ║  Repro: python -m pytest tests\hermes_cli\test_kanban_blocked_sticky.py -q --tb=short
++  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
++
++[100.0% |     8/~8 | ✓ 9 | ✗ 1] ✓ tests\hermes_cli\test_kanban_worker_continuity.py (7✓, 16.6s)
++
++=== Summary: 2 files, 9 tests passed, 1 failed (100% complete) in 29.8s (1 workers) ===
++  Durations cached to test_durations.json (2 files)
++
++=== Per-file subprocess time distribution ===
++  Files:   2
++  Total subprocess CPU-wall: 29.7s  (runner wall: 29.8s, parallelism: 1x)
++  P50: 16.56s  P90: 16.56s  P95: 16.56s  P99: 16.56s  Max: 16.56s
++  <1s: 0 files (0%)  <2s: 0 files (0%)
++  Top 10 slowest:
++     16.56s  tests\hermes_cli\test_kanban_worker_continuity.py
++     13.19s  tests\hermes_cli\test_kanban_blocked_sticky.py
++
++=== Failure output ===
++
++--- tests\hermes_cli\test_kanban_blocked_sticky.py ---
++F..                                                                      [100%]
++================================== FAILURES ===================================
++____________ test_protocol_exhaustion_survives_next_dispatch_tick _____________
++tests\hermes_cli\test_kanban_blocked_sticky.py:57: in test_protocol_exhaustion_survives_next_dispatch_tick
++    assert kb.get_task(conn, tid).status == 'blocked'
++E   AssertionError: assert 'running' == 'blocked'
++E     
++E     - blocked
++E     + running
++------------------------------ Captured log call ------------------------------
++INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
++INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
++INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
++INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
++INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
++INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
++INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
++INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
++INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
++WARNING  hermes_cli.kanban_db:kanban_db.py:8284 kanban: scratch workspaces are ephemeral — they're deleted when the task completes. Use --workspace worktree: (git worktree) or --workspace dir:/abs/path (existing dir) to preserve worker output. (task t_51cb2ffe)
++=========================== short test summary info ===========================
++FAILED tests/hermes_cli/test_kanban_blocked_sticky.py::test_protocol_exhaustion_survives_next_dispatch_tick
++1 failed, 2 passed in 4.90s
++
++=== 1 file with test failures (1 test failed) ===
++  tests\hermes_cli\test_kanban_blocked_sticky.py  (1 test failed)
+diff --git a/docs/event-delivery-evidence/continuation-tests-22.log b/docs/event-delivery-evidence/continuation-tests-22.log
+new file mode 100644
+index 0000000000..8c181f9bc4
+--- /dev/null
++++ b/docs/event-delivery-evidence/continuation-tests-22.log
+@@ -0,0 +1,13 @@
++Discovered 1 test files (~3 tests) under ['tests\\hermes_cli\\test_kanban_blocked_sticky.py']; running with -j 1
++[100.0% |     3/~3 | ✓3 | ✗0] ✓ tests\hermes_cli\test_kanban_blocked_sticky.py (3✓, 11.5s)
++
++=== Summary: 1 files, 3 tests passed, 0 failed (100% complete) in 11.5s (1 workers) ===
++  Durations cached to test_durations.json (1 files)
++
++=== Per-file subprocess time distribution ===
++  Files:   1
++  Total subprocess CPU-wall: 11.5s  (runner wall: 11.5s, parallelism: 1x)
++  P50: 11.53s  P90: 11.53s  P95: 11.53s  P99: 11.53s  Max: 11.53s
++  <1s: 0 files (0%)  <2s: 0 files (0%)
++  Top 10 slowest:
++     11.53s  tests\hermes_cli\test_kanban_blocked_sticky.py
+diff --git a/docs/event-delivery-evidence/worker-continuation-local.md b/docs/event-delivery-evidence/worker-continuation-local.md
+new file mode 100644
+index 0000000000..fcdbb3e3cd
+--- /dev/null
++++ b/docs/event-delivery-evidence/worker-continuation-local.md
+@@ -0,0 +1,23 @@
++# REG-2026-09-06-003: worker continuation
++
++Incident: Concursa t_d61b19ea reused session 20260906_043517_a6380b and returned
++four identical 672-character answers without tools. Checkpoint phase was
++deliverable_composed, next_action finalize_delivery; its sealed hash matched all
++four replies. DOV t_9ce8e0e3 also had a composed answer checkpoint.
++
++Event 10124 gave_up was followed by promoted and run 334 claimed in one second.
++The protocol breaker counted three violations while consecutive_failures was one.
++The next dispatcher tick checked the generic counter, ignoring the durable give-up.
++
++Repair: a worker with a finished answer starts a new turn in its existing session.
++Its transcript and workspace survive. Unfinished execution and pending verification
++retain checkpoint recovery; ordinary gateway answer delivery retains replay.
++gave_up stays blocked until the existing unblock API records a continuation.
++
++Prevention: incident-shaped checkpoint and dispatcher tests failed before the fix.
++Final focused verification: seven worker continuation checks plus three breaker
++checks passed. The dispatcher check invokes the next actual dispatch cycle after
++three clean worker exits, and checks explicit unblock remains supported.
++
++Local verification does not establish target operation. Publication, exact runtime
++activation and real incident continuation are pending in this commit.
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+index 7c4c75b12e..1b4feb376d 100644
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -5300,41 +5300,21 @@ def _synthesize_ended_run(
+ # ---------------------------------------------------------------------------
+ 
+ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
+-    """Return True when ``task_id`` is sticky-blocked by an explicit
+-    worker/operator ``kanban_block`` call (#28712).
+-
+-    A ``blocked`` status can come from two very different sources:
+-
+-    * **Worker- or operator-initiated** — a worker called
+-      ``kanban_block(reason="review-required: ...")`` (or somebody ran
+-      ``hermes kanban block <id>``).  This is a deliberate handoff that
+-      should stay blocked until an operator unblocks it.  The block tool
+-      emits a ``"blocked"`` event row in ``task_events``.
+-
+-    * **Circuit-breaker** — ``_record_task_failure`` tripped after
+-      repeated crashes / spawn failures / timeouts.  This emits
+-      ``"gave_up"``, *not* ``"blocked"``, and is meant to recover
+-      automatically once the underlying conditions change (e.g. parents
+-      finish, transient infra error clears).
+-
+-    The cheapest signal that distinguishes the two is the most recent
+-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
+-    recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
+-    no ``"unblocked"`` event has fired since), the task is sticky and
+-    ``recompute_ready`` must *not* auto-promote it.
+-
+-    Returns ``False`` when there is no such event at all (e.g. the task
+-    was set to ``status='blocked'`` by the circuit breaker or by direct
+-    DB manipulation) — preserves the pre-#28712 auto-recover semantics
+-    for that path.
++    """Keep explicit blocks and exhausted attempts until recorded unblock.
++
++    ``gave_up`` is the durable breaker decision, including protocol
++    violations that exhaust a separate budget below consecutive_failures.
++    Recomputing dependency readiness cannot undo that decision. The existing
++    unblock API records when a coordinator or operator authorizes continuation.
++    A dependency-only wait has no sticky event and still recovers normally.
+     """
+     row = conn.execute(
+         "SELECT kind FROM task_events "
+-        "WHERE task_id = ? AND kind IN ('blocked', 'block_loop_detected', 'unblocked') "
++        "WHERE task_id = ? AND kind IN ('blocked', 'block_loop_detected', 'gave_up', 'unblocked') "
+         "ORDER BY id DESC LIMIT 1",
+         (task_id,),
+     ).fetchone()
+-    return bool(row) and row["kind"] in {"blocked", "block_loop_detected"}
++    return bool(row) and row["kind"] in {"blocked", "block_loop_detected", "gave_up"}
+ 
+ 
+ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
+@@ -13977,14 +13957,14 @@ def _worker_resume_context(task: Task, home: str, *, board=None) -> tuple[Option
+         "and latest instructions before acting. Preserve completed work and existing PRs. "
+         "Check the target before repeating an external operation whose result is uncertain."
+     )
+-    from agent.turn_checkpoint import TurnCheckpointStore, build_checkpoint_resume_note, checkpoint_is_resumable
++    from agent.turn_checkpoint import TurnCheckpointStore, build_checkpoint_resume_note, checkpoint_is_worker_resumable
+     checkpoint_root = Path(home) / "sessions" / "turn-checkpoints"
+     if checkpoint_root.is_dir():
+         try:
+             checkpoint = TurnCheckpointStore(checkpoint_root).load(session_id)
+         except FileNotFoundError:
+             checkpoint = None
+-        if checkpoint_is_resumable(checkpoint):
++        if checkpoint_is_worker_resumable(checkpoint):
+             note += "\n\n" + build_checkpoint_resume_note(checkpoint)
+     return session_id, note
+ 
+diff --git a/tests/hermes_cli/test_kanban_blocked_sticky.py b/tests/hermes_cli/test_kanban_blocked_sticky.py
+index 9c3e4f4b89..46fcf7b9f9 100644
+--- a/tests/hermes_cli/test_kanban_blocked_sticky.py
++++ b/tests/hermes_cli/test_kanban_blocked_sticky.py
+@@ -37,6 +37,29 @@ import pytest
+ from hermes_cli import kanban_db as kb
+ 
+ 
++def test_protocol_exhaustion_survives_next_dispatch_tick(kanban_home, monkeypatch):
++    monkeypatch.setattr(kb, '_pid_alive', lambda pid: False)
++    monkeypatch.setattr(kb, '_resolve_crash_grace_seconds', lambda: 0)
++    monkeypatch.setattr(kb, '_classify_worker_exit', lambda pid: ('clean_exit', 0))
++    with kb.connect() as conn:
++        tid = kb.create_task(conn, title='Preserve completed tests', assignee='default', requires_repo=False)
++        kb.recompute_ready(conn)
++        for n in range(kb._PROTOCOL_VIOLATION_FAILURE_LIMIT):
++            assert kb.claim_task(conn, tid)
++            kb._set_worker_pid(conn, tid, 990000+n)
++            assert tid in kb.detect_crashed_workers(conn)
++        assert kb.get_task(conn, tid).status == 'blocked'
++        assert kb.get_task(conn, tid).consecutive_failures < 3
++        spawned = []
++        for _ in range(3):
++            kb.dispatch_once(conn, failure_limit=3, reconcile_orphans=False,
++                             spawn_fn=lambda task, workspace: spawned.append(task.id))
++            assert kb.get_task(conn, tid).status == 'blocked'
++        assert spawned == []
++        assert kb.unblock_task(conn, tid)
++        assert kb.claim_task(conn, tid)
++
++
+ @pytest.fixture
+ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+     """Isolated HERMES_HOME with an empty kanban DB."""
+@@ -59,7 +82,7 @@ def test_worker_block_is_not_auto_promoted_by_recompute_ready(kanban_home: Path)
+     Before #28712's fix, ``recompute_ready`` would silently flip it
+     back to ``ready`` on the very next tick."""
+     with kb.connect() as conn:
+-        tid = kb.create_task(conn, title="needs human review")
++        tid = kb.create_task(conn, title="needs human review", assignee="default", requires_repo=False)
+         kb.claim_task(conn, tid)
+         assert kb.block_task(
+             conn, tid,
+@@ -116,7 +139,7 @@ def test_protocol_violation_loop_is_broken(kanban_home: Path) -> None:
+     leaves the task blocked.
+     """
+     with kb.connect() as conn:
+-        tid = kb.create_task(conn, title="loop reproducer")
++        tid = kb.create_task(conn, title="loop reproducer", assignee="default", requires_repo=False)
+         kb.claim_task(conn, tid)
+         kb.block_task(
+             conn, tid,
+diff --git a/tests/hermes_cli/test_kanban_worker_continuity.py b/tests/hermes_cli/test_kanban_worker_continuity.py
+index 9d49dc9e00..14b3397f3f 100644
+--- a/tests/hermes_cli/test_kanban_worker_continuity.py
++++ b/tests/hermes_cli/test_kanban_worker_continuity.py
+@@ -3,6 +3,7 @@ import json
+ import os
+ import subprocess
+ import sys
++import pytest
+ from pathlib import Path
+ from types import SimpleNamespace
+ 
+@@ -43,6 +44,48 @@ def test_replacement_spawn_resumes_only_its_own_interrupted_session(tmp_path, mo
+     assert '--resume' not in captured[-1][0]
+ 
+ 
++@pytest.mark.parametrize('worker,verification_pending', [(False, False), (True, True)])
++def test_gateway_delivery_and_worker_verification_keep_resume_semantics(tmp_path, worker, verification_pending):
++    from agent.turn_checkpoint import TurnCheckpointStore
++    store = TurnCheckpointStore(tmp_path/'checkpoints')
++    messages = [{'role':'user', 'content':'Finish'}]
++    routing = {'kanban_task_id':'t-saved', 'kanban_db':'board.db'} if worker else {'platform':'telegram'}
++    store.start_turn('saved', 'original', 'Finish', messages, routing=routing)
++    store.mark_deliverable('saved', 'Existing answer', verification_pending=verification_pending)
++    restored = store.start_turn('saved', 'replacement', 'Finish', messages, routing=routing)
++    assert restored['turn_id'] == 'original'
++    assert restored['pending_deliverable']['content'] == 'Existing answer'
++
++
++@pytest.mark.parametrize('phase', ['deliverable_composed', 'delivery_pending'])
++def test_finished_worker_answer_starts_executable_turn_in_same_session(tmp_path, monkeypatch, phase):
++    from agent.turn_checkpoint import initialize_agent_turn_checkpoint
++    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
++    monkeypatch.setenv('HERMES_KANBAN_TASK', 't-continuity')
++    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path/'kanban.db'))
++    monkeypatch.setenv('HERMES_SESSION_SOURCE', 'kanban')
++    db = SessionDB(db_path=tmp_path/'state.db')
++    db.create_session(session_id='saved-answer', source='kanban')
++    db.append_message(session_id='saved-answer', role='user', content='Finish same card')
++    first = SimpleNamespace(session_id='saved-answer', _session_db=db)
++    initialize_agent_turn_checkpoint(first, turn_id='old-turn', user_content='Finish same card',
++                                     messages=db.get_messages('saved-answer'))
++    db.append_message(session_id='saved-answer', role='assistant', content='7 tests passed; API check pending')
++    first._turn_checkpoint_store.mark_deliverable('saved-answer', '7 tests passed; API check pending',
++                                                  verification_pending=False)
++    first._turn_checkpoint_store.transition('saved-answer', phase=phase,
++                                            next_action='finalize_delivery')
++    replacement = SimpleNamespace(session_id='saved-answer', _session_db=db)
++    state = initialize_agent_turn_checkpoint(replacement, turn_id='new-turn',
++                user_content='Finish same card', messages=db.get_messages('saved-answer'))
++    assert state['turn_id'] == 'new-turn'
++    assert state['phase'] == 'turn_started'
++    assert not state['recovery']['restored']
++    assert replacement._restored_pending_deliverable is None
++    assert db.get_messages('saved-answer')[-1]['content'] == '7 tests passed; API check pending'
++    db.close()
++
++
+ def test_process_death_cannot_commit_card_without_its_subscription(tmp_path, monkeypatch):
+     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+     monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path/'kanban.db'))

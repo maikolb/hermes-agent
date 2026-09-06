@@ -1,0 +1,85 @@
+{
+  "sha": "b011553a62865aefa8226b0c12b553b343457c30",
+  "backup": "/var/backups/hermes/worker-continuation-b011553a62865aefa8226b0c12b553b343457c30/activation-20260906T070905Z",
+  "old_entrypoint": "/usr/local/lib/hermes-agent.release-20260906-6ffe7f4fbf156cb5d20e0d74641f5fa186555326/venv/bin/hermes",
+  "target": "/usr/local/lib/hermes-agent.release-20260906-b011553a62865aefa8226b0c12b553b343457c30/venv/bin/hermes",
+  "before": {
+    "Restart": "always",
+    "MainPID": "3989907",
+    "ActiveState": "active",
+    "SubState": "running",
+    "argv": "/usr/local/lib/hermes-agent.release-20260906-ab8710cfa5e29c7f09d35f9c84780150492fefc9/venv/bin/python3 /usr/local/bin/hermes --profile default gateway run --replace "
+  },
+  "preserved_before": {
+    "Restart": "always",
+    "MainPID": "4097947",
+    "ActiveState": "active",
+    "SubState": "running",
+    "argv": "/usr/local/lib/hermes-agent.release-20260906-6ffe7f4fbf156cb5d20e0d74641f5fa186555326/venv/bin/python3 /usr/local/bin/hermes --profile hermes-project-factory gateway run --replace "
+  },
+  "started_at": 1788678545.526746,
+  "workers": [],
+  "checkpoints": [
+    {
+      "session": "20260906_043517_a6380b",
+      "path": "/srv/hermes/profiles/hermes-project-factory/sessions/turn-checkpoints/7208b36fbf4e4441896f2982d2ffb077.json",
+      "backup": "/var/backups/hermes/worker-continuation-b011553a62865aefa8226b0c12b553b343457c30/activation-20260906T070905Z/hermes-project-factory-7208b36fbf4e4441896f2982d2ffb077.json",
+      "sha256": "41cb7b0d8d104b0e460f460cc714e7a837d35d2fdafd3760e75cb7be3f6e15bb"
+    },
+    {
+      "session": "20260906_042325_19b4a8",
+      "path": "/srv/hermes/profiles/hermes-project-factory/sessions/turn-checkpoints/8237b49e4ecb40fe2c0833cfab6e963f.json",
+      "backup": "/var/backups/hermes/worker-continuation-b011553a62865aefa8226b0c12b553b343457c30/activation-20260906T070905Z/hermes-project-factory-8237b49e4ecb40fe2c0833cfab6e963f.json",
+      "sha256": "470dfc08e48783527a9b91598a3de0fc2a4a3e94aab4ad6d013d7e75bcd846e0"
+    }
+  ],
+  "phase": "released",
+  "after": {
+    "Restart": "always",
+    "MainPID": "73364",
+    "ActiveState": "active",
+    "SubState": "running",
+    "argv": "/usr/local/lib/hermes-agent.release-20260906-b011553a62865aefa8226b0c12b553b343457c30/venv/bin/python3 /usr/local/bin/hermes --profile default gateway run --replace ",
+    "telegram": {
+      "state": "connected",
+      "writer_pid": 73364,
+      "updated_at": "2026-09-06T07:10:24.839403+00:00",
+      "error_code": null
+    }
+  },
+  "preserved_after": {
+    "Restart": "always",
+    "MainPID": "4097947",
+    "ActiveState": "active",
+    "SubState": "running",
+    "argv": "/usr/local/lib/hermes-agent.release-20260906-6ffe7f4fbf156cb5d20e0d74641f5fa186555326/venv/bin/python3 /usr/local/bin/hermes --profile hermes-project-factory gateway run --replace "
+  },
+  "finished_at": 1788678633.931699,
+  "summary": {
+    "sha": "b011553a62865aefa8226b0c12b553b343457c30",
+    "phase": "released",
+    "backup": "/var/backups/hermes/worker-continuation-b011553a62865aefa8226b0c12b553b343457c30/activation-20260906T070905Z",
+    "error": null,
+    "after": {
+      "Restart": "always",
+      "MainPID": "73364",
+      "ActiveState": "active",
+      "SubState": "running",
+      "argv": "/usr/local/lib/hermes-agent.release-20260906-b011553a62865aefa8226b0c12b553b343457c30/venv/bin/python3 /usr/local/bin/hermes --profile default gateway run --replace ",
+      "telegram": {
+        "state": "connected",
+        "writer_pid": 73364,
+        "updated_at": "2026-09-06T07:10:24.839403+00:00",
+        "error_code": null
+      }
+    },
+    "workers": [],
+    "preserved_after": {
+      "Restart": "always",
+      "MainPID": "4097947",
+      "ActiveState": "active",
+      "SubState": "running",
+      "argv": "/usr/local/lib/hermes-agent.release-20260906-6ffe7f4fbf156cb5d20e0d74641f5fa186555326/venv/bin/python3 /usr/local/bin/hermes --profile hermes-project-factory gateway run --replace "
+    }
+  }
+}
