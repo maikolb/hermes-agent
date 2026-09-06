@@ -9403,6 +9403,34 @@ def invalidate_descendants_for_parent_reopen(
     return {"invalidated": invalidated, "terminations": terminations}
 
 
+def decomposition_context(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Render the task context used by the decomposer, including attributed comments.
+
+    Call inside the same read/write transaction as the task snapshot. Older
+    boards have no delivery columns; their actual missing values are None.
+    """
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        return None
+    values = dict(row)
+
+    def truncate(text: str, limit: int) -> str:
+        return text if len(text) <= limit else text[:limit - 1] + "…"
+
+    comments = list_comments(conn, task_id)[-12:]
+    return (
+        "\nDelivery: " + str(values.get("delivery_type"))
+        + "; requires_repo=" + str(values.get("requires_repo"))
+        + "\nExisting result (reuse, do not redo):\n"
+        + truncate(values.get("result") or "", 2000)
+        + "\nRecent attributed comments:\n"
+        + "\n".join(
+            f"{comment.author}: {truncate(comment.body, 700)}"
+            for comment in comments
+        )
+    )
+
+
 def specify_triage_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -9412,6 +9440,7 @@ def specify_triage_task(
     assignee: Optional[str] = None,
     author: Optional[str] = None,
     expected_instruction: tuple[Optional[str], Optional[str]] | None = None,
+    expected_context: Optional[str] = None,
     expected_revision: Optional[int] = None,
 ) -> bool:
     """Flesh out a triage task and promote it to ``todo``.
@@ -9444,6 +9473,10 @@ def specify_triage_task(
             (expected_instruction is not None
              and (existing["title"], existing["body"]) != expected_instruction)
             or (expected_revision is not None and existing["instruction_revision"] != expected_revision)
+            or (
+                expected_context is not None
+                and decomposition_context(conn, task_id) != expected_context
+            )
         ):
             _append_event(conn, task_id, "decomposition_discarded", {
                 "reason": "instruction_changed",
@@ -9514,6 +9547,7 @@ def decompose_triage_task(
     author: Optional[str] = None,
     auto_promote: bool = True,
     expected_instruction: tuple[Optional[str], Optional[str]] | None = None,
+    expected_context: Optional[str] = None,
     expected_revision: Optional[int] = None,
 ) -> Optional[list[str]]:
     """Fan a triage task out into child tasks and promote the root to ``todo``.
@@ -9610,6 +9644,10 @@ def decompose_triage_task(
             (expected_instruction is not None
              and (root_row["title"], root_row["body"]) != expected_instruction)
             or (expected_revision is not None and root_row["instruction_revision"] != expected_revision)
+            or (
+                expected_context is not None
+                and decomposition_context(conn, task_id) != expected_context
+            )
         ):
             _append_event(conn, task_id, "decomposition_discarded", {
                 "reason": "instruction_changed",
