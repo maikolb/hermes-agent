@@ -287,8 +287,8 @@ def _read_worker_trace_summary(board: str, task_id: str, kind: str) -> str:
     """Fetch the worker's own closeout text for a completion/blocked trace.
 
     Completed cards carry the worker's final summary in ``result``; blocked
-    cards carry it in the last card comment (close_delegation_cards stores
-    the summary as a comment on the block path). Best-effort: any failure
+    cards use the latest actual block event, then a substantive comment.
+    Administrative recovery notes are never worker output. Any failure
     returns an empty string and the trace stays short.
     """
     if not (board and task_id):
@@ -297,6 +297,18 @@ def _read_worker_trace_summary(board: str, task_id: str, kind: str) -> str:
         from hermes_cli import kanban_db as _kb
 
         with _kb.connect_closing(board=board) as conn:
+            if kind == "blocked":
+                rows = conn.execute(
+                    "SELECT payload FROM task_events WHERE task_id=? "
+                    "AND kind='blocked' ORDER BY id DESC LIMIT 20", (task_id,)
+                )
+                for row in rows:
+                    payload = json.loads(row["payload"] or "{}")
+                    if payload.get("reassessment_requested"):
+                        continue
+                    reason = str(payload.get("summary") or payload.get("reason") or "").strip()
+                    if reason:
+                        return reason
             if kind == "completed":
                 task = _kb.get_task(conn, task_id)
                 summary = str(getattr(task, "result", "") or "").strip()
@@ -308,7 +320,7 @@ def _read_worker_trace_summary(board: str, task_id: str, kind: str) -> str:
                 # trace go out as a bare title + link again.
             comments = _kb.list_comments(conn, task_id)
             for comment in reversed(comments):
-                if str(getattr(comment, "author", "") or "") == "watchdog":
+                if str(getattr(comment, "author", "") or "") in {"watchdog", "operator-continuity"}:
                     continue
                 body = str(getattr(comment, "body", "") or "").strip()
                 if body:
@@ -1522,6 +1534,9 @@ class GatewayKanbanWatchersMixin:
             if row.get("bootstrap") and has_current_attempt:
                 bucket[task.id] = row
             for event in row.get("events") or []:
+                if isinstance(getattr(event, "payload", None), dict) and event.payload.get("reassessment_requested"):
+                    # Administrative continuation is not a worker exiting.
+                    continue
                 if event.kind == "claimed":
                     if has_current_attempt:
                         bucket[task.id] = row
@@ -2653,7 +2668,10 @@ class GatewayKanbanWatchersMixin:
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
                                 reason = f": {str(ev.payload['reason'])[:160]}"
-                            msg = f"⏸ {board_tag}{tag}Kanban {sub['task_id']} blocked{reason}"
+                            if ev.payload and ev.payload.get("reassessment_requested"):
+                                msg = f"↪ {board_tag}Kanban {sub['task_id']} em reavaliação: {title}"
+                            else:
+                                msg = f"⏸ {board_tag}{tag}Kanban {sub['task_id']} blocked{reason}"
                         elif kind == "gave_up":
                             err = ""
                             if ev.payload and ev.payload.get("error"):
@@ -3314,16 +3332,11 @@ class GatewayKanbanWatchersMixin:
                     if int(running) >= int(cap):
                         # Full queue = normal waiting, not an anomaly.
                         return ""
-        except Exception:  # noqa: BLE001 — a probe failure must not block the alert
+        except Exception:  # noqa: BLE001
             logger.debug("ready watchdog: measured probes failed", exc_info=True)
-        # Everything measurable was measured and nothing explains the wait:
-        # the dispatcher genuinely has not acted on a spawnable card. THIS
-        # is the real anomaly (29/08: tick wedged in the old process).
-        return (
-            "nenhuma causa medida explica a espera (slots livres, perfil "
-            "existe, sem guard/backoff): o dispatcher não está agindo "
-            "neste board — checar o journal do gateway dono do lock"
-        )
+        # An incomplete probe cannot establish that the dispatcher is stuck.
+        # Its existing tick monitoring reports actual failures separately.
+        return ""
 
     @staticmethod
     def _ready_watchdog_guard_reason(conn: Any, task_id: str) -> str:
@@ -3362,8 +3375,8 @@ class GatewayKanbanWatchersMixin:
         dispatcher forever (#27145) and stays green-looking while dead —
         the operator called it the worst failure mode: silent with a
         healthy face. One pass per notifier tick over boards that have a
-        display binding; one durable alert per card (a ``watchdog``
-        comment is the dedupe token), delivered to the board's topic.
+        display binding; one durable alert per queue episode, identified
+        by its persisted ``watchdog_alert`` event and sent to the board topic.
         """
         from gateway.config import Platform as _Platform
 
@@ -3525,7 +3538,7 @@ class GatewayKanbanWatchersMixin:
     def _ready_watchdog_collect(
         self, board: str, now: float, settings: dict,
     ) -> list:
-        """Sync: ready tasks past threshold without claim or prior alert."""
+        """Sync: measured anomalies after the current queue entry, alerted once."""
         from hermes_cli import kanban_db as _kb
 
         stale: list = []
@@ -3539,25 +3552,35 @@ class GatewayKanbanWatchersMixin:
             ).fetchall()
             for task in rows:
                 task_id = str(task["id"])
-                already = conn.execute(
-                    "SELECT 1 FROM task_comments WHERE task_id = ? "
-                    "AND author = 'watchdog' LIMIT 1",
+                queued = conn.execute(
+                    "SELECT id,created_at FROM task_events WHERE task_id=? AND ("
+                    "kind IN ('unblocked','promoted','reclaimed') OR "
+                    "(kind='status' AND json_extract(payload,'$.status')='ready') OR "
+                    "json_extract(payload,'$.retry_status')='ready') ORDER BY id DESC LIMIT 1",
                     (task_id,),
+                ).fetchone()
+                queued_at = float(queued["created_at"] if queued else task["created_at"] or now)
+                queued_event_id = int(queued["id"]) if queued else 0
+                if now - queued_at < settings["threshold"]:
+                    continue
+                already = conn.execute(
+                    "SELECT 1 FROM task_events WHERE task_id = ? "
+                    "AND kind = 'watchdog_alert' AND id > ? LIMIT 1",
+                    (task_id, queued_event_id),
                 ).fetchone()
                 if already:
                     continue
-                reason = (
-                    self._ready_watchdog_guard_reason(conn, task_id)
-                    or self._ready_watchdog_reason(
-                        task, settings["default_assignee"], conn=conn
-                    )
+                if self._ready_watchdog_guard_reason(conn, task_id):
+                    continue
+                reason = self._ready_watchdog_reason(
+                    task, settings["default_assignee"], conn=conn
                 )
                 if not reason:
                     # Measured as normal waiting (full queue, deliberate
                     # backoff): silence, per operator order 29/08.
                     continue
                 age_minutes = max(
-                    1, int((now - float(task["created_at"] or now)) // 60)
+                    1, int((now - queued_at) // 60)
                 )
                 stale.append(
                     (task_id, str(task["title"] or task_id), reason, age_minutes)

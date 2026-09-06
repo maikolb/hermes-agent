@@ -179,11 +179,11 @@ def test_read_summary_completed_result_and_blocked_comment(
 
     conn = kb.connect()
     try:
-        done_id = kb.create_task(conn, title="done worker", assignee="w1")
+        done_id = kb.create_task(conn, title="done worker", assignee="default", requires_repo=False)
         kb.claim_task(conn, done_id, claimer="worker:w1")
         kb.complete_task(conn, done_id, result="Scope: X\nDone: Y")
 
-        blocked_id = kb.create_task(conn, title="stuck worker", assignee="w2")
+        blocked_id = kb.create_task(conn, title="stuck worker", assignee="default", requires_repo=False)
         kb.claim_task(conn, blocked_id, claimer="worker:w2")
         kb.block_task(conn, blocked_id, reason="sem acesso", kind="needs_input")
         kb.add_comment(conn, blocked_id, "worker", "Limitations: sem acesso ao S3")
@@ -196,7 +196,7 @@ def test_read_summary_completed_result_and_blocked_comment(
     )
     assert (
         kw._read_worker_trace_summary("b", blocked_id, "blocked")
-        == "Limitations: sem acesso ao S3"
+        == "sem acesso"
     )
 
 
@@ -240,7 +240,7 @@ def test_mirror_live_transcript_read_from_card_comment(tmp_path, monkeypatch):
     )
     conn = kb.connect()
     try:
-        tid = kb.create_task(conn, title="mirror", assignee="w")
+        tid = kb.create_task(conn, title="mirror", assignee="default", requires_repo=False)
         kb.add_comment(
             conn, tid, "delegation",
             f"Mirror card for in-process delegation d1 task 0. "
