@@ -287,12 +287,16 @@ def decompose_task(
     fanout=true with empty task list) — those surface via ``ok=False``.
     """
     with kb.connect_closing() as conn:
-        row = conn.execute(
-            "SELECT * FROM tasks WHERE id = ? AND status = 'triage'",
-            (task_id,),
-        ).fetchone()
-        task = kb.Task.from_row(row) if row else None
-        comments = kb.list_comments(conn, task_id)[-12:] if task else []
+        conn.execute("BEGIN")
+        try:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE id = ? AND status = 'triage'",
+                (task_id,),
+            ).fetchone()
+            task = kb.Task.from_row(row) if row else None
+            context_snapshot = kb.decomposition_context(conn, task_id) if task else None
+        finally:
+            conn.rollback()
     if task is None:
         return DecomposeOutcome(
             task_id, False, "task is not in triage or does not exist"
@@ -323,12 +327,8 @@ def decompose_task(
         roster=_format_roster(roster),
         default_assignee=default_assignee,
     )
+    user_msg += context_snapshot or ""
 
-    user_msg += "\nDelivery: " + str(task.delivery_type) + "; requires_repo=" + str(task.requires_repo)
-    user_msg += "\nExisting result (reuse, do not redo):\n" + _truncate(task.result or "", 2000)
-    user_msg += "\nRecent attributed comments:\n" + "\n".join(
-        f"{comment.author}: {_truncate(comment.body, 700)}" for comment in comments
-    )
     try:
         # Route through call_llm so auxiliary.kanban_decomposer.* config
         # (provider/model/base_url, extra_body, reasoning_effort, retries)
@@ -388,6 +388,7 @@ def decompose_task(
                 assignee=assignee_val,
                 author=audit_author,
                 expected_instruction=instruction_snapshot,
+                expected_context=context_snapshot,
                 expected_revision=task.instruction_revision,
             )
         if not ok:
@@ -461,6 +462,7 @@ def decompose_task(
                 author=audit_author,
                 auto_promote=auto_promote,
                 expected_instruction=instruction_snapshot,
+                expected_context=context_snapshot,
                 expected_revision=task.instruction_revision,
             )
     except ValueError as exc:
