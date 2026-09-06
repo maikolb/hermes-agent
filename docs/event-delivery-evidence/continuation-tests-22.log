@@ -1,0 +1,13 @@
+Discovered 1 test files (~3 tests) under ['tests\\hermes_cli\\test_kanban_blocked_sticky.py']; running with -j 1
+[100.0% |     3/~3 | ✓3 | ✗0] ✓ tests\hermes_cli\test_kanban_blocked_sticky.py (3✓, 11.5s)
+
+=== Summary: 1 files, 3 tests passed, 0 failed (100% complete) in 11.5s (1 workers) ===
+  Durations cached to test_durations.json (1 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   1
+  Total subprocess CPU-wall: 11.5s  (runner wall: 11.5s, parallelism: 1x)
+  P50: 11.53s  P90: 11.53s  P95: 11.53s  P99: 11.53s  Max: 11.53s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     11.53s  tests\hermes_cli\test_kanban_blocked_sticky.py

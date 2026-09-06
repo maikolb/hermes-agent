@@ -37,6 +37,29 @@ import pytest
 from hermes_cli import kanban_db as kb
 
 
+def test_protocol_exhaustion_survives_next_dispatch_tick(kanban_home, monkeypatch):
+    monkeypatch.setattr(kb, '_pid_alive', lambda pid: False)
+    monkeypatch.setattr(kb, '_resolve_crash_grace_seconds', lambda: 0)
+    monkeypatch.setattr(kb, '_classify_worker_exit', lambda pid: ('clean_exit', 0))
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title='Preserve completed tests', assignee='default', requires_repo=False)
+        kb.recompute_ready(conn)
+        for n in range(kb._PROTOCOL_VIOLATION_FAILURE_LIMIT):
+            assert kb.claim_task(conn, tid)
+            kb._set_worker_pid(conn, tid, 990000+n)
+            assert tid in kb.detect_crashed_workers(conn)
+        assert kb.get_task(conn, tid).status == 'blocked'
+        assert kb.get_task(conn, tid).consecutive_failures < 3
+        spawned = []
+        for _ in range(3):
+            kb.dispatch_once(conn, failure_limit=3, reconcile_orphans=False,
+                             spawn_fn=lambda task, workspace: spawned.append(task.id))
+            assert kb.get_task(conn, tid).status == 'blocked'
+        assert spawned == []
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid)
+
+
 @pytest.fixture
 def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolated HERMES_HOME with an empty kanban DB."""
@@ -59,7 +82,7 @@ def test_worker_block_is_not_auto_promoted_by_recompute_ready(kanban_home: Path)
     Before #28712's fix, ``recompute_ready`` would silently flip it
     back to ``ready`` on the very next tick."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="needs human review")
+        tid = kb.create_task(conn, title="needs human review", assignee="default", requires_repo=False)
         kb.claim_task(conn, tid)
         assert kb.block_task(
             conn, tid,
@@ -116,7 +139,7 @@ def test_protocol_violation_loop_is_broken(kanban_home: Path) -> None:
     leaves the task blocked.
     """
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="loop reproducer")
+        tid = kb.create_task(conn, title="loop reproducer", assignee="default", requires_repo=False)
         kb.claim_task(conn, tid)
         kb.block_task(
             conn, tid,

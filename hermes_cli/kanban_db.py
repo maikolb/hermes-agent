@@ -5300,41 +5300,21 @@ def _synthesize_ended_run(
 # ---------------------------------------------------------------------------
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return True when ``task_id`` is sticky-blocked by an explicit
-    worker/operator ``kanban_block`` call (#28712).
+    """Keep explicit blocks and exhausted attempts until recorded unblock.
 
-    A ``blocked`` status can come from two very different sources:
-
-    * **Worker- or operator-initiated** — a worker called
-      ``kanban_block(reason="review-required: ...")`` (or somebody ran
-      ``hermes kanban block <id>``).  This is a deliberate handoff that
-      should stay blocked until an operator unblocks it.  The block tool
-      emits a ``"blocked"`` event row in ``task_events``.
-
-    * **Circuit-breaker** — ``_record_task_failure`` tripped after
-      repeated crashes / spawn failures / timeouts.  This emits
-      ``"gave_up"``, *not* ``"blocked"``, and is meant to recover
-      automatically once the underlying conditions change (e.g. parents
-      finish, transient infra error clears).
-
-    The cheapest signal that distinguishes the two is the most recent
-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
-    recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
-    no ``"unblocked"`` event has fired since), the task is sticky and
-    ``recompute_ready`` must *not* auto-promote it.
-
-    Returns ``False`` when there is no such event at all (e.g. the task
-    was set to ``status='blocked'`` by the circuit breaker or by direct
-    DB manipulation) — preserves the pre-#28712 auto-recover semantics
-    for that path.
+    ``gave_up`` is the durable breaker decision, including protocol
+    violations that exhaust a separate budget below consecutive_failures.
+    Recomputing dependency readiness cannot undo that decision. The existing
+    unblock API records when a coordinator or operator authorizes continuation.
+    A dependency-only wait has no sticky event and still recovers normally.
     """
     row = conn.execute(
         "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'block_loop_detected', 'unblocked') "
+        "WHERE task_id = ? AND kind IN ('blocked', 'block_loop_detected', 'gave_up', 'unblocked') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] in {"blocked", "block_loop_detected"}
+    return bool(row) and row["kind"] in {"blocked", "block_loop_detected", "gave_up"}
 
 
 def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
@@ -13977,14 +13957,14 @@ def _worker_resume_context(task: Task, home: str, *, board=None) -> tuple[Option
         "and latest instructions before acting. Preserve completed work and existing PRs. "
         "Check the target before repeating an external operation whose result is uncertain."
     )
-    from agent.turn_checkpoint import TurnCheckpointStore, build_checkpoint_resume_note, checkpoint_is_resumable
+    from agent.turn_checkpoint import TurnCheckpointStore, build_checkpoint_resume_note, checkpoint_is_worker_resumable
     checkpoint_root = Path(home) / "sessions" / "turn-checkpoints"
     if checkpoint_root.is_dir():
         try:
             checkpoint = TurnCheckpointStore(checkpoint_root).load(session_id)
         except FileNotFoundError:
             checkpoint = None
-        if checkpoint_is_resumable(checkpoint):
+        if checkpoint_is_worker_resumable(checkpoint):
             note += "\n\n" + build_checkpoint_resume_note(checkpoint)
     return session_id, note
 

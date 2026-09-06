@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,6 +42,48 @@ def test_replacement_spawn_resumes_only_its_own_interrupted_session(tmp_path, mo
         conn.commit()
     kb._default_spawn(task,str(tmp_path))
     assert '--resume' not in captured[-1][0]
+
+
+@pytest.mark.parametrize('worker,verification_pending', [(False, False), (True, True)])
+def test_gateway_delivery_and_worker_verification_keep_resume_semantics(tmp_path, worker, verification_pending):
+    from agent.turn_checkpoint import TurnCheckpointStore
+    store = TurnCheckpointStore(tmp_path/'checkpoints')
+    messages = [{'role':'user', 'content':'Finish'}]
+    routing = {'kanban_task_id':'t-saved', 'kanban_db':'board.db'} if worker else {'platform':'telegram'}
+    store.start_turn('saved', 'original', 'Finish', messages, routing=routing)
+    store.mark_deliverable('saved', 'Existing answer', verification_pending=verification_pending)
+    restored = store.start_turn('saved', 'replacement', 'Finish', messages, routing=routing)
+    assert restored['turn_id'] == 'original'
+    assert restored['pending_deliverable']['content'] == 'Existing answer'
+
+
+@pytest.mark.parametrize('phase', ['deliverable_composed', 'delivery_pending'])
+def test_finished_worker_answer_starts_executable_turn_in_same_session(tmp_path, monkeypatch, phase):
+    from agent.turn_checkpoint import initialize_agent_turn_checkpoint
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_TASK', 't-continuity')
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path/'kanban.db'))
+    monkeypatch.setenv('HERMES_SESSION_SOURCE', 'kanban')
+    db = SessionDB(db_path=tmp_path/'state.db')
+    db.create_session(session_id='saved-answer', source='kanban')
+    db.append_message(session_id='saved-answer', role='user', content='Finish same card')
+    first = SimpleNamespace(session_id='saved-answer', _session_db=db)
+    initialize_agent_turn_checkpoint(first, turn_id='old-turn', user_content='Finish same card',
+                                     messages=db.get_messages('saved-answer'))
+    db.append_message(session_id='saved-answer', role='assistant', content='7 tests passed; API check pending')
+    first._turn_checkpoint_store.mark_deliverable('saved-answer', '7 tests passed; API check pending',
+                                                  verification_pending=False)
+    first._turn_checkpoint_store.transition('saved-answer', phase=phase,
+                                            next_action='finalize_delivery')
+    replacement = SimpleNamespace(session_id='saved-answer', _session_db=db)
+    state = initialize_agent_turn_checkpoint(replacement, turn_id='new-turn',
+                user_content='Finish same card', messages=db.get_messages('saved-answer'))
+    assert state['turn_id'] == 'new-turn'
+    assert state['phase'] == 'turn_started'
+    assert not state['recovery']['restored']
+    assert replacement._restored_pending_deliverable is None
+    assert db.get_messages('saved-answer')[-1]['content'] == '7 tests passed; API check pending'
+    db.close()
 
 
 def test_process_death_cannot_commit_card_without_its_subscription(tmp_path, monkeypatch):
