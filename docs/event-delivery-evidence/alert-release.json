@@ -1,0 +1,500 @@
+{
+  "runtime_sha": "6ffe7f4fbf156cb5d20e0d74641f5fa186555326",
+  "component": "project Telegram notifier and worker traces",
+  "activated_service": "hermes-gateway@hermes-project-factory.service",
+  "dispatcher_preserved": {
+    "pid": 3989907,
+    "loaded_sha": "ab8710cfa5e29c7f09d35f9c84780150492fefc9"
+  },
+  "source_files_verified": 10485,
+  "backup": "/var/backups/hermes/alert-integrity-6ffe7f4fbf156cb5d20e0d74641f5fa186555326/activation-20260906T050246Z",
+  "activation_started": 1788670966.129834,
+  "activation_finished": 1788671390.0236793,
+  "preserved_workers": [],
+  "workers_before": [
+    {
+      "id": "t_f1ce5125",
+      "current_run_id": 300,
+      "worker_pid": 4024658,
+      "board": "concursa-ai",
+      "cgroup": "0::/system.slice/system-hermes\\x2dgateway.slice/hermes-gateway@default.service",
+      "start_ticks": "142742166"
+    },
+    {
+      "id": "t_58b35f88",
+      "current_run_id": 337,
+      "worker_pid": 4091916,
+      "board": "dovcrm",
+      "cgroup": "0::/system.slice/system-hermes\\x2dgateway.slice/hermes-gateway@default.service",
+      "start_ticks": "143018926"
+    }
+  ],
+  "workers_after": [
+    {
+      "id": "t_d61b19ea",
+      "current_run_id": 316,
+      "worker_pid": 4100094,
+      "board": "concursa-ai",
+      "cgroup": "0::/system.slice/system-hermes\\x2dgateway.slice/hermes-gateway@default.service",
+      "start_ticks": "143056615"
+    },
+    {
+      "id": "t_f6e29133",
+      "current_run_id": 315,
+      "worker_pid": 4097053,
+      "board": "concursa-ai",
+      "cgroup": "0::/system.slice/system-hermes\\x2dgateway.slice/hermes-gateway@default.service",
+      "start_ticks": "143042856"
+    },
+    {
+      "id": "t_9ce8e0e3",
+      "current_run_id": 340,
+      "worker_pid": 4100661,
+      "board": "dovcrm",
+      "cgroup": "0::/system.slice/system-hermes\\x2dgateway.slice/hermes-gateway@default.service",
+      "start_ticks": "143059256"
+    },
+    {
+      "id": "t_58b35f88",
+      "current_run_id": 339,
+      "worker_pid": 4097669,
+      "board": "dovcrm",
+      "cgroup": "0::/system.slice/system-hermes\\x2dgateway.slice/hermes-gateway@default.service",
+      "start_ticks": "143045486"
+    }
+  ],
+  "current_screenshot_cards": {
+    "time": 1788671593.0225317,
+    "cards": [
+      {
+        "id": "t_f1ce5125",
+        "status": "blocked",
+        "current_run_id": null,
+        "worker_pid": null,
+        "last_events": [
+          {
+            "id": 10002,
+            "kind": "blocked",
+            "created_at": 1788670967
+          },
+          {
+            "id": 10001,
+            "kind": "commented",
+            "created_at": 1788670953
+          },
+          {
+            "id": 10000,
+            "kind": "heartbeat",
+            "created_at": 1788670952
+          },
+          {
+            "id": 9995,
+            "kind": "heartbeat",
+            "created_at": 1788670889
+          },
+          {
+            "id": 9991,
+            "kind": "heartbeat",
+            "created_at": 1788670821
+          },
+          {
+            "id": 9988,
+            "kind": "heartbeat",
+            "created_at": 1788670759
+          },
+          {
+            "id": 9982,
+            "kind": "heartbeat",
+            "created_at": 1788670694
+          },
+          {
+            "id": 9974,
+            "kind": "heartbeat",
+            "created_at": 1788670626
+          }
+        ],
+        "actual_block": {
+          "event_id": 10002,
+          "at": 1788670967,
+          "reason": "Validação bloqueada: Vitest/PGlite falhou no setup (`Hook timed out in 10000ms`), com 6 testes skipped; fixture com hook timeout60s preservada, ainda sem RED/GREEN válido. Claude CLI também não respondeu a --help em60s. Execução encerrada sem alteração de produto/produção; retomar do teste preservado e obter checks/revisão funcionais antes de PR/release."
+        },
+        "subscriptions": [
+          {
+            "task_id": "t_f1ce5125",
+            "notifier_profile": "hermes-project-factory",
+            "last_event_id": 10002,
+            "delivery_mode": "notify+wake"
+          }
+        ],
+        "delivery_receipts": []
+      },
+      {
+        "id": "t_f6e29133",
+        "status": "running",
+        "current_run_id": 315,
+        "worker_pid": 4097053,
+        "last_events": [
+          {
+            "id": 10032,
+            "kind": "heartbeat",
+            "created_at": 1788671551
+          },
+          {
+            "id": 10031,
+            "kind": "commented",
+            "created_at": 1788671541
+          },
+          {
+            "id": 10028,
+            "kind": "heartbeat",
+            "created_at": 1788671490
+          },
+          {
+            "id": 10026,
+            "kind": "heartbeat",
+            "created_at": 1788671415
+          },
+          {
+            "id": 10025,
+            "kind": "commented",
+            "created_at": 1788671380
+          },
+          {
+            "id": 10024,
+            "kind": "heartbeat",
+            "created_at": 1788671353
+          },
+          {
+            "id": 10023,
+            "kind": "heartbeat",
+            "created_at": 1788671292
+          },
+          {
+            "id": 10020,
+            "kind": "worker_session_linked",
+            "created_at": 1788671272
+          }
+        ],
+        "subscriptions": [
+          {
+            "task_id": "t_f6e29133",
+            "notifier_profile": "hermes-project-factory",
+            "last_event_id": 10015,
+            "delivery_mode": "notify+wake"
+          }
+        ],
+        "delivery_receipts": []
+      },
+      {
+        "id": "t_f71302be",
+        "status": "blocked",
+        "current_run_id": null,
+        "worker_pid": null,
+        "last_events": [
+          {
+            "id": 9990,
+            "kind": "commented",
+            "created_at": 1788670791
+          },
+          {
+            "id": 9915,
+            "kind": "commented",
+            "created_at": 1788669582
+          },
+          {
+            "id": 9717,
+            "kind": "blocked",
+            "created_at": 1788666937
+          },
+          {
+            "id": 9716,
+            "kind": "commented",
+            "created_at": 1788666937
+          },
+          {
+            "id": 7583,
+            "kind": "blocked",
+            "created_at": 1788485057
+          },
+          {
+            "id": 7582,
+            "kind": "heartbeat",
+            "created_at": 1788485022
+          },
+          {
+            "id": 7580,
+            "kind": "heartbeat",
+            "created_at": 1788484974
+          },
+          {
+            "id": 7577,
+            "kind": "heartbeat",
+            "created_at": 1788484916
+          }
+        ],
+        "actual_block": {
+          "event_id": 7583,
+          "at": 1788485057,
+          "reason": "delegation error: stale checkpoint write rejected: revision changed from 2 before candidate 2 committed"
+        },
+        "subscriptions": [
+          {
+            "task_id": "t_f71302be",
+            "notifier_profile": "hermes-project-factory",
+            "last_event_id": 9717,
+            "delivery_mode": "notify+wake"
+          }
+        ],
+        "delivery_receipts": []
+      },
+      {
+        "id": "t_35ea03c3",
+        "status": "todo",
+        "current_run_id": null,
+        "worker_pid": null,
+        "last_events": [
+          {
+            "id": 9945,
+            "kind": "unblocked",
+            "created_at": 1788670005
+          },
+          {
+            "id": 9944,
+            "kind": "assigned",
+            "created_at": 1788669984
+          },
+          {
+            "id": 9941,
+            "kind": "commented",
+            "created_at": 1788669933
+          },
+          {
+            "id": 9788,
+            "kind": "linked",
+            "created_at": 1788668164
+          },
+          {
+            "id": 9715,
+            "kind": "blocked",
+            "created_at": 1788666937
+          },
+          {
+            "id": 9714,
+            "kind": "commented",
+            "created_at": 1788666937
+          },
+          {
+            "id": 7544,
+            "kind": "blocked",
+            "created_at": 1788484261
+          },
+          {
+            "id": 7543,
+            "kind": "commented",
+            "created_at": 1788484258
+          }
+        ],
+        "actual_block": {
+          "event_id": 7544,
+          "at": 1788484261,
+          "reason": "Worker atingiu max_iterations após criar e validar commit local; card worktree não pode fechar sem PR. Continuação foi materializada no card t_538158e9, worker sa-0-7c13dddb, reutilizando o commit d80a721f e seguindo exclusivamente com entrega e validação no alvo."
+        },
+        "subscriptions": [
+          {
+            "task_id": "t_35ea03c3",
+            "notifier_profile": "hermes-project-factory",
+            "last_event_id": 9945,
+            "delivery_mode": "notify+wake"
+          }
+        ],
+        "delivery_receipts": []
+      }
+    ]
+  },
+  "services": {
+    "default": {
+      "Restart": "always",
+      "MainPID": "3989907",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "UnitFileState": "enabled",
+      "argv": "/usr/local/lib/hermes-agent.release-20260906-ab8710cfa5e29c7f09d35f9c84780150492fefc9/venv/bin/python3 /usr/local/bin/hermes --profile default gateway run --replace ",
+      "pythonpath": "",
+      "telegram": {
+        "state": "connected",
+        "writer_pid": 3989907,
+        "updated_at": "2026-09-06T03:54:17.745398+00:00",
+        "needs_attention": false,
+        "error_code": null
+      },
+      "unchanged_dispatcher": true
+    },
+    "hermes-project-factory": {
+      "Restart": "always",
+      "MainPID": "4097947",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "UnitFileState": "enabled",
+      "argv": "/usr/local/lib/hermes-agent.release-20260906-6ffe7f4fbf156cb5d20e0d74641f5fa186555326/venv/bin/python3 /usr/local/bin/hermes --profile hermes-project-factory gateway run --replace ",
+      "pythonpath": "",
+      "telegram": {
+        "state": "connected",
+        "writer_pid": 4097947,
+        "updated_at": "2026-09-06T05:09:46.924485+00:00",
+        "needs_attention": false,
+        "error_code": null
+      }
+    }
+  },
+  "local_tests_passed": 26,
+  "target_tests_passed": 5,
+  "incident": {
+    "task_id": "t_f1ce5125",
+    "unblocked_event": 9774,
+    "first_false_alert_event": 9776,
+    "second_false_alert_event": 9780,
+    "claimed_event": 9785,
+    "seconds_unblock_to_first_alert": 19,
+    "seconds_unblock_to_claim": 105,
+    "run_id": 300
+  },
+  "public_rtu": {
+    "time": "2026-09-06T05:10:24.153324+00:00",
+    "lux": {
+      "status": 200,
+      "bytes": 8931,
+      "sha256": "65fa7c1e2a2315c44e9bcd3a0149f732db4e288beef39711e46c6e6077b62ee2"
+    },
+    "card": {
+      "id": "t_f1ce5125",
+      "status": "blocked",
+      "current_run_id": null
+    },
+    "activity": {
+      "source": "session",
+      "scope": "run",
+      "run_id": 300,
+      "source_id": "session:300",
+      "total_bytes": 1078061,
+      "mtime": "2026-09-06T05:09:15.520555+00:00"
+    },
+    "full_log": {
+      "status": 200,
+      "bytes": 1078061,
+      "sha256": "fd8d7e6e2d256a18f5b45f42823b26ffba438360d90ddfb7953a71f8e9f9fb91",
+      "has_reasoning": true,
+      "has_tool_use": true
+    }
+  },
+  "prior_rtu_bytes": 742239,
+  "boards": {
+    "concursa-ai": {
+      "counts": {
+        "archived": 27,
+        "backlog": 20,
+        "blocked": 11,
+        "done": 213,
+        "running": 2,
+        "todo": 7
+      },
+      "recent_alerts": [
+        {
+          "id": 10004,
+          "task_id": "t_d61b19ea",
+          "created_at": 1788670980
+        },
+        {
+          "id": 9999,
+          "task_id": "t_d61b19ea",
+          "created_at": 1788670945
+        },
+        {
+          "id": 9985,
+          "task_id": "t_d61b19ea",
+          "created_at": 1788670703
+        },
+        {
+          "id": 9981,
+          "task_id": "t_d61b19ea",
+          "created_at": 1788670682
+        },
+        {
+          "id": 9979,
+          "task_id": "t_d61b19ea",
+          "created_at": 1788670653
+        },
+        {
+          "id": 9880,
+          "task_id": "t_d61b19ea",
+          "created_at": 1788669198
+        },
+        {
+          "id": 9873,
+          "task_id": "t_d61b19ea",
+          "created_at": 1788669132
+        },
+        {
+          "id": 9869,
+          "task_id": "t_d61b19ea",
+          "created_at": 1788669066
+        }
+      ]
+    },
+    "dovcrm": {
+      "counts": {
+        "archived": 10,
+        "backlog": 16,
+        "blocked": 8,
+        "done": 221,
+        "ready": 3,
+        "running": 1,
+        "todo": 7
+      },
+      "recent_alerts": [
+        {
+          "id": 8619,
+          "task_id": "t_58b35f88",
+          "created_at": 1788560868
+        },
+        {
+          "id": 8487,
+          "task_id": "t_35bd4a15",
+          "created_at": 1788541780
+        },
+        {
+          "id": 8303,
+          "task_id": "t_8346f110",
+          "created_at": 1788460498
+        },
+        {
+          "id": 8082,
+          "task_id": "t_9ce8e0e3",
+          "created_at": 1788447560
+        },
+        {
+          "id": 7845,
+          "task_id": "t_cc595bb1",
+          "created_at": 1788435915
+        },
+        {
+          "id": 7717,
+          "task_id": "t_6f7fe308",
+          "created_at": 1788428609
+        },
+        {
+          "id": 7582,
+          "task_id": "t_3a9e6098",
+          "created_at": 1788421431
+        },
+        {
+          "id": 7575,
+          "task_id": "t_7eccdb4c",
+          "created_at": 1788421344
+        }
+      ]
+    }
+  },
+  "limits": "Isolated notifier tests and exact active source verified. Historical Telegram posts are not erased; this does not declare every business card completed."
+}

@@ -66,11 +66,119 @@ A controlled micro-loop is not required because this repair uses focused tests a
 
 ## Validation Evidence
 ```json
-{"schemaVersion":1,"checks":[]}
+{
+  "schemaVersion": 1,
+  "checks": [
+    {
+      "criterionId": "AC-001",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused regression tests and current production readback",
+      "target": "srv1918217 project notifier and public Vigilia",
+      "procedure": "Reproduce native notification paths in isolation; verify source hashes, connected PID, preserved dispatcher and worker run log.",
+      "expected": "Accurate queue and worker notices without interrupting autonomous work.",
+      "observed": "Current queue age, durable per-episode alert dedupe and measured reasons passed focused local and target tests. Incident claim happened 105 seconds after unblock.",
+      "performedAtUtc": "2026-09-06T05:14:18.149880+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/alert-release.json",
+          "sha256": "1f2668b73d8bd28e58e5711f1333758804e7200cb83f55b08256958391ead026"
+        },
+        {
+          "path": "docs/event-delivery-evidence/alert-local-tests.log",
+          "sha256": "012e4a2940ac682ff8136793ccacc3fc3bf89532288f54b0fa73ad88d258f8ff"
+        },
+        {
+          "path": "docs/event-delivery-evidence/alert-target-tests.json",
+          "sha256": "d022eab0af20c164d38055c734b447aeb19e5e4a1a9b7df9c4c3c784cc4a6b7f"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-002",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused regression tests and current production readback",
+      "target": "srv1918217 project notifier and public Vigilia",
+      "procedure": "Reproduce native notification paths in isolation; verify source hashes, connected PID, preserved dispatcher and worker run log.",
+      "expected": "Accurate queue and worker notices without interrupting autonomous work.",
+      "observed": "Native notifier test emits a brief reassessment without internal prompt; focus remains active and actual block cause wins. Durable wake path is unchanged.",
+      "performedAtUtc": "2026-09-06T05:14:18.149880+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/alert-release.json",
+          "sha256": "1f2668b73d8bd28e58e5711f1333758804e7200cb83f55b08256958391ead026"
+        },
+        {
+          "path": "docs/event-delivery-evidence/alert-local-tests.log",
+          "sha256": "012e4a2940ac682ff8136793ccacc3fc3bf89532288f54b0fa73ad88d258f8ff"
+        },
+        {
+          "path": "docs/event-delivery-evidence/alert-target-tests.json",
+          "sha256": "d022eab0af20c164d38055c734b447aeb19e5e4a1a9b7df9c4c3c784cc4a6b7f"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-003",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused regression tests and current production readback",
+      "target": "srv1918217 project notifier and public Vigilia",
+      "procedure": "Reproduce native notification paths in isolation; verify source hashes, connected PID, preserved dispatcher and worker run log.",
+      "expected": "Accurate queue and worker notices without interrupting autonomous work.",
+      "observed": "Exact published source verified in the active project notifier; Telegram connected. Default dispatcher PID remained unchanged; the existing run log persisted and new workers started.",
+      "performedAtUtc": "2026-09-06T05:14:18.149880+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/alert-release.json",
+          "sha256": "1f2668b73d8bd28e58e5711f1333758804e7200cb83f55b08256958391ead026"
+        },
+        {
+          "path": "docs/event-delivery-evidence/alert-local-tests.log",
+          "sha256": "012e4a2940ac682ff8136793ccacc3fc3bf89532288f54b0fa73ad88d258f8ff"
+        },
+        {
+          "path": "docs/event-delivery-evidence/alert-target-tests.json",
+          "sha256": "d022eab0af20c164d38055c734b447aeb19e5e4a1a9b7df9c4c3c784cc4a6b7f"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-004",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused regression tests and current production readback",
+      "target": "srv1918217 project notifier and public Vigilia",
+      "procedure": "Reproduce native notification paths in isolation; verify source hashes, connected PID, preserved dispatcher and worker run log.",
+      "expected": "Accurate queue and worker notices without interrupting autonomous work.",
+      "observed": "Public Vigilia returns HTTP 200 and the session-bound RTU for task t_f1ce5125 run 300 with reasoning and tools. No batch replay or extra component.",
+      "performedAtUtc": "2026-09-06T05:14:18.149880+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/alert-release.json",
+          "sha256": "1f2668b73d8bd28e58e5711f1333758804e7200cb83f55b08256958391ead026"
+        },
+        {
+          "path": "docs/event-delivery-evidence/alert-local-tests.log",
+          "sha256": "012e4a2940ac682ff8136793ccacc3fc3bf89532288f54b0fa73ad88d258f8ff"
+        },
+        {
+          "path": "docs/event-delivery-evidence/alert-target-tests.json",
+          "sha256": "d022eab0af20c164d38055c734b447aeb19e5e4a1a9b7df9c4c3c784cc4a6b7f"
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ## Status
 - Contract preflight: validated
-- Implementation: complete locally; activation pending
-- Validation: 26 focused tests passed; incident events and worker verified
-- Completion: in progress
+- Implementation: released as 6ffe7f4fbf156cb5d20e0d74641f5fa186555326 in the project notifier
+- Validation: 26 local and 5 target tests passed; exact source, Telegram and RTU read back
+- Completion: complete for alert integrity; business tasks continue; owner acceptance pending

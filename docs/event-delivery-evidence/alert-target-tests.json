@@ -1,0 +1,13 @@
+{
+  "hostname": "srv1918217",
+  "sha": "6ffe7f4fbf156cb5d20e0d74641f5fa186555326",
+  "returncode": 0,
+  "seconds": 108.2,
+  "paths": [
+    "tests/gateway/test_kanban_alert_integrity.py"
+  ],
+  "stdout": ".....                                                                    [100%]\n5 passed in 90.30s (0:01:30)\n",
+  "stderr": "",
+  "production_data_used": false,
+  "active_entrypoint": "/usr/local/lib/hermes-agent.release-20260906-ab8710cfa5e29c7f09d35f9c84780150492fefc9/venv/bin/hermes"
+}

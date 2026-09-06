@@ -1,6 +1,6 @@
 {
   "external_scope": [],
-  "generated_at": "2026-09-06T04:23:17.530168+00:00",
+  "generated_at": "2026-09-06T05:14:24.370189+00:00",
   "repo_scope": [
     "docs/EXECUTION_CONTRACT.md",
     "docs/EXECUTION_CONTRACT.md.scope.json",
@@ -16,6 +16,6 @@
   ],
   "repo_scope_count": 10,
   "schema": 1,
-  "source_sha256": "af15e0439fc012da3879321a74c707cac2fcb6e5176965c6bdffc515c796803d",
+  "source_sha256": "68c20e808c8febe126b710be24fa56010e1057b302152d4e692e90d023a1ff6e",
   "workspace_root": "C:\\Users\\maiko\\Projetos\\default-64c4270e467b6d39\\new-chat-f520c76c60\\assignee-publish-worktree"
 }
