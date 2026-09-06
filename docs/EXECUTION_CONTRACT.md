@@ -88,11 +88,103 @@ A controlled micro-loop is not required because this repair uses focused tests a
 
 ## Validation Evidence
 ```json
-{"schemaVersion":1,"checks":[]}
+{
+  "schemaVersion": 1,
+  "checks": [
+    {
+      "criterionId": "AC-001",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused isolated interruption tests and production readback",
+      "target": "srv1918217 and public Vigilia Lux",
+      "procedure": "Read exact release, services, task events, worker process identity and session-bound public log; compare consecutive log sizes.",
+      "expected": "Authorized persisted work resumes through the existing dispatcher and is observable without duplication.",
+      "observed": "51 focused local tests and 5 target tests passed, including real process death, session/checkpoint recovery, atomic creation and single scheduled resume.",
+      "performedAtUtc": "2026-09-06T04:11:34.310458+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/continuity-release.json",
+          "sha256": "7fa5fdeadf27f19b12be5af5e8359d479cfb5698069a69f939e10dae9de58c8d"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-local-tests.log",
+          "sha256": "7ef92d1722b05fefd19cbeb187c3622c3b3f77fa6534e52f7303b4e9cce06215"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-002",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused isolated interruption tests and production readback",
+      "target": "srv1918217 and public Vigilia Lux",
+      "procedure": "Read exact release, services, task events, worker process identity and session-bound public log; compare consecutive log sizes.",
+      "expected": "Authorized persisted work resumes through the existing dispatcher and is observable without duplication.",
+      "observed": "27 historical requests persisted after individual review of reasons; two concrete human inputs retained. Native coordinator actions unblocked existing cards and native workers claimed them.",
+      "performedAtUtc": "2026-09-06T04:11:34.310458+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/continuity-release.json",
+          "sha256": "7fa5fdeadf27f19b12be5af5e8359d479cfb5698069a69f939e10dae9de58c8d"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-local-tests.log",
+          "sha256": "7ef92d1722b05fefd19cbeb187c3622c3b3f77fa6534e52f7303b4e9cce06215"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-003",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused isolated interruption tests and production readback",
+      "target": "srv1918217 and public Vigilia Lux",
+      "procedure": "Read exact release, services, task events, worker process identity and session-bound public log; compare consecutive log sizes.",
+      "expected": "Authorized persisted work resumes through the existing dispatcher and is observable without duplication.",
+      "observed": "Exact SHA active in both connected gateways. Two real workers have session-bound RTU available over the public Vigilia API. DOV run 315 grew from 38562 to 217539 bytes.",
+      "performedAtUtc": "2026-09-06T04:11:34.310458+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/continuity-release.json",
+          "sha256": "7fa5fdeadf27f19b12be5af5e8359d479cfb5698069a69f939e10dae9de58c8d"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-local-tests.log",
+          "sha256": "7ef92d1722b05fefd19cbeb187c3622c3b3f77fa6534e52f7303b4e9cce06215"
+        }
+      ]
+    },
+    {
+      "criterionId": "AC-004",
+      "status": "passed",
+      "performedBy": "agent",
+      "verificationMode": "direct",
+      "method": "Focused isolated interruption tests and production readback",
+      "target": "srv1918217 and public Vigilia Lux",
+      "procedure": "Read exact release, services, task events, worker process identity and session-bound public log; compare consecutive log sizes.",
+      "expected": "Authorized persisted work resumes through the existing dispatcher and is observable without duplication.",
+      "observed": "Inspected current processes have distinct PIDs, cards and runs; resumed work retains original card identities. No new component or broad test suite was added.",
+      "performedAtUtc": "2026-09-06T04:11:34.310458+00:00",
+      "artifacts": [
+        {
+          "path": "docs/event-delivery-evidence/continuity-release.json",
+          "sha256": "7fa5fdeadf27f19b12be5af5e8359d479cfb5698069a69f939e10dae9de58c8d"
+        },
+        {
+          "path": "docs/event-delivery-evidence/continuity-local-tests.log",
+          "sha256": "7ef92d1722b05fefd19cbeb187c3622c3b3f77fa6534e52f7303b4e9cce06215"
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ## Status
 - Contract preflight: validated
-- Implementation: complete locally; activation pending
-- Validation: 51 focused local tests passed; target baseline recorded
-- Completion: in progress
+- Implementation: released as ab8710cfa5e29c7f09d35f9c84780150492fefc9
+- Validation: 51 local and 5 target tests passed; two worker RTU streams verified on target
+- Completion: complete for technical continuity; historical reconciliation and business tasks continue; owner acceptance pending
