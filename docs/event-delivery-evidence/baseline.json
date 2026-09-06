@@ -1,0 +1,9 @@
+{
+  "base": "7d5fa695c0a75cafd8c8c8ef4a03e328a57c1c03",
+  "old_cursor": 1,
+  "claimed_cursor": 2,
+  "claimed_events": 1,
+  "sent": 0,
+  "pending_after_reopen": 0,
+  "bug_reproduced": true
+}

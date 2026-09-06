@@ -1,81 +1,87 @@
-# NFOS Kanban Whiteboard Implementation
+# Hermes durable Kanban event delivery
 
 ## Contract Metadata
 - Contract Version: 3
-- Contract ID: NFOS-WHITEBOARD-20260905
+- Contract ID: NFOS-EVENT-DELIVERY-20260905
 - Mode: REPAIR
 - Risk Level: HIGH
-- Machine Runtime Authority: none: user authorized this fixed single-writer implementation with focused regressions and target readback, without autonomous multi-agent loops.
+- Machine Runtime Authority: none: bounded owner-authorized repair in the existing consumer.
 - Acceptance Authority: Maikol
-- Base: c2bbb6bec5bb78803904fa0636f2b7618c957031, descended from efa3b7835e34600890a952b4f89d84d08e7290fe, in the existing assignee-publish-worktree
+- Base: 7d5fa695c0a75cafd8c8c8ef4a03e328a57c1c03 in the existing checkout.
 
 ## Requested Outcome
-One durable request, one responsible executor, truthful task/run state, proportional completion and recovery of the affected Concursa and DOV cards through the existing Hermes.
+Retain Kanban event delivery until confirmed, recover an interrupted delivery in the existing consumer and avoid a second handoff of work already durably accepted. Maikol explicitly said Faça after the recommendation to fix the loss window instead of adding a general board watchdog.
 
 ## Acceptance Criteria
-- AC-001: All creation paths preserve task role, repository need, delivery type and current instruction; activity records are never dispatched.
-- AC-002: Decomposition respects latest instructions and completed work; repeated operational failures do not create new graphs.
-- AC-003: Taking, transferring, completing and recovering work keep task, run and claim consistent; stale attempts cannot finish new ones.
-- AC-004: Reports finish with evidence without PR; code keeps project delivery checks.
-- AC-005: Board and notification show queued, actually executing, waiting, checking and delivered truthfully.
-- AC-006: Existing affected cards are reconciled individually with preserved results and history.
-- AC-007: Scoped tests and target readback demonstrate the published candidate; acceptance remains Maikol's.
+- AC-001: Claiming alone never consumes an event; interrupted claims are recoverable and stale acknowledgements cannot consume newer work.
+- AC-002: Passive notification and agent handoff have separate durable progress; a failed or interrupted handoff remains pending without resending a confirmed notification.
+- AC-003: A push handoff is acknowledged only after a durable turn checkpoint; repeated delivery of the same accepted handoff does not create another turn. Existing checkpoint recovery owns interrupted execution.
+- AC-004: Focused tests demonstrate interruption boundaries. Publish the scoped exact Git revision and activate the immutable candidate on the verified VPS if the affected services can be safely restarted; otherwise record the concrete pending activation condition.
 
 ## In Scope
-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/agent/agent_init.py`
-- `agent/agent_init.py`
-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tools/delegate_tool.py`
-- `tools/delegate_tool.py`
+- `tui_gateway/server.py`
+- `tests/tui_gateway/test_kanban_notify_poller.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tui_gateway/server.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/tui_gateway/test_kanban_notify_poller.py`
+- `hermes_cli/kanban_db.py`
+- `gateway/kanban_watchers.py`
+- `gateway/wake.py`
+- `gateway/platforms/base.py`
+- `agent/turn_checkpoint.py`
+- `tests/hermes_cli/test_kanban_notify.py`
+- `tests/hermes_cli/test_kanban_notify_durable.py`
+- `tests/gateway/test_kanban_notifier_wake_only_ordering.py`
+- `tests/gateway/test_kanban_notifier_durable.py`
+- `tests/gateway/test_wake_delivery.py`
+- `tests/gateway/test_kanban_whiteboard_notifications.py`
+- `tests/agent/test_turn_checkpoint.py`
 - `docs/EXECUTION_CONTRACT.md`
 - `docs/EXECUTION_CONTRACT.md.scope.json`
-- `work/whiteboard_*.py`
-- `outputs/kanban-whiteboard/**`
+- `docs/kanban-event-delivery.md`
+- `docs/event-delivery-evidence/`
 - `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/hermes_cli/kanban_db.py`
-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/hermes_cli/kanban_decompose.py`
 - `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/gateway/kanban_watchers.py`
-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tools/kanban_tools.py`
-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tools/delegation_kanban.py`
-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tools/principal_turn_mirror.py`
-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/plugins/kanban/dashboard/**`
-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/**`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/gateway/wake.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/gateway/platforms/base.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/agent/turn_checkpoint.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/hermes_cli/test_kanban_notify.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/hermes_cli/test_kanban_notify_durable.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/gateway/test_kanban_notifier_wake_only_ordering.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/gateway/test_kanban_notifier_durable.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/gateway/test_wake_delivery.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/gateway/test_kanban_whiteboard_notifications.py`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/tests/agent/test_turn_checkpoint.py`
 - `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/EXECUTION_CONTRACT.md`
 - `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/EXECUTION_CONTRACT.md.scope.json`
-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/kanban-whiteboard.md`
-- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/hermes_cli/kanban.py`
-- hermes_cli/kanban_db.py
-- hermes_cli/kanban_decompose.py
-- gateway/kanban_watchers.py
-- tools/kanban_tools.py
-- tools/delegation_kanban.py
-- tools/principal_turn_mirror.py
-- plugins/kanban/dashboard/
-- Focused Kanban tests and docs, this contract and its manifest
-- Existing project-scoped AOF adapter/validator failure handling with controls preserved
-- Concursa and DOV task data, consistent backups, exact release preparation, entrypoint and affected VPS services
-- Local outputs/kanban-whiteboard evidence and one-shot project recovery artifacts
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/kanban-event-delivery.md`
+- `C:/Users/maiko/Projetos/default-64c4270e467b6d39/new-chat-f520c76c60/assignee-publish-worktree/docs/event-delivery-evidence/`
+- `work/whiteboard_*.py`
+- `outputs/kanban-whiteboard/`
+- Existing fork branch fix/nfos-whiteboard-20260905 and exact new immutable release on srv1918217.
+- Consistent affected database backup, entrypoint and the two affected Hermes gateway services, with idle preflight and health readback.
 
 ## Out of Scope
-NFO-Homolog-Lab, P0-4a, retention, VACUUM, unrelated dirty checkout work, new worktrees, rebuilding existing PRs/commits, new global scripts or release gates, model/capacity changes, Titan local restart.
+General board sweep/watchdog, autonomous repair of the sixteen blocked cards, DOV checkout policy, Vigilia frontend or authentication, NFO-Homolog-Lab, P0-4a, retention, VACUUM, concurrent changes, new worktrees, broad suites and multiagent rounds.
 
 ## Failure Signal / Repro
-- Evidence: C:/Users/maiko/Documents/Codex/2026-09-05/quero-corrigir-a-configura-o-operacional/outputs/activation/active-behavior-readback.json
-- Target inspection: t_449a8a34 report hit delivery_review_required then acquired five worktree children; t_af3159a0 archived with running attempt; DOV literal unassigned and executed activity mirror; AOF terminal TimeoutExpired.
-- Evidence-Absent: these exact live incident excerpts were inspected read-only in the planning turn and will be captured with the implementation evidence before recovery mutations.
+- Evidence: `docs/event-delivery-evidence/baseline.json`
+Isolated real SQLite reproduction on the exact base: one event claimed, zero sent, zero pending after reopening. The notifier also acknowledges notify+wake text before a best-effort wake; handle_message queues a volatile background turn.
 
 ## Root-Cause Hypothesis
-Confirmed independent paths omit durable delivery classification and bypass common lifecycle updates. Decomposition treats recurrence triage as unfinished implementation and ignores current human clarification. AOF timeout incident is confirmed; exact expensive validator phase requires measurement before changing behavior.
+Claim and acknowledgement share last_event_id. Crash recovery never executes the rewind handler. A successful text notification is incorrectly treated as acknowledgement of the independent agent handoff.
 
 ## Claim Discipline
-Only direct tests justify validated-local; active process and user-route evidence justify validated-target/released. Existing artifacts are reused, never counted as proof of this candidate.
+No historical incident attribution beyond inspected evidence. Delivery deduplication does not imply exactly-once arbitrary external tool effects. Do not claim all blocked cards autonomously resolved or production fixed before exact activation readback.
 
 ## Forbidden Actions
-No credentials in output, global permission/hook disablement, retired release scripts, editing existing releases, bulk completion of unverified work, duplicate external actions, unrelated checkout edits, visible UI or forced interruption of live workers.
-
-## Loop Control
-A controlled autonomous micro-loop is not required: this is a fixed single-writer implementation with at most three focused fix/test iterations per affected behavior and no delegated execution. Pause only the affected phase on new business decisions, incompatible concurrent work or non-proportional validation requirements. At thirty active minutes report actual delivered slice and remaining cost before expanding.
+No global scripts/gates, hook disablement, existing-release edits, task bulk changes, visible windows, forced interruption of live workers, local Titan restart or secret output.
 
 ## Validation Plan
-Use canonical per-file Python test runner with hidden Windows subprocesses and temporary HERMES_HOME, restricting tests to changed behavior and adjacent contract checks. The shell wrapper performs repository-wide compilation, which conflicts with the user's explicit focused-test limit. Validate contract before source edits and at closeout. Record baseline and diff, preserve prior commit provenance, prepare immutable SHA candidate, snapshot affected data/config, atomically update entrypoint after idle check, restart only affected VPS services and allow measured cold-start time. Roll back entrypoint on failed health; do not restore data over new user activity.
+Focused real SQLite interruption, concurrent claim, stale acknowledgement, separate text/wake progress and checkpoint receipt tests. Use existing hidden per-file runner and isolated homes. Recheck exact Git base and clean scoped diff. Prepare immutable exact-SHA release, back up affected databases, check idle target, update entrypoint, restart only affected services and verify process, release and transport health. Roll back pointer on failed health without overwriting new user data.
+
+## Loop Control
+A controlled micro-loop is not required because this is one bounded fix with focused tests in the existing implementation and no autonomous task repair loop.
+Stop the affected operation on concurrent edits, target mismatch, failed health or a requirement for a new subsystem; report the smallest working slice and concrete remaining requirement.
 
 ## Validation Evidence
 ```json
@@ -83,4 +89,7 @@ Use canonical per-file Python test runner with hidden Windows subprocesses and t
 ```
 
 ## Status
-Backend implemented; focused native lifecycle, HTTP and notifier checks passed locally. Reused RTU binding delta from fa0f1e6ff0e5f475e015dba836103f2b46a60a93 without merging its ancestry. Lux delta coordinated with its existing owner thread. Production activation and individual card recovery remain pending.
+- Contract preflight: validated
+- Implementation: complete locally; exact publication and activation pending
+- Validation: focused local delivery checks passed; target check pending
+- Completion: in progress

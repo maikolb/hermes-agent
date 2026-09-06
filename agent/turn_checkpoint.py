@@ -351,6 +351,13 @@ class TurnCheckpointStore:
             with FileLock(str(lock_path), timeout=10.0), _lock_for(path):
                 if path.exists():
                     current = self._read_path(path, session_id)
+                    # Flush the prior input ACK before this checkpoint can be
+                    # replaced by another turn. A crash after its atomic write
+                    # cannot make an accepted Kanban handoff look undelivered.
+                    prior_receipt = (current.get("routing") or {}).get("kanban_wake_delivery")
+                    if prior_receipt:
+                        from gateway.wake import record_notify_progress
+                        record_notify_progress(prior_receipt, wake_accepted=True)
                     current_turn = str(current.get("turn_id") or "")
                     candidate_turn = str(candidate.get("turn_id") or "")
                     current_revision = int(current.get("revision", 0))
@@ -1638,6 +1645,9 @@ def initialize_agent_turn_checkpoint(
 ) -> dict[str, Any] | None:
     store = checkpoint_store_for_agent(agent)
     if store is None:
+        from gateway.wake import current_notify_receipt
+        if current_notify_receipt.get():
+            raise CheckpointWriteError("Kanban wake remains pending: session checkpoint unavailable")
         agent._turn_checkpoint_state = None
         return None
     # AIAgent stores gateway identity in private instance fields
@@ -1661,6 +1671,14 @@ def initialize_agent_turn_checkpoint(
             or ""
         ),
     }
+    from gateway.wake import current_notify_receipt, record_notify_progress
+    receipt = current_notify_receipt.get()
+    if receipt:
+        # Persist the destination first; recovery trusts it only after finding
+        # the same receipt in the atomically written checkpoint below.
+        record_notify_progress(receipt, checkpoint_root=str(store.root.resolve()),
+                               session_id=str(agent.session_id))
+        routing["kanban_wake_delivery"] = dict(receipt)
     resume_existing = bool(getattr(agent, "_resume_turn_from_checkpoint", False))
     try:
         state = store.start_turn(
@@ -1675,6 +1693,8 @@ def initialize_agent_turn_checkpoint(
         # One-shot: a reused gateway agent must not bind the next genuine user
         # turn to an older unfinished checkpoint.
         agent._resume_turn_from_checkpoint = False
+    if receipt:
+        record_notify_progress(receipt, wake_accepted=True)
     agent._turn_checkpoint_state = state
     agent._turn_checkpoint_restored = bool(state.get("recovery", {}).get("restored"))
     if agent._turn_checkpoint_restored:

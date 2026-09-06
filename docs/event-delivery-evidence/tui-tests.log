@@ -1,0 +1,13 @@
+Discovered 1 test files (~14 tests) under ['tests\\tui_gateway\\test_kanban_notify_poller.py']; running with -j 1
+[100.0% |    14/~14 | ✓14 | ✗ 0] ✓ tests\tui_gateway\test_kanban_notify_poller.py (14✓, 18.0s)
+
+=== Summary: 1 files, 14 tests passed, 0 failed (100% complete) in 18.0s (1 workers) ===
+  Durations cached to test_durations.json (1 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   1
+  Total subprocess CPU-wall: 18.0s  (runner wall: 18.0s, parallelism: 1x)
+  P50: 18.02s  P90: 18.02s  P95: 18.02s  P99: 18.02s  Max: 18.02s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     18.02s  tests\tui_gateway\test_kanban_notify_poller.py
