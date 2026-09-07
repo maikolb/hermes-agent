@@ -1,0 +1,15 @@
+{
+  "base": "7d5fa695c0a75cafd8c8c8ef4a03e328a57c1c03",
+  "legacy_fixture_failures": 26,
+  "comparison": {
+    "_resolve_executable_assignee": {
+      "unchanged_from_base": true,
+      "ast_sha256": "e846895a35a4c55db7213e773d24c6cffa27986d14602a81a5318c6d76c68c30"
+    },
+    "create_task": {
+      "unchanged_from_base": true,
+      "ast_sha256": "04157ecaeab1b9b03942721bfb9f600f99f6d9b0c4013a28d5fb2316ef6f19ed"
+    }
+  },
+  "finding": "The 26 failures occur in unchanged task creation/assignee validation before event delivery. The fixture uses missing worker1/builder/alice or no executor. No delivery assertions ran in those cases."
+}

@@ -6218,6 +6218,16 @@ class BasePlatformAdapter(ABC):
             )
             return
 
+        receipt = (event.metadata or {}).get("kanban_wake_delivery") if event.internal else None
+        if receipt:
+            from gateway.wake import notify_wake_accepted
+            if await asyncio.to_thread(notify_wake_accepted, receipt):
+                return
+            # A wake never interrupts or merges into a real user's turn.
+            self._heal_stale_session_lock(session_key)
+            if session_key in self._active_sessions:
+                return
+
         # On-entry self-heal: if the adapter still has an _active_sessions
         # entry for this key but the owner task has already exited (done or
         # cancelled), the lock is stale.  Clear it and fall through to
@@ -6472,7 +6482,13 @@ class BasePlatformAdapter(ABC):
             await self._run_processing_hook("on_processing_start", event)
 
             # Call the handler (this can take a while with tool calls)
-            response = await self._message_handler(event)
+            from gateway.wake import current_notify_receipt
+            receipt = (event.metadata or {}).get("kanban_wake_delivery") if event.internal else None
+            receipt_token = current_notify_receipt.set(receipt)
+            try:
+                response = await self._message_handler(event)
+            finally:
+                current_notify_receipt.reset(receipt_token)
             is_ephemeral_response = isinstance(response, EphemeralReply)
 
             # Slash-command handlers may return an EphemeralReply sentinel to

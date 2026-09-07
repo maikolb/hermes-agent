@@ -671,6 +671,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "children": children,
         "parent_count": len(parents),
         "child_count": len(children),
+        **kb.task_presentation(conn, task),
     }
 
 
@@ -713,6 +714,7 @@ def _handle_show(args: dict, **kw) -> str:
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
                     "provider_override": t.provider_override,
+                    **kb.task_presentation(conn, t),
                 }
 
             def _run_dict(r):
@@ -1102,6 +1104,7 @@ def _handle_block(args: dict, **kw) -> str:
             task
             and task.goal_mode
             and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS
+            and not conn.execute('SELECT 1 FROM nfos_workflows WHERE task_id=?',(tid,)).fetchone()
         ):
             conn.close()
             return tool_error(
@@ -1370,7 +1373,17 @@ def _handle_comment(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            cid = kb.add_comment(conn, tid, author=author, body=str(body))
+            if args.get("updates_instruction") is True:
+                if _is_dispatcher_owned_worker() or _is_delegated_child_context():
+                    return tool_error("Only the coordinating conversation can replace the operator instruction.")
+                revision = args.get("instruction_revision")
+                if not isinstance(revision, int) or isinstance(revision, bool):
+                    return tool_error("Read kanban_show and supply its instruction_revision.")
+                cid = kb.update_task_instruction(
+                    conn, tid, body=str(body), author=author, expected_revision=revision,
+                )
+            else:
+                cid = kb.add_comment(conn, tid, author=author, body=str(body))
             return _ok(task_id=tid, comment_id=cid)
         finally:
             conn.close()
@@ -1837,40 +1850,42 @@ def _handle_create(args: dict, **kw) -> str:
                     if _self_task is not None and _self_task.project_id:
                         project_id = _self_task.project_id
                         project_source_task_id = _self_task.id
-            new_tid = kb.create_task(
-                conn,
-                title=str(title).strip(),
-                body=body,
-                assignee=str(assignee),
-                parents=tuple(parents),
-                tenant=tenant,
-                priority=int(priority) if priority is not None else 0,
-                workspace_kind=str(workspace_kind),
-                workspace_path=workspace_path,
-                project_id=project_id,
-                project_source_task_id=project_source_task_id,
-                requires_repo=requires_repo if "requires_repo" in args else None,
-                triage=triage,
-                backlog=backlog,
-                idempotency_key=idempotency_key,
-                max_runtime_seconds=(
-                    int(max_runtime_seconds)
-                    if max_runtime_seconds is not None else None
-                ),
-                skills=skills,
-                model_override=model_override,
-                provider_override=provider_override,
-                goal_mode=goal_mode,
-                goal_max_turns=(
-                    int(goal_max_turns) if goal_max_turns is not None else None
-                ),
-                initial_status=str(initial_status),
-                created_by=os.environ.get("HERMES_PROFILE") or "worker",
-                session_id=session_id,
-                board=board,
-            )
-            new_task = kb.get_task(conn, new_tid)
-            subscribed = _maybe_auto_subscribe(conn, new_tid)
+            with kb.write_txn(conn):
+                new_tid = kb.create_task(
+                    conn,
+                    title=str(title).strip(),
+                    body=body,
+                    assignee=str(assignee),
+                    parents=tuple(parents),
+                    tenant=tenant,
+                    priority=int(priority) if priority is not None else 0,
+                    workspace_kind=str(workspace_kind),
+                    workspace_path=workspace_path,
+                    project_id=project_id,
+                    project_source_task_id=project_source_task_id,
+                    requires_repo=requires_repo if "requires_repo" in args else None,
+                    delivery_type=args.get("delivery_type"),
+                    triage=triage,
+                    backlog=backlog,
+                    idempotency_key=idempotency_key,
+                    max_runtime_seconds=(
+                        int(max_runtime_seconds)
+                        if max_runtime_seconds is not None else None
+                    ),
+                    skills=skills,
+                    model_override=model_override,
+                    provider_override=provider_override,
+                    goal_mode=goal_mode,
+                    goal_max_turns=(
+                        int(goal_max_turns) if goal_max_turns is not None else None
+                    ),
+                    initial_status=str(initial_status),
+                    created_by=os.environ.get("HERMES_PROFILE") or "worker",
+                    session_id=session_id,
+                    board=board,
+                )
+                new_task = kb.get_task(conn, new_tid)
+                subscribed = _maybe_auto_subscribe(conn, new_tid, strict=True)
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
@@ -1888,7 +1903,7 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(f"kanban_create: {e}")
 
 
-def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
+def _maybe_auto_subscribe(conn: Any, task_id: str, *, strict: bool = False) -> bool:
     """Auto-subscribe the calling session to task completion / block events.
 
     Returns True if a subscription row was written, False otherwise (no
@@ -1921,10 +1936,9 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     - **CLI / cron / test / unattached**: no persistent delivery channel,
       no-op.
 
-    Failure mode: any exception inside the function is logged at WARNING
-    with the offending exception + diagnostic env vars and swallowed.
-    We never want a notification bookkeeping failure to fail the
-    kanban_create that the agent is mid-conversation about.
+    Creation uses strict mode inside the card transaction: a subscription
+    write failure rolls back the card too, so accepted work cannot be left
+    without its continuation channel. Other callers retain best-effort mode.
     """
     try:
         cfg = load_config()
@@ -2013,6 +2027,8 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             "_maybe_auto_subscribe failed: %r (platform=%r key_set=%r)",
             _exc, platform, bool(chat_id),
         )
+        if strict:
+            raise
         return False
 
 
@@ -2441,7 +2457,9 @@ KANBAN_COMMENT_SCHEMA = {
         "Append a comment to a task's thread. Use for durable notes "
         "that should outlive this run (questions for the next worker, "
         "partial findings, rationale). Ephemeral reasoning doesn't "
-        "belong here — use your normal response instead."
+        "belong here. When the user changes the request, the coordinating conversation "
+        "sets updates_instruction=true, supplies the current instruction_revision from "
+        "kanban_show, and writes the complete current request in body. Reuse this card."
     ),
     "parameters": {
         "type": "object",
@@ -2457,6 +2475,8 @@ KANBAN_COMMENT_SCHEMA = {
                 "type": "string",
                 "description": "Markdown-supported comment body.",
             },
+            "updates_instruction": {"type": "boolean", "description": "Replace the current request after an explicit user correction; coordinator only."},
+            "instruction_revision": {"type": "integer", "description": "Current revision from kanban_show, required when replacing the instruction."},
             "board": _board_schema_prop(),
         },
         "required": ["task_id", "body"],
@@ -2660,6 +2680,10 @@ KANBAN_CREATE_SCHEMA = {
                     "artifacts. Cannot be combined with workspace_kind=worktree. "
                     "Omission preserves existing project/repository inheritance."
                 ),
+            },
+            "delivery_type": {
+                "type": "string", "enum": ["code", "report", "operation"],
+                "description": "Requested output. Reports and operations use scratch or dir and finish with evidence; code follows project Git delivery rules.",
             },
             "backlog": {
                 "type": "boolean",

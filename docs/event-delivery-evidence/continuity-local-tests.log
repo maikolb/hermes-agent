@@ -1,0 +1,19 @@
+Discovered 4 test files (~49 tests) under ['tests\\hermes_cli\\test_kanban_worker_continuity.py', 'tests\\gateway\\test_kanban_continuity.py', 'tests\\gateway\\test_kanban_notifier_durable.py', 'tests\\agent\\test_turn_checkpoint.py']; running with -j 1
+[ 73.5% |    36/~49 | ✓38 | ✗ 0] ✓ tests\agent\test_turn_checkpoint.py (38✓, 13.6s)
+[ 77.6% |    38/~49 | ✓40 | ✗ 0] ✓ tests\gateway\test_kanban_continuity.py (2✓, 9.5s)
+[ 93.9% |    46/~49 | ✓48 | ✗ 0] ✓ tests\gateway\test_kanban_notifier_durable.py (8✓, 17.0s)
+[100.0% |    49/~49 | ✓51 | ✗ 0] ✓ tests\hermes_cli\test_kanban_worker_continuity.py (3✓, 15.6s)
+
+=== Summary: 4 files, 51 tests passed, 0 failed (100% complete) in 55.6s (1 workers) ===
+  Durations cached to test_durations.json (4 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   4
+  Total subprocess CPU-wall: 55.6s  (runner wall: 55.6s, parallelism: 1x)
+  P50: 15.56s  P90: 17.05s  P95: 17.05s  P99: 17.05s  Max: 17.05s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     17.05s  tests\gateway\test_kanban_notifier_durable.py
+     15.56s  tests\hermes_cli\test_kanban_worker_continuity.py
+     13.56s  tests\agent\test_turn_checkpoint.py
+      9.47s  tests\gateway\test_kanban_continuity.py

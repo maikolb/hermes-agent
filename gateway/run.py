@@ -11618,10 +11618,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Commands, media, conversational follow-ups, and corrections keep the
         # established steer/queue/interrupt path below.
         if (
-            event.message_type == MessageType.TEXT
-            and not getattr(event, "media_urls", None)
-            and not getattr(event, "media_types", None)
-            and await self._kanban_parallel_dispatch_busy_message(
+            await self._kanban_parallel_dispatch_busy_message(
                 event,
                 session_key,
             )
@@ -14088,6 +14085,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             marker = entry.last_resume_marked_at or entry.updated_at
             if (
                 entry.resume_reason != "provider_rate_limit"
+                and window > 0
                 and marker is not None
                 and (now - marker).total_seconds() > window
             ):
@@ -14298,7 +14296,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         fallback = 0
         try:
             agent_timeout = max(1.0, _float_env("HERMES_AGENT_TIMEOUT", 1800))
-            marker_max_age = max(60 * 60, int(agent_timeout * 2))
+            freshness = _auto_continue_freshness_window()
+            marker_max_age = 0 if freshness <= 0 else max(int(freshness), int(agent_timeout * 2))
             exact = await self.async_session_store.recover_interrupted_turns(
                 max_age_seconds=marker_max_age
             )
@@ -19150,6 +19149,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event, _cmd_def_inner, _quick_key, source,
                 )
 
+            # Persist NFOS input before legacy in-memory busy transports.
+            # The same durable path handles direct tasks and coordination.
+            if await self._nfos_receive(event) is not None:
+                return None
+
             if (
                 event.message_type == MessageType.PHOTO
                 and self._busy_input_mode != "steer"
@@ -20932,6 +20936,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         if project_route_denial is not None:
             return project_route_denial
+        nfos_receipt = await self._nfos_receive(event, project_context)
+        if nfos_receipt is not None:
+            # Receipt egress and its retry obligation belong to the same
+            # persisted path; returning text here would send it a second time.
+            return None
         event_metadata = getattr(event, "metadata", None) or {}
         if not isinstance(event_metadata, dict):
             event_metadata = {}
@@ -21178,6 +21187,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         if project_context is not None:
             context_prompt += _project_context_prompt_block(project_context)
+            from hermes_cli.nfos_runtime import project_config, principal_instructions
+            if project_config(project_context.board_slug, self._kanban_parallel_dispatch_config(source)):
+                context_prompt += "\n\n" + principal_instructions()
 
         # Per-turn must-deliver notes.  These used to be appended to
         # context_prompt (the ephemeral system prompt), which guaranteed a
@@ -21185,6 +21197,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # ride the current user message via the api_content sidecar instead
         # (staged below, consumed in run_sync → build_turn_context).
         turn_sidecar_notes: List[str] = []
+        intake_note = self._nfos_coordinator_intake_note(event)
+        if intake_note:
+            turn_sidecar_notes.append(intake_note)
 
         # If the previous session expired and was auto-reset, deliver a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).

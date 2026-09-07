@@ -18,8 +18,10 @@ import re
 import shlex
 import sqlite3
 import time
+import uuid
 import unicodedata
 from contextvars import Context
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -286,8 +288,8 @@ def _read_worker_trace_summary(board: str, task_id: str, kind: str) -> str:
     """Fetch the worker's own closeout text for a completion/blocked trace.
 
     Completed cards carry the worker's final summary in ``result``; blocked
-    cards carry it in the last card comment (close_delegation_cards stores
-    the summary as a comment on the block path). Best-effort: any failure
+    cards use the latest actual block event, then a substantive comment.
+    Administrative recovery notes are never worker output. Any failure
     returns an empty string and the trace stays short.
     """
     if not (board and task_id):
@@ -296,6 +298,18 @@ def _read_worker_trace_summary(board: str, task_id: str, kind: str) -> str:
         from hermes_cli import kanban_db as _kb
 
         with _kb.connect_closing(board=board) as conn:
+            if kind == "blocked":
+                rows = conn.execute(
+                    "SELECT payload FROM task_events WHERE task_id=? "
+                    "AND kind='blocked' ORDER BY id DESC LIMIT 20", (task_id,)
+                )
+                for row in rows:
+                    payload = json.loads(row["payload"] or "{}")
+                    if payload.get("reassessment_requested"):
+                        continue
+                    reason = str(payload.get("summary") or payload.get("reason") or "").strip()
+                    if reason:
+                        return reason
             if kind == "completed":
                 task = _kb.get_task(conn, task_id)
                 summary = str(getattr(task, "result", "") or "").strip()
@@ -307,7 +321,7 @@ def _read_worker_trace_summary(board: str, task_id: str, kind: str) -> str:
                 # trace go out as a bare title + link again.
             comments = _kb.list_comments(conn, task_id)
             for comment in reversed(comments):
-                if str(getattr(comment, "author", "") or "") == "watchdog":
+                if str(getattr(comment, "author", "") or "") in {"watchdog", "operator-continuity"}:
                     continue
                 body = str(getattr(comment, "body", "") or "").strip()
                 if body:
@@ -856,6 +870,273 @@ def _wake_scope_id(adapter: Any, sub: dict) -> Optional[str]:
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
+    @staticmethod
+    def _nfos_receipt_text(request_id, payload=None):
+        origin=(payload or {}).get('origin') or {}
+        if origin:
+            return (f"Atividade adicional registrada: {request_id}, identificada na tarefa "
+                    f"{origin.get('task_id') or origin.get('request_id') or 'de origem'}. "
+                    'O worker seguirá o pedido e os anexos preservados no mesmo projeto.')
+        return (f'Pedido registrado: {request_id}. O worker criará o card e iniciará a análise. '
+                'Se as vagas estiverem ocupadas, o pedido permanece na fila. Continuo disponível para coordenar as tarefas.')
+
+    def _nfos_receipt_profiles(self):
+        profiles={str(self._active_profile_name() or 'default')}
+        profiles.update(str(name) for name in (getattr(self,'_profile_adapters',{}) or {}))
+        return profiles
+
+    @staticmethod
+    def _nfos_receipt_owner(payload):
+        source=payload.get('source') or {}
+        return str(source.get('transport_profile') or source.get('profile') or 'default')
+
+    def _nfos_receipt_candidates(self, profiles, board=None, request_id=None, limit=20, *, coordination=False):
+        """Read pending obligations even when their worker has no card yet."""
+        from hermes_cli import kanban_db as kb
+        boards=[{'slug':board}] if board else kb.list_boards(include_archived=False)
+        seen=set();pending=[]
+        for meta in boards:
+            slug=meta.get('slug') or kb.DEFAULT_BOARD
+            path=Path(meta.get('db_path') or kb.kanban_db_path(board=slug)).resolve()
+            if path in seen or not path.is_file():continue
+            seen.add(path)
+            try:
+                with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=2)) as conn:
+                    conn.row_factory=sqlite3.Row
+                    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_requests'").fetchone():continue
+                    condition="status='coordinating'" if coordination else "status<>'coordinating' AND acknowledged_at IS NULL"
+                    sql='SELECT id,payload,source_key FROM nfos_requests WHERE '+condition
+                    rows=conn.execute(sql+(' AND id=?' if request_id else '')+' ORDER BY created_at,id',
+                                      (request_id,) if request_id else ()).fetchall()
+                for row in rows:
+                    payload=json.loads(row['payload']);source=payload.get('source') or {}
+                    if source.get('platform')!='telegram' or self._nfos_receipt_owner(payload) not in profiles:continue
+                    if not all(source.get(key) for key in ('chat_id','thread_id','message_id')):continue
+                    receipt=payload.get('coordination' if coordination else 'receipt') or {};now=time.time()
+                    if coordination and receipt.get('wake_accepted'):continue
+                    if max(receipt.get('claim_until',0),receipt.get('next_attempt_at',0))>now:continue
+                    if coordination:payload['_request_part']=json.loads(row['source_key'])[-1]
+                    pending.append((path,row['id'],payload))
+                    if len(pending)>=limit:return pending
+            except (sqlite3.Error,OSError,ValueError,TypeError):
+                logger.warning('NFOS receipt scan failed for board %s',slug,exc_info=True)
+        return pending
+
+    def _nfos_claim_receipt(self,path,request_id,profiles):
+        from hermes_cli import kanban_db as kb
+        with kb.connect_closing(path) as conn, kb.write_txn(conn):
+            row=conn.execute('SELECT payload,acknowledged_at FROM nfos_requests WHERE id=?',(request_id,)).fetchone()
+            if row is None or row['acknowledged_at'] is not None:return None
+            payload=json.loads(row['payload']);source=payload.get('source') or {};now=time.time()
+            if source.get('platform')!='telegram' or self._nfos_receipt_owner(payload) not in profiles:return None
+            receipt=payload.setdefault('receipt',{})
+            if max(receipt.get('claim_until',0),receipt.get('next_attempt_at',0))>now:return None
+            receipt.setdefault('content',self._nfos_receipt_text(request_id,payload))
+            receipt.update(claim_token=uuid.uuid4().hex,claim_until=now+60,attempts=int(receipt.get('attempts',0))+1)
+            conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(json.dumps(payload,ensure_ascii=False),request_id))
+            return payload
+
+    @staticmethod
+    def _nfos_finish_receipt(path,request_id,token,*,success,message_id=None,error=None,retry_after=0):
+        from hermes_cli import kanban_db as kb
+        with kb.connect_closing(path) as conn, kb.write_txn(conn):
+            row=conn.execute('SELECT payload,acknowledged_at FROM nfos_requests WHERE id=?',(request_id,)).fetchone()
+            if row is None or row['acknowledged_at'] is not None:return
+            payload=json.loads(row['payload']);receipt=payload.get('receipt') or {}
+            if receipt.get('claim_token')!=token:return
+            receipt.pop('claim_token',None);receipt.pop('claim_until',None)
+            if success:
+                receipt.update(message_id=str(message_id) if message_id is not None else None,last_error=None)
+                receipt.pop('next_attempt_at',None)
+            else:
+                from agent.redact import redact_sensitive_text
+                delay=max(min(300,5*2**min(int(receipt.get('attempts',1))-1,6)),float(retry_after or 0))
+                diagnostic=redact_sensitive_text(str(error or 'Transport did not confirm receipt'),force=True,redact_url_credentials=True)
+                receipt.update(last_error=diagnostic[:500],next_attempt_at=time.time()+delay)
+            payload['receipt']=receipt
+            conn.execute('UPDATE nfos_requests SET payload=?,acknowledged_at=? WHERE id=?',
+                         (json.dumps(payload,ensure_ascii=False),int(time.time()) if success else None,request_id))
+
+    async def _nfos_retry_receipts(self, *, board=None, request_id=None):
+        """One bounded send per claim; failed/unknown results remain durable.
+
+        Telegram cannot promise exactly-once delivery after a lost response.
+        Retries retain the request ID and text; task intake remains idempotent.
+        """
+        from gateway.platforms.base import Platform,SessionSource
+        profiles={profile for profile in self._nfos_receipt_profiles()
+                  if self._adapter_for_source(SessionSource(platform=Platform.TELEGRAM,chat_id='',profile=profile)) is not None}
+        if not profiles:return
+        try:
+            candidates=await _to_thread_process_service(self._nfos_receipt_candidates,profiles,board,request_id)
+        except Exception:
+            logger.warning('NFOS receipt collection failed; obligations remain pending',exc_info=True)
+            return
+        for path,rid,payload in candidates:
+            source=payload['source'];owner=self._nfos_receipt_owner(payload)
+            restored=SessionSource(platform=Platform.TELEGRAM,chat_id=source['chat_id'],thread_id=source['thread_id'],
+                                   chat_type=source.get('chat_type') or 'group',user_id=source.get('user_id'),profile=owner)
+            adapter=self._adapter_for_source(restored)
+            if adapter is None:continue
+            try:
+                claimed=await _to_thread_process_service(self._nfos_claim_receipt,path,rid,profiles)
+                if claimed is None:continue
+                receipt=claimed['receipt'];origin=claimed['source']
+                try:
+                    result=await asyncio.wait_for(adapter._send_with_retry(
+                        chat_id=origin['chat_id'],content=receipt['content'],reply_to=origin['message_id'],
+                        metadata=self._thread_metadata_for_source(restored,origin['message_id']),
+                        max_retries=0,allow_content_fallback=False),timeout=15)
+                    success=getattr(result,'success',False) is True
+                    finish=lambda:self._nfos_finish_receipt(path,rid,receipt['claim_token'],success=success,
+                        message_id=getattr(result,'message_id',None),error=getattr(result,'error',None),
+                        retry_after=getattr(result,'retry_after',0))
+                except Exception as exc:
+                    finish=lambda error=str(exc):self._nfos_finish_receipt(path,rid,receipt['claim_token'],success=False,error=error)
+                await _to_thread_process_service(finish)
+            except Exception:
+                logger.warning('NFOS receipt %s remains pending after delivery failure',rid,exc_info=True)
+
+    async def _nfos_receive(self, event, project_context=None):
+        """Opted-in project intake; the worker, not this handler, creates the card."""
+        source=getattr(event,'source',None)
+        if source is None or getattr(event,'internal',False):
+            return None
+        metadata=dict(getattr(event,'metadata',None) or {})
+        metadata.pop('nfos_coordinator_intake',None)
+        event.metadata=metadata
+        platform=str(getattr(getattr(source,'platform',None),'value','')).lower()
+        if platform!='telegram' or not getattr(source,'thread_id',None):
+            return None
+        text=str(getattr(event,'text','') or '').strip()
+        media=list(getattr(event,'media_urls',[]) or [])
+        if text.startswith('/') or not (text or media):
+            return None
+        config=self._kanban_parallel_dispatch_config(source)
+        configured=(((config or {}).get('kanban') or {}).get('delivery') or {}).get('projects') or {}
+        if not any(isinstance(item,dict) and item.get('enabled') is True for item in configured.values()):
+            return None
+        if project_context is None:
+            project_context,denial=await asyncio.to_thread(self._resolve_project_context_for_message,event,source)
+            if denial is not None:
+                return None
+        if project_context is None or getattr(project_context,'is_management',False):
+            return None
+        from hermes_cli.nfos_runtime import project_config,preserve_attachments
+        from hermes_cli import kanban_db as kb
+        from hermes_cli import nfos_delivery as delivery
+        board=str(project_context.board_slug)
+        project=project_config(board,config)
+        if not project:
+            return None
+        project.setdefault('profile',str(getattr(source,'profile','') or self._active_profile_name() or 'default'))
+        project.setdefault('project_id',getattr(project_context,'project_id',None))
+        identity={'platform':platform,'chat_id':str(source.chat_id),'thread_id':str(source.thread_id),
+            'message_id':str(event.message_id or ''),'user_id':str(source.user_id or ''),
+            'chat_type':str(source.chat_type or 'group'),'profile':str(getattr(source,'profile','') or self._active_profile_name() or 'default')}
+        owner_resolver=getattr(self,'_adapter_profile_for_source',None)
+        owner=owner_resolver(source) if callable(owner_resolver) else identity['profile']
+        identity['transport_profile']=str(owner or self._active_profile_name() or 'default')
+        def prepare():
+            path=kb.kanban_db_path(board=board)
+            attachments=preserve_attachments(media,list(getattr(event,'media_types',[]) or []),
+                directory=path.parent/'request-media') if media else []
+            return {'db_path':str(path.resolve()),'request':{
+                'source':identity,'text':text,'project':project,'attachments':attachments,'part':'0'}}
+        context=await asyncio.to_thread(prepare)
+        if getattr(event,'reply_to_message_id',None) or (not media and _classify_parallel_intake_message(text)!='new_task'):
+            # Accept the original durably, not through the old RAM-only steer
+            # queue. This is a Principal inbox entry, not executable work.
+            def defer():
+                with kb.connect_closing(board=board) as conn:
+                    return delivery.receive_request(conn,**context['request'],defer_to_principal=True,
+                        reply_to_message_id=getattr(event,'reply_to_message_id',None))
+            request_id=await asyncio.to_thread(defer)
+            await self._nfos_retry_coordinator_inputs(board=board,request_id=request_id)
+            return ''
+        def persist():
+            payload=context['request']
+            with kb.connect_closing(board=board) as conn:
+                return delivery.receive_request(conn,**payload)
+        request_id=await asyncio.to_thread(persist)
+        await self._nfos_retry_receipts(board=board,request_id=request_id)
+        return self._nfos_receipt_text(request_id)
+
+    async def _nfos_retry_coordinator_inputs(self, *, board=None, request_id=None):
+        """Feed persisted input into the existing checkpoint-aware wake path."""
+        from gateway.platforms.base import Platform,SessionSource
+        profiles={profile for profile in self._nfos_receipt_profiles()
+                  if self._adapter_for_source(SessionSource(platform=Platform.TELEGRAM,chat_id='',profile=profile)) is not None}
+        if not profiles:return
+        try:
+            candidates=await _to_thread_process_service(
+                lambda:self._nfos_receipt_candidates(profiles,board,request_id,coordination=True))
+        except Exception:
+            logger.warning('NFOS Principal input collection failed; original messages remain pending',exc_info=True)
+            return
+        active=getattr(self,'_nfos_coordinator_deliveries',None)
+        if active is None:
+            active={};self._nfos_coordinator_deliveries=active
+        background=getattr(self,'_background_tasks',None)
+        if background is None:
+            background=set();self._background_tasks=background
+        for path,rid,payload in candidates:
+            key=(str(path),rid)
+            if key in active and not active[key].done():continue
+            task=asyncio.create_task(self._nfos_deliver_coordinator_input(path,rid,payload),name='nfos-coordinator-input')
+            active[key]=task; background.add(task)
+            def finished(completed, key=key):
+                background.discard(completed)
+                if active.get(key) is completed:active.pop(key,None)
+                if not completed.cancelled() and completed.exception():
+                    logger.warning('NFOS coordinator input remains pending after delivery failure')
+            task.add_done_callback(finished)
+
+    async def _nfos_deliver_coordinator_input(self, path, request_id, payload):
+        from hermes_cli import kanban_db as kb,nfos_delivery as delivery
+        from hermes_cli.nfos_runtime import coordinator_intake_instructions
+        from gateway.platforms.base import Platform,SessionSource
+        from gateway.wake import deliver_wake
+        def claim():
+            with kb.connect_closing(path) as conn:
+                return delivery.claim_coordinator_input(conn,request_id)
+        receipt=await _to_thread_process_service(claim)
+        if receipt is None:return
+        original=payload['source'];owner=self._nfos_receipt_owner(payload)
+        source=SessionSource(platform=Platform.TELEGRAM,chat_id=original['chat_id'],
+            thread_id=original['thread_id'],chat_type=original.get('chat_type') or 'group',
+            user_id=original.get('user_id'),profile=owner)
+        context={'db_path':str(path),'request_id':request_id,
+            'reply_to_message_id':(payload.get('coordination') or {}).get('reply_to_message_id'),
+            'request':{key:payload[key] for key in ('source','text','project','attachments')}}
+        context['request']['part']=payload.get('_request_part','0')
+        error=None
+        try:
+            # The wake's user content is checkpointed before its ACK. A later
+            # sidecar alone would lose the exact intake after a crash here.
+            wake_text=('[NFOS: mensagem original preservada para coordenação; não é uma nova mensagem Telegram.]\n'
+                +payload['text']+'\n\n'+coordinator_intake_instructions(context,
+                    reply_to=context['reply_to_message_id']))
+            accepted=await deliver_wake(self._adapter_for_source(source),source=source,
+                text=wake_text,
+                receipt=receipt,metadata={'nfos_coordinator_intake':context})
+            if accepted:return
+        except Exception as exc:
+            error=str(exc)
+        def retry():
+            with kb.connect_closing(path) as conn:
+                delivery.retry_coordinator_input(conn,receipt,error=error)
+        await _to_thread_process_service(retry)
+
+    @staticmethod
+    def _nfos_coordinator_intake_note(event):
+        context=(getattr(event,'metadata',None) or {}).get('nfos_coordinator_intake')
+        if not isinstance(context,dict):
+            return ''
+        from hermes_cli.nfos_runtime import coordinator_intake_instructions
+        return coordinator_intake_instructions(context,
+            reply_to=getattr(event,'reply_to_message_id',None) or context.get('reply_to_message_id'))
+
     def _owns_kanban_dispatcher_lock(self) -> bool:
         """Return whether this gateway currently owns the singleton lock."""
         return getattr(self, "_kanban_dispatcher_lock_handle", None) is not None
@@ -963,8 +1244,19 @@ class GatewayKanbanWatchersMixin:
         session_key: str,
     ) -> bool:
         """Turn an independent busy-topic request into a subscribed Kanban card."""
+        receipt=await self._nfos_receive(event)
+        if receipt is not None:
+            # The persisted receipt owns egress for idle, busy and retry paths.
+            return True
+        if (getattr(event,'metadata',None) or {}).get('nfos_coordinator_intake'):
+            # An opted-in reply/ambiguous request belongs to the Principal;
+            # it must not create a card through the older parallel path.
+            return False
         source = getattr(event, "source", None)
         if source is None or getattr(event, "internal", False):
+            return False
+        # Media outside the opted-in NFOS path retains the existing handling.
+        if getattr(event, 'media_urls', None) or getattr(event, 'media_types', None):
             return False
         if not str(getattr(source, "thread_id", "") or "").strip():
             return False
@@ -1521,6 +1813,9 @@ class GatewayKanbanWatchersMixin:
             if row.get("bootstrap") and has_current_attempt:
                 bucket[task.id] = row
             for event in row.get("events") or []:
+                if isinstance(getattr(event, "payload", None), dict) and event.payload.get("reassessment_requested"):
+                    # Administrative continuation is not a worker exiting.
+                    continue
                 if event.kind == "claimed":
                     if has_current_attempt:
                         bucket[task.id] = row
@@ -2085,7 +2380,7 @@ class GatewayKanbanWatchersMixin:
         # intentionally excluded to avoid one notification per minute.
         NOTIFY_KINDS = (
             "claimed", "completed", "blocked", "gave_up", "status",
-            "block_loop_detected", "review_requested",
+            "block_loop_detected", "review_requested", "nfos_principal_requested",
         )
         # Focus accounting consumes worker-run boundaries too, but these
         # internal retry/recovery events must never become chat messages.
@@ -2110,16 +2405,8 @@ class GatewayKanbanWatchersMixin:
         # task is archived lets the cursor (advanced atomically by
         # claim_unseen_events_for_sub) handle dedup, and any retry-loop
         # event reaches the user.
-        # Per-subscription send-failure counter. Adapter.send raising
-        # means the chat is dead (deleted, bot kicked, etc.) — after N
-        # consecutive send failures the sub is dropped so we don't spin
-        # against a dead chat every 5 seconds forever.
-        # Raised from 3 to 12 (~60s at the 5s tick cadence): now that a
-        # reported SendResult(success=False) also lands here (see the
-        # delivery loop below), a transient Telegram/API outage of a few
-        # ticks must NOT permanently unsubscribe a live review-gate channel.
-        # A genuinely dead chat still drops, just ~60s later — a fine trade
-        # for an unattended gate where a false drop means silent work pileup.
+        # Count failures for diagnostics. An unavailable destination never
+        # discards an outstanding delivery; explicit unsubscribe owns removal.
         MAX_SEND_FAILURES = 12
         sub_fail_counts: dict[tuple, int] = getattr(
             self, "_kanban_sub_fail_counts", {}
@@ -2152,6 +2439,9 @@ class GatewayKanbanWatchersMixin:
 
         while self._running:
             try:
+                # Requests may owe a receipt before any card/subscription exists.
+                await self._nfos_retry_receipts()
+                await self._nfos_retry_coordinator_inputs()
                 _gc_due = time.monotonic() >= _gc_next_at
                 _gc_retention_days = 30
                 if _gc_due:
@@ -2424,6 +2714,7 @@ class GatewayKanbanWatchersMixin:
                                                 "bootstrap": True,
                                                 "events": [],
                                             })
+                                    claim_token = uuid.uuid4().hex
                                     old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
                                         conn,
                                         task_id=sub["task_id"],
@@ -2431,21 +2722,29 @@ class GatewayKanbanWatchersMixin:
                                         chat_id=sub["chat_id"],
                                         thread_id=sub.get("thread_id") or "",
                                         kinds=CLAIM_KINDS,
+                                        claim_token=claim_token,
                                     )
                                     if not events:
                                         continue
-                                    # A gateway boot must never replay historical
-                                    # lifecycle events into chat.  The atomic claim
-                                    # above already advances the cursor, so filtering
-                                    # the claimed range here safely converges stale
-                                    # subscriptions without sending or waking.
-                                    subscription_created_at = float(
-                                        sub.get("created_at") or 0.0
-                                    )
-                                    delivery_cutoff = max(
-                                        gateway_started_at,
-                                        subscription_created_at,
-                                    )
+                                    identity = {key: sub[key] for key in
+                                                ("task_id", "platform", "chat_id", "thread_id")}
+                                    claim = _kb.get_notify_claim(conn, **identity)
+                                    sub["_claim_token"] = claim_token
+                                    sub["_notify_receipt"] = {
+                                        "db_path": conn.execute("PRAGMA database_list").fetchone()[2],
+                                        "delivery_id": claim["delivery_id"],
+                                    }
+                                    sub["_notified"] = bool(claim["notified"])
+
+                                    def acknowledge_skipped():
+                                        _kb.advance_notify_cursor(
+                                            conn, **identity, new_cursor=cursor,
+                                            claim_token=claim_token,
+                                        )
+
+                                    # Unacknowledged events survive gateway restart.
+                                    # Only events preceding the subscription are historical.
+                                    delivery_cutoff = float(sub.get("created_at") or 0.0)
                                     current_events = [
                                         ev for ev in events
                                         if float(ev.created_at or 0.0) >= delivery_cutoff
@@ -2456,6 +2755,7 @@ class GatewayKanbanWatchersMixin:
                                             "event(s) for one subscription on board %s",
                                             len(events), slug,
                                         )
+                                        acknowledge_skipped()
                                         continue
                                     events = current_events
                                     if task is None:
@@ -2493,6 +2793,7 @@ class GatewayKanbanWatchersMixin:
                                     if not notify_events and archived_events:
                                         notify_events = archived_events[-1:]
                                     if not notify_events:
+                                        acknowledge_skipped()
                                         continue
                                     first_claim_row = conn.execute(
                                         "SELECT MIN(id) AS id FROM task_events "
@@ -2510,6 +2811,7 @@ class GatewayKanbanWatchersMixin:
                                     ]
                                     events = material_events[-1:]
                                     if not events:
+                                        acknowledge_skipped()
                                         continue
                                     logger.debug(
                                         "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
@@ -2601,6 +2903,15 @@ class GatewayKanbanWatchersMixin:
                     wake_handoff = ""
                     for ev in d["events"]:
                         kind = ev.kind
+                        expected_states = {
+                            "claimed": {"running"}, "completed": {"done", "archived"},
+                            "blocked": {"blocked"}, "block_loop_detected": {"blocked"},
+                            "review_requested": {"review"},
+                        }
+                        if task and (task.task_role == "activity" or (
+                            kind in expected_states and task.status not in expected_states[kind]
+                        )):
+                            continue
                         # Identity prefix: attribute terminal pings to the
                         # worker that did the work. Makes fleets (where one
                         # chat subscribes to many tasks) legible at a glance.
@@ -2608,8 +2919,8 @@ class GatewayKanbanWatchersMixin:
                         tag = f"@{who} " if who else ""
                         if kind == "claimed":
                             msg = (
-                                f"▶ {board_tag}{tag}Kanban {sub['task_id']} started"
-                                f" — {title}"
+                                f"▶ {board_tag}{tag}Kanban {sub['task_id']} reservado para execução"
+                                f": {title}"
                             )
                         elif kind == "completed":
                             # Prefer the run's summary (the worker's
@@ -2639,7 +2950,10 @@ class GatewayKanbanWatchersMixin:
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
                                 reason = f": {str(ev.payload['reason'])[:160]}"
-                            msg = f"⏸ {board_tag}{tag}Kanban {sub['task_id']} blocked{reason}"
+                            if ev.payload and ev.payload.get("reassessment_requested"):
+                                msg = f"↪ {board_tag}Kanban {sub['task_id']} em reavaliação: {title}"
+                            else:
+                                msg = f"⏸ {board_tag}{tag}Kanban {sub['task_id']} blocked{reason}"
                         elif kind == "gave_up":
                             err = ""
                             if ev.payload and ev.payload.get("error"):
@@ -2666,6 +2980,10 @@ class GatewayKanbanWatchersMixin:
                             if ev.payload and ev.payload.get("status"):
                                 new_status = str(ev.payload["status"])
                             msg = f"🔄 {board_tag}{tag}Kanban {sub['task_id']} → {new_status}"
+                        elif kind == "nfos_principal_requested":
+                            decision_payload = ev.payload or {}
+                            msg = (f"👀 {board_tag}Principal analisando {sub['task_id']}: "
+                                   f"{str(decision_payload.get('question') or '')[:500]}")
                         elif kind == "review_requested":
                             # Implementation complete; task moved to the
                             # first-class review lane. Wake the origin thread.
@@ -2677,13 +2995,7 @@ class GatewayKanbanWatchersMixin:
                                 f" — {title}{handoff}"
                             )
                         elif kind == "block_loop_detected":
-                            # A task re-blocked for the same cause past the
-                            # recurrence limit and was routed to `triage` for a
-                            # human decision. This is the ONE transition that
-                            # exists to force human attention, yet it emits no
-                            # `blocked`/`status` event — so before adding it to
-                            # TERMINAL_KINDS it produced zero notification and
-                            # the task stalled in triage silently. Ping loudly.
+                            # Keep the same task and report the concrete impediment.
                             reason = ""
                             recurrences = None
                             if ev.payload:
@@ -2692,8 +3004,8 @@ class GatewayKanbanWatchersMixin:
                                 recurrences = ev.payload.get("recurrences")
                             rc = f" (blocked {recurrences}x for the same cause)" if recurrences else ""
                             msg = (
-                                f"🛑 {board_tag}{tag}Kanban {sub['task_id']} routed to TRIAGE"
-                                f" — needs a human decision{rc}{reason}"
+                                f"⏸ {board_tag}{tag}Kanban {sub['task_id']} continua aguardando"
+                                f"{rc}{reason}"
                             )
                         else:
                             # archived / unblocked are claimed by TERMINAL_KINDS
@@ -2747,6 +3059,8 @@ class GatewayKanbanWatchersMixin:
                             # is resolved (reset or bumped) by the wake
                             # outcome there, not by skipping the send here.
                             continue
+                        if sub.get("_notified"):
+                            continue
                         try:
                             _send_res = await adapter.send(
                                 sub["chat_id"], msg, metadata=metadata,
@@ -2790,6 +3104,11 @@ class GatewayKanbanWatchersMixin:
                                         "kanban notifier: artifact delivery for %s failed: %s",
                                         sub["task_id"], art_exc,
                                     )
+                            from gateway.wake import record_notify_progress
+                            await asyncio.to_thread(
+                                record_notify_progress, sub["_notify_receipt"], notified=True,
+                            )
+                            sub["_notified"] = True
                             # Reset the failure counter on success.
                             sub_fail_counts.pop(sub_key, None)
                         except Exception as exc:
@@ -2801,45 +3120,22 @@ class GatewayKanbanWatchersMixin:
                                 sub["task_id"], platform_str, fails,
                                 MAX_SEND_FAILURES, exc,
                             )
-                            if fails >= MAX_SEND_FAILURES:
-                                logger.warning(
-                                    "kanban notifier: dropping subscription "
-                                    "%s on %s after %d consecutive send failures",
-                                    sub["task_id"], platform_str, fails,
-                                )
-                                await _to_thread_process_service(self._kanban_unsub, sub, board_slug)
-                                sub_fail_counts.pop(sub_key, None)
-                            else:
-                                await _to_thread_process_service(
-                                    self._kanban_rewind,
-                                    sub,
-                                    d["cursor"],
-                                    d.get("old_cursor", 0),
-                                    board_slug,
-                                )
-                            # Rewind the pre-send claim on transient failure so
-                            # a later tick can retry. After too many failures,
-                            # dropping the subscription is the terminal action.
+                            await _to_thread_process_service(
+                                self._kanban_rewind,
+                                sub,
+                                d["cursor"],
+                                d.get("old_cursor", 0),
+                                board_slug,
+                            )
+                            # Release this reservation; keep the durable pending delivery.
                             break
                     else:
-                        # All text pings delivered (or intentionally skipped
-                        # for non-push adapters, whose delivery is the wake
-                        # self-post below). Whether the cursor may advance now
-                        # depends on the adapter class:
-                        #
-                        # * push-capable: the text send WAS the delivery, so
-                        #   advance immediately (pre-existing behavior); the
-                        #   wake injection below stays best-effort.
-                        # * non-push (api_server): the wake self-post IS the
-                        #   delivery. Advancing first would let a failed /
-                        #   retry-exhausted self-post (swallowed by the
-                        #   best-effort except) permanently lose the event.
-                        #   So the self-post runs FIRST and the cursor only
-                        #   advances after it succeeds — a failure rewinds the
-                        #   claim exactly like a failed send() above, so the
-                        #   next tick retries.
+                        # Text delivery and agent acceptance are independent.
+                        # A subscription advances only when both applicable
+                        # obligations are confirmed. The API path retains its
+                        # existing response acknowledgement boundary.
                         task_terminal = task and task.status == "archived"
-                        _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked")
+                        _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "nfos_principal_requested")
                         _wake_kinds = (
                             {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
                             if wake_agent and agent_wake_on_events
@@ -2876,6 +3172,8 @@ class GatewayKanbanWatchersMixin:
                             if "crashed" in _wake_kinds: _parts.append(t("gateway.kanban.wake.crashed"))
                             if "timed_out" in _wake_kinds: _parts.append(t("gateway.kanban.wake.timed_out"))
                             if "blocked" in _wake_kinds: _parts.append(t("gateway.kanban.wake.blocked"))
+                            if "nfos_principal_requested" in _wake_kinds:
+                                _parts.append("worker aguardando sua decisão")
                             _status = t("gateway.kanban.wake.status_joiner").join(_parts) or t("gateway.kanban.wake.status_default")
                             _synth = t(
                                 "gateway.kanban.wake.message",
@@ -2898,6 +3196,13 @@ class GatewayKanbanWatchersMixin:
                             _synth += "\n\n" + t(
                                 "gateway.kanban.wake.guidance"
                             )
+                            if "nfos_principal_requested" in _wake_kinds:
+                                from hermes_cli.nfos_runtime import workflow_command
+                                _synth += (f"\nNFOS: consulte `{workflow_command()} pending` "
+                                    "no board desta mensagem. Leia a spec e as evidências e resolva cada decisão "
+                                    "por `decide`. O worker atual aguarda sua resposta; não crie outro worker "
+                                    "nem encerre o card para fazer a revisão. Se resolver, use continue ou approve; "
+                                    "se depender de humano, registre human com a pergunta concreta.")
 
                         if not _is_push_adapter and _wake_kinds and _session_key:
                             # Wake self-post IS the delivery on this path —
@@ -2924,35 +3229,20 @@ class GatewayKanbanWatchersMixin:
                                     sub["task_id"], fails,
                                     MAX_SEND_FAILURES, _wk_err, exc_info=True,
                                 )
-                                if fails >= MAX_SEND_FAILURES:
-                                    logger.warning(
-                                        "kanban notifier: dropping subscription "
-                                        "%s on %s after %d consecutive wake failures",
-                                        sub["task_id"], platform_str, fails,
-                                    )
-                                    await _to_thread_process_service(self._kanban_unsub, sub, board_slug)
-                                    sub_fail_counts.pop(sub_key, None)
-                                else:
-                                    # Rewind the pre-send claim so the next
-                                    # tick retries the self-post — the event
-                                    # is NOT lost.
-                                    await _to_thread_process_service(
-                                        self._kanban_rewind,
-                                        sub,
-                                        d["cursor"],
-                                        d.get("old_cursor", 0),
-                                        board_slug,
-                                    )
+                                # Rewind the pre-send claim so the next
+                                # tick retries the self-post — the event
+                                # is NOT lost.
+                                await _to_thread_process_service(
+                                    self._kanban_rewind,
+                                    sub,
+                                    d["cursor"],
+                                    d.get("old_cursor", 0),
+                                    board_slug,
+                                )
                                 continue
 
-                        async def _push_wake() -> None:
-                            """Wake the creator session behind a push adapter.
-
-                            Shared by the wake-only (pre-advance, delivery)
-                            and notify+wake (post-advance, best-effort)
-                            branches below; raises on failure so the caller
-                            decides whether to rewind or merely log.
-                            """
+                        async def _push_wake() -> bool:
+                            """Request a handoff; True means its checkpoint is durable."""
                             from gateway.session import SessionSource
                             from gateway.wake import deliver_wake
                             # Rebuild the creator's real session scope from
@@ -2992,28 +3282,31 @@ class GatewayKanbanWatchersMixin:
                             # push-capable adapters (the non-push /
                             # self-post branch is handled BEFORE the
                             # cursor advance above).
-                            await deliver_wake(
+                            accepted = await deliver_wake(
                                 adapter,
                                 text=_synth,
                                 session_id=_session_key,
                                 source=_source,
+                                receipt=sub["_notify_receipt"],
                             )
+                            if accepted is False:
+                                return False
                             logger.info(
                                 "kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
                                 sub["task_id"], platform_str, sub["chat_id"], sub_profile or "default", _wake_kinds,
                             )
 
-                        if _is_push_adapter and not send_passive and _wake_kinds:
-                            # Wake-only (delivery_mode='wake') push sub: the
-                            # text ping was intentionally skipped above, so
-                            # the wake IS the sole delivery. It must succeed
-                            # BEFORE the cursor advances — advancing first
-                            # would let a failed wake (previously swallowed
-                            # by the best-effort except below) permanently
-                            # lose the event. Mirrors the non-push
-                            # (api_server) self-post ordering above.
+                            return True
+
+                        if _is_push_adapter and _wake_kinds:
+                            # The same durable acceptance applies to wake and notify+wake.
                             try:
-                                await _push_wake()
+                                if not await _push_wake():
+                                    await _to_thread_process_service(
+                                        self._kanban_rewind, sub, d["cursor"],
+                                        d.get("old_cursor", 0), board_slug,
+                                    )
+                                    continue
                                 sub_fail_counts.pop(sub_key, None)
                             except Exception as _wk_err:
                                 fails = sub_fail_counts.get(sub_key, 0) + 1
@@ -3024,25 +3317,16 @@ class GatewayKanbanWatchersMixin:
                                     sub["task_id"], fails,
                                     MAX_SEND_FAILURES, _wk_err, exc_info=True,
                                 )
-                                if fails >= MAX_SEND_FAILURES:
-                                    logger.warning(
-                                        "kanban notifier: dropping subscription "
-                                        "%s on %s after %d consecutive wake failures",
-                                        sub["task_id"], platform_str, fails,
-                                    )
-                                    await _to_thread_process_service(self._kanban_unsub, sub, board_slug)
-                                    sub_fail_counts.pop(sub_key, None)
-                                else:
-                                    # Rewind the pre-send claim so the next
-                                    # tick retries the wake — the event is
-                                    # NOT lost.
-                                    await _to_thread_process_service(
-                                        self._kanban_rewind,
-                                        sub,
-                                        d["cursor"],
-                                        d.get("old_cursor", 0),
-                                        board_slug,
-                                    )
+                                # Rewind the pre-send claim so the next
+                                # tick retries the wake — the event is
+                                # NOT lost.
+                                await _to_thread_process_service(
+                                    self._kanban_rewind,
+                                    sub,
+                                    d["cursor"],
+                                    d.get("old_cursor", 0),
+                                    board_slug,
+                                )
                                 continue
 
                         # Delivery complete (text ping for push adapters, wake
@@ -3050,9 +3334,11 @@ class GatewayKanbanWatchersMixin:
                         # push subs): advance cursor. The cursor is the dedup
                         # mechanism — it prevents re-delivery of the same
                         # event on subsequent ticks.
-                        await _to_thread_process_service(
+                        advanced = await _to_thread_process_service(
                             self._kanban_advance, sub, d["cursor"], board_slug,
                         )
+                        if not advanced:
+                            continue
                         if not _is_push_adapter:
                             # Nothing left to deliver on this path (the wake,
                             # if any, already succeeded above).
@@ -3062,23 +3348,6 @@ class GatewayKanbanWatchersMixin:
                         # work for review corrections and continuation. The
                         # retained cursor prevents replay while preserving the
                         # original delivery and wake ownership for that cycle.
-                        if _is_push_adapter and send_passive and _wake_kinds:
-                            # notify+wake: the text ping above was the
-                            # delivery and the cursor has advanced; the wake
-                            # injection stays best-effort.
-                            try:
-                                await _push_wake()
-                            except Exception as _wk_err:
-                                # Best-effort: the notification itself already
-                                # delivered and the cursor has advanced, so a
-                                # broken wake path must not wedge the tick — but
-                                # log at WARNING with a traceback rather than
-                                # DEBUG so a persistently-failing wake is visible
-                                # in normal logs instead of silently no-op'ing.
-                                logger.warning(
-                                    "kanban notifier: wakeup injection failed for %s: %s",
-                                    sub["task_id"], _wk_err, exc_info=True,
-                                )
                         if task_terminal:
                             await _to_thread_process_service(
                                 self._kanban_unsub, sub, board_slug,
@@ -3131,7 +3400,7 @@ class GatewayKanbanWatchersMixin:
         conn = _kb.connect(board=board)
         try:
             rows = conn.execute(
-                "SELECT id, title, claim_lock, worker_pid, last_heartbeat_at "
+                "SELECT id, title, claim_lock, worker_pid, last_heartbeat_at, current_run_id, task_role "
                 "FROM tasks WHERE status = 'running' "
                 "AND claim_lock IS NOT NULL",
             ).fetchall()
@@ -3174,7 +3443,7 @@ class GatewayKanbanWatchersMixin:
                     ) > heartbeat_secs
                 if not dead:
                     continue
-                is_mirror = conn.execute(
+                is_mirror = row["task_role"] == "activity" or conn.execute(
                     "SELECT 1 FROM task_comments WHERE task_id = ? AND "
                     "body LIKE 'Mirror card for in-process delegation%' "
                     "LIMIT 1",
@@ -3182,43 +3451,35 @@ class GatewayKanbanWatchersMixin:
                 ).fetchone() is not None
                 out.append(
                     (str(row["id"]), str(row["title"] or ""), is_mirror,
-                     row["worker_pid"] is not None)
+                     row["worker_pid"] is not None, row["current_run_id"], claim,
+                     row["last_heartbeat_at"])
                 )
         finally:
             conn.close()
         return out
 
     def _claim_reaper_apply(
-        self, board: str, task_id: str, disposition: str
+        self, board: str, task_id: str, disposition: str,
+        run_id: int | None, claim: str, heartbeat: int | None,
     ) -> None:
         from hermes_cli import kanban_db as _kb
 
-        new_status = (
-            "archived" if disposition == "archived_stale_mirror" else "ready"
-        )
         conn = _kb.connect(board=board)
         try:
-            with _kb.write_txn(conn):
-                conn.execute(
-                    "UPDATE tasks SET status = ?, claim_lock = NULL, "
-                    "claim_expires = NULL, worker_pid = NULL "
-                    "WHERE id = ? AND status = 'running'",
-                    (new_status, task_id),
-                )
-                conn.execute(
-                    "INSERT INTO task_events"
-                    "(task_id, kind, payload, created_at) "
-                    "VALUES (?, 'claim_reaped', ?, strftime('%s','now'))",
-                    (task_id, json.dumps({"disposition": disposition})),
-                )
+            recovered = _kb.recover_interrupted_task(
+                conn, task_id, expected_run_id=run_id, expected_claim=claim,
+                expected_heartbeat=heartbeat,
+            )
+            if not recovered:
+                return
             note = (
                 "Card espelho de subagente arquivado."
                 if disposition == "archived_stale_mirror"
-                else "Card devolvido pra fila (ready); o dispatcher respawna."
+                else "Tarefa disponível para retomar quando suas dependências permitirem."
             )
             _kb.add_comment(
-                conn, task_id, "watchdog",
-                "Claim morto colhido pelo reaper: o processo dono sumiu ou o "
+                conn, task_id, "hermes",
+                "Execução interrompida: o processo terminou. "
                 f"heartbeat parou. {note}",
             )
         finally:
@@ -3270,7 +3531,7 @@ class GatewayKanbanWatchersMixin:
                 )
             except Exception:  # noqa: BLE001
                 continue
-            for task_id, _title, is_mirror, is_worker in stale:
+            for task_id, _title, is_mirror, is_worker, run_id, claim, heartbeat in stale:
                 if is_mirror:
                     disposition = "archived_stale_mirror"
                 elif is_worker:
@@ -3279,7 +3540,7 @@ class GatewayKanbanWatchersMixin:
                     continue
                 try:
                     await asyncio.to_thread(
-                        self._claim_reaper_apply, board, task_id, disposition,
+                        self._claim_reaper_apply, board, task_id, disposition, run_id, claim, heartbeat,
                     )
                     logger.info(
                         "claim reaper: %s/%s -> %s",
@@ -3366,16 +3627,11 @@ class GatewayKanbanWatchersMixin:
                     if int(running) >= int(cap):
                         # Full queue = normal waiting, not an anomaly.
                         return ""
-        except Exception:  # noqa: BLE001 — a probe failure must not block the alert
+        except Exception:  # noqa: BLE001
             logger.debug("ready watchdog: measured probes failed", exc_info=True)
-        # Everything measurable was measured and nothing explains the wait:
-        # the dispatcher genuinely has not acted on a spawnable card. THIS
-        # is the real anomaly (29/08: tick wedged in the old process).
-        return (
-            "nenhuma causa medida explica a espera (slots livres, perfil "
-            "existe, sem guard/backoff): o dispatcher não está agindo "
-            "neste board — checar o journal do gateway dono do lock"
-        )
+        # An incomplete probe cannot establish that the dispatcher is stuck.
+        # Its existing tick monitoring reports actual failures separately.
+        return ""
 
     @staticmethod
     def _ready_watchdog_guard_reason(conn: Any, task_id: str) -> str:
@@ -3414,8 +3670,8 @@ class GatewayKanbanWatchersMixin:
         dispatcher forever (#27145) and stays green-looking while dead —
         the operator called it the worst failure mode: silent with a
         healthy face. One pass per notifier tick over boards that have a
-        display binding; one durable alert per card (a ``watchdog``
-        comment is the dedupe token), delivered to the board's topic.
+        display binding; one durable alert per queue episode, identified
+        by its persisted ``watchdog_alert`` event and sent to the board topic.
         """
         from gateway.config import Platform as _Platform
 
@@ -3577,7 +3833,7 @@ class GatewayKanbanWatchersMixin:
     def _ready_watchdog_collect(
         self, board: str, now: float, settings: dict,
     ) -> list:
-        """Sync: ready tasks past threshold without claim or prior alert."""
+        """Sync: measured anomalies after the current queue entry, alerted once."""
         from hermes_cli import kanban_db as _kb
 
         stale: list = []
@@ -3591,25 +3847,35 @@ class GatewayKanbanWatchersMixin:
             ).fetchall()
             for task in rows:
                 task_id = str(task["id"])
-                already = conn.execute(
-                    "SELECT 1 FROM task_comments WHERE task_id = ? "
-                    "AND author = 'watchdog' LIMIT 1",
+                queued = conn.execute(
+                    "SELECT id,created_at FROM task_events WHERE task_id=? AND ("
+                    "kind IN ('unblocked','promoted','reclaimed') OR "
+                    "(kind='status' AND json_extract(payload,'$.status')='ready') OR "
+                    "json_extract(payload,'$.retry_status')='ready') ORDER BY id DESC LIMIT 1",
                     (task_id,),
+                ).fetchone()
+                queued_at = float(queued["created_at"] if queued else task["created_at"] or now)
+                queued_event_id = int(queued["id"]) if queued else 0
+                if now - queued_at < settings["threshold"]:
+                    continue
+                already = conn.execute(
+                    "SELECT 1 FROM task_events WHERE task_id = ? "
+                    "AND kind = 'watchdog_alert' AND id > ? LIMIT 1",
+                    (task_id, queued_event_id),
                 ).fetchone()
                 if already:
                     continue
-                reason = (
-                    self._ready_watchdog_guard_reason(conn, task_id)
-                    or self._ready_watchdog_reason(
-                        task, settings["default_assignee"], conn=conn
-                    )
+                if self._ready_watchdog_guard_reason(conn, task_id):
+                    continue
+                reason = self._ready_watchdog_reason(
+                    task, settings["default_assignee"], conn=conn
                 )
                 if not reason:
                     # Measured as normal waiting (full queue, deliberate
                     # backoff): silence, per operator order 29/08.
                     continue
                 age_minutes = max(
-                    1, int((now - float(task["created_at"] or now)) // 60)
+                    1, int((now - queued_at) // 60)
                 )
                 stale.append(
                     (task_id, str(task["title"] or task_id), reason, age_minutes)
@@ -3627,7 +3893,7 @@ class GatewayKanbanWatchersMixin:
         conn = _kb.connect(board=board)
         try:
             _kb.add_comment(
-                conn, task_id, "watchdog",
+                conn, task_id, "hermes",
                 f"Alerta de abandono publicado no tópico do projeto: {reason}",
             )
             with _kb.write_txn(conn):
@@ -3695,7 +3961,7 @@ class GatewayKanbanWatchersMixin:
 
     def _kanban_advance(
         self, sub: dict, cursor: int, board: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """Sync helper: advance a subscription's cursor. Runs in to_thread.
 
         ``board`` scopes the DB connection to the board that owns this
@@ -3704,13 +3970,14 @@ class GatewayKanbanWatchersMixin:
         from hermes_cli import kanban_db as _kb
         conn = _kb.connect(board=board)
         try:
-            _kb.advance_notify_cursor(
+            return _kb.advance_notify_cursor(
                 conn,
                 task_id=sub["task_id"],
                 platform=sub["platform"],
                 chat_id=sub["chat_id"],
                 thread_id=sub.get("thread_id") or "",
                 new_cursor=cursor,
+                claim_token=sub.get("_claim_token"),
             )
         finally:
             conn.close()
@@ -3748,6 +4015,7 @@ class GatewayKanbanWatchersMixin:
                 thread_id=sub.get("thread_id") or "",
                 claimed_cursor=claimed_cursor,
                 old_cursor=old_cursor,
+                claim_token=sub.get("_claim_token"),
             )
         finally:
             conn.close()

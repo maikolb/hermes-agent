@@ -1,0 +1,19 @@
+Discovered 4 test files (~19 tests) under ['tests\\gateway\\test_kanban_notifier_durable.py', 'tests\\gateway\\test_kanban_notifier_wake_only_ordering.py', 'tests\\gateway\\test_kanban_whiteboard_notifications.py', 'tests\\hermes_cli\\test_kanban_notify_durable.py']; running with -j 1
+[ 42.1% |     8/~19 | ✓8 | ✗0] ✓ tests\gateway\test_kanban_notifier_durable.py (8✓, 15.6s)
+[ 63.2% |    12/~19 | ✓12 | ✗ 0] ✓ tests\gateway\test_kanban_notifier_wake_only_ordering.py (4✓, 12.5s)
+[ 73.7% |    14/~19 | ✓14 | ✗ 0] ✓ tests\gateway\test_kanban_whiteboard_notifications.py (2✓, 10.7s)
+[100.0% |    19/~19 | ✓19 | ✗ 0] ✓ tests\hermes_cli\test_kanban_notify_durable.py (5✓, 15.6s)
+
+=== Summary: 4 files, 19 tests passed, 0 failed (100% complete) in 54.5s (1 workers) ===
+  Durations cached to test_durations.json (4 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   4
+  Total subprocess CPU-wall: 54.5s  (runner wall: 54.5s, parallelism: 1x)
+  P50: 15.59s  P90: 15.64s  P95: 15.64s  P99: 15.64s  Max: 15.64s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     15.64s  tests\gateway\test_kanban_notifier_durable.py
+     15.59s  tests\hermes_cli\test_kanban_notify_durable.py
+     12.50s  tests\gateway\test_kanban_notifier_wake_only_ordering.py
+     10.72s  tests\gateway\test_kanban_whiteboard_notifications.py

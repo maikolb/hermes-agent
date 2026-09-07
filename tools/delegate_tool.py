@@ -4130,6 +4130,7 @@ def delegate_task(
     # kills them (27/08 DOVCRM: tools stuck 31-67s, both children dead at
     # 600s, while dispatcher workers sailed through the same window).
     from tools.delegation_kanban import (
+        bind_delegation_session,
         close_delegation_cards,
         create_delegation_cards,
         create_dispatch_cards,
@@ -4201,8 +4202,10 @@ def delegate_task(
     # request path, where the session env is readable) and threaded through
     # to the aggregate closer. Best-effort side-channel like the live
     # transcripts — see tools/delegation_kanban.py.
+    kanban_run_bindings = {}
     kanban_card_ids = create_delegation_cards(
-        task_list, live_deleg_id, kanban_board, live_paths=live_paths
+        task_list, live_deleg_id, kanban_board, live_paths=live_paths,
+        run_bindings=kanban_run_bindings,
     )
     # One display sink (operator requirement 28/08): each child's activity
     # tees into the board's NATIVE worker log under its mirror card id, so
@@ -4288,6 +4291,10 @@ def delegate_task(
             # Explicit-pin preflight failures (e.g. pinned delegation.command
             # missing from PATH) refuse the spawn loudly (#80450).
             return tool_error(str(exc))
+        if i in kanban_run_bindings and i in kanban_card_ids:
+            bind_delegation_session(
+                kanban_board, kanban_card_ids[i], kanban_run_bindings[i], child.session_id,
+            )
         # Attach the validated schema for the completion-side validation
         # hook in _run_single_child. Absent (None) on schema-less tasks.
         if _task_schema is not None:
@@ -4495,7 +4502,7 @@ def delegate_task(
         update_manifest_statuses(live_deleg_id, results)
         if kanban_heartbeat is not None:
             kanban_heartbeat.stop()
-        close_delegation_cards(kanban_board, kanban_card_ids, results)
+        close_delegation_cards(kanban_board, kanban_card_ids, results, run_bindings=kanban_run_bindings)
         for entry in results:
             _card_idx = entry.get("task_index")
             if isinstance(_card_idx, int) and _card_idx in kanban_card_ids:
@@ -5241,6 +5248,8 @@ DELEGATE_TASK_SCHEMA = {
                     "type": "object",
                     "properties": {
                         "goal": {"type": "string", "description": "Task goal"},
+                        "delivery_type": {"type":"string", "enum":["code","report","operation"], "description":"Deliverable type, preserved when routed to a worker."},
+                        "requires_repo": {"type":"boolean", "description":"False for reports/audits that need no code change or PR."},
                         "context": {
                             "type": "string",
                             "description": "Task-specific context",

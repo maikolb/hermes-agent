@@ -69,6 +69,20 @@ def checkpoint_is_resumable(state: Mapping[str, Any] | None) -> bool:
     )
 
 
+def checkpoint_is_worker_resumable(state: Mapping[str, Any] | None) -> bool:
+    """A worker resumes unfinished execution, not a composed answer.
+
+    Gateway delivery may still need to replay a sealed answer. A replacement
+    Kanban worker must instead read the current card in a new turn of the same
+    session. Otherwise delivery replay exits without invoking any task tools.
+    Pending verification remains executable work and retains its checkpoint.
+    """
+    return checkpoint_is_resumable(state) and not (
+        state.get("phase") in {"deliverable_composed", "delivery_pending"}
+        and not (state.get("verification") or {}).get("pending")
+    )
+
+
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.RLock] = {}
 _REDACTED_SENTINEL_RE = re.compile(r"«redacted(?::[^»]*)?»")
@@ -351,6 +365,13 @@ class TurnCheckpointStore:
             with FileLock(str(lock_path), timeout=10.0), _lock_for(path):
                 if path.exists():
                     current = self._read_path(path, session_id)
+                    # Flush the prior input ACK before this checkpoint can be
+                    # replaced by another turn. A crash after its atomic write
+                    # cannot make an accepted Kanban handoff look undelivered.
+                    prior_receipt = (current.get("routing") or {}).get("kanban_wake_delivery")
+                    if prior_receipt:
+                        from gateway.wake import record_notify_progress
+                        record_notify_progress(prior_receipt, wake_accepted=True)
                     current_turn = str(current.get("turn_id") or "")
                     candidate_turn = str(candidate.get("turn_id") or "")
                     current_revision = int(current.get("revision", 0))
@@ -479,8 +500,26 @@ class TurnCheckpointStore:
             existing = self.restore(session_id, messages)
         except FileNotFoundError:
             existing = None
+        prior_routing = (existing or {}).get("routing") or {}
+        worker_next_turn = bool(
+            routing and routing.get("kanban_task_id")
+            and prior_routing.get("kanban_task_id") == routing["kanban_task_id"]
+            and prior_routing.get("kanban_db") == routing.get("kanban_db")
+            and not checkpoint_is_worker_resumable(existing)
+        )
+        # A repeated coordinator/user instruction is a new request after an
+        # answer was composed. Text equality alone cannot identify the old
+        # delivery. Explicit gateway recovery still replays an undelivered
+        # answer, and pending verification still resumes its unfinished work.
+        new_request_after_answer = bool(
+            existing and not resume_existing and raw_user.strip()
+            and existing.get("phase") in {"deliverable_composed", "delivery_pending"}
+            and not existing.get("verification", {}).get("pending")
+        )
         if (
             existing
+            and not worker_next_turn
+            and not new_request_after_answer
             and existing.get("phase") not in {"terminal", "delivered", "cancelled"}
             and (
                 resume_existing
@@ -1638,6 +1677,9 @@ def initialize_agent_turn_checkpoint(
 ) -> dict[str, Any] | None:
     store = checkpoint_store_for_agent(agent)
     if store is None:
+        from gateway.wake import current_notify_receipt
+        if current_notify_receipt.get():
+            raise CheckpointWriteError("Kanban wake remains pending: session checkpoint unavailable")
         agent._turn_checkpoint_state = None
         return None
     # AIAgent stores gateway identity in private instance fields
@@ -1661,7 +1703,28 @@ def initialize_agent_turn_checkpoint(
             or ""
         ),
     }
+    from gateway.wake import current_notify_receipt, record_notify_progress
+    receipt = current_notify_receipt.get()
+    if receipt:
+        # Persist the destination first; recovery trusts it only after finding
+        # the same receipt in the atomically written checkpoint below.
+        record_notify_progress(receipt, checkpoint_root=str(store.root.resolve()),
+                               session_id=str(agent.session_id))
+        routing["kanban_wake_delivery"] = dict(receipt)
     resume_existing = bool(getattr(agent, "_resume_turn_from_checkpoint", False))
+    kanban_task = os.environ.get("HERMES_KANBAN_TASK", "")
+    if kanban_task and os.environ.get("HERMES_SESSION_SOURCE") == "kanban":
+        routing["kanban_task_id"] = kanban_task
+        routing["kanban_db"] = os.environ.get("HERMES_KANBAN_DB", "")
+        try:
+            prior = store.load(str(agent.session_id))
+        except FileNotFoundError:
+            prior = None
+        prior_route = (prior or {}).get("routing") or {}
+        if (checkpoint_is_worker_resumable(prior)
+                and prior_route.get("kanban_task_id") == kanban_task
+                and prior_route.get("kanban_db") == routing["kanban_db"]):
+            resume_existing = True
     try:
         state = store.start_turn(
             str(agent.session_id),
@@ -1675,6 +1738,8 @@ def initialize_agent_turn_checkpoint(
         # One-shot: a reused gateway agent must not bind the next genuine user
         # turn to an older unfinished checkpoint.
         agent._resume_turn_from_checkpoint = False
+    if receipt:
+        record_notify_progress(receipt, wake_accepted=True)
     agent._turn_checkpoint_state = state
     agent._turn_checkpoint_restored = bool(state.get("recovery", {}).get("restored"))
     if agent._turn_checkpoint_restored:

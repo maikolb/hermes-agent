@@ -329,6 +329,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     # --- create ---
     p_create = sub.add_parser("create", help="Create a new task")
     p_create.add_argument("title", help="Task title")
+    p_create.add_argument("--delivery-type", choices=["code", "report", "operation"], default=None)
+    p_create.add_argument("--requires-repo", action=argparse.BooleanOptionalAction, default=None)
     p_create.add_argument("--body", default=None, help="Optional opening post")
     p_create.add_argument("--assignee", default=None, help="Profile name to assign")
     p_create.add_argument("--parent", action="append", default=[],
@@ -1575,6 +1577,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
         task_id = kb.create_task(
             conn,
             title=args.title,
+            delivery_type=getattr(args, "delivery_type", None),
+            requires_repo=getattr(args, "requires_repo", None),
             body=args.body,
             assignee=args.assignee,
             created_by=args.created_by or _profile_author(),

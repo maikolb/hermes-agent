@@ -1,0 +1,118 @@
+{
+  "host": "srv1918217",
+  "sha": "3c6418ae9edb6130a30634efe722e5e7358c4711",
+  "verified_at": 1788659019.543985,
+  "entry": "/usr/local/lib/hermes-agent.release-20260905-3c6418ae9edb6130a30634efe722e5e7358c4711/venv/bin/hermes",
+  "files": {
+    "hermes_cli/kanban_db.py": "a147c1b0dcea6bb722220b0980884bae7b48b08f4a72d8ce27770c8f0e40122f",
+    "gateway/kanban_watchers.py": "a5e9831477f8e396dd7ecdc558833e9a0c97f5af0e1b5eb1ef2cb772050319d4",
+    "gateway/wake.py": "1ba2b4b14fe572de3611ffe7eadf42cf95278ecdb6edf0aff69a0818fcefaee4",
+    "gateway/platforms/base.py": "2cf16db371263c089b8c7b34580ade40d0bba9afb28a2fef2fceffc3a4dd0ee5",
+    "agent/turn_checkpoint.py": "117302d39398f9d8279f83bc2443af55f9abd18fd7f2047ce12249ec4ce3b3cd",
+    "tui_gateway/server.py": "f5226611feb520f3bb51ca3989604c9632209ef2b3f298c41412e0b5a6f984cd"
+  },
+  "services": {
+    "hermes-gateway@default.service": {
+      "MainPID": "3796491",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "telegram_state": "connected",
+      "telegram_writer_pid": 3796491
+    },
+    "hermes-gateway@hermes-project-factory.service": {
+      "MainPID": "3797320",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "telegram_state": "connected",
+      "telegram_writer_pid": 3797320
+    }
+  },
+  "boards": {
+    "concursa-ai": {
+      "claim_table_present": true,
+      "task_status_counts": {
+        "archived": 25,
+        "backlog": 20,
+        "blocked": 17,
+        "done": 198,
+        "todo": 5
+      },
+      "delivery_modes": {
+        "notify": 38,
+        "notify+wake": 65
+      },
+      "pending_deliveries": 0
+    },
+    "dovcrm": {
+      "claim_table_present": true,
+      "task_status_counts": {
+        "archived": 10,
+        "backlog": 16,
+        "blocked": 12,
+        "done": 208,
+        "todo": 7
+      },
+      "delivery_modes": {
+        "notify": 18,
+        "notify+wake": 80
+      },
+      "pending_deliveries": 0
+    }
+  },
+  "summary": {
+    "host": "srv1918217",
+    "sha": "3c6418ae9edb6130a30634efe722e5e7358c4711",
+    "services": {
+      "hermes-gateway@default.service": {
+        "MainPID": "3796491",
+        "NRestarts": "0",
+        "ActiveState": "active",
+        "SubState": "running",
+        "telegram_state": "connected",
+        "telegram_writer_pid": 3796491
+      },
+      "hermes-gateway@hermes-project-factory.service": {
+        "MainPID": "3797320",
+        "NRestarts": "0",
+        "ActiveState": "active",
+        "SubState": "running",
+        "telegram_state": "connected",
+        "telegram_writer_pid": 3797320
+      }
+    },
+    "boards": {
+      "concursa-ai": {
+        "claim_table_present": true,
+        "task_status_counts": {
+          "archived": 25,
+          "backlog": 20,
+          "blocked": 17,
+          "done": 198,
+          "todo": 5
+        },
+        "delivery_modes": {
+          "notify": 38,
+          "notify+wake": 65
+        },
+        "pending_deliveries": 0
+      },
+      "dovcrm": {
+        "claim_table_present": true,
+        "task_status_counts": {
+          "archived": 10,
+          "backlog": 16,
+          "blocked": 12,
+          "done": 208,
+          "todo": 7
+        },
+        "delivery_modes": {
+          "notify": 18,
+          "notify+wake": 80
+        },
+        "pending_deliveries": 0
+      }
+    }
+  }
+}

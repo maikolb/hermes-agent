@@ -1,0 +1,130 @@
+{
+  "host": "srv1918217",
+  "runtime": "/usr/local/lib/hermes-agent.release-20260906-ab8710cfa5e29c7f09d35f9c84780150492fefc9/venv/bin/hermes",
+  "task_id": "t_f1ce5125",
+  "status": "running",
+  "worker_pid": 4024658,
+  "run_id": 300,
+  "events": [
+    {
+      "id": 9800,
+      "kind": "heartbeat",
+      "created_at": 1788668306
+    },
+    {
+      "id": 9798,
+      "kind": "worker_session_linked",
+      "created_at": 1788668285
+    },
+    {
+      "id": 9794,
+      "kind": "watchdog_alert_resolved",
+      "created_at": 1788668230
+    },
+    {
+      "id": 9793,
+      "kind": "watchdog_alert_resolved",
+      "created_at": 1788668229
+    },
+    {
+      "id": 9787,
+      "kind": "spawned",
+      "created_at": 1788668145
+    },
+    {
+      "id": 9785,
+      "kind": "claimed",
+      "created_at": 1788668144
+    },
+    {
+      "id": 9780,
+      "kind": "watchdog_alert",
+      "created_at": 1788668122
+    },
+    {
+      "id": 9779,
+      "kind": "commented",
+      "created_at": 1788668122
+    },
+    {
+      "id": 9776,
+      "kind": "watchdog_alert",
+      "created_at": 1788668058
+    },
+    {
+      "id": 9775,
+      "kind": "commented",
+      "created_at": 1788668058
+    },
+    {
+      "id": 9774,
+      "kind": "unblocked",
+      "created_at": 1788668039
+    },
+    {
+      "id": 9770,
+      "kind": "assigned",
+      "created_at": 1788667996
+    },
+    {
+      "id": 9769,
+      "kind": "commented",
+      "created_at": 1788667968
+    },
+    {
+      "id": 9703,
+      "kind": "blocked",
+      "created_at": 1788666937
+    },
+    {
+      "id": 9702,
+      "kind": "commented",
+      "created_at": 1788666937
+    },
+    {
+      "id": 4534,
+      "kind": "commented",
+      "created_at": 1788275650
+    },
+    {
+      "id": 4523,
+      "kind": "gave_up",
+      "created_at": 1788275442
+    },
+    {
+      "id": 4522,
+      "kind": "crashed",
+      "created_at": 1788275442
+    },
+    {
+      "id": 4516,
+      "kind": "spawned",
+      "created_at": 1788275287
+    },
+    {
+      "id": 4515,
+      "kind": "claimed",
+      "created_at": 1788275287
+    },
+    {
+      "id": 4514,
+      "kind": "protocol_violation",
+      "created_at": 1788275287
+    },
+    {
+      "id": 4508,
+      "kind": "spawned",
+      "created_at": 1788275173
+    },
+    {
+      "id": 4507,
+      "kind": "claimed",
+      "created_at": 1788275172
+    },
+    {
+      "id": 4506,
+      "kind": "protocol_violation",
+      "created_at": 1788275171
+    }
+  ]
+}

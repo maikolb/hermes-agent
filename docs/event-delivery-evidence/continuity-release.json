@@ -1,0 +1,98 @@
+{
+  "runtime_sha": "ab8710cfa5e29c7f09d35f9c84780150492fefc9",
+  "released": true,
+  "services": {
+    "hermes-gateway@default.service": {
+      "MainPID": "3989907",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "telegram_state": "connected",
+      "telegram_writer_pid": 3989907
+    },
+    "hermes-gateway@hermes-project-factory.service": {
+      "MainPID": "3990714",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "telegram_state": "connected",
+      "telegram_writer_pid": 3990714
+    }
+  },
+  "config": {
+    "default": {
+      "freshness": 0,
+      "wake": true
+    },
+    "hermes-project-factory": {
+      "freshness": 0,
+      "wake": true
+    }
+  },
+  "backup": "/var/backups/hermes/continuity-ab8710cfa5e29c7f09d35f9c84780150492fefc9/activation-20260906T035221Z",
+  "historical_backup": "/var/backups/hermes/continuity-ab8710cfa5e29c7f09d35f9c84780150492fefc9/historical-20260906T035531Z",
+  "local_tests_passed": 51,
+  "target_tests_passed": 5,
+  "historical_requests": 27,
+  "retained_known_human_inputs": 2,
+  "actual_workers": [
+    {
+      "board": "concursa-ai",
+      "task_id": "t_74beb26e",
+      "run_id": 294,
+      "pid": 4004605,
+      "session_id": "20260906_040328_e300cc"
+    },
+    {
+      "board": "dovcrm",
+      "task_id": "t_427dcfe4",
+      "run_id": 315,
+      "pid": 3999748,
+      "session_id": "20260906_035931_c70a01"
+    }
+  ],
+  "public_streams": [
+    {
+      "board": "concursa-ai",
+      "task_id": "t_74beb26e",
+      "run_id": 294,
+      "source_id": "session:294",
+      "bytes": 125070,
+      "sha256": "24db9e6e6324988f80870d6b28c9e82f473ca9f922fd0d75a7cf117afc5d920b",
+      "observed_at": "2026-09-06T04:07:02.721132+00:00"
+    },
+    {
+      "board": "dovcrm",
+      "task_id": "t_427dcfe4",
+      "run_id": 315,
+      "source_id": "session:315",
+      "bytes": 217539,
+      "sha256": "e47737914feebae4f40ba574a390ab42d43e16e57f7093a3f2943189c4254ce2",
+      "observed_at": "2026-09-06T04:07:02.721132+00:00"
+    }
+  ],
+  "dov_live_growth": {
+    "run_id": 315,
+    "before_bytes": 38562,
+    "after_bytes": 217539
+  },
+  "observed_board_counts": {
+    "concursa-ai": {
+      "backlog": 20,
+      "todo": 5,
+      "running": 1,
+      "blocked": 15,
+      "done": 200
+    },
+    "dovcrm": {
+      "backlog": 16,
+      "todo": 7,
+      "ready": 2,
+      "running": 2,
+      "blocked": 9,
+      "done": 211
+    }
+  },
+  "claim_limit": "Business tasks and historical reconciliation remain in progress. Released continuity is not a claim that every task is completed.",
+  "scope_note": "Vigilia owner thread confirmed historical fallback is labeled; Principal cards without run session metadata are not included in the claim about worker RTU."
+}

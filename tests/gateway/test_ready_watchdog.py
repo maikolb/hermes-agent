@@ -1,8 +1,8 @@
 """Ready-abandonment watchdog (operator card t_7872edd5, 28/08).
 
 A ready card nobody will ever claim must produce ONE alert in the
-project topic with a detectable reason — silent-but-healthy-looking is
-the worst failure mode. Dedupe is durable (a ``watchdog`` comment).
+project topic with a measured reason. Dedupe uses the persisted
+``watchdog_alert`` event for the current queue episode.
 """
 
 from __future__ import annotations
@@ -74,14 +74,16 @@ def _make_ready(age_seconds, *, assignee=None, workspace_path=None):
     conn = kb.connect()
     try:
         task_id = kb.create_task(
-            conn, title="card esquecido", assignee=assignee
+            conn, title="card esquecido", assignee="default", requires_repo=False
         )
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET status='ready', created_at=?, "
-                "workspace_path=? WHERE id=?",
-                (int(time.time() - age_seconds), workspace_path, task_id),
+                "workspace_path=?, assignee=? WHERE id=?",
+                (int(time.time() - age_seconds), workspace_path, assignee, task_id),
             )
+            conn.execute("UPDATE task_events SET created_at=? WHERE task_id=?",
+                         (int(time.time() - age_seconds), task_id))
     finally:
         conn.close()
     return task_id
@@ -107,12 +109,10 @@ def test_stale_unassigned_ready_alerts_once_with_reason(board, monkeypatch):
 
     conn = kb.connect()
     try:
-        comments = kb.list_comments(conn, task_id)
+        count = conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='watchdog_alert'", (task_id,)).fetchone()[0]
     finally:
         conn.close()
-    assert any(
-        getattr(c, "author", "") == "watchdog" for c in comments
-    )
+    assert count == 1
 
 
 def test_fresh_or_claimed_ready_stays_silent(board, monkeypatch):
@@ -164,10 +164,8 @@ def test_watchdog_gate_off_is_silent(board, monkeypatch):
     assert adapter.sent == []
 
 
-def test_dispatcher_guard_reason_beats_generic(board, monkeypatch):
-    """Wave 4 do DOVCRM (28/08): quando o dispatcher está deliberadamente
-    segurando o card (respawn_guarded active_pr a cada tick), o alerta deve
-    nomear o guard em vez do genérico 'dispatcher parado'."""
+def test_deliberate_dispatcher_guard_stays_silent(board, monkeypatch):
+    """An intentional active-PR hold does not establish a dispatch failure."""
     import json as _json
     import time as _time
 
@@ -195,11 +193,7 @@ def test_dispatcher_guard_reason_beats_generic(board, monkeypatch):
 
     asyncio.run(runner._kanban_ready_watchdog())
 
-    assert len(adapter.sent) == 1
-    text = adapter.sent[0]["text"]
-    assert "segurado por guard do dispatcher" in text
-    assert "PR ativa do projeto" in text
-    assert "dispatcher parado" not in text
+    assert adapter.sent == []
 
 
 def test_alert_is_edited_to_resolved_after_claim(board, monkeypatch):

@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -53,19 +55,73 @@ def adapter_supports_push(adapter: Any) -> bool:
     return bool(getattr(adapter, "supports_async_delivery", True))
 
 
+# Set only by the internal adapter event, copied into the existing agent thread.
+current_notify_receipt = ContextVar("current_notify_receipt", default=None)
+
+
+def _receipt_connection(receipt):
+    import sqlite3
+    conn = sqlite3.connect(Path(receipt["db_path"]).resolve().as_uri()
+                           + "?mode=rw", uri=True, timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def record_notify_progress(receipt, **progress):
+    conn = _receipt_connection(receipt)
+    try:
+        if receipt.get("kind") == "nfos_coordinator_input":
+            from hermes_cli.nfos_delivery import record_coordinator_progress
+            return record_coordinator_progress(conn, receipt, **progress)
+        from hermes_cli.kanban_db import update_notify_receipt
+        return update_notify_receipt(conn, delivery_id=receipt["delivery_id"], **progress)
+    finally:
+        conn.close()
+
+
+def notify_wake_accepted(receipt):
+    """Recover a lost ACK from the checkpoint written before agent work starts."""
+    conn = _receipt_connection(receipt)
+    try:
+        if receipt.get("kind") == "nfos_coordinator_input":
+            from hermes_cli.nfos_delivery import coordinator_wake_accepted
+            return coordinator_wake_accepted(conn, receipt)
+        row = conn.execute("SELECT * FROM kanban_notify_claims WHERE delivery_id=?",
+                           (receipt["delivery_id"],)).fetchone()
+    finally:
+        conn.close()
+    # Removed after acknowledgement or an explicit unsubscribe: never resurrect it.
+    if row is None or row["wake_accepted"]:
+        return True
+    if row["checkpoint_root"] and row["session_id"]:
+        from agent.turn_checkpoint import TurnCheckpointStore
+        try:
+            state = TurnCheckpointStore(row["checkpoint_root"]).load(row["session_id"])
+        except FileNotFoundError:
+            return False
+        saved = (state.get("routing") or {}).get("kanban_wake_delivery") or {}
+        if saved.get("delivery_id") == receipt["delivery_id"]:
+            record_notify_progress(receipt, wake_accepted=True)
+            return True
+    return False
+
+
 async def deliver_wake(
     adapter: Any,
     *,
     text: str,
     session_id: str = "",
     source: Any = None,
-) -> None:
+    receipt: dict | None = None,
+    metadata: dict | None = None,
+) -> bool | None:
     """Deliver a wake turn to the session behind ``adapter``.
 
     ``session_id`` is the RAW session id (the ``X-Hermes-Session-Id`` value /
     ``state.db`` key) — required for non-push adapters. ``source`` is the
     ``SessionSource`` used to build the synthetic event — required for
-    push-capable adapters.
+    push-capable adapters. ``metadata`` carries optional context on that
+    internal event; an explicit receipt owns ``kanban_wake_delivery``.
 
     Raises on failure (bad arguments, exhausted retries, HTTP error) so the
     caller can rewind/retry instead of treating the wake as delivered.
@@ -75,15 +131,23 @@ async def deliver_wake(
             raise ValueError(
                 "deliver_wake: push-capable adapter requires a SessionSource"
             )
+        if receipt and await asyncio.to_thread(notify_wake_accepted, receipt):
+            return True
         from gateway.platforms.base import MessageEvent, MessageType
 
+        event_metadata = dict(metadata or {})
+        if receipt:
+            event_metadata["kanban_wake_delivery"] = receipt
         synth_event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
             source=source,
             internal=True,
+            metadata=event_metadata,
         )
         await adapter.handle_message(synth_event)
+        if receipt:
+            return await asyncio.to_thread(notify_wake_accepted, receipt)
         return
 
     if not session_id:

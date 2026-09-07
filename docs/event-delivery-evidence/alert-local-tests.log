@@ -1,0 +1,77 @@
+Discovered 4 test files (~26 tests) under ['tests\\gateway\\test_kanban_alert_integrity.py', 'tests\\gateway\\test_ready_watchdog.py', 'tests\\gateway\\test_worker_closeout_traces.py', 'tests\\gateway\\test_kanban_whiteboard_notifications.py']; running with -j 1
+[ 19.2% |     5/~26 | ✓5 | ✗0] ✓ tests\gateway\test_kanban_alert_integrity.py (5✓, 12.3s)
+[ 26.9% |     7/~26 | ✓7 | ✗0] ✓ tests\gateway\test_kanban_whiteboard_notifications.py (2✓, 10.4s)
+[ 53.8% |    14/~26 | ✓14 | ✗ 0] ✓ tests\gateway\test_ready_watchdog.py (7✓, 11.6s)
+[100.0% |    26/~26 | ✓25 | ✗ 1] ✗ tests\gateway\test_worker_closeout_traces.py (11✓ 1✗, 11.4s)
+
+  ╔╍ Failed: tests\gateway\test_worker_closeout_traces.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║ .......F....                                                             [100%]
+  ║ ================================== FAILURES ===================================
+  ║ _____________ test_mirror_live_transcript_read_from_card_comment ______________
+  ║ tests\gateway\test_worker_closeout_traces.py:243: in test_mirror_live_transcript_read_from_card_comment
+  ║     tid = kb.create_task(conn, title="mirror", assignee="w")
+  ║           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  ║ hermes_cli\kanban_db.py:4160: in create_task
+  ║     assignee = _resolve_executable_assignee(assignee)
+  ║                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  ║ hermes_cli\kanban_db.py:3721: in _resolve_executable_assignee
+  ║     raise ValueError(
+  ║ E   ValueError: Assignee profile 'w' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+  ║ =========================== short test summary info ===========================
+  ║ FAILED tests/gateway/test_worker_closeout_traces.py::test_mirror_live_transcript_read_from_card_comment
+  ║ 1 failed, 11 passed in 4.09s
+  ║
+  ║  Repro: python -m pytest tests\gateway\test_worker_closeout_traces.py -q --tb=short
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+
+=== Summary: 4 files, 25 tests passed, 1 failed (100% complete) in 45.7s (1 workers) ===
+  Durations cached to test_durations.json (4 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   4
+  Total subprocess CPU-wall: 45.7s  (runner wall: 45.7s, parallelism: 1x)
+  P50: 11.61s  P90: 12.34s  P95: 12.34s  P99: 12.34s  Max: 12.34s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     12.34s  tests\gateway\test_kanban_alert_integrity.py
+     11.61s  tests\gateway\test_ready_watchdog.py
+     11.38s  tests\gateway\test_worker_closeout_traces.py
+     10.38s  tests\gateway\test_kanban_whiteboard_notifications.py
+
+=== Failure output ===
+
+--- tests\gateway\test_worker_closeout_traces.py ---
+.......F....                                                             [100%]
+================================== FAILURES ===================================
+_____________ test_mirror_live_transcript_read_from_card_comment ______________
+tests\gateway\test_worker_closeout_traces.py:243: in test_mirror_live_transcript_read_from_card_comment
+    tid = kb.create_task(conn, title="mirror", assignee="w")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+hermes_cli\kanban_db.py:4160: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+hermes_cli\kanban_db.py:3721: in _resolve_executable_assignee
+    raise ValueError(
+E   ValueError: Assignee profile 'w' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+=========================== short test summary info ===========================
+FAILED tests/gateway/test_worker_closeout_traces.py::test_mirror_live_transcript_read_from_card_comment
+1 failed, 11 passed in 4.09s
+
+=== 1 file with test failures (1 test failed) ===
+  tests\gateway\test_worker_closeout_traces.py  (1 test failed)
+
+Final fixture correction and focused rerun:
+Discovered 1 test files (~12 tests) under ['tests\\gateway\\test_worker_closeout_traces.py']; running with -j 1
+[100.0% |    12/~12 | ✓12 | ✗ 0] ✓ tests\gateway\test_worker_closeout_traces.py (12✓, 11.0s)
+
+=== Summary: 1 files, 12 tests passed, 0 failed (100% complete) in 11.0s (1 workers) ===
+  Durations cached to test_durations.json (1 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   1
+  Total subprocess CPU-wall: 11.0s  (runner wall: 11.0s, parallelism: 1x)
+  P50: 10.97s  P90: 10.97s  P95: 10.97s  P99: 10.97s  Max: 10.97s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     10.97s  tests\gateway\test_worker_closeout_traces.py

@@ -1694,6 +1694,11 @@ def init_agent(
         if not delegated_child:
             os.environ["HERMES_SESSION_ID"] = agent.session_id
 
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        from hermes_cli.kanban_db import bind_dispatcher_session
+
+        bind_dispatcher_session(agent.session_id)
+
     # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
     hermes_home = get_hermes_home()
     agent.logs_dir = hermes_home / "sessions"
