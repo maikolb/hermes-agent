@@ -911,6 +911,9 @@ class GatewayKanbanWatchersMixin:
                 for row in rows:
                     payload=json.loads(row['payload']);source=payload.get('source') or {}
                     if source.get('platform')!='telegram' or self._nfos_receipt_owner(payload) not in profiles:continue
+                    # A retained session row is recovery lineage, not a new
+                    # Telegram message that can receive a transport reply/ACK.
+                    if not coordination and source.get('message_identity_kind')=='retained-session-row':continue
                     if not all(source.get(key) for key in ('chat_id','thread_id','message_id')):continue
                     receipt=payload.get('coordination' if coordination else 'receipt') or {};now=time.time()
                     if coordination and receipt.get('wake_accepted'):continue
@@ -1095,17 +1098,30 @@ class GatewayKanbanWatchersMixin:
     async def _nfos_deliver_coordinator_input(self, path, request_id, payload):
         from hermes_cli import kanban_db as kb,nfos_delivery as delivery
         from hermes_cli.nfos_runtime import coordinator_intake_instructions
-        from gateway.platforms.base import Platform,SessionSource
+        from gateway.platforms.base import BasePlatformAdapter,Platform,SessionSource
+        from gateway.session import build_session_key
         from gateway.wake import deliver_wake
         def claim():
             with kb.connect_closing(path) as conn:
                 return delivery.claim_coordinator_input(conn,request_id)
-        receipt=await _to_thread_process_service(claim)
-        if receipt is None:return
         original=payload['source'];owner=self._nfos_receipt_owner(payload)
         source=SessionSource(platform=Platform.TELEGRAM,chat_id=original['chat_id'],
             thread_id=original['thread_id'],chat_type=original.get('chat_type') or 'group',
             user_id=original.get('user_id'),profile=owner)
+        adapter=self._adapter_for_source(source)
+        if isinstance(adapter,BasePlatformAdapter):
+            # handle_message schedules the agent asynchronously. Until its
+            # checkpoint exists, an expired timer is not evidence that this
+            # live turn ended. Check the same admission guard BEFORE replacing
+            # the durable claim; a rejected busy wake must not fence its owner.
+            key=build_session_key(source,
+                group_sessions_per_user=adapter.config.extra.get('group_sessions_per_user',True),
+                thread_sessions_per_user=adapter.config.extra.get('thread_sessions_per_user',False),
+                profile=adapter._session_key_profile(source))
+            adapter._heal_stale_session_lock(key)
+            if key in adapter._active_sessions:return
+        receipt=await _to_thread_process_service(claim)
+        if receipt is None:return
         context={'db_path':str(path),'request_id':request_id,
             'reply_to_message_id':(payload.get('coordination') or {}).get('reply_to_message_id'),
             'request':{key:payload[key] for key in ('source','text','project','attachments')}}
@@ -1117,7 +1133,7 @@ class GatewayKanbanWatchersMixin:
             wake_text=('[NFOS: mensagem original preservada para coordenação; não é uma nova mensagem Telegram.]\n'
                 +payload['text']+'\n\n'+coordinator_intake_instructions(context,
                     reply_to=context['reply_to_message_id']))
-            accepted=await deliver_wake(self._adapter_for_source(source),source=source,
+            accepted=await deliver_wake(adapter,source=source,
                 text=wake_text,
                 receipt=receipt,metadata={'nfos_coordinator_intake':context})
             if accepted:return
