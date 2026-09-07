@@ -1,0 +1,285 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:/Users/maiko/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 1 test files (~5 tests) under ['tests\\hermes_cli\\test_nfos_project_rollout.py']; running with -j 1
+[100.0% |     5/~5 | ✓1 | ✗5] ✗ tests\hermes_cli\test_nfos_project_rollout.py (1✓ 5✗, 13.0s)
+
+  ╔╍ Failed: tests\hermes_cli\test_nfos_project_rollout.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+  ║ INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+  ║ =========================== short test summary info ===========================
+  ║ FAILED tests/hermes_cli/test_nfos_project_rollout.py::test_enabled_project_adopts_same_card_before_dispatch_without_rewriting_history
+  ║ FAILED tests/hermes_cli/test_nfos_project_rollout.py::test_retained_block_reaches_principal_once_and_only_its_answer_resumes[continue]
+  ║ FAILED tests/hermes_cli/test_nfos_project_rollout.py::test_retained_block_reaches_principal_once_and_only_its_answer_resumes[human]
+  ║ FAILED tests/hermes_cli/test_nfos_project_rollout.py::test_rollout_keeps_backlog_dependencies_and_completed_cards_in_place
+  ║ FAILED tests/hermes_cli/test_nfos_project_rollout.py::test_migration_event_failure_rolls_back_the_entire_adoption
+  ║ ========================= 5 failed, 1 passed in 6.70s =========================
+  ║
+  ║  Repro: python -m pytest tests\hermes_cli\test_nfos_project_rollout.py
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+
+=== Summary: 1 files, 1 tests passed, 5 failed (100% complete) in 13.0s (1 workers) ===
+  Durations cached to test_durations.json (1 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   1
+  Total subprocess CPU-wall: 13.0s  (runner wall: 13.0s, parallelism: 1x)
+  P50: 13.02s  P90: 13.02s  P95: 13.02s  P99: 13.02s  Max: 13.02s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     13.02s  tests\hermes_cli\test_nfos_project_rollout.py
+
+=== Failure output ===
+
+--- tests\hermes_cli\test_nfos_project_rollout.py ---
+============================= test session starts =============================
+platform win32 -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 6 items
+
+tests\hermes_cli\test_nfos_project_rollout.py FFF.FF                     [100%]
+
+================================== FAILURES ===================================
+_ test_enabled_project_adopts_same_card_before_dispatch_without_rewriting_history _
+
+board = <hermes_cli.sqlite_safe_read.TrackedConnection object at 0x0000021325991150>
+
+    def test_enabled_project_adopts_same_card_before_dispatch_without_rewriting_history(board):
+        tid=retained(board)
+        before=dict(board.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+        comments=[tuple(r) for r in board.execute('SELECT * FROM task_comments WHERE task_id=?', (tid,))]
+        tick(board)
+        workflow=delivery.get_workflow(board, tid)
+>       assert workflow is not None, 'Enabled project left its retained ready card in the legacy path'
+E       AssertionError: Enabled project left its retained ready card in the legacy path
+E       assert None is not None
+
+tests\hermes_cli\test_nfos_project_rollout.py:43: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+_ test_retained_block_reaches_principal_once_and_only_its_answer_resumes[continue] _
+
+board = <hermes_cli.sqlite_safe_read.TrackedConnection object at 0x0000021325E6A650>
+action = 'continue'
+
+    @pytest.mark.parametrize('action', ['continue', 'human'])
+    def test_retained_block_reaches_principal_once_and_only_its_answer_resumes(board, action):
+        tid=retained(board)
+        kb.block_task(board, tid, reason='Tool unavailable; partial report retained', kind='transient')
+        tick(board)
+        decisions=delivery.pending_decisions(board)
+>       assert len(decisions)==1, 'Retained blocker never reached the new Principal queue'
+E       AssertionError: Retained blocker never reached the new Principal queue
+E       assert 0 == 1
+E        +  where 0 = len([])
+
+tests\hermes_cli\test_nfos_project_rollout.py:62: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+_ test_retained_block_reaches_principal_once_and_only_its_answer_resumes[human] _
+
+board = <hermes_cli.sqlite_safe_read.TrackedConnection object at 0x0000021326518650>
+action = 'human'
+
+    @pytest.mark.parametrize('action', ['continue', 'human'])
+    def test_retained_block_reaches_principal_once_and_only_its_answer_resumes(board, action):
+        tid=retained(board)
+        kb.block_task(board, tid, reason='Tool unavailable; partial report retained', kind='transient')
+        tick(board)
+        decisions=delivery.pending_decisions(board)
+>       assert len(decisions)==1, 'Retained blocker never reached the new Principal queue'
+E       AssertionError: Retained blocker never reached the new Principal queue
+E       assert 0 == 1
+E        +  where 0 = len([])
+
+tests\hermes_cli\test_nfos_project_rollout.py:62: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+____ test_rollout_keeps_backlog_dependencies_and_completed_cards_in_place _____
+
+board = <hermes_cli.sqlite_safe_read.TrackedConnection object at 0x0000021323C10650>
+
+    def test_rollout_keeps_backlog_dependencies_and_completed_cards_in_place(board):
+        parent=retained(board,'Parent')
+        child=retained(board,'Child')
+        held=retained(board,'Unrequested backlog')
+        completed=retained(board,'Delivered')
+        board.execute("UPDATE tasks SET status='backlog',assignee=NULL WHERE id=?",(held,))
+        board.execute("UPDATE tasks SET status='done' WHERE id=?",(completed,))
+        board.commit()
+        kb.link_tasks(board, parent, child)
+        tick(board)
+>       assert delivery.get_workflow(board,child) is not None
+E       AssertionError: assert None is not None
+E        +  where None = <function get_workflow at 0x000002132405C5E0>(<hermes_cli.sqlite_safe_read.TrackedConnection object at 0x0000021323C10650>, 't_73fb9fd5')
+E        +    where <function get_workflow at 0x000002132405C5E0> = delivery.get_workflow
+
+tests\hermes_cli\test_nfos_project_rollout.py:98: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+_________ test_migration_event_failure_rolls_back_the_entire_adoption _________
+
+board = <hermes_cli.sqlite_safe_read.TrackedConnection object at 0x0000021326518650>
+
+    def test_migration_event_failure_rolls_back_the_entire_adoption(board):
+        tid=retained(board)
+        board.execute("CREATE TRIGGER reject_rollout BEFORE INSERT ON task_events WHEN NEW.kind='nfos_legacy_adopted' BEGIN SELECT RAISE(ABORT,'rollout power loss'); END")
+        board.commit()
+>       with pytest.raises(sqlite3.IntegrityError, match='rollout power loss'):
+E       Failed: DID NOT RAISE IntegrityError
+
+tests\hermes_cli\test_nfos_project_rollout.py:109: Failed
+------------------------------ Captured log call ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+=========================== short test summary info ===========================
+FAILED tests/hermes_cli/test_nfos_project_rollout.py::test_enabled_project_adopts_same_card_before_dispatch_without_rewriting_history
+FAILED tests/hermes_cli/test_nfos_project_rollout.py::test_retained_block_reaches_principal_once_and_only_its_answer_resumes[continue]
+FAILED tests/hermes_cli/test_nfos_project_rollout.py::test_retained_block_reaches_principal_once_and_only_its_answer_resumes[human]
+FAILED tests/hermes_cli/test_nfos_project_rollout.py::test_rollout_keeps_backlog_dependencies_and_completed_cards_in_place
+FAILED tests/hermes_cli/test_nfos_project_rollout.py::test_migration_event_failure_rolls_back_the_entire_adoption
+========================= 5 failed, 1 passed in 6.70s =========================
+
+=== 1 file with test failures (5 tests failed) ===
+  tests\hermes_cli\test_nfos_project_rollout.py  (5 tests failed)

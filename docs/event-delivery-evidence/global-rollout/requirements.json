@@ -1,0 +1,32 @@
+[
+  [
+    "R01",
+    "PASS em integração",
+    "Entrada configurada em vários projetos; retransmissão preserva identidade. 8 testes de intake e 11 de recibos."
+  ],
+  [
+    "R02",
+    "PASS em SQLite real",
+    "Card, histórico, dependências, workspace e recibos preservados. Adoção repetida não cria outra tarefa."
+  ],
+  [
+    "R03",
+    "PASS em integração",
+    "Fila do Principal recebe o bloqueio uma vez; continue retoma, human mantém aguardando. Falha transacional reverte decisão e retomada juntas."
+  ],
+  [
+    "R04",
+    "PASS em contratos",
+    "PID vivo não é interrompido; PID reutilizado não retém card morto. Backlog e concluídos mantidos. Revisão antiga não cria segundo executor."
+  ],
+  [
+    "R05",
+    "Preparado",
+    "10 quadros reais configurados em candidato; Concursa aponta para /srv/projects/Concursa_ai/source. Ainda sem ativação."
+  ],
+  [
+    "R06",
+    "NOT_RUN em produção",
+    "Publicação, adoção autônoma e projeção do novo rollout no Vigília ainda pendentes nesta captura."
+  ]
+]

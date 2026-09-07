@@ -1,0 +1,27 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: /usr/local/lib/hermes-agent.release-20260907-3653382193e3a5cde4dbb4f219b31905c86de95e/venv/bin/python
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+fatal: not a git repository (or any of the parent directories): .git
+▶ launching test runner
+Discovered 5 test files (~34 tests) under ['tests/hermes_cli/test_nfos_project_rollout.py', 'tests/hermes_cli/test_nfos_impediment_revision.py', 'tests/gateway/test_nfos_receipts.py', 'tests/gateway/test_nfos_principal_queue.py', 'tests/gateway/test_nfos_intake.py']; running with -j 1
+[ 17.6% |     6/~34 | ✓8 | ✗0] ✓ tests/gateway/test_nfos_intake.py (8✓, 104.3s)
+[ 23.5% |     8/~34 | ✓10 | ✗ 0] ✓ tests/gateway/test_nfos_principal_queue.py (2✓, 93.0s)
+[ 55.9% |    19/~34 | ✓21 | ✗ 0] ✓ tests/gateway/test_nfos_receipts.py (11✓, 156.4s)
+[ 67.6% |    23/~34 | ✓27 | ✗ 0] ✓ tests/hermes_cli/test_nfos_impediment_revision.py (6✓, 112.3s)
+[100.0% |    34/~34 | ✓39 | ✗ 0] ✓ tests/hermes_cli/test_nfos_project_rollout.py (12✓, 247.3s)
+
+=== Summary: 5 files, 39 tests passed, 0 failed (100% complete) in 713.5s (1 workers) ===
+  Durations cached to test_durations.json (5 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   5
+  Total subprocess CPU-wall: 713.3s  (runner wall: 713.5s, parallelism: 1x)
+  P50: 112.30s  P90: 247.30s  P95: 247.30s  P99: 247.30s  Max: 247.30s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+    247.30s  tests/hermes_cli/test_nfos_project_rollout.py
+    156.40s  tests/gateway/test_nfos_receipts.py
+    112.30s  tests/hermes_cli/test_nfos_impediment_revision.py
+    104.30s  tests/gateway/test_nfos_intake.py
+     93.00s  tests/gateway/test_nfos_principal_queue.py

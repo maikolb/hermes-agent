@@ -1,0 +1,36 @@
+{
+  "at": "2026-09-07T21:54:46.825876+00:00",
+  "result": {
+    "started": "2026-09-07T21:36:55.922479+00:00",
+    "finished": "2026-09-07T21:49:13.524163+00:00",
+    "source": "/var/tmp/nfos-12h/global-rollout-260ylpcq/source",
+    "exit_code": 0,
+    "files": {
+      "hermes_cli/nfos_delivery.py": "2bbc594388f715bd0ae5c54211fa3cd690ae038e5ad4f6fc4b95becb07385f43",
+      "hermes_cli/nfos_runtime.py": "2fc0436e3f9ade9f32379bf90bb3a1078c9318d6f0426f96ccafada01250f064",
+      "hermes_cli/kanban_db.py": "aa0e4d7bf430007acb10668b331f5f2541876a7dfc0397b68be39e6ba8c654d3",
+      "gateway/kanban_watchers.py": "bf00040bdecaa99d7d6d55bb8fc64a5effdb82608505b3527331abfece4f966a",
+      "tests/hermes_cli/test_nfos_project_rollout.py": "3c63a1a02faf525e254f012ea1e89f67fdd245d877c6e5763d2fd7fdae24eb3c",
+      "tests/hermes_cli/test_nfos_impediment_revision.py": "5cbbe9dd32e8e07bf44722f67cf51b0a6fa14064a8a6caf5ab03949aa4f0d6ea",
+      "tests/gateway/test_nfos_receipts.py": "144107ce9993348a2ff084b30387ab58d2e8b56303b086dff1fed2befc2072c3",
+      "tests/gateway/test_nfos_principal_queue.py": "b9c6ffbdb0568f44712d388b5b412ae8738dde0ecdc502e6c972334b581885ac",
+      "tests/gateway/test_nfos_intake.py": "8a2d60f16cdbf58bdd3d73d14749982cf6151e5db4414cb00f3239734b38ac2d"
+    },
+    "command": [
+      "bash",
+      "scripts/run_tests.sh",
+      "-j",
+      "1",
+      "--file-retries",
+      "0",
+      "tests/hermes_cli/test_nfos_project_rollout.py",
+      "tests/hermes_cli/test_nfos_impediment_revision.py",
+      "tests/gateway/test_nfos_receipts.py",
+      "tests/gateway/test_nfos_principal_queue.py",
+      "tests/gateway/test_nfos_intake.py"
+    ],
+    "production_modified": false
+  },
+  "log": "▶ no local venv — using Nix dev venv via HERMES_PYTHON: /usr/local/lib/hermes-agent.release-20260907-3653382193e3a5cde4dbb4f219b31905c86de95e/venv/bin/python\n▶ running per-file parallel test suite via run_tests_parallel.py\n  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)\n▶ pre-compiling bytecode cache\nfatal: not a git repository (or any of the parent directories): .git\n▶ launching test runner\nDiscovered 5 test files (~34 tests) under ['tests/hermes_cli/test_nfos_project_rollout.py', 'tests/hermes_cli/test_nfos_impediment_revision.py', 'tests/gateway/test_nfos_receipts.py', 'tests/gateway/test_nfos_principal_queue.py', 'tests/gateway/test_nfos_intake.py']; running with -j 1\n[ 17.6% |     6/~34 | ✓8 | ✗0] ✓ tests/gateway/test_nfos_intake.py (8✓, 104.3s)\n[ 23.5% |     8/~34 | ✓10 | ✗ 0] ✓ tests/gateway/test_nfos_principal_queue.py (2✓, 93.0s)\n[ 55.9% |    19/~34 | ✓21 | ✗ 0] ✓ tests/gateway/test_nfos_receipts.py (11✓, 156.4s)\n[ 67.6% |    23/~34 | ✓27 | ✗ 0] ✓ tests/hermes_cli/test_nfos_impediment_revision.py (6✓, 112.3s)\n[100.0% |    34/~34 | ✓39 | ✗ 0] ✓ tests/hermes_cli/test_nfos_project_rollout.py (12✓, 247.3s)\n\n=== Summary: 5 files, 39 tests passed, 0 failed (100% complete) in 713.5s (1 workers) ===\n  Durations cached to test_durations.json (5 files)\n\n=== Per-file subprocess time distribution ===\n  Files:   5\n  Total subprocess CPU-wall: 713.3s  (runner wall: 713.5s, parallelism: 1x)\n  P50: 112.30s  P90: 247.30s  P95: 247.30s  P99: 247.30s  Max: 247.30s\n  <1s: 0 files (0%)  <2s: 0 files (0%)\n  Top 10 slowest:\n    247.30s  tests/hermes_cli/test_nfos_project_rollout.py\n    156.40s  tests/gateway/test_nfos_receipts.py\n    112.30s  tests/hermes_cli/test_nfos_impediment_revision.py\n    104.30s  tests/gateway/test_nfos_intake.py\n     93.00s  tests/gateway/test_nfos_principal_queue.py\n",
+  "log_sha256": "44d9640914c725757925160318560cc0709525484939be71f029a0639306240d"
+}
