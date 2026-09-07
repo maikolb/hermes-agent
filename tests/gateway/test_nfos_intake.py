@@ -70,9 +70,15 @@ async def test_media_original_survives_cache_removal(setup):
 async def test_status_and_replies_stay_with_principal(setup):
     runner,event,adapter,root=setup
     event.text='Qual é o status?'
-    assert await runner._nfos_receive(event) is None
-    event.text='Corrija o que falei antes';event.reply_to_message_id='122'
-    assert await runner._nfos_receive(event) is None
+    assert await runner._nfos_receive(event) is not None
+    event.text='Corrija o que falei antes';event.reply_to_message_id='122';event.message_id='124'
+    assert await runner._nfos_receive(event) is not None
+    with kb.connect_closing() as conn:
+        rows=conn.execute('SELECT status,task_id,worker_pid FROM nfos_requests').fetchall()
+        assert len(rows)==2
+        assert all(row['status']=='coordinating' and row['task_id'] is None and row['worker_pid'] is None for row in rows)
+        assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0]==0
+    adapter._send_with_retry.assert_not_called()
 
 
 @pytest.mark.asyncio

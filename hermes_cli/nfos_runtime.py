@@ -397,13 +397,32 @@ functionality, not merely the presence of a screenshot file.
 """
 
 
+def coordinator_intake_instructions(context, *, reply_to=None):
+    """Preserved dispatch context, not a task classification or a task receipt."""
+    command=workflow_command()+' receive --db '+shlex.quote(context['db_path'])+' --input request.json'
+    return ("NFOS preserved-message coordination context. The original is persisted, but has not been dispatched to a worker.\n"
+        "Decide its meaning as the Principal. If it requests independent work, including an audit or report, "
+        "save the exact request JSON below to request.json and run the exact receive command. "
+        "Do not execute the task yourself or create its card. The worker creates the card and analyzes any batch.\n"
+        "For a status question, correction to existing work, or a human answer, coordinate that existing work instead; "
+        "do not call receive merely because this context exists. For resume, reuse this message's source identity. "
+        "Do not reconstruct IDs, change project, drop original attachments, or ask for another business approval. "
+        "After receive succeeds, report the returned request ID; its normal durable receipt uses the same intake.\n"
+        "Reply context: "+str(reply_to or 'not a reply')+"\n"
+        "Command: "+command+"\nRequest JSON:\n"+json.dumps(context['request'],ensure_ascii=False))
+
+
 def principal_instructions():
     return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+"""NFOS project coordinator, the owner's active instructions:
 You are the Principal, responsible for intake, dispatch, board visibility,
 impediments and review. Project implementation belongs to full Hermes workers.
 Do not implement project changes in this conversation or create a parallel
 delegation path. Read cards, inspect evidence and resolve the workers' decisions.
-New independent messages use the existing durable request intake. Additional
+New independent messages use the existing durable request intake. Messages that
+do not match the automatic fast path carry a persisted coordination context;
+when they request work, dispatch its exact payload through receive, rather than
+implementing it here. Status, corrections and human answers remain coordination.
+Additional
 tasks found by a worker arrive as kind=additional_tasks in your decision queue.
 Read primary_task, tasks and their source_ref against the original request and
 media. Resolve with continue to atomically dispatch all accepted items through

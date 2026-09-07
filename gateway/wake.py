@@ -68,10 +68,13 @@ def _receipt_connection(receipt):
 
 
 def record_notify_progress(receipt, **progress):
-    from hermes_cli.kanban_db import update_notify_receipt
     conn = _receipt_connection(receipt)
     try:
-        update_notify_receipt(conn, delivery_id=receipt["delivery_id"], **progress)
+        if receipt.get("kind") == "nfos_coordinator_input":
+            from hermes_cli.nfos_delivery import record_coordinator_progress
+            return record_coordinator_progress(conn, receipt, **progress)
+        from hermes_cli.kanban_db import update_notify_receipt
+        return update_notify_receipt(conn, delivery_id=receipt["delivery_id"], **progress)
     finally:
         conn.close()
 
@@ -80,6 +83,9 @@ def notify_wake_accepted(receipt):
     """Recover a lost ACK from the checkpoint written before agent work starts."""
     conn = _receipt_connection(receipt)
     try:
+        if receipt.get("kind") == "nfos_coordinator_input":
+            from hermes_cli.nfos_delivery import coordinator_wake_accepted
+            return coordinator_wake_accepted(conn, receipt)
         row = conn.execute("SELECT * FROM kanban_notify_claims WHERE delivery_id=?",
                            (receipt["delivery_id"],)).fetchone()
     finally:
@@ -107,13 +113,15 @@ async def deliver_wake(
     session_id: str = "",
     source: Any = None,
     receipt: dict | None = None,
+    metadata: dict | None = None,
 ) -> bool | None:
     """Deliver a wake turn to the session behind ``adapter``.
 
     ``session_id`` is the RAW session id (the ``X-Hermes-Session-Id`` value /
     ``state.db`` key) — required for non-push adapters. ``source`` is the
     ``SessionSource`` used to build the synthetic event — required for
-    push-capable adapters.
+    push-capable adapters. ``metadata`` carries optional context on that
+    internal event; an explicit receipt owns ``kanban_wake_delivery``.
 
     Raises on failure (bad arguments, exhausted retries, HTTP error) so the
     caller can rewind/retry instead of treating the wake as delivered.
@@ -127,12 +135,15 @@ async def deliver_wake(
             return True
         from gateway.platforms.base import MessageEvent, MessageType
 
+        event_metadata = dict(metadata or {})
+        if receipt:
+            event_metadata["kanban_wake_delivery"] = receipt
         synth_event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
             source=source,
             internal=True,
-            metadata={"kanban_wake_delivery": receipt} if receipt else {},
+            metadata=event_metadata,
         )
         await adapter.handle_message(synth_event)
         if receipt:

@@ -66,6 +66,19 @@ Os projetos opt-in recebem instruções gerenciais no Principal e usam o intake
 NFOS antes do caminho de implementação direta. Respostas, perguntas de status e
 mensagens de coordenação continuam sendo tratadas pelo Principal.
 
+O reconhecimento automático de pedidos é um caminho rápido. Outras formulações,
+inclusive pedidos enviados como resposta, chegam ao Principal com a identidade
+real da mensagem, o board e os anexos originais preservados. Se houver trabalho
+independente, ele usa o mesmo comando `receive` e deixa o worker criar o card.
+O original fica em `nfos_requests` com estado `coordinating`, sem criar card ou
+ocupar vaga de worker. O mecanismo de wake existente entrega a mensagem ao
+Principal quando sua sessão está disponível. A confirmação exige checkpoint
+com texto, origem, anexos e comando de despacho. Antes dessa confirmação, uma
+queda deixa a entrega pendente no SQLite; depois dela, a recuperação usa o
+checkpoint da sessão. O mesmo pedido passa a `pending` quando o Principal o
+identifica como trabalho. Uma pergunta de status ou resposta humana continua
+sendo coordenação e não cria tarefa apenas por conter esse contexto.
+
 ## Fonte de cada informação
 
 | Informação | Autoridade |

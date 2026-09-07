@@ -890,7 +890,7 @@ class GatewayKanbanWatchersMixin:
         source=payload.get('source') or {}
         return str(source.get('transport_profile') or source.get('profile') or 'default')
 
-    def _nfos_receipt_candidates(self, profiles, board=None, request_id=None, limit=20):
+    def _nfos_receipt_candidates(self, profiles, board=None, request_id=None, limit=20, *, coordination=False):
         """Read pending obligations even when their worker has no card yet."""
         from hermes_cli import kanban_db as kb
         boards=[{'slug':board}] if board else kb.list_boards(include_archived=False)
@@ -904,15 +904,18 @@ class GatewayKanbanWatchersMixin:
                 with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=2)) as conn:
                     conn.row_factory=sqlite3.Row
                     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_requests'").fetchone():continue
-                    sql='SELECT id,payload FROM nfos_requests WHERE acknowledged_at IS NULL'
+                    condition="status='coordinating'" if coordination else "status<>'coordinating' AND acknowledged_at IS NULL"
+                    sql='SELECT id,payload,source_key FROM nfos_requests WHERE '+condition
                     rows=conn.execute(sql+(' AND id=?' if request_id else '')+' ORDER BY created_at,id',
                                       (request_id,) if request_id else ()).fetchall()
                 for row in rows:
                     payload=json.loads(row['payload']);source=payload.get('source') or {}
                     if source.get('platform')!='telegram' or self._nfos_receipt_owner(payload) not in profiles:continue
                     if not all(source.get(key) for key in ('chat_id','thread_id','message_id')):continue
-                    receipt=payload.get('receipt') or {};now=time.time()
+                    receipt=payload.get('coordination' if coordination else 'receipt') or {};now=time.time()
+                    if coordination and receipt.get('wake_accepted'):continue
                     if max(receipt.get('claim_until',0),receipt.get('next_attempt_at',0))>now:continue
+                    if coordination:payload['_request_part']=json.loads(row['source_key'])[-1]
                     pending.append((path,row['id'],payload))
                     if len(pending)>=limit:return pending
             except (sqlite3.Error,OSError,ValueError,TypeError):
@@ -999,14 +1002,19 @@ class GatewayKanbanWatchersMixin:
         source=getattr(event,'source',None)
         if source is None or getattr(event,'internal',False):
             return None
+        metadata=dict(getattr(event,'metadata',None) or {})
+        metadata.pop('nfos_coordinator_intake',None)
+        event.metadata=metadata
         platform=str(getattr(getattr(source,'platform',None),'value','')).lower()
         if platform!='telegram' or not getattr(source,'thread_id',None):
             return None
         text=str(getattr(event,'text','') or '').strip()
         media=list(getattr(event,'media_urls',[]) or [])
-        if text.startswith('/') or getattr(event,'reply_to_message_id',None):
+        if text.startswith('/') or not (text or media):
             return None
-        if not media and _classify_parallel_intake_message(text)!='new_task':
+        config=self._kanban_parallel_dispatch_config(source)
+        configured=(((config or {}).get('kanban') or {}).get('delivery') or {}).get('projects') or {}
+        if not any(isinstance(item,dict) and item.get('enabled') is True for item in configured.values()):
             return None
         if project_context is None:
             project_context,denial=await asyncio.to_thread(self._resolve_project_context_for_message,event,source)
@@ -1018,7 +1026,7 @@ class GatewayKanbanWatchersMixin:
         from hermes_cli import kanban_db as kb
         from hermes_cli import nfos_delivery as delivery
         board=str(project_context.board_slug)
-        project=project_config(board,self._kanban_parallel_dispatch_config(source))
+        project=project_config(board,config)
         if not project:
             return None
         project.setdefault('profile',str(getattr(source,'profile','') or self._active_profile_name() or 'default'))
@@ -1029,15 +1037,105 @@ class GatewayKanbanWatchersMixin:
         owner_resolver=getattr(self,'_adapter_profile_for_source',None)
         owner=owner_resolver(source) if callable(owner_resolver) else identity['profile']
         identity['transport_profile']=str(owner or self._active_profile_name() or 'default')
-        def persist():
+        def prepare():
             path=kb.kanban_db_path(board=board)
             attachments=preserve_attachments(media,list(getattr(event,'media_types',[]) or []),
                 directory=path.parent/'request-media') if media else []
+            return {'db_path':str(path.resolve()),'request':{
+                'source':identity,'text':text,'project':project,'attachments':attachments,'part':'0'}}
+        context=await asyncio.to_thread(prepare)
+        if getattr(event,'reply_to_message_id',None) or (not media and _classify_parallel_intake_message(text)!='new_task'):
+            # Accept the original durably, not through the old RAM-only steer
+            # queue. This is a Principal inbox entry, not executable work.
+            def defer():
+                with kb.connect_closing(board=board) as conn:
+                    return delivery.receive_request(conn,**context['request'],defer_to_principal=True,
+                        reply_to_message_id=getattr(event,'reply_to_message_id',None))
+            request_id=await asyncio.to_thread(defer)
+            await self._nfos_retry_coordinator_inputs(board=board,request_id=request_id)
+            return ''
+        def persist():
+            payload=context['request']
             with kb.connect_closing(board=board) as conn:
-                return delivery.receive_request(conn,source=identity,text=text,project=project,attachments=attachments)
+                return delivery.receive_request(conn,**payload)
         request_id=await asyncio.to_thread(persist)
         await self._nfos_retry_receipts(board=board,request_id=request_id)
         return self._nfos_receipt_text(request_id)
+
+    async def _nfos_retry_coordinator_inputs(self, *, board=None, request_id=None):
+        """Feed persisted input into the existing checkpoint-aware wake path."""
+        from gateway.platforms.base import Platform,SessionSource
+        profiles={profile for profile in self._nfos_receipt_profiles()
+                  if self._adapter_for_source(SessionSource(platform=Platform.TELEGRAM,chat_id='',profile=profile)) is not None}
+        if not profiles:return
+        try:
+            candidates=await _to_thread_process_service(
+                lambda:self._nfos_receipt_candidates(profiles,board,request_id,coordination=True))
+        except Exception:
+            logger.warning('NFOS Principal input collection failed; original messages remain pending',exc_info=True)
+            return
+        active=getattr(self,'_nfos_coordinator_deliveries',None)
+        if active is None:
+            active={};self._nfos_coordinator_deliveries=active
+        background=getattr(self,'_background_tasks',None)
+        if background is None:
+            background=set();self._background_tasks=background
+        for path,rid,payload in candidates:
+            key=(str(path),rid)
+            if key in active and not active[key].done():continue
+            task=asyncio.create_task(self._nfos_deliver_coordinator_input(path,rid,payload),name='nfos-coordinator-input')
+            active[key]=task; background.add(task)
+            def finished(completed, key=key):
+                background.discard(completed)
+                if active.get(key) is completed:active.pop(key,None)
+                if not completed.cancelled() and completed.exception():
+                    logger.warning('NFOS coordinator input remains pending after delivery failure')
+            task.add_done_callback(finished)
+
+    async def _nfos_deliver_coordinator_input(self, path, request_id, payload):
+        from hermes_cli import kanban_db as kb,nfos_delivery as delivery
+        from hermes_cli.nfos_runtime import coordinator_intake_instructions
+        from gateway.platforms.base import Platform,SessionSource
+        from gateway.wake import deliver_wake
+        def claim():
+            with kb.connect_closing(path) as conn:
+                return delivery.claim_coordinator_input(conn,request_id)
+        receipt=await _to_thread_process_service(claim)
+        if receipt is None:return
+        original=payload['source'];owner=self._nfos_receipt_owner(payload)
+        source=SessionSource(platform=Platform.TELEGRAM,chat_id=original['chat_id'],
+            thread_id=original['thread_id'],chat_type=original.get('chat_type') or 'group',
+            user_id=original.get('user_id'),profile=owner)
+        context={'db_path':str(path),'request_id':request_id,
+            'reply_to_message_id':(payload.get('coordination') or {}).get('reply_to_message_id'),
+            'request':{key:payload[key] for key in ('source','text','project','attachments')}}
+        context['request']['part']=payload.get('_request_part','0')
+        error=None
+        try:
+            # The wake's user content is checkpointed before its ACK. A later
+            # sidecar alone would lose the exact intake after a crash here.
+            wake_text=('[NFOS: mensagem original preservada para coordenação; não é uma nova mensagem Telegram.]\n'
+                +payload['text']+'\n\n'+coordinator_intake_instructions(context,
+                    reply_to=context['reply_to_message_id']))
+            accepted=await deliver_wake(self._adapter_for_source(source),source=source,
+                text=wake_text,
+                receipt=receipt,metadata={'nfos_coordinator_intake':context})
+            if accepted:return
+        except Exception as exc:
+            error=str(exc)
+        def retry():
+            with kb.connect_closing(path) as conn:
+                delivery.retry_coordinator_input(conn,receipt,error=error)
+        await _to_thread_process_service(retry)
+
+    @staticmethod
+    def _nfos_coordinator_intake_note(event):
+        context=(getattr(event,'metadata',None) or {}).get('nfos_coordinator_intake')
+        if not isinstance(context,dict):
+            return ''
+        from hermes_cli.nfos_runtime import coordinator_intake_instructions
+        return coordinator_intake_instructions(context,
+            reply_to=getattr(event,'reply_to_message_id',None) or context.get('reply_to_message_id'))
 
     def _owns_kanban_dispatcher_lock(self) -> bool:
         """Return whether this gateway currently owns the singleton lock."""
@@ -1150,6 +1248,10 @@ class GatewayKanbanWatchersMixin:
         if receipt is not None:
             # The persisted receipt owns egress for idle, busy and retry paths.
             return True
+        if (getattr(event,'metadata',None) or {}).get('nfos_coordinator_intake'):
+            # An opted-in reply/ambiguous request belongs to the Principal;
+            # it must not create a card through the older parallel path.
+            return False
         source = getattr(event, "source", None)
         if source is None or getattr(event, "internal", False):
             return False
@@ -2339,6 +2441,7 @@ class GatewayKanbanWatchersMixin:
             try:
                 # Requests may owe a receipt before any card/subscription exists.
                 await self._nfos_retry_receipts()
+                await self._nfos_retry_coordinator_inputs()
                 _gc_due = time.monotonic() >= _gc_next_at
                 _gc_retention_days = 30
                 if _gc_due:

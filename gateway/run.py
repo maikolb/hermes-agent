@@ -19149,6 +19149,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event, _cmd_def_inner, _quick_key, source,
                 )
 
+            # Persist NFOS input before legacy in-memory busy transports.
+            # The same durable path handles direct tasks and coordination.
+            if await self._nfos_receive(event) is not None:
+                return None
+
             if (
                 event.message_type == MessageType.PHOTO
                 and self._busy_input_mode != "steer"
@@ -21192,6 +21197,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # ride the current user message via the api_content sidecar instead
         # (staged below, consumed in run_sync → build_turn_context).
         turn_sidecar_notes: List[str] = []
+        intake_note = self._nfos_coordinator_intake_note(event)
+        if intake_note:
+            turn_sidecar_notes.append(intake_note)
 
         # If the previous session expired and was auto-reset, deliver a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).

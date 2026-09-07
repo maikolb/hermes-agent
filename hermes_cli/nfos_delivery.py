@@ -117,7 +117,8 @@ def _event(conn, task_id, run_id, kind, payload):
     _kb()._append_event(conn,task_id,kind,payload,run_id=run_id)
 
 
-def receive_request(conn, *, source, text, project, attachments=(), part='0', origin=None):
+def receive_request(conn, *, source, text, project, attachments=(), part='0', origin=None,
+                    defer_to_principal=False, reply_to_message_id=None):
     required=('platform','chat_id','thread_id','message_id')
     if any(not str(source.get(k) or '').strip() for k in required):
         raise WorkflowError('A request needs its original platform/chat/topic/message identity')
@@ -128,11 +129,101 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
     payload={'source':source,'text':text,'project':project,'attachments':list(attachments)}
     if origin is not None:
         payload['origin']=origin
+    if defer_to_principal:
+        payload['coordination']={'reply_to_message_id':reply_to_message_id}
     payload=_json(payload)
     with _kb().write_txn(conn,allow_nested=True):
-        conn.execute('INSERT OR IGNORE INTO nfos_requests(id,source_key,payload,created_at) VALUES(?,?,?,?)',
-                     (request_id,source_key,payload,int(time.time())))
+        conn.execute('INSERT OR IGNORE INTO nfos_requests(id,source_key,payload,status,created_at) VALUES(?,?,?,?,?)',
+                     (request_id,source_key,payload,'coordinating' if defer_to_principal else 'pending',int(time.time())))
+        if not defer_to_principal:
+            # The Principal classifies the preserved message through the same
+            # intake. Its original bytes/identity remain authoritative.
+            conn.execute("UPDATE nfos_requests SET status='pending' WHERE id=? AND status='coordinating'",
+                         (request_id,))
     return request_id
+
+
+def _coordinator_receipt(conn, row):
+    path=next(item[2] for item in conn.execute('PRAGMA database_list') if item[1]=='main')
+    if not path:
+        raise WorkflowError('Principal input requires a persistent board database')
+    coordination=json.loads(row['payload']).get('coordination') or {}
+    return {'kind':'nfos_coordinator_input','db_path':str(Path(path).resolve()),
+            'request_id':row['id'],'delivery_id':'nfos-input:'+row['id'],
+            'claim_token':coordination.get('claim_token')}
+
+
+def record_coordinator_progress(conn, receipt, **progress):
+    with _kb().write_txn(conn,allow_nested=True):
+        row=get_request(conn,receipt['request_id'])
+        if row is None:
+            return
+        payload=json.loads(row['payload']);coordination=payload.setdefault('coordination',{})
+        if coordination.get('claim_token')!=receipt.get('claim_token'):
+            raise OwnershipConflict('Principal input was claimed by another delivery attempt')
+        for key in ('checkpoint_root','session_id','wake_accepted'):
+            if key in progress:
+                coordination[key]=progress[key]
+        if coordination.get('wake_accepted'):
+            coordination['claim_until']=0
+            coordination['last_error']=None
+        conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(payload),row['id']))
+
+
+def coordinator_wake_accepted(conn, receipt):
+    """Same lost-ACK recovery as ordinary Kanban wakes, without a fake card."""
+    row=get_request(conn,receipt['request_id'])
+    if row is None or row['status']!='coordinating':
+        return True
+    coordination=json.loads(row['payload']).get('coordination') or {}
+    if coordination.get('wake_accepted'):
+        return True
+    if coordination.get('checkpoint_root') and coordination.get('session_id'):
+        from agent.turn_checkpoint import TurnCheckpointStore
+        try:
+            state=TurnCheckpointStore(coordination['checkpoint_root']).load(coordination['session_id'])
+        except FileNotFoundError:
+            return False
+        saved=(state.get('routing') or {}).get('kanban_wake_delivery') or {}
+        if (saved.get('delivery_id')==receipt['delivery_id']
+                and saved.get('claim_token')==coordination.get('claim_token')
+                and saved.get('db_path')==receipt['db_path']):
+            record_coordinator_progress(conn,_coordinator_receipt(conn,row),wake_accepted=True)
+            return True
+    return False
+
+
+def claim_coordinator_input(conn, request_id):
+    row=get_request(conn,request_id)
+    if row is None or coordinator_wake_accepted(conn,_coordinator_receipt(conn,row)):
+        return None
+    with _kb().write_txn(conn,allow_nested=True):
+        row=get_request(conn,request_id)
+        if row is None or row['status']!='coordinating':
+            return None
+        payload=json.loads(row['payload']);coordination=payload.setdefault('coordination',{})
+        now=time.time()
+        if coordination.get('wake_accepted') or max(coordination.get('claim_until',0),coordination.get('next_attempt_at',0))>now:
+            return None
+        coordination.update(claim_token=uuid.uuid4().hex,claim_until=now+60,
+                            attempts=int(coordination.get('attempts',0))+1)
+        conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(payload),row['id']))
+        return _coordinator_receipt(conn,get_request(conn,request_id))
+
+
+def retry_coordinator_input(conn, receipt, *, error=None):
+    with _kb().write_txn(conn,allow_nested=True):
+        row=get_request(conn,receipt['request_id'])
+        if row is None or row['status']!='coordinating':
+            return
+        payload=json.loads(row['payload']);coordination=payload.get('coordination') or {}
+        if coordination.get('claim_token')!=receipt.get('claim_token') or coordination.get('wake_accepted'):
+            return
+        from agent.redact import redact_sensitive_text
+        delay=5 if error is None else min(300,5*2**min(int(coordination.get('attempts',1))-1,6))
+        coordination.update(claim_until=0,next_attempt_at=time.time()+delay,
+                            last_error=redact_sensitive_text(str(error),force=True,redact_url_credentials=True)[:500] if error else None)
+        conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(payload),row['id']))
 
 
 def reserve_request(conn, *, capacity):
@@ -931,6 +1022,7 @@ def main():
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
+    parser.add_argument('--db',help='Exact board database supplied by the current gateway event')
     parser.add_argument('--evidence',help='JSON file with the TL session/output and fallback reason when applicable')
     parser.add_argument('--author',default='Claude TL',choices=['Claude TL','Codex'])
     parser.add_argument('--stage')
@@ -947,7 +1039,7 @@ def main():
     args=parser.parse_args()
     payload=json.loads(Path(args.input).read_text(encoding='utf-8-sig')) if args.input else {}
     evidence=json.loads(Path(args.evidence).read_text(encoding='utf-8-sig')) if args.evidence else {}
-    with _kb().connect_closing() as conn:
+    with _kb().connect_closing(db_path=Path(args.db) if args.db else None) as conn:
         if args.action=='show':
             result={'workflow':get_workflow(conn,args.task),'spec':get_spec(conn,args.task),
                 'runtime':{'code_root':str(Path(__file__).resolve().parents[1]),'python':sys.executable},
