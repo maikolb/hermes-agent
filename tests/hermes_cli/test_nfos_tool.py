@@ -113,19 +113,85 @@ def test_wrong_task_run_cannot_spawn_a_process(adapter, board):
     assert not marker.exists()
 
 
-def test_deadline_terminates_command_and_its_real_descendant(adapter, board):
-    code = """import subprocess,sys,time,os
-p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(90)'])
-print('PIDS',os.getpid(),p.pid,flush=True)
-time.sleep(90)
-"""
-    result = invoke(adapter, board, code, timeout_seconds=1.0, call_id='deadline')
-    assert result['status'] == 'timed_out' and result['timed_out'] is True
-    chunks = read(board, 'SELECT * FROM nfos_tool_chunks ORDER BY seq')
-    output = b''.join(r['content'] for r in chunks if r['stream'] == 'stdout').decode()
-    pids = [int(n) for n in output.strip().split()[1:]]
-    assert len(pids) == 2
-    assert all(not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE for pid in pids)
+def test_deadline_terminates_command_and_its_real_descendant(adapter, board, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    # CI can spend more than one second starting Python. Prove that the actual
+    # command AND its actual child are alive before exercising the deadline.
+    # Only this module's clock reference moves; process creation, SQLite, output,
+    # signals, termination waits and every other module retain real time.
+    expired = threading.Event()
+    monkeypatch.setattr(adapter, 'time', SimpleNamespace(
+        time=time.time, sleep=time.sleep,
+        monotonic=lambda: time.monotonic() + (180 if expired.is_set() else 0)))
+    child = ("import json,os,psutil,time;"
+             "print(json.dumps({'role':'child','pid':os.getpid(),"
+             "'started_at':psutil.Process().create_time()}),flush=True);time.sleep(90)")
+    code = ("import json,subprocess,sys,time,os,psutil\n"
+            "print(json.dumps({'role':'command','pid':os.getpid(),"
+            "'started_at':psutil.Process().create_time()}),flush=True)\n"
+            f"p=subprocess.Popen([sys.executable,'-u','-c',{child!r}])\n"
+            "time.sleep(90)\n")
+    owned = []
+    ready = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(invoke, adapter, board, code, timeout_seconds=90, call_id='deadline')
+        try:
+            readiness_deadline = time.monotonic() + 60
+            output = b''
+            while time.monotonic() < readiness_deadline:
+                try:
+                    chunks = read(board, "SELECT * FROM nfos_tool_chunks WHERE call_id='deadline' ORDER BY seq")
+                    output = b''.join(r['content'] for r in chunks if r['stream'] == 'stdout')
+                    for line in output.splitlines():
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue  # a persisted chunk may end halfway through a line
+                        ready[row['role']] = row
+                except sqlite3.OperationalError:
+                    pass
+                if set(ready) == {'command', 'child'}:
+                    break
+                if future.done():
+                    pytest.fail(f'Fixture process ended before both readiness receipts: {future.result()}; stdout={output!r}')
+                time.sleep(.025)
+            else:
+                pytest.fail(f'Fixture startup exceeded 60s before both readiness receipts; stdout={output!r}')
+            call = read(board, "SELECT * FROM nfos_tool_calls WHERE id='deadline'")[0]
+            root = psutil.Process(call['worker_pid'])
+            assert abs(root.create_time() - call['worker_started_at']) < .01
+            owned = [{'pid': p.pid, 'started_at': p.create_time()}
+                     for p in [root, *root.children(recursive=True)]]
+            for receipt in ready.values():
+                assert any(p['pid'] == receipt['pid'] and
+                           abs(p['started_at'] - receipt['started_at']) < .01 for p in owned)
+                assert psutil.Process(receipt['pid']).status() != psutil.STATUS_ZOMBIE
+            assert call['status'] == 'running' and not future.done()
+            assert call['deadline_at'] - call['started_at'] == pytest.approx(90)
+            expired.set()
+            result = future.result(timeout=20)
+            assert result['status'] == 'timed_out' and result['timed_out'] is True
+            assert result['error'] == 'Tool deadline exceeded'
+            assert len(ready) == 2
+            # Assert before fixture cleanup: cleanup must never hide a failure
+            # of the adapter to terminate one of the two real processes.
+            for receipt in ready.values():
+                try:
+                    process = psutil.Process(receipt['pid'])
+                    assert (abs(process.create_time() - receipt['started_at']) >= .01 or
+                            process.status() == psutil.STATUS_ZOMBIE)
+                except psutil.NoSuchProcess:
+                    pass
+        finally:
+            # On a failed readiness/assertion the adapter still receives its
+            # deadline, then only recorded identities from this test are cleaned.
+            expired.set()
+            try:
+                future.result(timeout=20)
+            finally:
+                cleanup_verified_test_processes(owned)
 
 
 def test_utf8_and_large_output_are_preserved_without_truncation(adapter, board):

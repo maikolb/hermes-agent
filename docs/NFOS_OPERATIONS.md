@@ -118,6 +118,15 @@ se perder, a próxima tentativa consulta o destino primeiro. A revisão vincula 
 spec ao candidato homologado e à sua árvore. O SHA integrado e o artefato de
 produção são registrados separadamente; HTTP200 sozinho não comprova a entrega.
 
+Nos cards NFOS, o guard legado de PR não consulta nem integra uma PR citada em
+comentário. A publicação pertence ao workflow e ao seu registro de efeitos.
+
+Uma correção na instrução do mesmo card exige atualizar e persistir a spec antes
+de continuar a implementação. A revisão anterior não aprova o novo escopo: o
+Principal revisa o candidato ou relatório atual antes da publicação ou conclusão.
+Spec, revisões anteriores e trabalho salvo permanecem no histórico. A consulta de
+um efeito externo já iniciado continua permitida para descobrir seu resultado.
+
 A autorização de negócio dentro da spec permite revisão, merge e deploy sem nova
 confirmação humana. Uma dependência real de acesso ou uma escolha de produto ainda
 sem resposta gera a pergunta específica, sem criar login ou aprovação genérica.

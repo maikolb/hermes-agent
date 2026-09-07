@@ -5275,6 +5275,14 @@ def update_task_instruction(
         if task.status in {"done", "archived"}:
             raise ValueError("completed work requires an explicit follow-up task")
         conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (body, task_id))
+        if task.body != body:
+            conn.execute(
+                "UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?",
+                (f"Read instruction r{expected_revision + 1}, update and persist the spec, "
+                 "then continue the unfinished work. Submit the current candidate or report "
+                 "to the Principal before publication or completion. "
+                 "Preserve saved work and reconcile unknown effects.", int(time.time()), task_id),
+            )
         cur = conn.execute(
             "INSERT INTO task_comments(task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
             (task_id, author, "Current operator instruction:\n" + body, int(time.time())),
@@ -12742,16 +12750,14 @@ def check_respawn_guard(
         if not requeued_after:
             return "recent_success"
 
-    # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
-    #    The guard exists to prevent a DUPLICATE PR, not to park the card
-    #    waiting for a human. Before holding, RESOLVE the PR's state:
-    #    already merged/closed → the guard no longer applies; still open →
-    #    hold, surfacing ``pr_merge_pending`` when it is green+mergeable so
-    #    the DELIVERY phase (or the operator) completes the cycle. The
-    #    guard itself NEVER merges: adversarial review 29/08 executed
-    #    counterexamples where guard-side merging shipped a foreign repo's
-    #    PR (prose-regex target), treated an empty check rollup as green,
-    #    and raced a force-push between view and merge (TOCTOU).
+    # NFOS owns review and publication through its durable effect protocol.
+    # A comment URL must neither publish outside that path nor hold its worker.
+    # Earlier cooldown/auth/recent-success guards still apply to these cards.
+    if conn.execute("SELECT 1 FROM nfos_workflows WHERE task_id=?", (task_id,)).fetchone():
+        return None
+
+    # 4. Legacy cards resolve recent comment PRs using their existing policy,
+    #    including active-PR holds and configured automatic merging.
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
     latest_pr_url = None
     latest_pr_at = 0
