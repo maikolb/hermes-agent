@@ -325,6 +325,19 @@ def get_spec(conn, task_id):
     return _artifact(conn,task_id,'spec')
 
 
+def _spec_matches_instruction(conn, task_id):
+    task=_kb().get_task(conn,task_id)
+    spec=get_spec(conn,task_id)
+    # Specs predating this binding are valid only for the initial instruction.
+    return bool(task and spec and
+        json.loads(spec['evidence']).get('instruction_revision',0)==task.instruction_revision)
+
+
+def _require_current_instruction_spec(conn, task_id):
+    if not _spec_matches_instruction(conn,task_id):
+        raise WorkflowError('Card instructions changed; read them and persist the updated spec before continuing delivery')
+
+
 def save_spec(conn, task_id, run_id, spec, *, author, evidence):
     if not spec.get('goal') or not spec.get('criteria') or not spec.get('steps'):
         raise WorkflowError('A spec needs a goal, verifiable criteria and direct steps')
@@ -349,11 +362,12 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
             _event(conn,task_id,run_id,'nfos_delivery_classified',
                    {'previous':task.delivery_type,'delivery_type':spec['delivery_type'],'author':author})
         revision=wf['spec_revision']+1
+        saved_evidence=dict(evidence, instruction_revision=task.instruction_revision)
         conn.execute('INSERT INTO nfos_artifacts(task_id,run_id,kind,revision,content,author,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)',
-                     (task_id,run_id,'spec',revision,_json(spec),author,_json(evidence),int(time.time())))
+                     (task_id,run_id,'spec',revision,_json(spec),author,_json(saved_evidence),int(time.time())))
         conn.execute("UPDATE nfos_workflows SET stage='spec',spec_revision=?,next_action='Implement and verify the persisted spec',updated_at=? WHERE task_id=?",
                      (revision,int(time.time()),task_id))
-        _event(conn,task_id,run_id,'nfos_spec_saved',{'revision':revision,'author':author,'evidence':evidence})
+        _event(conn,task_id,run_id,'nfos_spec_saved',{'revision':revision,'author':author,'evidence':saved_evidence})
         return revision
 
 
@@ -373,6 +387,8 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
             raise WorkflowError('Persist the spec before implementation')
         if stage!='analysis' and _scope_needs_new_spec(wf):
             raise WorkflowError('Principal changed the primary task; persist a newer spec before continuing delivery')
+        if stage!='analysis':
+            _require_current_instruction_spec(conn,task_id)
         updates=dict(state or {})
         updates.pop('task_partition',None)  # Only Principal decisions own this receipt.
         saved=json.loads(wf['state_json']);saved.update(updates)
@@ -529,6 +545,7 @@ def save_report(conn, task_id, run_id, report):
     spec=get_spec(conn,task_id)
     if not spec:
         raise WorkflowError('No persisted spec')
+    _require_current_instruction_spec(conn,task_id)
     report=json.loads(_json(report))
     encoded=_json(report)
     checks=_report_artifact_checks(conn,task,spec,report)
@@ -538,6 +555,7 @@ def save_report(conn, task_id, run_id, report):
         current=_owned(conn,task_id,run_id)
         if get_spec(conn,task_id)['id']!=spec['id'] or current.workspace_path!=task.workspace_path:
             raise WorkflowError('Spec or workspace changed while evidence was checked; save the current report')
+        _require_current_instruction_spec(conn,task_id)
         previous=_artifact(conn,task_id,'report');revision=(previous['revision'] if previous else 0)+1
         conn.execute('INSERT INTO nfos_artifacts(task_id,run_id,kind,revision,content,author,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)',
             (task_id,run_id,'report',revision,encoded,'worker',_json(evidence),int(time.time())))
@@ -549,6 +567,8 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
         raise WorkflowError('A decision needs its kind and concrete question')
     with _kb().write_txn(conn):
         _owned(conn,task_id,run_id)
+        if kind=='review':
+            _require_current_instruction_spec(conn,task_id)
         context=dict(context)
         if kind=='additional_tasks':
             # Identity follows the saved proposal, not the execution/question
@@ -736,6 +756,11 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
         row=get_decision(conn,decision_id)
         if not row:
             raise WorkflowError('Unknown decision')
+        if action=='approve':
+            _require_current_instruction_spec(conn,row['task_id'])
+            reviewed_revision=(json.loads(row['context']).get('review_identity') or {}).get('instruction_revision',0)
+            if reviewed_revision!=_kb().get_task(conn,row['task_id']).instruction_revision:
+                raise WorkflowError('Card instructions changed during review; review the updated spec')
         if row['status']!='pending':
             if row['action']==action and row['answer']==answer:
                 if proposal is not None and json.loads(row['context']).get('dispatch_proposal')!=proposal:
@@ -858,12 +883,19 @@ def _review_identity(conn,task_id,*,state=None):
     task=_kb().get_task(conn,task_id)
     if task.delivery_type=='code':
         state=json.loads(wf['state_json']) if state is None else state
-        return {k:state.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')}
-    report=_artifact(conn,task_id,'report')
-    return {'report_revision':report['revision'] if report else None}
+        identity={k:state.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')}
+    else:
+        report=_artifact(conn,task_id,'report')
+        identity={'report_revision':report['revision'] if report else None}
+    # Preserve the identity of existing reviews for unchanged initial cards.
+    if task.instruction_revision:
+        identity['instruction_revision']=task.instruction_revision
+    return identity
 
 
 def _approved(conn, task_id, revision, *, state=None):
+    if not _spec_matches_instruction(conn,task_id):
+        return False
     row=conn.execute("SELECT action,context FROM nfos_decisions WHERE task_id=? AND kind='review' AND status='resolved' AND spec_revision=? ORDER BY resolved_at DESC,rowid DESC LIMIT 1",
                      (task_id,revision)).fetchone()
     return bool(row and row['action']=='approve' and
@@ -896,6 +928,7 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             wf=get_workflow(conn,task_id);state=json.loads(wf['state_json'])
             if not wf['spec_revision']:
                 raise WorkflowError('Persist the spec before changing an environment')
+            _require_current_instruction_spec(conn,task_id)
             if operation in {'merge','deploy'} and not _approved(conn,task_id,wf['spec_revision']):
                 raise WorkflowError('Principal review of this candidate is pending')
             _project_owned(conn,task_id,run_id,candidate if operation=='homolog' else state.get('homolog_sha'))
@@ -967,7 +1000,7 @@ def completion_evidence_check(conn, task_id):
         raise WorkflowError('Completion evidence must be read outside the write transaction')
     report=_artifact(conn,task_id,'report')
     spec=get_spec(conn,task_id)
-    if not report or not spec:
+    if not report or not spec or not _spec_matches_instruction(conn,task_id):
         return None
     try:
         content=json.loads(report['content']); metadata=json.loads(report['evidence'])
@@ -1003,7 +1036,7 @@ def completion_ready(conn, task_id, *, evidence_check=None):
     wf=get_workflow(conn,task_id)
     if wf is None:
         return True
-    if _scope_needs_new_spec(wf):
+    if _scope_needs_new_spec(wf) or not _spec_matches_instruction(conn,task_id):
         return False
     report=_artifact(conn,task_id,'report')
     if not wf['spec_revision'] or not report or json.loads(report['evidence']).get('spec_revision')!=wf['spec_revision']:

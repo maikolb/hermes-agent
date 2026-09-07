@@ -39,7 +39,7 @@ GREEN = {
 
 def _task_with_pr(monkeypatch):
     conn = kb.connect()
-    task_id = kb.create_task(conn, title="wave", assignee="hermes")
+    task_id = kb.create_task(conn, title="wave", assignee="default")
     kb.add_comment(conn, task_id, "worker", f"PR aberta: {PR_URL}")
     return conn, task_id
 
