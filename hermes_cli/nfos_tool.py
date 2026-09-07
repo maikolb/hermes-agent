@@ -274,6 +274,10 @@ def _finish(conn, call_id, status, *, returncode=None, timed_out=False, error=No
             timed_out = row['timed_out']
             status = 'timed_out' if timed_out else 'interrupted'
             error = row['error']
+        # The wrapper can be killed while cleaning descendants, or encode a
+        # negative POSIX return code as 0..255. Prefer the native exit receipt.
+        if row['returncode'] is not None:
+            returncode = row['returncode']
         conn.execute('''UPDATE nfos_tool_calls SET status=?,finished_at=?,returncode=?,timed_out=?,error=?
             WHERE id=?''', (status, time.time(), returncode, int(timed_out), error, call_id))
         _event(conn, row, 'nfos_tool_finished', status=status, returncode=returncode,
@@ -372,6 +376,22 @@ def _hidden_process_options():
     return {'creationflags': subprocess.CREATE_NO_WINDOW, 'startupinfo': info}
 
 
+def _publish_command_exit(payload, command_pid, returncode):
+    """Persist the real result before waiting for any remaining descendants."""
+    expected = payload['process_identity']
+    ancestry = {os.getpid(), *(proc.pid for proc in psutil.Process().parents())}
+    if expected['pid'] not in ancestry or not _matches(expected['pid'], expected['started_at']):
+        raise ToolExecutionError('Native exit no longer has its recorded process identity')
+    with connect(payload['db_path']) as conn:
+        with _transaction(conn):
+            row = get_call(conn, payload['call_id'])
+            if not row or (row['worker_pid'], row['worker_started_at']) != (expected['pid'], expected['started_at']):
+                raise ToolExecutionError('Native exit belongs to a different call process')
+            if conn.execute('UPDATE nfos_tool_calls SET returncode=? WHERE id=? AND returncode IS NULL',
+                            (returncode,row['id'])).rowcount:
+                _event(conn,row,'nfos_tool_command_exited',pid=command_pid,returncode=returncode)
+
+
 def _child():
     # EOF means the adapter died before authorizing execution. This child has
     # no external effect until its PID/create-time are durably recorded.
@@ -384,6 +404,7 @@ def _child():
                             stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
                             **_hidden_process_options())
     proc.communicate(input=input_bytes)
+    _publish_command_exit(payload, proc.pid, proc.returncode)
     # Keep the process-group identity valid until even fast, reparented tool
     # descendants have exited. The adapter's deadline applies to all of them.
     identity = _identity(os.getpid())
@@ -468,7 +489,8 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
                 thread = threading.Thread(target=pump, args=(pipe, name), daemon=True)
                 thread.start()
                 threads.append(thread)
-            process.stdin.write((_json({'argv': argv, 'cwd': cwd,
+            process.stdin.write((_json({'argv': argv, 'cwd': cwd, 'db_path':str(Path(db_path).resolve()),
+                'call_id':call_id,'process_identity':identity,
                 'stdin_base64': base64.b64encode(input_bytes).decode() if input_bytes is not None else None}) + '\n').encode())
             process.stdin.close()
             deadline = time.monotonic() + timeout_seconds

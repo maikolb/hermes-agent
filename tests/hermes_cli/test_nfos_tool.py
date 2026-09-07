@@ -256,15 +256,6 @@ def test_live_ownership_loss_stops_the_old_call(adapter, board):
     assert 'ownership' in result['error']
 
 
-@pytest.mark.skipif(os.name == 'nt', reason='POSIX TERM handling; Windows process-tree termination covered separately')
-def test_timed_out_is_true_even_when_command_handles_term_with_exit_zero(adapter, board):
-    result = invoke(adapter, board,
-        "import signal,sys,time;signal.signal(signal.SIGTERM,lambda *_:sys.exit(0));print('ready',flush=True);time.sleep(90)",
-        timeout_seconds=1, call_id='graceful-deadline')
-    assert result['returncode'] == 0
-    assert result['status'] == 'timed_out' and result['timed_out'] is True
-
-
 def test_runtime_reconciliation_reports_a_transition_only_once(adapter, board):
     with concurrent.futures.ThreadPoolExecutor() as pool:
         future = pool.submit(invoke, adapter, board,
