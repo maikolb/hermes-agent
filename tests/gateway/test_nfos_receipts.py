@@ -107,6 +107,10 @@ async def test_returned_transport_failure_is_not_acknowledged(env):
 @pytest.mark.asyncio
 async def test_inflight_claim_survives_cancel_and_prevents_parallel_receipt(env):
     runner,event,adapter,clock=env
+    # Schema creation precedes the timed cancellation scenario. This test
+    # measures an in-flight receipt claim, not cold database migration time.
+    with kb.connect_closing() as conn:
+        delivery.init_schema(conn)
     started=asyncio.Event()
     async def waiting(**kwargs):
         started.set()
