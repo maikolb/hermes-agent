@@ -265,7 +265,7 @@ def _stop_cli_runner(call):
                        'descendants_json':'[]'})
 
 
-def _finish(conn, call_id, status, *, returncode=None, timed_out=False, error=None, only_changed=False):
+def _finish(conn, call_id, status, *, timed_out=False, error=None, only_changed=False):
     with _transaction(conn):
         row = get_call(conn, call_id)
         if row['status'] not in ACTIVE:
@@ -274,10 +274,15 @@ def _finish(conn, call_id, status, *, returncode=None, timed_out=False, error=No
             timed_out = row['timed_out']
             status = 'timed_out' if timed_out else 'interrupted'
             error = row['error']
-        # The wrapper can be killed while cleaning descendants, or encode a
-        # negative POSIX return code as 0..255. Prefer the native exit receipt.
-        if row['returncode'] is not None:
-            returncode = row['returncode']
+        # Only the native command's durable receipt establishes its outcome.
+        # The wrapper may exit independently, including during reconciliation.
+        returncode = row['returncode']
+        if status in ('succeeded', 'failed'):
+            if returncode is None:
+                status = 'interrupted'
+                error = 'Native exit receipt missing; effect may be unknown'
+            else:
+                status = 'succeeded' if returncode == 0 else 'failed'
         conn.execute('''UPDATE nfos_tool_calls SET status=?,finished_at=?,returncode=?,timed_out=?,error=?
             WHERE id=?''', (status, time.time(), returncode, int(timed_out), error, call_id))
         _event(conn, row, 'nfos_tool_finished', status=status, returncode=returncode,
@@ -533,14 +538,14 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
                     _event(conn, get_call(conn, call_id), 'nfos_tool_chunk', seq=sequence, stream=stream, bytes=len(data))
             returncode = process.wait()
             if stopped_reason:
-                return _finish(conn, call_id, 'timed_out' if timed_out else 'interrupted', returncode=returncode,
+                return _finish(conn, call_id, 'timed_out' if timed_out else 'interrupted',
                                timed_out=timed_out, error=final_error)
             # Detached descendants are still this call's children. A tool must
             # not leave them executing after its receipt says it is finished.
             descendants = _descendants(get_call(conn, call_id))
             if descendants:
                 _stop_tree(get_call(conn, call_id))
-            return _finish(conn, call_id, 'succeeded' if returncode == 0 else 'failed', returncode=returncode)
+            return _finish(conn, call_id, 'succeeded' if returncode == 0 else 'failed')
         except BaseException as exc:
             row = get_call(conn, call_id)
             if process and process.stdin and not process.stdin.closed:
@@ -559,7 +564,7 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
             # Exception messages may contain command arguments from a launcher;
             # record the type only, never environment values or command dumps.
             _finish(conn, call_id, 'spawn_failed' if row['status'] == 'intent' else 'interrupted',
-                    returncode=process.poll() if process else None, error=type(exc).__name__)
+                    error=type(exc).__name__)
             raise
         finally:
             for sig, handler in previous_handlers.items():
