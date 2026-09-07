@@ -63,6 +63,29 @@ def test_homolog_requires_the_project_publication_slot(delivery):
         d.advance(conn,task.id,task.current_run_id,'homolog',next_action='Deploy HML',state={'homolog_sha':A})
 
 
+def test_homolog_deployment_precedes_review_and_is_reconciled_separately(delivery):
+    conn,task=delivery
+    assert d.acquire_project(conn,'pilot',task.id,task.current_run_id,A)
+    effect=d.begin_effect(conn,task.id,task.current_run_id,operation='homolog',target='https://hml.example.test',candidate=A)
+    assert effect['execute']
+    with pytest.raises(d.WorkflowError,match='destination'):
+        d.release_project(conn,'pilot',task.id,task.current_run_id)
+    repeated=d.begin_effect(conn,task.id,task.current_run_id,operation='homolog',target='https://hml.example.test',candidate=A)
+    assert not repeated['execute'] and repeated['reconcile']
+    d.reconcile_effect(conn,effect['id'],found=True,evidence={'readback':'Actual HML container SHA and artifact','candidate':A,'tree':TREE,'artifact':'sha256:hml-image'})
+    assert not d._approved(conn,task.id,1)
+    assert not d._confirmed(conn,task.id,'deploy',A)
+    assert not d.completion_ready(conn,task.id)
+
+
+def test_homologation_requires_the_persisted_spec(delivery):
+    conn,task=delivery
+    conn.execute('UPDATE nfos_workflows SET spec_revision=0 WHERE task_id=?',(task.id,));conn.commit()
+    assert d.acquire_project(conn,'pilot',task.id,task.current_run_id,A)
+    with pytest.raises(d.WorkflowError,match='spec'):
+        d.begin_effect(conn,task.id,task.current_run_id,operation='homolog',target='https://hml.example.test',candidate=A)
+
+
 def test_changed_merge_tree_requires_rehomologation(delivery):
     conn,task=delivery
     approved(conn,task)

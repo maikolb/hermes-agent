@@ -198,6 +198,11 @@ def bootstrap_card(conn, request_id, token, *, pid):
         # The owner's NFOS workflow owns review and verified delivery for this
         # enrolled card. Keep the legacy row, but do not require a second
         # reviewer process or an unrelated board-admin policy on this path.
+        if kind=='code':
+            # Existing scratch/report cards did not have a worktree tracking
+            # row. It must exist in this same bootstrap transaction, before
+            # the child materializes and records its workspace ownership.
+            kb._insert_git_delivery_obligation(conn,task_id,int(time.time()))
         conn.execute('UPDATE task_git_delivery SET required=0 WHERE task_id=?',(task_id,))
         conn.execute("UPDATE nfos_requests SET status='attached',task_id=?,worker_pid=?,worker_started_at=? WHERE id=?",
                      (task_id,pid,started_at,request_id))
@@ -206,7 +211,7 @@ def bootstrap_card(conn, request_id, token, *, pid):
             notifier_profile=source.get('profile') or profile,delivery_mode='notify+wake')
         _event(conn,task_id,task.current_run_id,
             'nfos_worker_recovered_card' if project.get('existing_task_id') else 'nfos_worker_created_card',
-            {'request_id':request_id,'pid':pid})
+            {'request_id':request_id,'pid':pid,'worker_started_at':started_at})
         return kb.get_task(conn,task_id)
 
 
@@ -232,9 +237,17 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         raise WorkflowError('Codex spec fallback needs the Claude unavailability reason')
     with _kb().write_txn(conn):
         task=_owned(conn,task_id,run_id)
-        if spec.get('delivery_type')!=task.delivery_type:
-            raise WorkflowError('Spec delivery type must match the card')
         wf=get_workflow(conn,task_id)
+        if spec.get('delivery_type')!=task.delivery_type:
+            # The project default is provisional until TL has analyzed the
+            # request. An audit must not inherit a Git delivery requirement.
+            if wf['spec_revision'] or wf['stage']!='analysis' or spec.get('delivery_type') not in {'report','operation'}:
+                raise WorkflowError('Spec delivery type must match the card after initial classification')
+            conn.execute('UPDATE tasks SET delivery_type=?,requires_repo=0 WHERE id=?',
+                         (spec['delivery_type'],task_id))
+            conn.execute('UPDATE task_git_delivery SET required=0 WHERE task_id=?',(task_id,))
+            _event(conn,task_id,run_id,'nfos_delivery_classified',
+                   {'previous':task.delivery_type,'delivery_type':spec['delivery_type'],'author':author})
         revision=wf['spec_revision']+1
         conn.execute('INSERT INTO nfos_artifacts(task_id,run_id,kind,revision,content,author,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)',
                      (task_id,run_id,'spec',revision,_json(spec),author,_json(evidence),int(time.time())))
@@ -324,14 +337,46 @@ def resume_after_answer(conn,task_id,*,answer,source):
     with _kb().write_txn(conn):
         if not get_workflow(conn,task_id):
             raise WorkflowError('Unknown NFOS card')
-        rows=conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND status='human'",(task_id,)).fetchall()
+        rows=conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status='human'",(task_id,)).fetchall()
         if not rows:
             raise WorkflowError('No pending human question on this card')
-        if not _kb().unblock_task(conn,task_id):
-            raise WorkflowError('Wait for the previous worker to finish saving and stop')
-        conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',answer=?,author='Human',resolved_at=? WHERE task_id=? AND status='human'",
-            (answer,int(time.time()),task_id))
-        _event(conn,task_id,None,'nfos_human_answered',{'answer':answer,'source':source,'decisions':[r['id'] for r in rows]})
+        for row in rows:
+            context=json.loads(row['context'])
+            context['human_reply']={'answer':answer,'source':source,'author':source.get('actor') or 'Human','received_at':int(time.time())}
+            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?',(_json(context),row['id']))
+        _event(conn,task_id,None,'nfos_human_answer_received',{'answer':answer,'source':source,'decisions':[r['id'] for r in rows]})
+    return task_id in reconcile_human_answers(conn)
+
+
+def reconcile_human_answers(conn):
+    """The same runtime tick retains human blocks and applies saved replies."""
+    resumed=[]
+    rows=conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()
+    for row in rows:
+        if _run_process_alive(conn,row['task_id'],row['run_id']):
+            continue
+        task=_kb().get_task(conn,row['task_id'])
+        if not task or task.status in {'done','archived'}:
+            continue
+        # A crash before kanban_block must not turn a human question into
+        # an automatic execution retry at startup.
+        if task.status in {'running','ready'}:
+            _kb().block_task(conn,task.id,reason=row['answer'],kind='needs_input',
+                             expected_run_id=task.current_run_id if task.status=='running' else None)
+        reply=json.loads(row['context']).get('human_reply')
+        if not reply:
+            continue
+        with _kb().write_txn(conn):
+            current=get_decision(conn,row['id'])
+            if current['status']!='human':
+                continue
+            if not _kb().unblock_task(conn,row['task_id']):
+                continue
+            conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',answer=?,author=?,resolved_at=? WHERE task_id=? AND status='human'",
+                         (reply['answer'],reply.get('author','Human'),int(time.time()),row['task_id']))
+            _event(conn,row['task_id'],None,'nfos_human_answered',reply)
+            resumed.append(row['task_id'])
+    return resumed
 
 
 def resolve_decision(conn, decision_id, *, action, answer, author):
@@ -399,16 +444,18 @@ def _project_owned(conn,task_id,run_id,candidate):
 
 
 def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
-    if operation not in {'pr','merge','deploy'} or not target or not candidate:
+    if operation not in {'homolog','pr','merge','deploy'} or not target or not candidate:
         raise WorkflowError('External effect needs operation, destination and exact candidate')
     with _kb().write_txn(conn):
         task=_owned(conn,task_id,run_id)
         if task.delivery_type=='code':
             wf=get_workflow(conn,task_id);state=json.loads(wf['state_json'])
+            if not wf['spec_revision']:
+                raise WorkflowError('Persist the spec before changing an environment')
             if operation in {'merge','deploy'} and not _approved(conn,task_id,wf['spec_revision']):
                 raise WorkflowError('Principal review of this candidate is pending')
-            _project_owned(conn,task_id,run_id,state.get('homolog_sha'))
-            expected=state.get('integrated_sha') if operation=='deploy' else state.get('homolog_sha')
+            _project_owned(conn,task_id,run_id,candidate if operation=='homolog' else state.get('homolog_sha'))
+            expected=candidate if operation=='homolog' else (state.get('integrated_sha') if operation=='deploy' else state.get('homolog_sha'))
             if candidate!=expected:
                 raise WorkflowError('Use the confirmed integrated candidate' if operation=='deploy' else 'Use the homologated candidate')
             if operation=='deploy' and not _confirmed(conn,task_id,'merge',state.get('homolog_sha')):
@@ -443,6 +490,10 @@ def reconcile_effect(conn, effect_id, *, found, evidence):
             wf=get_workflow(conn,task.id);state=json.loads(wf['state_json'])
             if evidence.get('candidate')!=effect['candidate']:
                 raise WorkflowError('Destination readback must identify this exact candidate')
+            if effect['operation']=='homolog':
+                if not evidence.get('tree') or not evidence.get('artifact'):
+                    raise WorkflowError('Read the actual homologation tree and deployed artifact')
+                state['homolog_deployment']=evidence
             if effect['operation'] in {'merge','deploy'}:
                 if evidence.get('tree')!=state.get('candidate_tree'):
                     raise WorkflowError('Integrated tree differs from homologation; verify the new tree in homolog first')
@@ -483,12 +534,39 @@ def completion_ready(conn, task_id):
     return True
 
 
+def _run_process_alive(conn, task_id, run_id):
+    run=conn.execute('SELECT worker_pid FROM task_runs WHERE task_id=? AND id=?',(task_id,run_id)).fetchone()
+    event=conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind IN ('spawned','nfos_worker_created_card','nfos_worker_recovered_card') ORDER BY id DESC LIMIT 1",
+                       (task_id,run_id)).fetchone()
+    payload=json.loads(event['payload'] or '{}') if event else {}
+    pid=payload.get('pid') or (run['worker_pid'] if run else None)
+    expected=payload.get('worker_started_at')
+    if not pid or not _kb()._pid_alive(pid):
+        return False
+    # An old run without a start identity remains occupied while its PID is
+    # alive; modern runs distinguish PID reuse from their actual worker.
+    return expected is None or _kb()._process_identity_matches(pid,expected)
+
+
 def acquire_project(conn, project, task_id, run_id, candidate):
     with _kb().write_txn(conn):
         _owned(conn,task_id,run_id)
         current=_row(conn,'nfos_project_delivery','project',project)
         if current:
-            return current['task_id']==task_id and current['run_id']==run_id and current['candidate']==candidate
+            if (current['task_id'],current['run_id'],current['candidate'])==(task_id,run_id,candidate):
+                return True
+            previous=conn.execute('SELECT ended_at FROM task_runs WHERE id=? AND task_id=?',
+                                  (current['run_id'],current['task_id'])).fetchone()
+            if not previous or not previous['ended_at'] or _run_process_alive(conn,current['task_id'],current['run_id']):
+                return False
+            unknown=conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('homolog','merge','deploy')",
+                                 (current['task_id'],)).fetchone()
+            # The replacement run may reconcile its own exact candidate.
+            # Another candidate/task cannot overwrite an ambiguous delivery.
+            if unknown and (current['task_id']!=task_id or current['candidate']!=candidate):
+                return False
+            conn.execute('DELETE FROM nfos_project_delivery WHERE project=?',(project,))
+            _event(conn,task_id,run_id,'nfos_project_delivery_recovered',{'project':project,'previous':current})
         conn.execute('INSERT INTO nfos_project_delivery(project,task_id,run_id,candidate,acquired_at) VALUES(?,?,?,?,?)',
                      (project,task_id,run_id,candidate,int(time.time())))
         _event(conn,task_id,run_id,'nfos_project_delivery_acquired',{'project':project,'candidate':candidate})
@@ -497,8 +575,8 @@ def acquire_project(conn, project, task_id, run_id, candidate):
 
 def release_project(conn, project, task_id, run_id):
     with _kb().write_txn(conn):
-        if conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('merge','deploy')",(task_id,)).fetchone():
-            raise WorkflowError('Read the unresolved merge/deploy destination before releasing publication')
+        if conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('homolog','merge','deploy')",(task_id,)).fetchone():
+            raise WorkflowError('Read the unresolved homologation/merge/deploy destination before releasing publication')
         changed=conn.execute('DELETE FROM nfos_project_delivery WHERE project=? AND task_id=? AND run_id=?',
                              (project,task_id,run_id)).rowcount
         if changed:
@@ -524,7 +602,7 @@ def main():
     parser.add_argument('--decision')
     parser.add_argument('--timeout',type=float,default=300,help='Maximum wait duration; pending is not failure')
     parser.add_argument('--resolution',choices=['continue','approve','changes','human'])
-    parser.add_argument('--operation',choices=['pr','merge','deploy'])
+    parser.add_argument('--operation',choices=['homolog','pr','merge','deploy'])
     parser.add_argument('--target')
     parser.add_argument('--candidate')
     parser.add_argument('--effect-id')
@@ -539,6 +617,9 @@ def main():
                 'report':_artifact(conn,args.task,'report'),
                 'decisions':[dict(r) for r in conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? ORDER BY created_at',(args.task,))],
                 'effects':[dict(r) for r in conn.execute('SELECT * FROM nfos_effects WHERE task_id=?',(args.task,))]}
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_tool_calls'").fetchone():
+                from hermes_cli.nfos_tool import read_calls
+                result['native_calls']=read_calls(conn,args.task)
         elif args.action=='save-spec':
             result={'revision':save_spec(conn,args.task,args.run,payload,author=args.author,evidence=evidence)}
         elif args.action=='save-report':
@@ -553,7 +634,8 @@ def main():
         elif args.action=='wait':
             result=wait_decision(conn,args.decision,timeout=args.timeout)
         elif args.action=='resume':
-            resume_after_answer(conn,args.task,answer=payload['answer'],source=payload['source']);result={'resumed':True}
+            resumed=resume_after_answer(conn,args.task,answer=payload['answer'],source=payload['source'])
+            result={'resumed':resumed,'answer_persisted':True,'waiting_for_previous_exit':not resumed}
         elif args.action=='decide':
             if os.environ.get('HERMES_KANBAN_TASK'):
                 raise WorkflowError('The Principal resolves reviews in its own coordinator session')

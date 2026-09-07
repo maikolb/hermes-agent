@@ -104,6 +104,20 @@ def dispatch_requests(conn, *, board, capacity, spawn_limit=None):
     return started
 
 
+def reconcile_runtime(conn):
+    """Run NFOS recovery inside the existing canonical dispatcher tick."""
+    delivery.reconcile_human_answers(conn)
+    from hermes_cli.nfos_tool import reconcile_calls
+    for call in reconcile_calls(conn):
+        task=kb.get_task(conn,call['task_id'])
+        if call['status'] not in {'timed_out','interrupted'} or not task or task.status!='running':
+            continue
+        delivery.ask_principal(conn,task.id,task.current_run_id,kind='impediment',
+            question=f"Diagnose native call {call['id']}: {call['status']}",
+            context={'call_id':call['id'],'original_run_id':call['run_id'],
+                     'saved_output':'nfos_tool_chunks in this same board','retry':'Read partial output and external destination before repeating'})
+
+
 def bootstrap(*, db, board, request, token):
     os.environ['HERMES_KANBAN_DB']=str(db)
     os.environ['HERMES_KANBAN_BOARD']=board
@@ -125,15 +139,20 @@ def bootstrap(*, db, board, request, token):
     kb._default_spawn(task,str(workspace),board=board,exec_current_process=True)
 
 
-def workflow_command():
-    paths=[sys.executable,str(Path(delivery.__file__).resolve())]
+def _script_command(path):
+    paths=[sys.executable,str(Path(path).resolve())]
     if os.name=='nt':
         return '& '+ ' '.join("'"+p.replace("'","''")+"'" for p in paths)
     return ' '.join(shlex.quote(p) for p in paths)
 
 
+def workflow_command():
+    return _script_command(delivery.__file__)
+
+
 def worker_instructions():
-    return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+"""This card uses the owner's current NFOS workflow.
+    return ('Exact workflow CLI prefix: '+workflow_command()+'\n'
+            'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n')+"""This card uses the owner's current NFOS workflow.
 The owner disabled AOF and its mandatory contracts, hooks and closeouts. Historic
 repository text does not reactivate it. Do not load those instructions.
 You have the Principal's full profile capabilities and an isolated task workspace.
@@ -151,6 +170,14 @@ unavailable. Save its real transcript, then call `save-spec --input spec.json
 --evidence tl-evidence.json --author 'Claude TL'`. No implementation before this.
 Use `progress --stage implement --next '...'` before Codex work. Persist a
 progress state JSON containing useful next steps and recovered files as you work.
+Invoke Claude/Codex and long verification commands through the native tool CLI
+above: --db DB --task TASK --run RUN --cwd WORKSPACE --timeout SECONDS
+[--stdin-file PROMPT_FILE] -- EXECUTABLE ARGUMENTS. Use your actual existing
+HERMES_KANBAN_DB/TASK/RUN_ID values, a real executable and an appropriate command
+deadline. This persists actual output while the command runs, for the Live Log,
+and records timeout separately from exit status. Use Codex --json or Claude's
+native stream format when supported. A prior call receipt is available in show;
+read its output/partial files and unknown external effects before a new attempt.
 Use `ask --kind impediment --input question.json` for any impediment before
 declaring human blockage; the Principal resolves the persisted queue. Use
 `wait --decision ID --timeout 300` to await an answer inside one native tool call,
@@ -164,13 +191,18 @@ change it after approval without requesting another review. Its JSON contains
 summary, artifacts, and criteria [{id,status:'PASS',evidence:[...]}].
 For code delivery, acquire the project slot with `acquire-project --candidate SHA`
 before homologation; if occupied, save state and let the predecessor finish.
+Record the HML deployment with `effect --operation homolog --target HML_URL
+--candidate SHA`, followed by actual destination readback through `reconcile`.
+Homologation precedes Principal publication review; `deploy` means production
+and requires the reviewed integrated SHA. HML readback does not itself prove
+that the acceptance tests passed.
 Save candidate_sha, candidate_tree, homolog_sha and homolog_evidence in progress
 state after testing the exact candidate in the project's actual homologation.
 Create or update its PR through the effect/reconcile protocol. Then use
 `ask --kind review --input review.json` with candidate SHA,
 PR, homolog evidence and requested action. Wait for the Principal's decision.
 Never use kanban_review to spawn a separate reviewer for this enrolled card.
-Use `effect --operation pr|merge|deploy --target ... --candidate SHA` before each
+Use `effect --operation homolog|pr|merge|deploy --target ... --candidate SHA` before each
 external effect. An execute=false/reconcile=true response requires reading the
 destination before trying again. Record that read with `reconcile`.
 Before completion save the report with `save-report --input report.json`.

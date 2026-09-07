@@ -1834,6 +1834,8 @@ CREATE TABLE IF NOT EXISTS task_git_delivery (
     request_fingerprint TEXT,
     ownership_json      TEXT,
     ownership_fingerprint TEXT,
+    creation_intent_json TEXT,
+    creation_intent_fingerprint TEXT,
     candidate_digest    TEXT UNIQUE,
     receipt_json        TEXT,
     receipt_fingerprint TEXT,
@@ -3019,6 +3021,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         ("request_fingerprint", "request_fingerprint TEXT"),
         ("ownership_json", "ownership_json TEXT"),
         ("ownership_fingerprint", "ownership_fingerprint TEXT"),
+        ("creation_intent_json", "creation_intent_json TEXT"),
+        ("creation_intent_fingerprint", "creation_intent_fingerprint TEXT"),
         ("receipt_fingerprint", "receipt_fingerprint TEXT"),
         ("cleanup_state", "cleanup_state TEXT NOT NULL DEFAULT 'not_requested'"),
         ("cleanup_attempts", "cleanup_attempts INTEGER NOT NULL DEFAULT 0"),
@@ -6333,6 +6337,8 @@ def _seal_materialized_worktree_ownership(
     repo_root: Path,
     worktree: Path,
     branch: str,
+    creation_intent: Optional[dict[str, Any]] = None,
+    recovered: bool = False,
 ) -> None:
     """Persist provenance immediately after Hermes creates a linked worktree."""
 
@@ -6358,9 +6364,12 @@ def _seal_materialized_worktree_ownership(
         "git_dir": str(git_dir.resolve(strict=False)),
         "canonical_worktree": str(canonical_worktree),
         "branch": branch,
-        "creation_nonce": secrets.token_hex(16),
+        "creation_nonce": (creation_intent or {}).get("creation_nonce") or secrets.token_hex(16),
         "created_at": int(time.time()),
     }
+    if creation_intent:
+        payload["initial_sha"] = creation_intent["base_sha"]
+        payload["creation_run_id"] = creation_intent["run_id"]
     ownership_json = json.dumps(
         payload,
         ensure_ascii=False,
@@ -6407,6 +6416,12 @@ def _seal_materialized_worktree_ownership(
                 "ownership_fingerprint": fingerprint,
             },
         )
+        if recovered:
+            _append_event(conn, task_id, "worktree_creation_recovered", {
+                "canonical_worktree": str(canonical_worktree),
+                "creation_nonce": payload["creation_nonce"],
+                "initial_sha": payload.get("initial_sha"),
+            })
 
 
 def _build_cleanup_obligation(
@@ -10315,6 +10330,167 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> boo
     return True
 
 
+def _read_worktree_creation_intent(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]]:
+    row = conn.execute(
+        "SELECT creation_intent_json, creation_intent_fingerprint "
+        "FROM task_git_delivery WHERE task_id=?", (task_id,),
+    ).fetchone()
+    if row is None or (row[0] is None and row[1] is None):
+        return None
+    try:
+        intent = json.loads(row[0])
+        _, fingerprint = _canonical_delivery_document(intent)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("worktree creation intent is invalid") from exc
+    if (not isinstance(intent, dict) or fingerprint != row[1]
+            or intent.get("task_id") != task_id or intent.get("schema_version") != 1
+            or not re.fullmatch(r"[0-9a-f]{32}", str(intent.get("creation_nonce", "")))
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(intent.get("base_sha", "")))):
+        raise RuntimeError("worktree creation intent changed identity")
+    return intent
+
+
+def _worktree_creation_lock_matches(worktree: Path, intent: Mapping[str, Any]) -> bool:
+    git_dir = _git_dir(worktree)
+    if git_dir is None:
+        return False
+    try:
+        return (git_dir / "locked").read_text(encoding="utf-8").strip() == (
+            "hermes-nfos-create:" + str(intent["creation_nonce"])
+        )
+    except OSError:
+        return False
+
+
+def _release_worktree_creation_lock(worktree: Path, intent: Optional[dict[str, Any]]) -> None:
+    # Git's native temporary lock protects creation from prune and carries its
+    # nonce across a process death. A later, unrelated user lock is left alone.
+    if intent and _worktree_creation_lock_matches(worktree, intent):
+        result = _cleanup_git(worktree, "worktree", "unlock", str(worktree))
+        if result.returncode != 0:
+            raise RuntimeError("could not release completed worktree creation lock")
+
+
+def _materialize_nfos_worktree(
+    conn: sqlite3.Connection, task: Task, *, repo_root: Path, target: Path, branch: str,
+) -> None:
+    owner_token = secrets.token_hex(16)
+    try:
+        _materialize_nfos_worktree_attempt(
+            conn, task, repo_root=repo_root, target=target, branch=branch,
+            owner_token=owner_token,
+        )
+    finally:
+        # A handled Git error must not leave a long-lived gateway owning the
+        # creation attempt. A killed process skips this; its PID/start identity
+        # then lets the next runtime establish that the creator is gone.
+        with write_txn(conn):
+            intent = _read_worktree_creation_intent(conn, task.id)
+            if intent and intent.get("owner_token") == owner_token:
+                intent.update(owner_pid=None, owner_started_at=None, owner_token=None)
+                encoded, fingerprint = _canonical_delivery_document(intent)
+                conn.execute(
+                    "UPDATE task_git_delivery SET creation_intent_json=?, creation_intent_fingerprint=? WHERE task_id=?",
+                    (encoded, fingerprint, task.id),
+                )
+
+
+def _materialize_nfos_worktree_attempt(
+    conn: sqlite3.Connection, task: Task, *, repo_root: Path, target: Path,
+    branch: str, owner_token: str,
+) -> None:
+    """Commit creation intent before Git, then reconcile only its exact checkout.
+
+    A matching path alone is insufficient: Git writes the intent nonce into its
+    worktree lock during add. Recovery requires that nonce and the original
+    commit, while leaving the index, working files and untracked data unchanged.
+    """
+    repo_root = repo_root.expanduser().resolve(strict=True)
+    common_dir = _git_common_dir(repo_root)
+    if common_dir is None or not _task_owns_worktree_identity(task.id, target, branch):
+        raise RuntimeError("NFOS worktree creation has no exact repository/task identity")
+    # Git probes can be slow on a busy host. Do not hold the board writer while
+    # resolving the candidate; the transaction below rechecks the intent owner,
+    # and the actual add is pinned to this commit and validates the branch again.
+    base_sha = None
+    if _read_worktree_creation_intent(conn, task.id) is None:
+        if target.exists() or target.is_symlink():
+            raise RuntimeError(f"existing worktree {target} is foreign without a prior creation intent")
+        ref = f"refs/heads/{branch}" if _git_branch_exists(repo_root, branch) else "HEAD"
+        result = _cleanup_git(repo_root, "rev-parse", "--verify", f"{ref}^{{commit}}")
+        base_sha = result.stdout.strip()
+        if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", base_sha):
+            raise RuntimeError("cannot identify initial commit for worktree creation")
+    with write_txn(conn):
+        intent = _read_worktree_creation_intent(conn, task.id)
+        if intent:
+            expected = (str(repo_root), str(target), str(common_dir), branch)
+            actual = tuple(intent.get(k) for k in (
+                "repo_root", "canonical_worktree", "git_common_dir", "branch"))
+            if actual != expected:
+                raise RuntimeError("worktree creation intent changed repository, path or branch")
+            if (intent.get("owner_token") != owner_token
+                    and _process_identity_matches(intent.get("owner_pid"), intent.get("owner_started_at"))):
+                raise RuntimeError("worktree creator is still alive; cannot replace its execution")
+        else:
+            if target.exists() or target.is_symlink():
+                raise RuntimeError(f"existing worktree {target} is foreign without a prior creation intent")
+            if base_sha is None:
+                raise RuntimeError("worktree creation intent disappeared while resolving its candidate")
+            intent = {
+                "schema_version": 1, "task_id": task.id,
+                "run_id": task.current_run_id, "repo_root": str(repo_root),
+                "canonical_worktree": str(target), "git_common_dir": str(common_dir),
+                "branch": branch, "base_sha": base_sha,
+                "creation_nonce": secrets.token_hex(16), "created_at": int(time.time()),
+            }
+            _append_event(conn, task.id, "worktree_creation_requested", {
+                "canonical_worktree": str(target), "branch": branch,
+                "base_sha": base_sha, "creation_nonce": intent["creation_nonce"],
+            })
+        intent.update(owner_pid=os.getpid(), owner_started_at=_process_start_time(os.getpid()), owner_token=owner_token)
+        encoded, fingerprint = _canonical_delivery_document(intent)
+        updated = conn.execute(
+            "UPDATE task_git_delivery SET creation_intent_json=?, creation_intent_fingerprint=? "
+            "WHERE task_id=? AND ownership_json IS NULL AND ownership_fingerprint IS NULL",
+            (encoded, fingerprint, task.id),
+        )
+        if updated.rowcount != 1:
+            raise RuntimeError("worktree creation obligation is missing or already sealed")
+
+    recovered = target.exists()
+    if not recovered:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        args = ["worktree", "add", "--lock", "--reason", "hermes-nfos-create:" + intent["creation_nonce"]]
+        if _git_branch_exists(repo_root, branch):
+            head = _cleanup_git(repo_root, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}")
+            if head.returncode != 0 or head.stdout.strip() != intent["base_sha"]:
+                raise RuntimeError("worktree branch moved after creation intent was saved")
+            args.extend([str(target), branch])
+        else:
+            args.extend(["-b", branch, str(target), intent["base_sha"]])
+        result = _cleanup_git(repo_root, *args, timeout=60)
+        if result.returncode != 0:
+            raise RuntimeError(f"NFOS git worktree add failed: {(result.stderr or result.stdout).strip()}")
+
+    git_dir = _git_dir(target)
+    head = _cleanup_git(target, "rev-parse", "--verify", "HEAD^{commit}")
+    if (not _worktree_creation_lock_matches(target, intent)
+            or _git_common_dir(target) != common_dir
+            or _git_current_branch(target) != branch
+            or _git_toplevel(target) != target
+            or git_dir is None or git_dir == common_dir
+            or head.returncode != 0 or head.stdout.strip() != intent["base_sha"]):
+        raise RuntimeError("unsealed worktree is foreign or differs from its exact creation intent; preserved")
+    if not (git_dir / "index").is_file() or (git_dir / "index.lock").exists():
+        raise RuntimeError("worktree Git checkout is incomplete or still writing; preserved for diagnosis")
+    _seal_materialized_worktree_ownership(
+        conn, task.id, repo_root=repo_root, worktree=target, branch=branch,
+        creation_intent=intent, recovered=recovered,
+    )
+    _release_worktree_creation_lock(target, intent)
+
+
 def _materialize_task_owned_worktree(
     conn: Optional[sqlite3.Connection],
     task: Task,
@@ -10352,9 +10528,21 @@ def _materialize_task_owned_worktree(
             raise RuntimeError(
                 f"sealed worktree ownership is no longer valid: {reason}"
             )
+        _release_worktree_creation_lock(
+            Path(str(payload["canonical_worktree"])),
+            _read_worktree_creation_intent(conn, task.id),
+        )
         return Path(str(payload["canonical_worktree"])), str(payload["branch"])
 
     canonical_target = target.expanduser().resolve(strict=False)
+    if conn.execute("SELECT 1 FROM nfos_workflows WHERE task_id=?", (task.id,)).fetchone():
+        _materialize_nfos_worktree(
+            conn, task, repo_root=repo_root, target=canonical_target, branch=branch,
+        )
+        valid, payload, reason = _validate_worktree_ownership(conn, task.id, require_checkout=True)
+        if not valid or payload is None:
+            raise RuntimeError(f"new worktree ownership could not be validated: {reason}")
+        return Path(str(payload["canonical_worktree"])), str(payload["branch"])
     if canonical_target.exists():
         raise RuntimeError(
             f"existing worktree {canonical_target} has no Hermes creation receipt; "
@@ -13140,6 +13328,8 @@ def _dispatch_once_locked(
     # reap_worker_zombies() for the full rationale.
     reap_worker_zombies()
     if not dry_run:
+        from hermes_cli.nfos_runtime import reconcile_runtime
+        reconcile_runtime(conn)
         # An archive can commit immediately before process termination (or
         # termination can fail transiently).  The archived row retains the
         # exact PID/claim until a later tick proves the worker exited, so a

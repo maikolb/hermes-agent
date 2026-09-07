@@ -2,6 +2,7 @@
 import json
 import os
 import sqlite3
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -213,7 +214,7 @@ def test_native_block_asks_principal_before_releasing_the_worker(board):
         assert kb.get_task(conn,task.id).current_run_id==task.current_run_id
 
 
-def test_principal_human_decision_is_durable_until_worker_stops_and_answer_arrives(board):
+def test_principal_human_decision_is_durable_until_worker_stops_and_answer_arrives(board,monkeypatch):
     with kb.connect_closing(board) as conn:
         task=started(conn);spec(conn,task)
         decision=delivery.ask_principal(conn,task.id,task.current_run_id,kind='impediment',question='Which business rule?',context={'saved':'checkpoint'})
@@ -221,6 +222,7 @@ def test_principal_human_decision_is_durable_until_worker_stops_and_answer_arriv
         assert kb.block_task(conn,task.id,reason='Maikol must choose A or B',kind='needs_input',expected_run_id=task.current_run_id)
         assert kb.get_task(conn,task.id).status=='blocked'
         assert delivery.get_decision(conn,decision)['status']=='human'
+        monkeypatch.setattr(delivery,'_run_process_alive',lambda *args:False)
         delivery.resume_after_answer(conn,task.id,answer='Use A',source={'platform':'telegram','message_id':'55'})
         assert kb.get_task(conn,task.id).status=='ready'
         assert delivery.get_decision(conn,decision)['status']=='resolved'
@@ -263,3 +265,24 @@ def test_native_wait_returns_the_principal_answer_without_another_model_turn(boa
             assert waiting.wait(3)
             delivery.resolve_decision(conn,decision,action='continue',answer='Use HML',author='Principal')
             assert future.result(timeout=5)['answer']=='Use HML'
+
+
+def test_existing_report_card_can_materialize_its_real_code_workspace(board):
+    repo=board.parent/'repo';repo.mkdir()
+    def git(*args):
+        return subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+    git('init','--initial-branch=main')
+    git('-c','user.name=NFOS test','-c','user.email=nfos@example.test','commit','--allow-empty','-m','Fixture baseline')
+    with kb.connect_closing(board) as conn:
+        tid=kb.create_task(conn,title='Existing visual defect',assignee='default',workspace_kind='scratch',requires_repo=False,delivery_type='report')
+        assert conn.execute('SELECT 1 FROM task_git_delivery WHERE task_id=?',(tid,)).fetchone() is None
+        rid=delivery.receive_request(conn,source={'platform':'telegram','chat_id':'1','thread_id':'2','message_id':'adopt-code'},
+            text='Deliver this existing correction',project={'profile':'default','delivery_type':'code','repo_path':str(repo),'existing_task_id':tid})
+        request=delivery.reserve_request(conn,capacity=2)
+        task=delivery.bootstrap_card(conn,rid,request['claim_token'],pid=os.getpid())
+        workspace,branch=kb._resolve_worktree_workspace(task,board='pilot',conn=conn)
+        assert workspace.is_dir()
+        assert kb._validate_worktree_ownership(conn,tid,require_checkout=True)[0]
+        assert conn.execute('SELECT required FROM task_git_delivery WHERE task_id=?',(tid,)).fetchone()[0]==0
+        assert kb.get_task(conn,tid).branch_name==branch
