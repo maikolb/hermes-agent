@@ -1,0 +1,671 @@
+{
+  "at": "2026-09-07T22:12:33.929983+00:00",
+  "source": "consistent pre-deployment SQLite backup compared with live read-only snapshots",
+  "boards": {
+    "recuperacli": {
+      "original_tasks": 20,
+      "missing_tasks": [],
+      "scope_changes": [],
+      "history": {
+        "task_links": {
+          "original_rows": 14,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_comments": {
+          "original_rows": 106,
+          "missing_or_modified": 0,
+          "new_rows": 1
+        },
+        "task_attachments": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_events": {
+          "original_rows": 417,
+          "missing_or_modified": 0,
+          "new_rows": 11
+        },
+        "task_runs": {
+          "original_runs": 31,
+          "missing_runs": 0,
+          "new_runs": 1
+        }
+      },
+      "workspace_changes": []
+    },
+    "dovcrm": {
+      "original_tasks": 285,
+      "missing_tasks": [],
+      "scope_changes": [],
+      "history": {
+        "task_links": {
+          "original_rows": 79,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_comments": {
+          "original_rows": 823,
+          "missing_or_modified": 0,
+          "new_rows": 3
+        },
+        "task_attachments": {
+          "original_rows": 16,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_events": {
+          "original_rows": 10740,
+          "missing_or_modified": 0,
+          "new_rows": 212
+        },
+        "task_runs": {
+          "original_runs": 426,
+          "missing_runs": 0,
+          "new_runs": 4
+        }
+      },
+      "workspace_changes": []
+    },
+    "mulher-mais-segura": {
+      "original_tasks": 0,
+      "missing_tasks": [],
+      "scope_changes": [],
+      "history": {
+        "task_links": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_comments": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_attachments": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_events": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_runs": {
+          "original_runs": 0,
+          "missing_runs": 0,
+          "new_runs": 0
+        }
+      },
+      "workspace_changes": []
+    },
+    "sommus": {
+      "original_tasks": 0,
+      "missing_tasks": [],
+      "scope_changes": [],
+      "history": {
+        "task_links": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_comments": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_attachments": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_events": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_runs": {
+          "original_runs": 0,
+          "missing_runs": 0,
+          "new_runs": 0
+        }
+      },
+      "workspace_changes": []
+    },
+    "concursa-ai": {
+      "original_tasks": 313,
+      "missing_tasks": [],
+      "scope_changes": [],
+      "history": {
+        "task_links": {
+          "original_rows": 70,
+          "missing_or_modified": 0,
+          "new_rows": 2
+        },
+        "task_comments": {
+          "original_rows": 701,
+          "missing_or_modified": 0,
+          "new_rows": 5
+        },
+        "task_attachments": {
+          "original_rows": 4,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_events": {
+          "original_rows": 10757,
+          "missing_or_modified": 0,
+          "new_rows": 152
+        },
+        "task_runs": {
+          "original_runs": 385,
+          "missing_runs": 0,
+          "new_runs": 2
+        }
+      },
+      "workspace_changes": []
+    },
+    "hermes-project-facto-786f51f34a055368--infotributos": {
+      "original_tasks": 19,
+      "missing_tasks": [],
+      "scope_changes": [],
+      "history": {
+        "task_links": {
+          "original_rows": 14,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_comments": {
+          "original_rows": 51,
+          "missing_or_modified": 0,
+          "new_rows": 1
+        },
+        "task_attachments": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_events": {
+          "original_rows": 2607,
+          "missing_or_modified": 0,
+          "new_rows": 21
+        },
+        "task_runs": {
+          "original_runs": 27,
+          "missing_runs": 0,
+          "new_runs": 1
+        }
+      },
+      "workspace_changes": []
+    },
+    "hermes-project-facto-786f51f34a055368--dovtest": {
+      "original_tasks": 32,
+      "missing_tasks": [],
+      "scope_changes": [],
+      "history": {
+        "task_links": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_comments": {
+          "original_rows": 31,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_attachments": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_events": {
+          "original_rows": 237,
+          "missing_or_modified": 0,
+          "new_rows": 8
+        },
+        "task_runs": {
+          "original_runs": 33,
+          "missing_runs": 0,
+          "new_runs": 0
+        }
+      },
+      "workspace_changes": []
+    },
+    "hermes-project-facto-786f51f34a055368--central-dec": {
+      "original_tasks": 16,
+      "missing_tasks": [],
+      "scope_changes": [],
+      "history": {
+        "task_links": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_comments": {
+          "original_rows": 15,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_attachments": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_events": {
+          "original_rows": 140,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_runs": {
+          "original_runs": 16,
+          "missing_runs": 0,
+          "new_runs": 0
+        }
+      },
+      "workspace_changes": []
+    },
+    "project-factory": {
+      "original_tasks": 20,
+      "missing_tasks": [],
+      "scope_changes": [],
+      "history": {
+        "task_links": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_comments": {
+          "original_rows": 55,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_attachments": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_events": {
+          "original_rows": 189,
+          "missing_or_modified": 0,
+          "new_rows": 7
+        },
+        "task_runs": {
+          "original_runs": 14,
+          "missing_runs": 0,
+          "new_runs": 0
+        }
+      },
+      "workspace_changes": []
+    },
+    "trabalho": {
+      "original_tasks": 20,
+      "missing_tasks": [],
+      "scope_changes": [],
+      "history": {
+        "task_links": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_comments": {
+          "original_rows": 7,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_attachments": {
+          "original_rows": 0,
+          "missing_or_modified": 0,
+          "new_rows": 0
+        },
+        "task_events": {
+          "original_rows": 86,
+          "missing_or_modified": 0,
+          "new_rows": 17
+        },
+        "task_runs": {
+          "original_runs": 6,
+          "missing_runs": 0,
+          "new_runs": 0
+        }
+      },
+      "workspace_changes": []
+    }
+  },
+  "summary": {
+    "at": "2026-09-07T22:12:33.929983+00:00",
+    "boards": {
+      "recuperacli": {
+        "original_tasks": 20,
+        "missing_tasks": [],
+        "scope_changes": [],
+        "history": {
+          "task_links": {
+            "original_rows": 14,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_comments": {
+            "original_rows": 106,
+            "missing_or_modified": 0,
+            "new_rows": 1
+          },
+          "task_attachments": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_events": {
+            "original_rows": 417,
+            "missing_or_modified": 0,
+            "new_rows": 11
+          },
+          "task_runs": {
+            "original_runs": 31,
+            "missing_runs": 0,
+            "new_runs": 1
+          }
+        },
+        "workspace_changes": []
+      },
+      "dovcrm": {
+        "original_tasks": 285,
+        "missing_tasks": [],
+        "scope_changes": [],
+        "history": {
+          "task_links": {
+            "original_rows": 79,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_comments": {
+            "original_rows": 823,
+            "missing_or_modified": 0,
+            "new_rows": 3
+          },
+          "task_attachments": {
+            "original_rows": 16,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_events": {
+            "original_rows": 10740,
+            "missing_or_modified": 0,
+            "new_rows": 212
+          },
+          "task_runs": {
+            "original_runs": 426,
+            "missing_runs": 0,
+            "new_runs": 4
+          }
+        },
+        "workspace_changes": []
+      },
+      "mulher-mais-segura": {
+        "original_tasks": 0,
+        "missing_tasks": [],
+        "scope_changes": [],
+        "history": {
+          "task_links": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_comments": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_attachments": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_events": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_runs": {
+            "original_runs": 0,
+            "missing_runs": 0,
+            "new_runs": 0
+          }
+        },
+        "workspace_changes": []
+      },
+      "sommus": {
+        "original_tasks": 0,
+        "missing_tasks": [],
+        "scope_changes": [],
+        "history": {
+          "task_links": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_comments": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_attachments": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_events": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_runs": {
+            "original_runs": 0,
+            "missing_runs": 0,
+            "new_runs": 0
+          }
+        },
+        "workspace_changes": []
+      },
+      "concursa-ai": {
+        "original_tasks": 313,
+        "missing_tasks": [],
+        "scope_changes": [],
+        "history": {
+          "task_links": {
+            "original_rows": 70,
+            "missing_or_modified": 0,
+            "new_rows": 2
+          },
+          "task_comments": {
+            "original_rows": 701,
+            "missing_or_modified": 0,
+            "new_rows": 5
+          },
+          "task_attachments": {
+            "original_rows": 4,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_events": {
+            "original_rows": 10757,
+            "missing_or_modified": 0,
+            "new_rows": 152
+          },
+          "task_runs": {
+            "original_runs": 385,
+            "missing_runs": 0,
+            "new_runs": 2
+          }
+        },
+        "workspace_changes": []
+      },
+      "hermes-project-facto-786f51f34a055368--infotributos": {
+        "original_tasks": 19,
+        "missing_tasks": [],
+        "scope_changes": [],
+        "history": {
+          "task_links": {
+            "original_rows": 14,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_comments": {
+            "original_rows": 51,
+            "missing_or_modified": 0,
+            "new_rows": 1
+          },
+          "task_attachments": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_events": {
+            "original_rows": 2607,
+            "missing_or_modified": 0,
+            "new_rows": 21
+          },
+          "task_runs": {
+            "original_runs": 27,
+            "missing_runs": 0,
+            "new_runs": 1
+          }
+        },
+        "workspace_changes": []
+      },
+      "hermes-project-facto-786f51f34a055368--dovtest": {
+        "original_tasks": 32,
+        "missing_tasks": [],
+        "scope_changes": [],
+        "history": {
+          "task_links": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_comments": {
+            "original_rows": 31,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_attachments": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_events": {
+            "original_rows": 237,
+            "missing_or_modified": 0,
+            "new_rows": 8
+          },
+          "task_runs": {
+            "original_runs": 33,
+            "missing_runs": 0,
+            "new_runs": 0
+          }
+        },
+        "workspace_changes": []
+      },
+      "hermes-project-facto-786f51f34a055368--central-dec": {
+        "original_tasks": 16,
+        "missing_tasks": [],
+        "scope_changes": [],
+        "history": {
+          "task_links": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_comments": {
+            "original_rows": 15,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_attachments": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_events": {
+            "original_rows": 140,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_runs": {
+            "original_runs": 16,
+            "missing_runs": 0,
+            "new_runs": 0
+          }
+        },
+        "workspace_changes": []
+      },
+      "project-factory": {
+        "original_tasks": 20,
+        "missing_tasks": [],
+        "scope_changes": [],
+        "history": {
+          "task_links": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_comments": {
+            "original_rows": 55,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_attachments": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_events": {
+            "original_rows": 189,
+            "missing_or_modified": 0,
+            "new_rows": 7
+          },
+          "task_runs": {
+            "original_runs": 14,
+            "missing_runs": 0,
+            "new_runs": 0
+          }
+        },
+        "workspace_changes": []
+      },
+      "trabalho": {
+        "original_tasks": 20,
+        "missing_tasks": [],
+        "scope_changes": [],
+        "history": {
+          "task_links": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_comments": {
+            "original_rows": 7,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_attachments": {
+            "original_rows": 0,
+            "missing_or_modified": 0,
+            "new_rows": 0
+          },
+          "task_events": {
+            "original_rows": 86,
+            "missing_or_modified": 0,
+            "new_rows": 17
+          },
+          "task_runs": {
+            "original_runs": 6,
+            "missing_runs": 0,
+            "new_runs": 0
+          }
+        },
+        "workspace_changes": []
+      }
+    }
+  }
+}

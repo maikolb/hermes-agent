@@ -1,0 +1,233 @@
+{
+  "at": "2026-09-07T22:19:39.026116+00:00",
+  "activated": true,
+  "phase": "activated",
+  "services": [
+    {
+      "unit": "hermes-gateway@default.service",
+      "pid": 3470197,
+      "code_paths": [
+        "/usr/local/lib/hermes-agent.release-20260907-53c5f68b24c4d8a40766af1d34990e92e664e20e/venv/bin/python3",
+        "/usr/local/lib/hermes-agent.release-20260907-53c5f68b24c4d8a40766af1d34990e92e664e20e/venv/bin/hermes"
+      ],
+      "runtime": {
+        "gateway_state": "running",
+        "active_agents": 0,
+        "updated_at": "2026-09-07T22:05:51.028281+00:00",
+        "pid": 3470197
+      }
+    },
+    {
+      "unit": "hermes-gateway@hermes-project-factory.service",
+      "pid": 3471002,
+      "code_paths": [
+        "/usr/local/lib/hermes-agent.release-20260907-53c5f68b24c4d8a40766af1d34990e92e664e20e/venv/bin/python3",
+        "/usr/local/lib/hermes-agent.release-20260907-53c5f68b24c4d8a40766af1d34990e92e664e20e/venv/bin/hermes"
+      ],
+      "runtime": {
+        "gateway_state": "running",
+        "active_agents": 6,
+        "updated_at": "2026-09-07T22:18:24.633091+00:00",
+        "pid": 3471002
+      }
+    }
+  ],
+  "projects": [
+    {
+      "path": "/srv/hermes/config.yaml",
+      "other_settings_unchanged": true,
+      "drain_present": false,
+      "project_count": 10
+    },
+    {
+      "path": "/srv/hermes/profiles/hermes-project-factory/config.yaml",
+      "other_settings_unchanged": true,
+      "drain_present": false,
+      "project_count": 10
+    }
+  ],
+  "boards": {
+    "recuperacli": {
+      "exists": true,
+      "workflow_count": 4,
+      "adopted": 4,
+      "decisions": {
+        "pending": 3,
+        "resolved": 1
+      },
+      "workers": [],
+      "duplicate_adoption": [],
+      "legacy_open": []
+    },
+    "dovcrm": {
+      "exists": true,
+      "workflow_count": 35,
+      "adopted": 32,
+      "decisions": {
+        "pending": 8,
+        "resolved": 17,
+        "superseded": 3
+      },
+      "workers": [
+        {
+          "id": "t_427dcfe4",
+          "status": "running",
+          "current_run_id": 430,
+          "worker_pid": 3481337,
+          "worker_started_at": 1788819131.66,
+          "workspace_path": "/srv/projects/next-crm",
+          "stage": "analysis",
+          "spec_revision": 0,
+          "process_matches": true
+        }
+      ],
+      "duplicate_adoption": [],
+      "legacy_open": []
+    },
+    "mulher-mais-segura": {
+      "exists": true,
+      "workflow_count": 0,
+      "adopted": 0,
+      "decisions": {},
+      "workers": [],
+      "duplicate_adoption": [],
+      "legacy_open": []
+    },
+    "sommus": {
+      "exists": true,
+      "workflow_count": 0,
+      "adopted": 0,
+      "decisions": {},
+      "workers": [],
+      "duplicate_adoption": [],
+      "legacy_open": []
+    },
+    "concursa-ai": {
+      "exists": true,
+      "workflow_count": 45,
+      "adopted": 45,
+      "decisions": {
+        "pending": 15,
+        "resolved": 1
+      },
+      "workers": [
+        {
+          "id": "t_81d88134",
+          "status": "running",
+          "current_run_id": 390,
+          "worker_pid": 3484780,
+          "worker_started_at": 1788819271.46,
+          "workspace_path": "/srv/projects/Concursa_ai",
+          "stage": "analysis",
+          "spec_revision": 0,
+          "process_matches": true
+        }
+      ],
+      "duplicate_adoption": [],
+      "legacy_open": []
+    },
+    "hermes-project-facto-786f51f34a055368--infotributos": {
+      "exists": true,
+      "workflow_count": 7,
+      "adopted": 7,
+      "decisions": {
+        "pending": 1
+      },
+      "workers": [],
+      "duplicate_adoption": [],
+      "legacy_open": []
+    },
+    "hermes-project-facto-786f51f34a055368--dovtest": {
+      "exists": true,
+      "workflow_count": 2,
+      "adopted": 2,
+      "decisions": {
+        "pending": 2
+      },
+      "workers": [],
+      "duplicate_adoption": [],
+      "legacy_open": []
+    },
+    "hermes-project-facto-786f51f34a055368--central-dec": {
+      "exists": true,
+      "workflow_count": 0,
+      "adopted": 0,
+      "decisions": {},
+      "workers": [],
+      "duplicate_adoption": [],
+      "legacy_open": []
+    },
+    "project-factory": {
+      "exists": true,
+      "workflow_count": 5,
+      "adopted": 5,
+      "decisions": {
+        "pending": 2
+      },
+      "workers": [],
+      "duplicate_adoption": [],
+      "legacy_open": []
+    },
+    "trabalho": {
+      "exists": true,
+      "workflow_count": 13,
+      "adopted": 13,
+      "decisions": {},
+      "workers": [],
+      "duplicate_adoption": [],
+      "legacy_open": []
+    }
+  },
+  "source": "read-only SQLite snapshots, process identity, gateway status and config comparison against pre-deployment backup",
+  "source_sha256": "14554709fe1d020450a4b38d3246fb3eee08eeed0c5fa4b43cf71d0947b4dde8",
+  "decisions": [
+    {
+      "board": "recuperacli",
+      "id": "dec_60efe989357cc3853498c894",
+      "task_id": "t_2d708384",
+      "run_id": 1,
+      "kind": "impediment",
+      "status": "resolved",
+      "action": "continue",
+      "author": "Principal",
+      "created_at": 1788818828,
+      "resolved_at": 1788819558
+    },
+    {
+      "board": "dovcrm",
+      "id": "dec_9fd6a9aa3840071deaa97e39",
+      "task_id": "t_829ec242",
+      "run_id": 391,
+      "kind": "impediment",
+      "status": "resolved",
+      "action": "continue",
+      "author": "Principal",
+      "created_at": 1788818805,
+      "resolved_at": 1788819378
+    },
+    {
+      "board": "dovcrm",
+      "id": "dec_ad1fc9e78a06e7368ca4197e",
+      "task_id": "t_427dcfe4",
+      "run_id": 315,
+      "kind": "impediment",
+      "status": "resolved",
+      "action": "continue",
+      "author": "Principal",
+      "created_at": 1788818803,
+      "resolved_at": 1788819113
+    },
+    {
+      "board": "concursa-ai",
+      "id": "dec_abad00d5b4b433c507576147",
+      "task_id": "t_81d88134",
+      "run_id": 17,
+      "kind": "impediment",
+      "status": "resolved",
+      "action": "continue",
+      "author": "Principal",
+      "created_at": 1788818771,
+      "resolved_at": 1788819164
+    }
+  ]
+}
