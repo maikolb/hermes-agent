@@ -1,0 +1,62 @@
+Failed-compaction safety-stop validation evidence
+Date: 2026-09-02
+Branch: fix/compaction-failure-stop
+Base: maikolb/main at 5e073855c8
+
+Incident correlation
+- Source log: C:\Users\maiko\AppData\Local\hermes\logs\gateway-hidden-launch.log
+- Screenshot: C:\Users\maiko\AppData\Local\Temp\codex-clipboard-bfd7c908-761a-480c-9f89-96b6e1ae6eb5.png
+- Observed incident sequence: preflight above 231,200 tokens; 300-second auxiliary compression timeout; fallback authentication unavailable; continuation at approximately 266,692 tokens with cooldown:59; later tool waits of approximately 121 and 303 seconds.
+- Current-main code inspection: agent/conversation_loop.py warned on the pre-provider cooldown branch and had no return, so the oversized request remained eligible for dispatch.
+
+Implemented boundary
+- The existing soft compression_deferred result now accepts the explicit block reason and annotates the existing turn checkpoint.
+- When the fully assembled request is above threshold and should_compress_info returns a block reason, Hermes refunds the unmade iteration, persists the transcript, marks the checkpoint compaction_deferred, and returns before the provider call.
+- The gateway continues to distinguish compression_deferred from compression_exhausted, so this path cannot trigger the destructive auto-reset.
+- The result reports checkpoint_preserved=true only after the transition succeeds. A failed transition reports that checkpoint status could not be confirmed.
+
+Direct incident-shaped result
+- provider create calls: 0
+- api_calls: 0
+- completed: false
+- failed: false
+- partial: true
+- compression_deferred: true
+- compression_deferred_reason: cooldown:59
+- checkpoint phase: compaction_deferred
+- checkpoint next_action: run_manual_compression_then_resume_current_turn
+- original history and active user request remained in result.messages
+
+Check 1
+Command: python -m pytest tests/run_agent/test_compression_lock_defer.py -q
+Exit: 0
+Observed: 10 passed in 9.51s after the final behavior and false-claim guard were added.
+
+Check 2
+Command: python -m pytest tests/run_agent/test_compression_lock_defer.py tests/run_agent/test_preflight_compression_cap_e2e.py tests/run_agent/test_turn_checkpoint_compaction.py tests/agent/test_context_compressor_summary_continuity.py tests/agent/test_g5_current_turn_media.py tests/agent/test_turn_context_overflow_warning.py -q
+Exit: 0
+Observed: 41 passed in 40.47s.
+
+Check 3
+Command: python -m pytest tests/gateway/test_compression_deferred_soft_result.py tests/gateway/test_35809_auto_reset_clean_context.py tests/gateway/test_7100_transient_failure_transcript.py -q
+Exit: 0
+Observed: 8 passed in 6.74s.
+
+Check 4
+Command: uvx ruff@0.15.10 check agent/conversation_loop.py tests/run_agent/test_compression_lock_defer.py
+Exit: 0
+Observed: All checks passed.
+
+Check 5
+Command: python -m py_compile agent/conversation_loop.py tests/run_agent/test_compression_lock_defer.py
+Exit: 0
+Observed: both changed Python files compiled.
+
+Excluded changes
+- No compression threshold, timeout, provider, model, summary prompt, abort_on_summary_failure, protected-tail, memory, AOF, or credential setting changed.
+- No deterministic fallback summary was enabled.
+- No history was deleted and no gateway auto-reset was requested.
+
+Readiness ceiling
+- validated-local for this source branch.
+- PR CI, merge, immutable release, local/VPS install, and a real incident-shaped target canary remain pending.

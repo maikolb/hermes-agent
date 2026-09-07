@@ -48,7 +48,9 @@ jobs:
             runner: macos-latest
             marker: macos_only
           - name: Windows-only tests
-            runner: windows-latest-32-core
+            # Fork note: windows-latest-32-core never schedules here
+            # (no larger runners on this account).
+            runner: windows-latest
             marker: windows_only
     steps:
       - name: Checkout code

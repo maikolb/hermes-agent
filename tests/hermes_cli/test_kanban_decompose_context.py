@@ -47,7 +47,8 @@ def test_context_changed_during_decomposition_discards_graph(tmp_path, monkeypat
         calls.append(kwargs)
         prompt = kwargs["messages"][1]["content"]
         assert "operator: " + original_body in prompt
-        assert "Delivery: None; requires_repo=None" in prompt
+        # The explicit non-repository task is persisted as a report.
+        assert "Delivery: report; requires_repo=0" in prompt
         assert latest_body not in prompt
         # A second real connection can commit an edit while the model works.
         # Title/body stay identical; only newly consumed context changes.

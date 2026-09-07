@@ -1469,38 +1469,75 @@ def _compression_deferred_result(
     agent,
     messages: List[Dict],
     api_call_count: int,
+    *,
+    reason: str = "compression_lock_contended",
 ) -> Dict[str, Any]:
-    """Build the soft turn result for a lock-contended compression defer.
+    """Build a soft turn result when an oversized request cannot compact now.
 
-    Another path (a sibling turn, a background review fork, a manual
-    ``/compress``) holds this session's compression lock, so every
-    compression pass this turn no-oped and the request still does not fit.
-    This is a TEMPORARY condition — the lock winner is actively shrinking
-    the same session — so the turn must end as a soft defer
+    Lock contention and a same-session summary-failure cooldown are temporary.
+    The turn must end as a soft defer
     (``compression_deferred``), never as ``compression_exhausted``: the
     gateway auto-resets (wipes) the session on exhaustion (#9893/#35809),
-    which would destroy a session that the concurrent compressor is about
-    to make healthy again.
+    while continuing would send a request already proven over the configured
+    threshold. The original transcript and durable checkpoint stay intact.
 
     ``failed`` stays False so the gateway persists the user turn (transient
     branch) and retry-next-message semantics apply.
     """
     holder = getattr(agent, "_compression_skipped_due_to_lock", None)
+    normalized_reason = str(reason or "compression_temporarily_blocked")
     logger.info(
-        "turn deferred: compression lock held by another path "
-        "(session=%s holder=%s) — not counting as compression exhaustion",
+        "turn deferred before oversized provider call "
+        "(session=%s reason=%s holder=%s) — not counting as compression exhaustion",
         agent.session_id or "none",
+        normalized_reason,
         holder if isinstance(holder, str) else "unconfirmed",
     )
+    checkpoint_preserved = False
+    checkpoint_store = getattr(agent, "_turn_checkpoint_store", None)
+    if checkpoint_store is not None and agent.session_id:
+        try:
+            agent._turn_checkpoint_state = checkpoint_store.transition(
+                str(agent.session_id),
+                phase="compaction_deferred",
+                next_action="run_manual_compression_then_resume_current_turn",
+                blockers=[
+                    "Automatic context compression is temporarily blocked "
+                    f"while the request is over threshold ({normalized_reason})."
+                ],
+            )
+            checkpoint_preserved = True
+        except Exception:
+            logger.warning(
+                "could not annotate the existing turn checkpoint for "
+                "compression defer; the provider call remains blocked",
+                exc_info=True,
+            )
     try:
         agent._flush_status_buffer()
     except Exception:
         pass
-    _final = (
-        "Context compression is already running for this session. "
-        "Please retry in a moment — your next message will be processed "
-        "once the concurrent compression finishes."
-    )
+    if normalized_reason == "compression_lock_contended":
+        _final = (
+            "Context compression is already running for this session. "
+            "Please retry in a moment; your next message will be processed "
+            "once the concurrent compression finishes."
+        )
+    else:
+        _preservation = (
+            "The original session and its durable recovery checkpoint were preserved."
+            if checkpoint_preserved
+            else (
+                "The original session was preserved, but durable checkpoint status "
+                "could not be confirmed."
+            )
+        )
+        _final = (
+            "Hermes stopped before sending another oversized model request because "
+            "automatic context compression is temporarily blocked. "
+            f"{_preservation} Run /compress to retry compression now, or /new to "
+            "start a fresh session."
+        )
     return {
         "final_response": _final,
         "messages": messages,
@@ -1510,6 +1547,8 @@ def _compression_deferred_result(
         "partial": True,
         "failed": False,
         "compression_deferred": True,
+        "compression_deferred_reason": normalized_reason,
+        "checkpoint_preserved": checkpoint_preserved,
         "session_id": agent.session_id,
     }
 
@@ -2876,6 +2915,26 @@ def run_conversation(
                     _block_reason,
                     request_pressure_tokens,
                     int(getattr(_compressor, "threshold_tokens", 0) or 0),
+                )
+                # The fully assembled request is already over threshold and
+                # the compressor has explicitly refused this attempt. Sending
+                # it anyway recreates the live 266k/231k failure: the model may
+                # hang, tools may keep running, and the session grows during
+                # the cooldown. Preserve the original transcript/checkpoint
+                # and end softly before the provider boundary. This is not
+                # exhaustion, so the gateway must not auto-reset the session.
+                api_call_count -= 1
+                agent._api_call_count = api_call_count
+                try:
+                    agent.iteration_budget.refund()
+                except Exception:
+                    pass
+                agent._persist_session(messages, conversation_history)
+                return _compression_deferred_result(
+                    agent,
+                    messages,
+                    api_call_count,
+                    reason=str(_block_reason),
                 )
         elif not agent.compression_enabled and len(messages) > 1:
             # Uncompressed session guard (#89297): compression is disabled, so
