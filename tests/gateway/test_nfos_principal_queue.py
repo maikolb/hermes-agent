@@ -22,7 +22,8 @@ def test_principal_wake_survives_failed_acceptance_and_keeps_same_worker(tmp_pat
     adapter=RecordingAdapter()
     asyncio.run(_run_one_notifier_tick(monkeypatch,_make_runner(adapter)))
     assert len(adapter.handled)==1
-    assert 'nfos_delivery pending' in adapter.handled[0].text
+    from hermes_cli.nfos_runtime import workflow_command
+    assert workflow_command()+' pending' in adapter.handled[0].text
     with kb.connect_closing() as conn:
         assert delivery.get_decision(conn,decision)['status']=='pending'
         assert kb.get_task(conn,task.id).current_run_id==task.current_run_id

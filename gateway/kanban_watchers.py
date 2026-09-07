@@ -2971,7 +2971,8 @@ class GatewayKanbanWatchersMixin:
                                 "gateway.kanban.wake.guidance"
                             )
                             if "nfos_principal_requested" in _wake_kinds:
-                                _synth += ("\nNFOS: consulte `python -m hermes_cli.nfos_delivery pending` "
+                                from hermes_cli.nfos_runtime import workflow_command
+                                _synth += (f"\nNFOS: consulte `{workflow_command()} pending` "
                                     "no board desta mensagem. Leia a spec e as evidências e resolva cada decisão "
                                     "por `decide`. O worker atual aguarda sua resposta; não crie outro worker "
                                     "nem encerre o card para fazer a revisão. Se resolver, use continue ou approve; "

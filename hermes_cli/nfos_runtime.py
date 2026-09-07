@@ -158,7 +158,16 @@ keeping this worker alive while the Principal is reviewing. A pending response
 means keep waiting, not failure. Save context before waiting. An action=human
 answer means save the next step, block the card with that concrete question and
 exit along with this task's children. Continue/changes preserves this execution.
-For delivery, use `ask --kind review --input review.json` with candidate SHA,
+For report/audit delivery, save the complete report on the card with `save-report`
+BEFORE requesting review. The review binds that saved report revision; do not
+change it after approval without requesting another review. Its JSON contains
+summary, artifacts, and criteria [{id,status:'PASS',evidence:[...]}].
+For code delivery, acquire the project slot with `acquire-project --candidate SHA`
+before homologation; if occupied, save state and let the predecessor finish.
+Save candidate_sha, candidate_tree, homolog_sha and homolog_evidence in progress
+state after testing the exact candidate in the project's actual homologation.
+Create or update its PR through the effect/reconcile protocol. Then use
+`ask --kind review --input review.json` with candidate SHA,
 PR, homolog evidence and requested action. Wait for the Principal's decision.
 Never use kanban_review to spawn a separate reviewer for this enrolled card.
 Use `effect --operation pr|merge|deploy --target ... --candidate SHA` before each
@@ -166,6 +175,7 @@ external effect. An execute=false/reconcile=true response requires reading the
 destination before trying again. Record that read with `reconcile`.
 Before completion save the report with `save-report --input report.json`.
 It contains summary, artifacts, and criteria [{id,status:'PASS',evidence:[...]}].
+After verified delivery, release the project slot with `release-project`.
 Record homolog_sha, integrated_sha, artifact and production_readback in progress
 state for code delivery. Report-only tasks need no PR/deploy. Evidence must prove
 functionality, not merely the presence of a screenshot file.
