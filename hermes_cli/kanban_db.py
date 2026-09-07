@@ -5559,6 +5559,12 @@ def claim_task(
         task = get_task(conn, task_id)
         if task is None or (task.task_role != "work" and not allow_activity):
             return None
+        from hermes_cli.nfos_delivery import active_suspension
+        if active_suspension(conn, task_id):
+            return None
+        retained = conn.execute("SELECT json_extract(state_json,'$.retained_workspace') FROM nfos_workflows WHERE task_id=?", (task_id,)).fetchone()
+        if retained and retained[0] and not json.loads(retained[0]).get('restored_at'):
+            return None
         from hermes_cli.nfos_runtime import previous_runs_termination_pending
         if task.status == 'ready' and previous_runs_termination_pending(conn, task_id):
             return None
@@ -10430,12 +10436,13 @@ def _release_worktree_creation_lock(worktree: Path, intent: Optional[dict[str, A
 
 def _materialize_nfos_worktree(
     conn: sqlite3.Connection, task: Task, *, repo_root: Path, target: Path, branch: str,
+    initial_sha: Optional[str] = None,
 ) -> None:
     owner_token = secrets.token_hex(16)
     try:
         _materialize_nfos_worktree_attempt(
             conn, task, repo_root=repo_root, target=target, branch=branch,
-            owner_token=owner_token,
+            owner_token=owner_token, initial_sha=initial_sha,
         )
     finally:
         # A handled Git error must not leave a long-lived gateway owning the
@@ -10454,7 +10461,7 @@ def _materialize_nfos_worktree(
 
 def _materialize_nfos_worktree_attempt(
     conn: sqlite3.Connection, task: Task, *, repo_root: Path, target: Path,
-    branch: str, owner_token: str,
+    branch: str, owner_token: str, initial_sha: Optional[str] = None,
 ) -> None:
     """Commit creation intent before Git, then reconcile only its exact checkout.
 
@@ -10473,7 +10480,7 @@ def _materialize_nfos_worktree_attempt(
     if _read_worktree_creation_intent(conn, task.id) is None:
         if target.exists() or target.is_symlink():
             raise RuntimeError(f"existing worktree {target} is foreign without a prior creation intent")
-        ref = f"refs/heads/{branch}" if _git_branch_exists(repo_root, branch) else "HEAD"
+        ref = initial_sha or (f"refs/heads/{branch}" if _git_branch_exists(repo_root, branch) else "HEAD")
         result = _cleanup_git(repo_root, "rev-parse", "--verify", f"{ref}^{{commit}}")
         base_sha = result.stdout.strip()
         if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", base_sha):
@@ -10555,6 +10562,7 @@ def _materialize_task_owned_worktree(
     repo_root: Path,
     target: Path,
     branch: str,
+    initial_sha: Optional[str] = None,
 ) -> tuple[Path, str]:
     """Create or reuse only a worktree with durable Hermes provenance."""
 
@@ -10594,7 +10602,7 @@ def _materialize_task_owned_worktree(
     canonical_target = target.expanduser().resolve(strict=False)
     if conn.execute("SELECT 1 FROM nfos_workflows WHERE task_id=?", (task.id,)).fetchone():
         _materialize_nfos_worktree(
-            conn, task, repo_root=repo_root, target=canonical_target, branch=branch,
+            conn, task, repo_root=repo_root, target=canonical_target, branch=branch, initial_sha=initial_sha,
         )
         valid, payload, reason = _validate_worktree_ownership(conn, task.id, require_checkout=True)
         if not valid or payload is None:
@@ -13728,6 +13736,13 @@ def _dispatch_once_locked(
             continue
         try:
             resolved_branch_name = None
+            if delivery_project is not None:
+                from hermes_cli.nfos_workspaces import isolate_retained_workspace
+                candidate, retained_owner = isolate_retained_workspace(conn, candidate, board=board)
+                if retained_owner:
+                    result.skipped_workspace_leased.append((candidate.id,
+                        str(retained_owner.get('task_id') or 'unknown'), candidate.workspace_path))
+                    continue
             if candidate.workspace_kind == "worktree":
                 workspace, resolved_branch_name = _resolve_worktree_workspace(
                     candidate,

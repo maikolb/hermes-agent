@@ -2456,8 +2456,8 @@ class GatewayKanbanWatchersMixin:
         while self._running:
             try:
                 # Requests may owe a receipt before any card/subscription exists.
-                await self._nfos_retry_receipts()
                 await self._nfos_retry_coordinator_inputs()
+                await self._nfos_retry_receipts()
                 _gc_due = time.monotonic() >= _gc_next_at
                 _gc_retention_days = 30
                 if _gc_due:
@@ -2917,6 +2917,7 @@ class GatewayKanbanWatchersMixin:
                     # "Task X completed" and re-decomposes work that already
                     # exists on the board.
                     wake_handoff = ""
+                    text_delivery_failed = False
                     for ev in d["events"]:
                         kind = ev.kind
                         expected_states = {
@@ -3077,6 +3078,8 @@ class GatewayKanbanWatchersMixin:
                             continue
                         if sub.get("_notified"):
                             continue
+                        if text_delivery_failed:
+                            continue
                         try:
                             _send_res = await adapter.send(
                                 sub["chat_id"], msg, metadata=metadata,
@@ -3136,15 +3139,11 @@ class GatewayKanbanWatchersMixin:
                                 sub["task_id"], platform_str, fails,
                                 MAX_SEND_FAILURES, exc,
                             )
-                            await _to_thread_process_service(
-                                self._kanban_rewind,
-                                sub,
-                                d["cursor"],
-                                d.get("old_cursor", 0),
-                                board_slug,
-                            )
-                            # Release this reservation; keep the durable pending delivery.
-                            break
+                            # A platform outage must not prevent the internal
+                            # Principal from receiving a worker's decision.
+                            # Keep the same claim through the wake below, then
+                            # retry only the unconfirmed text on a later tick.
+                            text_delivery_failed = True
                     else:
                         # Text delivery and agent acceptance are independent.
                         # A subscription advances only when both applicable
@@ -3345,6 +3344,13 @@ class GatewayKanbanWatchersMixin:
                                     board_slug,
                                 )
                                 continue
+
+                        if text_delivery_failed:
+                            await _to_thread_process_service(
+                                self._kanban_rewind, sub, d["cursor"],
+                                d.get("old_cursor", 0), board_slug,
+                            )
+                            continue
 
                         # Delivery complete (text ping for push adapters, wake
                         # self-post for non-push, wake injection for wake-only

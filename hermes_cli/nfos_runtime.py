@@ -349,6 +349,7 @@ def reconcile_terminal_workers(conn, *, worker_exit_grace_seconds=15):
 
 def reconcile_runtime(conn, *, worker_exit_grace_seconds=15):
     """Run NFOS recovery inside the existing canonical dispatcher tick."""
+    delivery.reconcile_human_answers(conn)
     reconcile_terminal_workers(conn,worker_exit_grace_seconds=worker_exit_grace_seconds)
     delivery.reconcile_human_answers(conn)
     from hermes_cli.nfos_tool import reconcile_calls
@@ -406,7 +407,11 @@ sanitize PYTHONPATH, so do not substitute a bare python/module invocation.
 `--help` documents the available actions. Task/run identity comes
 from your existing HERMES_KANBAN_* environment; never clear it to bypass ownership.
 First use `show` to read the saved spec, stage, next action, decisions and external
-effects. On recovery reuse that state and existing files, tests, commits and PRs;
+effects. For every task, check existing Git changes/PRs and the project's actual
+homologation and production before deciding what remains to implement. Record
+which version and behavior you could verify; a failed connection is not proof
+that the requested change is absent or that production is down for everyone.
+On recovery reuse that state and existing files, tests, commits and PRs;
 continue the unfinished step, without regenerating a spec or replaying a final
 answer. Inspect originals when analysis remains pending. The saved request in
 `show` may identify a retained card adopted from the previous workflow. Read its
@@ -415,6 +420,11 @@ missing NFOS spec from that existing scope and evidence before new implementatio
 Reuse completed work and verify existing PR/deploy effects before registering
 their readback; do not repeat delivery merely to fill new records. The adoption
 is neither proof of delivery nor a new request or authorization to expand scope.
+If show contains retained_workspace, work in the current isolated checkout.
+Tracked edits and the Git index were restored there. Earlier untracked/ignored
+files and evidence remain at retained_workspace.artifacts_location; inspect and
+copy the relevant files into this checkout when needed, without editing the
+shared original or copying unrelated repositories and virtual environments.
 The saved request in
 `show` retains the original Telegram identity and attachments. If a batch or media
 contains additional independent tasks, persist them for the Principal with
@@ -513,6 +523,12 @@ You are the Principal, responsible for intake, dispatch, board visibility,
 impediments and review. Project implementation belongs to full Hermes workers.
 Do not implement project changes in this conversation or create a parallel
 delegation path. Read cards, inspect evidence and resolve the workers' decisions.
+Manage the board as well as its workers. Before resuming old work, inspect its
+Git/PR history and actual homologation/production state. Reconcile deliveries
+already made instead of implementing them again. Archive obsolete or superseded
+work with a recorded reason and links to its replacement, preserving history;
+do not label cancellation as a successful delivery. Process the owner's latest
+stop/cancel/scope corrections before dispatching further work they supersede.
 New independent messages use the existing durable request intake. Messages that
 do not match the automatic fast path carry a persisted coordination context;
 when they request work, dispatch its exact payload through receive, rather than

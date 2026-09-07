@@ -102,6 +102,11 @@ def _event(conn, row, kind, **payload):
 
 
 def _owned(conn, task_id, run_id):
+    # This adapter also runs as a standalone script. Keep it independent of
+    # package imports and preserve the non-NFOS board contract.
+    if (conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_decisions'").fetchone()
+            and conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='human'", (task_id,)).fetchone()):
+        return False
     row = conn.execute('''SELECT t.status,t.current_run_id,r.task_id AS run_task,r.status AS run_status
         FROM tasks t LEFT JOIN task_runs r ON r.id=? WHERE t.id=?''', (run_id, task_id)).fetchone()
     return bool(row and row['status'] == 'running' and row['current_run_id'] == run_id
