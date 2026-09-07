@@ -328,9 +328,51 @@ def get_spec(conn, task_id):
 def _spec_matches_instruction(conn, task_id):
     task=_kb().get_task(conn,task_id)
     spec=get_spec(conn,task_id)
-    # Specs predating this binding are valid only for the initial instruction.
-    return bool(task and spec and
-        json.loads(spec['evidence']).get('instruction_revision',0)==task.instruction_revision)
+    if not task or not spec:
+        return False
+    evidence=json.loads(spec['evidence'])
+    if 'instruction_revision' in evidence or task.instruction_revision==0:
+        return evidence.get('instruction_revision',0)==task.instruction_revision
+    # Historical specs remain immutable. A Principal's explicit reconciliation
+    # binds only the exact instruction and spec it inspected, never later edits.
+    identity=_legacy_spec_identity(task,spec)
+    for row in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_legacy_spec_bound' ORDER BY id DESC",(task_id,)):
+        if json.loads(row['payload']).get('identity')==identity:
+            return True
+    return False
+
+
+def _legacy_spec_identity(task,spec):
+    return {'spec_id':spec['id'],'spec_sha256':hashlib.sha256(spec['content'].encode()).hexdigest(),
+            'instruction_revision':task.instruction_revision,
+            'instruction_sha256':hashlib.sha256(_json({'title':task.title,'body':task.body}).encode()).hexdigest()}
+
+
+def reconcile_legacy_spec(conn,task_id,*,spec_id,spec_sha256,instruction_revision,
+                          instruction_sha256,reason,evidence,author):
+    """Record a reviewed migration binding; do not alter spec, review or effects."""
+    if os.environ.get('HERMES_KANBAN_TASK'):
+        raise WorkflowError('The Principal reconciles legacy metadata outside the worker session')
+    if not reason or not author or not isinstance(evidence,list) or not evidence:
+        raise WorkflowError('Record the reconciliation reason, author and inspected local evidence')
+    if conn.in_transaction:
+        raise WorkflowError('Reconciliation evidence must be read outside a write transaction')
+    checks=[_inspect_local_evidence(str(Path(ref).resolve())) for ref in evidence]
+    expected={'spec_id':spec_id,'spec_sha256':spec_sha256,'instruction_revision':instruction_revision,
+              'instruction_sha256':instruction_sha256}
+    with _kb().write_txn(conn):
+        task=_kb().get_task(conn,task_id);spec=get_spec(conn,task_id)
+        if not task or not spec or _legacy_spec_identity(task,spec)!=expected:
+            raise WorkflowError('Spec or instruction changed; read and review the current identity')
+        if 'instruction_revision' in json.loads(spec['evidence']):
+            raise WorkflowError('Only a legacy spec missing its instruction binding can be reconciled')
+        for row in conn.execute("SELECT id,payload FROM task_events WHERE task_id=? AND kind='nfos_legacy_spec_bound' ORDER BY id DESC",(task_id,)):
+            if json.loads(row['payload']).get('identity')==expected:
+                return {'event_id':row['id'],'identity':expected}
+        _event(conn,task_id,None,'nfos_legacy_spec_bound',
+               {'identity':expected,'reason':reason,'author':author,'evidence':checks})
+        event_id=conn.execute("SELECT max(id) FROM task_events WHERE task_id=? AND kind='nfos_legacy_spec_bound'",(task_id,)).fetchone()[0]
+        return {'event_id':event_id,'identity':expected}
 
 
 def _require_current_instruction_spec(conn, task_id):
@@ -1120,7 +1162,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','save-spec','save-report','progress','ask','decide',
-        'pending','effect','reconcile','acquire-project','release-project','receive','resume','wait','reconsider'])
+        'pending','effect','reconcile','reconcile-spec','acquire-project','release-project','receive','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -1157,6 +1199,8 @@ def main():
             result={'revision':save_spec(conn,args.task,args.run,payload,author=args.author,evidence=evidence)}
         elif args.action=='save-report':
             save_report(conn,args.task,args.run,payload);result={'saved':True}
+        elif args.action=='reconcile-spec':
+            result=reconcile_legacy_spec(conn,args.task,**payload)
         elif args.action=='progress':
             advance(conn,args.task,args.run,args.stage,next_action=args.next_action,state=payload);result={'saved':True}
         elif args.action=='ask':
