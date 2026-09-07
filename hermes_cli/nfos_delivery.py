@@ -816,7 +816,10 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             raise WorkflowError('Decision was already resolved')
         if action=='approve' and row['kind']!='review':
             raise WorkflowError('Only a delivery review can authorize publication')
-        if row['kind']!='additional_tasks' and row['spec_revision']!=get_workflow(conn,row['task_id'])['spec_revision']:
+        current_spec_revision=get_workflow(conn,row['task_id'])['spec_revision']
+        # Operational questions can outlive spec preparation. Their answers
+        # resolve the original question, never approve a different delivery.
+        if row['kind']=='review' and row['spec_revision']!=current_spec_revision:
             raise WorkflowError('Spec changed during review; review the current revision')
         if proposal is not None and row['kind']!='additional_tasks':
             raise WorkflowError('A revised task proposal applies only to additional_tasks')
@@ -849,7 +852,9 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                 raise WorkflowError('Review needs the saved report')
         conn.execute('UPDATE nfos_decisions SET status=?,answer=?,author=?,action=?,resolved_at=? WHERE id=?',
                      ('human' if action=='human' else 'resolved',answer,author,action,int(time.time()),decision_id))
-        _event(conn,row['task_id'],row['run_id'],'nfos_principal_resolved',{'decision_id':decision_id,'action':action,'answer':answer})
+        _event(conn,row['task_id'],row['run_id'],'nfos_principal_resolved',
+               {'decision_id':decision_id,'action':action,'answer':answer,
+                'asked_spec_revision':row['spec_revision'],'resolved_spec_revision':current_spec_revision})
 
 
 def reconsider_decision(conn, decision_id, *, action, reason, answer, author='Principal'):
