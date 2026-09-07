@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS nfos_tool_calls (
     status TEXT NOT NULL, created_at REAL NOT NULL,
     started_at REAL, finished_at REAL, deadline_at REAL,
     timeout_seconds REAL NOT NULL, runner_pid INTEGER, runner_started_at REAL,
+    runner_kind TEXT NOT NULL DEFAULT 'embedded',
     worker_pid INTEGER, worker_started_at REAL,
     descendants_json TEXT NOT NULL DEFAULT '[]', returncode INTEGER,
     timed_out INTEGER NOT NULL DEFAULT 0, error TEXT
@@ -73,6 +74,8 @@ def init_schema(conn):
     for name in ('stdin_path', 'stdin_sha256'):
         if name not in columns:
             conn.execute('ALTER TABLE nfos_tool_calls ADD COLUMN ' + name + ' TEXT')
+    if 'runner_kind' not in columns:
+        conn.execute("ALTER TABLE nfos_tool_calls ADD COLUMN runner_kind TEXT NOT NULL DEFAULT 'embedded'")
     conn.commit()
 
 
@@ -103,6 +106,28 @@ def _owned(conn, task_id, run_id):
         FROM tasks t LEFT JOIN task_runs r ON r.id=? WHERE t.id=?''', (run_id, task_id)).fetchone()
     return bool(row and row['status'] == 'running' and row['current_run_id'] == run_id
                 and row['run_task'] == task_id and row['run_status'] == 'running')
+
+
+def _in_exit_grace(conn, task_id, run_id):
+    """Existing commands may finish a short flush after an NFOS run closes."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_workflows'").fetchone():
+        return False
+    row=conn.execute('''SELECT r.status,r.ended_at,r.metadata,t.current_run_id,q.payload
+        FROM task_runs r JOIN tasks t ON t.id=r.task_id JOIN nfos_workflows w ON w.task_id=t.id
+        LEFT JOIN nfos_requests q ON q.id=w.request_id WHERE r.task_id=? AND r.id=?''',
+        (task_id,run_id)).fetchone()
+    if not row or not row['ended_at'] or row['current_run_id'] not in (None,run_id):
+        return False
+    if row['status']!='done' and not (row['status']=='blocked' and conn.execute(
+            "SELECT 1 FROM nfos_decisions WHERE task_id=? AND run_id=? AND status='human'",
+            (task_id,run_id)).fetchone()):
+        return False
+    receipt=json.loads(row['metadata'] or '{}').get('nfos_cleanup') or {}
+    if receipt.get('status') in {'stopping','confirmed'}:
+        return False
+    project=json.loads(row['payload'] or '{}').get('project',{})
+    not_before=receipt.get('not_before',float(row['ended_at'])+float(project.get('worker_exit_grace_seconds',15)))
+    return time.time()<not_before
 
 
 def _identity(pid):
@@ -143,7 +168,7 @@ def _group_children(pid, started_at):
     return children
 
 
-def _descendants(row):
+def _descendants(row, *, include_group=False):
     identities = {int(p['pid']): p for p in json.loads(row['descendants_json'] or '[]')}
     if _matches(row['worker_pid'], row['worker_started_at']):
         try:
@@ -153,8 +178,9 @@ def _descendants(row):
                     identities[proc.pid] = identity
         except psutil.Error:
             pass
-        for identity in _group_children(row['worker_pid'], row['worker_started_at']):
-            identities[identity['pid']] = identity
+        if include_group:
+            for identity in _group_children(row['worker_pid'], row['worker_started_at']):
+                identities[identity['pid']] = identity
     return [p for p in identities.values() if _matches(p['pid'], p['started_at'])]
 
 
@@ -171,7 +197,7 @@ def _signal_identity(identity, *, kill=False):
 
 def _stop_tree(row, grace=.5):
     root = {'pid': row['worker_pid'], 'started_at': row['worker_started_at']}
-    children = _descendants(row)
+    children = _descendants(row, include_group=True)
     root_matches = _matches(root['pid'], root['started_at'])
     # Children first lets the handshake wrapper collect the real command exit
     # status, including a command that handles TERM and exits successfully.
@@ -181,7 +207,7 @@ def _stop_tree(row, grace=.5):
     while time.monotonic() < deadline and any(_matches(p['pid'], p['started_at']) for p in children):
         time.sleep(.025)
     # Include descendants born while the first termination was in progress.
-    children = {p['pid']: p for p in children + _descendants(row)}
+    children = {p['pid']: p for p in children + _descendants(row, include_group=True)}
     for identity in reversed(list(children.values())):
         _signal_identity(identity, kill=True)
     if root_matches and _matches(root['pid'], root['started_at']):
@@ -225,6 +251,20 @@ def read_chunks(conn, call_id, *, after_seq=0, limit=1000):
         (call_id, max(0, int(after_seq)), min(1000, max(1, int(limit)))))]
 
 
+def call_runner_alive(call):
+    """A CLI adapter is one disposable process, unlike an embedded caller."""
+    return call.get('runner_kind') == 'cli' and _matches(call['runner_pid'], call['runner_started_at'])
+
+
+def _stop_cli_runner(call):
+    # Never terminate the process embedding this Python API (it can own more
+    # than one card). Only main() records a disposable, one-call CLI runner.
+    if not call_runner_alive(call) or call['runner_pid'] == os.getpid():
+        return []
+    return _stop_tree({'worker_pid':call['runner_pid'],'worker_started_at':call['runner_started_at'],
+                       'descendants_json':'[]'})
+
+
 def _finish(conn, call_id, status, *, returncode=None, timed_out=False, error=None, only_changed=False):
     with _transaction(conn):
         row = get_call(conn, call_id)
@@ -264,7 +304,7 @@ def reconcile_calls(conn):
         expired = bool(row['deadline_at'] and row['deadline_at'] <= time.time())
         runner_alive = _matches(row['runner_pid'], row['runner_started_at'])
         owned = _owned(conn, row['task_id'], row['run_id'])
-        if runner_alive and not expired and owned and row['status'] != 'stopping':
+        if runner_alive and not expired and row['status'] != 'stopping' and (owned or _in_exit_grace(conn,row['task_id'],row['run_id'])):
             continue
         error = ('Tool deadline exceeded' if expired else
                  'Execution ownership changed' if not owned else 'Execution adapter stopped; effect may be unknown')
@@ -286,6 +326,7 @@ def reconcile_calls(conn):
         changed = _finish(conn, row['id'], 'timed_out' if expired else 'interrupted',
                           timed_out=expired, error=error, only_changed=not requested)
         if changed:
+            changed['runner_termination_pending']=bool(_stop_cli_runner(changed))
             reconciled.append(changed)
     return reconciled
 
@@ -301,6 +342,9 @@ def terminate_calls(conn, task_id, run_id=None, *, reason='Execution was stopped
     changed = []
     for row in read_calls(conn, task_id, run_id):
         if row['status'] not in ACTIVE:
+            if call_runner_alive(row):
+                row['runner_termination_pending']=bool(_stop_cli_runner(row))
+                changed.append(row)
             continue
         requested = _request_stop(conn, row, timed_out=False, error=reason)
         if not requested and row['status'] != 'stopping':
@@ -314,6 +358,7 @@ def terminate_calls(conn, task_id, run_id=None, *, reason='Execution was stopped
         else:
             result = _finish(conn, row['id'], 'interrupted', error=reason, only_changed=not requested)
             if result:
+                result['runner_termination_pending']=bool(_stop_cli_runner(result))
                 changed.append(result)
     return changed
 
@@ -343,11 +388,12 @@ def _child():
     # descendants have exited. The adapter's deadline applies to all of them.
     identity = _identity(os.getpid())
     while identity and _group_children(identity['pid'], identity['started_at']):
-        time.sleep(.05)
+        time.sleep(.25)
     return proc.returncode
 
 
-def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id=None, env=None, stdin_path=None):
+def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id=None, env=None, stdin_path=None,
+                _cli_owner=False):
     """Execute an exact vector without a shell. Secrets belong in env, not argv.
 
     Reusing a call ID only reads the existing receipt. A retry is a new call
@@ -383,10 +429,10 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
                 raise ToolExecutionError('The task no longer belongs to this execution')
             identity = _identity(os.getpid())
             conn.execute('''INSERT INTO nfos_tool_calls
-                (id,task_id,run_id,argv_json,cwd,stdin_path,stdin_sha256,status,created_at,timeout_seconds,runner_pid,runner_started_at)
-                VALUES(?,?,?,?,?,?,?,'intent',?,?,?,?)''',
+                (id,task_id,run_id,argv_json,cwd,stdin_path,stdin_sha256,status,created_at,timeout_seconds,runner_pid,runner_started_at,runner_kind)
+                VALUES(?,?,?,?,?,?,?,'intent',?,?,?,?,?)''',
                 (call_id, task_id, run_id, _json(argv), cwd, input_path, input_hash, time.time(), timeout_seconds,
-                 identity['pid'], identity['started_at']))
+                 identity['pid'], identity['started_at'], 'cli' if _cli_owner else 'embedded'))
             _event(conn, get_call(conn, call_id), 'nfos_tool_intent')
         streams = queue.Queue(maxsize=128)
         def pump(pipe, name):
@@ -432,7 +478,7 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
             timed_out = False
             while len(eof) < 2 or process.poll() is None:
                 now = time.monotonic()
-                if now - last_identity_refresh >= .25:
+                if now - last_identity_refresh >= 1:
                     row = get_call(conn, call_id)
                     descendants = _descendants(row)
                     with _transaction(conn):
@@ -440,7 +486,7 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
                                      (_json(descendants), call_id))
                     if row['status'] not in ACTIVE:
                         stopped_reason = row['error'] or 'Runtime reconciled this call'
-                    if not _owned(conn, task_id, run_id):
+                    if not _owned(conn, task_id, run_id) and not _in_exit_grace(conn,task_id,run_id):
                         stopped_reason = 'Execution ownership changed'
                     last_identity_refresh = now
                 if (now >= deadline or cancelled.is_set() or stopped_reason) and not stopped_reason == 'termination_complete':
@@ -519,7 +565,8 @@ def main():
     args = parser.parse_args()
     argv = args.command[1:] if args.command[:1] == ['--'] else args.command
     result = run_command(args.db, task_id=args.task, run_id=args.run, argv=argv, cwd=args.cwd,
-                         timeout_seconds=args.timeout, call_id=args.call_id, stdin_path=args.stdin_file)
+                         timeout_seconds=args.timeout, call_id=args.call_id, stdin_path=args.stdin_file,
+                         _cli_owner=True)
     print(json.dumps(result, ensure_ascii=False))
     if result['timed_out']:
         return 124

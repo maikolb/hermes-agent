@@ -10,11 +10,13 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import time
 import uuid
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 # Terminal tools intentionally sanitize inherited PYTHONPATH. An absolute
 # script invocation must still use the source that owns this workflow.
@@ -275,21 +277,157 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
         _event(conn,task_id,run_id,'nfos_progress',{'stage':stage,'next_action':next_action,'state':state or {}})
 
 
+def _report_results(spec, report):
+    rows=report.get('criteria',[])
+    if not isinstance(rows,list) or any(not isinstance(row,dict) for row in rows):
+        raise WorkflowError('Report criteria must be result objects')
+    results={row.get('id'):row for row in rows}
+    expected={c['id'] for c in json.loads(spec['content'])['criteria']}
+    if len(results)!=len(rows) or set(results)!=expected:
+        raise WorkflowError('Report must contain each spec criterion exactly once')
+    if any(row.get('status') not in {'PASS','FAIL','NOT_RUN'} for row in rows):
+        raise WorkflowError('Report results must use PASS, FAIL or NOT_RUN')
+    if not str(report.get('summary') or '').strip():
+        raise WorkflowError('Report needs its actual outcome')
+    if any(row['status']=='PASS' and not row.get('evidence') for row in rows):
+        raise WorkflowError('Passing criteria require linked evidence')
+    return results
+
+
+def _evidence_refs(value):
+    if value is None:
+        return []
+    return value if isinstance(value,list) else [value]
+
+
+def _evidence_locator(reference):
+    if isinstance(reference,str) and reference.strip():
+        return reference.strip()
+    if isinstance(reference,dict):
+        for key in ('path','local_path','file','url','href','uri','ref','artifact','id'):
+            if isinstance(reference.get(key),str) and reference[key].strip():
+                return reference[key].strip()
+    raise WorkflowError('Evidence needs a file path, URL or declared artifact id')
+
+
+def _evidence_location(reference, workspace):
+    value=_evidence_locator(reference)
+    parsed=urlsplit(value)
+    if parsed.scheme and len(parsed.scheme)>1 and parsed.scheme!='file':
+        return 'external',value
+    if parsed.scheme=='file':
+        value=unquote(parsed.path)
+        if os.name=='nt' and len(value)>2 and value[0]=='/' and value[2]==':':
+            value=value[1:]
+    path=Path(value).expanduser()
+    if not path.is_absolute():
+        if not workspace:
+            raise WorkflowError('Relative evidence needs the task workspace; use its absolute path')
+        path=Path(workspace)/path
+    return 'local',str(path.resolve(strict=False))
+
+
+def _inspect_local_evidence(value):
+    """Read real bytes outside the SQLite writer, detecting concurrent changes."""
+    path=Path(value)
+    try:
+        before=path.stat()
+        if not stat.S_ISREG(before.st_mode):
+            raise WorkflowError(f'Evidence is not an accessible regular file: {path}')
+        digest=hashlib.sha256()
+        with path.open('rb') as stream:
+            opened=os.fstat(stream.fileno())
+            for chunk in iter(lambda:stream.read(1024*1024),b''):
+                digest.update(chunk)
+            after=os.fstat(stream.fileno())
+        identity=lambda s:(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)
+        if identity(before)!=identity(opened) or identity(opened)!=identity(after) or identity(after)!=identity(path.stat()):
+            raise WorkflowError(f'Evidence changed while being read: {path}')
+        return {'path':str(path),'sha256':digest.hexdigest(),'size_bytes':after.st_size}
+    except OSError as exc:
+        raise WorkflowError(f'Local evidence is unavailable or inaccessible: {path}') from exc
+
+
+def _report_artifact_checks(conn, task, spec, report):
+    results=_report_results(spec,report)
+    workspace=str(Path(task.workspace_path).resolve(strict=False)) if task.workspace_path else None
+    originals=set()
+    request=conn.execute('SELECT r.payload FROM nfos_workflows w JOIN nfos_requests r ON r.id=w.request_id WHERE w.task_id=?',(task.id,)).fetchone()
+    if request:
+        for attachment in json.loads(request['payload']).get('attachments',[]):
+            if not isinstance(attachment,dict):
+                continue
+            for key in ('original','source_path','path','local_path'):
+                if attachment.get(key):
+                    try:
+                        kind,path=_evidence_location(attachment[key],workspace)
+                    except WorkflowError:
+                        # An unused historical attachment may refer to another
+                        # host. It cannot authorize a local cross-card path.
+                        continue
+                    if kind=='local':
+                        originals.add(path)
+    # Shared repository anchors are not exclusive task workspaces. Only a
+    # concrete per-card directory proves that a path belongs to another card.
+    other_workspaces=[Path(row['workspace_path']).resolve(strict=False) for row in
+        conn.execute('SELECT id,workspace_path FROM tasks WHERE id!=? AND workspace_path IS NOT NULL',(task.id,))
+        if Path(row['workspace_path']).name==row['id']]
+    checks=[]; aliases={}
+    for reference in _evidence_refs(report.get('artifacts')):
+        locator=_evidence_locator(reference)
+        kind,location=_evidence_location(reference,workspace)
+        check={'ref':locator,'task_id':task.id,'run_id':task.current_run_id,
+               'spec_revision':spec['revision'],'criteria':[],'checked_at':int(time.time())}
+        if kind=='local':
+            path=Path(location)
+            if location not in originals and any(path.is_relative_to(root) for root in other_workspaces):
+                raise WorkflowError('Evidence belongs to another task workspace and is not an input of this request')
+            check.update(_inspect_local_evidence(location),status='verified_local')
+        else:
+            check.update(url=location,status='external_unchecked')
+        index=len(checks);checks.append(check)
+        keys=[locator,location]
+        if isinstance(reference,dict) and reference.get('id'):
+            keys.append(str(reference['id']))
+        for key in keys:
+            if key in aliases and aliases[key]!=index:
+                prior=checks[aliases[key]]
+                if prior.get('path',prior.get('url'))!=location:
+                    raise WorkflowError('Artifact id links to different evidence locations')
+            aliases[key]=index
+    for criterion_id,row in results.items():
+        for reference in _evidence_refs(row.get('evidence')):
+            locator=_evidence_locator(reference)
+            index=aliases.get(locator)
+            if index is None:
+                _,location=_evidence_location(reference,workspace)
+                index=aliases.get(location)
+            if index is None:
+                raise WorkflowError(f'Criterion {criterion_id} evidence must link to a declared artifact')
+            if criterion_id not in checks[index]['criteria']:
+                checks[index]['criteria'].append(criterion_id)
+    return checks
+
+
 def save_report(conn, task_id, run_id, report):
+    if conn.in_transaction:
+        raise WorkflowError('Report evidence must be read outside a write transaction')
+    task=_owned(conn,task_id,run_id)
+    spec=get_spec(conn,task_id)
+    if not spec:
+        raise WorkflowError('No persisted spec')
+    report=json.loads(_json(report))
+    encoded=_json(report)
+    checks=_report_artifact_checks(conn,task,spec,report)
+    evidence={'spec_revision':spec['revision'],'report_sha256':hashlib.sha256(encoded.encode()).hexdigest(),
+              'artifact_checks':checks,'schema_version':1}
     with _kb().write_txn(conn):
-        _owned(conn,task_id,run_id)
-        spec=get_spec(conn,task_id)
-        if not spec:
-            raise WorkflowError('No persisted spec')
-        criteria=json.loads(spec['content'])['criteria']
-        results={row['id']:row for row in report.get('criteria',[])}
-        if any(c['id'] not in results or results[c['id']].get('status')!='PASS' or not results[c['id']].get('evidence') for c in criteria):
-            raise WorkflowError('Every spec criterion requires passing evidence')
-        if not report.get('summary') or not report.get('artifacts'):
-            raise WorkflowError('Report needs outcome and accessible artifact references')
+        current=_owned(conn,task_id,run_id)
+        if get_spec(conn,task_id)['id']!=spec['id'] or current.workspace_path!=task.workspace_path:
+            raise WorkflowError('Spec or workspace changed while evidence was checked; save the current report')
         previous=_artifact(conn,task_id,'report');revision=(previous['revision'] if previous else 0)+1
         conn.execute('INSERT INTO nfos_artifacts(task_id,run_id,kind,revision,content,author,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)',
-            (task_id,run_id,'report',revision,_json(report),'worker',_json({'spec_revision':spec['revision']}),int(time.time())))
+            (task_id,run_id,'report',revision,encoded,'worker',_json(evidence),int(time.time())))
         _event(conn,task_id,run_id,'nfos_report_saved',{'revision':revision,'spec_revision':spec['revision']})
 
 
@@ -349,11 +487,13 @@ def resume_after_answer(conn,task_id,*,answer,source):
 
 
 def reconcile_human_answers(conn):
+    from hermes_cli.nfos_runtime import run_termination_pending
     """The same runtime tick retains human blocks and applies saved replies."""
     resumed=[]
     rows=conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()
     for row in rows:
-        if _run_process_alive(conn,row['task_id'],row['run_id']):
+        if (_run_process_alive(conn,row['task_id'],row['run_id'])
+                or run_termination_pending(conn,row['task_id'],row['run_id'])):
             continue
         task=_kb().get_task(conn,row['task_id'])
         if not task or task.status in {'done','archived'}:
@@ -476,13 +616,17 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         return {'id':key,'execute':True,'reconcile':False,'status':'unknown'}
 
 
-def reconcile_effect(conn, effect_id, *, found, evidence):
+def reconcile_effect(conn, effect_id, *, found, evidence, caller_task_id=None, caller_run_id=None):
     if not evidence or not evidence.get('readback'):
         raise WorkflowError('Reconciliation requires destination readback evidence')
     with _kb().write_txn(conn):
         effect=_row(conn,'nfos_effects','id',effect_id)
         if not effect:
             raise WorkflowError('Unknown effect')
+        if caller_task_id is not None or caller_run_id is not None:
+            if effect['task_id']!=caller_task_id:
+                raise OwnershipConflict('This receipt belongs to another task')
+            _owned(conn,caller_task_id,caller_run_id)
         if effect['status']=='confirmed' and not found:
             raise WorkflowError('Confirmed effect cannot be undone by an absent lookup')
         task=_kb().get_task(conn,effect['task_id'])
@@ -513,12 +657,59 @@ def reconcile_effect(conn, effect_id, *, found, evidence):
         _event(conn,effect['task_id'],effect['run_id'],'nfos_effect_reconciled',{'effect_id':effect_id,'status':status,'evidence':evidence})
 
 
-def completion_ready(conn, task_id):
+def completion_evidence_check(conn, task_id):
+    """Read evidence before completion's transaction; never perform network I/O."""
+    if conn.in_transaction:
+        raise WorkflowError('Completion evidence must be read outside the write transaction')
+    report=_artifact(conn,task_id,'report')
+    spec=get_spec(conn,task_id)
+    if not report or not spec:
+        return None
+    try:
+        content=json.loads(report['content']); metadata=json.loads(report['evidence'])
+        results=_report_results(spec,content)
+        if any(row['status']!='PASS' for row in results.values()):
+            return None
+        digest=hashlib.sha256(report['content'].encode()).hexdigest()
+        if (metadata.get('schema_version')!=1 or metadata.get('report_sha256')!=digest
+                or metadata.get('spec_revision')!=spec['revision']):
+            return None
+        proved=set()
+        for check in metadata.get('artifact_checks',[]):
+            if (check.get('task_id')!=task_id or check.get('run_id')!=report['run_id']
+                    or check.get('spec_revision')!=spec['revision']):
+                return None
+            if check.get('status')=='verified_local':
+                actual=_inspect_local_evidence(check['path'])
+                if any(actual[key]!=check.get(key) for key in ('path','sha256','size_bytes')):
+                    return None
+                proved.update(check.get('criteria',[]))
+            elif check.get('status')!='external_unchecked':
+                return None
+        if any(row['status']!='PASS' or criterion not in proved for criterion,row in results.items()):
+            return None
+        return {'report_id':report['id'],'report_revision':report['revision'],
+                'report_sha256':digest,'spec_revision':spec['revision'],
+                'evidence_sha256':hashlib.sha256(report['evidence'].encode()).hexdigest()}
+    except (WorkflowError,KeyError,TypeError,ValueError):
+        return None
+
+
+def completion_ready(conn, task_id, *, evidence_check=None):
     wf=get_workflow(conn,task_id)
     if wf is None:
         return True
     report=_artifact(conn,task_id,'report')
     if not wf['spec_revision'] or not report or json.loads(report['evidence']).get('spec_revision')!=wf['spec_revision']:
+        return False
+    if evidence_check is None:
+        if conn.in_transaction:
+            return False
+        evidence_check=completion_evidence_check(conn,task_id)
+    if evidence_check!={'report_id':report['id'],'report_revision':report['revision'],
+            'report_sha256':hashlib.sha256(report['content'].encode()).hexdigest(),
+            'spec_revision':wf['spec_revision'],
+            'evidence_sha256':hashlib.sha256(report['evidence'].encode()).hexdigest()}:
         return False
     if not _approved(conn,task_id,wf['spec_revision']):
         return False
@@ -627,8 +818,10 @@ def main():
         elif args.action=='progress':
             advance(conn,args.task,args.run,args.stage,next_action=args.next_action,state=payload);result={'saved':True}
         elif args.action=='ask':
+            context={k:v for k,v in payload.items() if k not in {'question','context'}}
+            context.update(payload.get('context') or {})
             result={'decision_id':ask_principal(conn,args.task,args.run,kind=args.kind,
-                question=payload['question'],context=payload.get('context',{}))}
+                question=payload['question'],context=context)}
         elif args.action=='pending':
             result=pending_decisions(conn)
         elif args.action=='wait':
@@ -643,7 +836,8 @@ def main():
         elif args.action=='effect':
             result=begin_effect(conn,args.task,args.run,operation=args.operation,target=args.target,candidate=args.candidate)
         elif args.action=='reconcile':
-            reconcile_effect(conn,args.effect_id,found=payload['found'],evidence=payload['evidence']);result={'saved':True}
+            reconcile_effect(conn,args.effect_id,found=payload['found'],evidence=payload['evidence'],
+                caller_task_id=args.task,caller_run_id=args.run);result={'saved':True}
         elif args.action=='acquire-project':
             result={'acquired':acquire_project(conn,args.project,args.task,args.run,args.candidate)}
         elif args.action=='release-project':

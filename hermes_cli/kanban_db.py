@@ -6968,9 +6968,10 @@ def complete_task(
     if not _parents_satisfied(conn, task_id):
         return False
 
-    from hermes_cli.nfos_delivery import completion_ready, get_workflow
+    from hermes_cli.nfos_delivery import completion_evidence_check, completion_ready, get_workflow
     delivery_enrolled = get_workflow(conn, task_id) is not None
-    if not completion_ready(conn, task_id):
+    nfos_evidence_check = completion_evidence_check(conn, task_id) if delivery_enrolled else None
+    if not completion_ready(conn, task_id, evidence_check=nfos_evidence_check):
         return False
 
     # Gate: verify created_cards BEFORE the main write txn. A rejected
@@ -7061,7 +7062,7 @@ def complete_task(
         # ``review`` or ``running``.
         if not _parents_satisfied(conn, task_id):
             return False
-        if not completion_ready(conn, task_id):
+        if not completion_ready(conn, task_id, evidence_check=nfos_evidence_check):
             return False
         prior = conn.execute(
             "SELECT status, current_run_id, workspace_kind, workspace_path, "

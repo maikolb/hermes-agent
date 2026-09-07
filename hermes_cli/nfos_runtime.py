@@ -104,13 +104,131 @@ def dispatch_requests(conn, *, board, capacity, spawn_limit=None):
     return started
 
 
-def reconcile_runtime(conn):
+def _cleanup_metadata(conn, run_id):
+    row=conn.execute('SELECT metadata FROM task_runs WHERE id=?',(run_id,)).fetchone()
+    return json.loads(row['metadata'] or '{}') if row else {}
+
+
+def _save_cleanup(conn, run, receipt, *, event=None):
+    with kb.write_txn(conn):
+        metadata=_cleanup_metadata(conn,run['id'])
+        previous=metadata.get('nfos_cleanup')
+        metadata['nfos_cleanup']=receipt
+        conn.execute('UPDATE task_runs SET metadata=? WHERE id=? AND task_id=?',
+                     (json.dumps(metadata,ensure_ascii=False),run['id'],run['task_id']))
+        if event and previous!=receipt:
+            kb._append_event(conn,run['task_id'],event,receipt,run_id=run['id'])
+
+
+def _worker_identity_receipt(conn, run):
+    rows=conn.execute("SELECT id,payload FROM task_events WHERE task_id=? AND run_id=? AND kind IN ('spawned','nfos_worker_created_card','nfos_worker_recovered_card') ORDER BY id DESC",
+                      (run['task_id'],run['id'])).fetchall()
+    for row in rows:
+        payload=json.loads(row['payload'] or '{}')
+        if payload.get('pid') and (not run['worker_pid'] or payload['pid']==run['worker_pid']):
+            return {'worker_pid':payload['pid'],'worker_started_at':payload.get('worker_started_at'),
+                    'source_event_id':row['id']}
+    return {'worker_pid':run['worker_pid'],'worker_started_at':None,'source_event_id':None}
+
+
+def run_termination_pending(conn, task_id, run_id):
+    """A saved human answer must not start a replacement over known live work."""
+    if run_id is None:
+        return False
+    from hermes_cli import nfos_tool as tool
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_tool_calls'").fetchone():
+        if any(call['status'] in tool.ACTIVE or tool.call_runner_alive(call)
+               for call in tool.read_calls(conn,task_id,run_id)):
+            return True
+    run=conn.execute('SELECT * FROM task_runs WHERE task_id=? AND id=?',(task_id,run_id)).fetchone()
+    if not run:
+        return False
+    receipt=_cleanup_metadata(conn,run_id).get('nfos_cleanup') or _worker_identity_receipt(conn,run)
+    if receipt.get('status')=='confirmed':
+        return False
+    if receipt.get('worker_started_at') is None and receipt.get('worker_pid'):
+        return kb._pid_alive(receipt['worker_pid'])
+    identities=json.loads(receipt.get('descendants_json') or '[]')
+    identities.append({'pid':receipt.get('worker_pid'),'started_at':receipt.get('worker_started_at')})
+    return any(tool._matches(item['pid'],item['started_at']) for item in identities)
+
+
+def reconcile_terminal_workers(conn, *, worker_exit_grace_seconds=15):
+    """Clean only closed runs. Pending Principal decisions keep their worker."""
+    from hermes_cli import nfos_tool as tool
+    rows=conn.execute("""SELECT r.* FROM task_runs r JOIN nfos_workflows w ON w.task_id=r.task_id
+        WHERE r.ended_at IS NOT NULL AND (r.status='done' OR (r.status='blocked' AND EXISTS (
+            SELECT 1 FROM nfos_decisions d WHERE d.task_id=r.task_id AND d.run_id=r.id
+            AND (d.status='human' OR (d.action='continue' AND json_extract(d.context,'$.human_reply') IS NOT NULL)))))
+        ORDER BY r.ended_at,r.id""").fetchall()
+    changed=[]
+    for run in rows:
+        receipt=_cleanup_metadata(conn,run['id']).get('nfos_cleanup')
+        if receipt and receipt.get('status')=='confirmed':
+            continue
+        task=kb.get_task(conn,run['task_id'])
+        if not task:
+            continue
+        if receipt is None:
+            grace=float(worker_exit_grace_seconds)
+            request=conn.execute('SELECT q.payload FROM nfos_workflows w JOIN nfos_requests q ON q.id=w.request_id WHERE w.task_id=?',
+                                 (run['task_id'],)).fetchone()
+            if request:
+                grace=float(json.loads(request['payload']).get('project',{}).get('worker_exit_grace_seconds',grace))
+            grace=max(0,grace)
+            receipt=dict(_worker_identity_receipt(conn,run),status='waiting',grace_seconds=grace,
+                         not_before=float(run['ended_at'])+grace,descendants_json='[]',requested_at=time.time())
+        # An old receipt cannot authorize signaling the same process after it
+        # has been deliberately attached to a newer active run.
+        if (task.current_run_id and task.current_run_id!=run['id'] and task.worker_pid==receipt['worker_pid']
+                and task.worker_started_at==receipt['worker_started_at']):
+            continue
+        if receipt.get('worker_pid') and receipt.get('worker_started_at') is None and kb._pid_alive(receipt['worker_pid']):
+            receipt.update(status='identity_unavailable',error='Live worker lacks a persisted creation-time identity')
+            _save_cleanup(conn,run,receipt,event='nfos_worker_exit_pending')
+            continue
+        # Capture while the worker is still alive, including during its grace
+        # period, so a later crash retains the identities of known children.
+        receipt['descendants_json']=json.dumps(tool._descendants(receipt))
+        if time.time()<receipt['not_before']:
+            _save_cleanup(conn,run,receipt)
+            continue
+        first_stop=receipt['status']!='stopping'
+        receipt.update(status='stopping',error=None)
+        _save_cleanup(conn,run,receipt,event='nfos_worker_exit_requested' if first_stop else None)
+        try:
+            calls=tool.terminate_calls(conn,run['task_id'],run['id'],reason='The owning worker run is closed')
+            # Recheck the current pointer after command cleanup and before the
+            # worker signal; never stop a process now registered for new work.
+            current=kb.get_task(conn,run['task_id'])
+            if (current.current_run_id and current.current_run_id!=run['id']
+                    and current.worker_pid==receipt['worker_pid']
+                    and current.worker_started_at==receipt['worker_started_at']):
+                continue
+            survivors=tool._stop_tree(receipt)
+            if survivors or any(call['status'] in tool.ACTIVE or call.get('runner_termination_pending') for call in calls):
+                receipt.update(status='stopping',error='Known process termination remains unconfirmed')
+                _save_cleanup(conn,run,receipt,event='nfos_worker_exit_pending')
+                continue
+        except (OSError,RuntimeError,tool.psutil.Error) as exc:
+            receipt.update(status='stopping',error=type(exc).__name__)
+            _save_cleanup(conn,run,receipt,event='nfos_worker_exit_pending')
+            continue
+        receipt.update(status='confirmed',confirmed_at=time.time(),error=None)
+        _save_cleanup(conn,run,receipt,event='nfos_worker_exit_confirmed')
+        changed.append(run['id'])
+    return changed
+
+
+def reconcile_runtime(conn, *, worker_exit_grace_seconds=15):
     """Run NFOS recovery inside the existing canonical dispatcher tick."""
+    reconcile_terminal_workers(conn,worker_exit_grace_seconds=worker_exit_grace_seconds)
     delivery.reconcile_human_answers(conn)
     from hermes_cli.nfos_tool import reconcile_calls
     for call in reconcile_calls(conn):
         task=kb.get_task(conn,call['task_id'])
-        if call['status'] not in {'timed_out','interrupted'} or not task or task.status!='running':
+        if (call['status'] not in {'timed_out','interrupted'} or not task or task.status!='running'
+                or task.current_run_id!=call['run_id']):
             continue
         delivery.ask_principal(conn,task.id,task.current_run_id,kind='impediment',
             question=f"Diagnose native call {call['id']}: {call['status']}",

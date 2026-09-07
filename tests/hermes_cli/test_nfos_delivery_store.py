@@ -143,9 +143,11 @@ def test_done_requires_review_and_report_and_reports_need_no_pr(board):
     with kb.connect_closing(board) as conn:
         task=started(conn);spec(conn,task)
         assert kb.complete_task(conn,task.id,result='Completed') is False
+        evidence=board.parent/'count.txt'
+        evidence.write_text('Total reconciled: 31',encoding='utf-8')
         delivery.save_report(conn,task.id,task.current_run_id,
-            {'criteria':[{'id':'AC1','status':'PASS','evidence':['/evidence/count.txt']}],
-             'summary':'Total reconciled','artifacts':['/evidence/count.txt']})
+            {'criteria':[{'id':'AC1','status':'PASS','evidence':[str(evidence)]}],
+             'summary':'Total reconciled','artifacts':[str(evidence)]})
         assert kb.complete_task(conn,task.id,result='Completed') is False
         decision=delivery.ask_principal(conn,task.id,task.current_run_id,
             kind='review',question='Review the report',context={})
@@ -223,6 +225,8 @@ def test_principal_human_decision_is_durable_until_worker_stops_and_answer_arriv
         assert kb.get_task(conn,task.id).status=='blocked'
         assert delivery.get_decision(conn,decision)['status']=='human'
         monkeypatch.setattr(delivery,'_run_process_alive',lambda *args:False)
+        from hermes_cli import nfos_runtime
+        monkeypatch.setattr(nfos_runtime,'run_termination_pending',lambda *args:False)
         delivery.resume_after_answer(conn,task.id,answer='Use A',source={'platform':'telegram','message_id':'55'})
         assert kb.get_task(conn,task.id).status=='ready'
         assert delivery.get_decision(conn,decision)['status']=='resolved'

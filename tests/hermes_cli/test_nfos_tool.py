@@ -141,6 +141,18 @@ def test_utf8_and_large_output_are_preserved_without_truncation(adapter, board):
     assert len({r['seq'] for r in chunks}) == len(chunks)
 
 
+def test_live_streaming_does_not_scan_all_host_process_groups_each_tick(adapter, board, monkeypatch):
+    group_scans=[]
+    original=adapter._group_children
+    def counted(pid, started_at):
+        group_scans.append(pid)
+        return original(pid,started_at)
+    monkeypatch.setattr(adapter,'_group_children',counted)
+    result=invoke(adapter,board,"import time;print('stream remains live',flush=True);time.sleep(1.1)")
+    assert result['status']=='succeeded'
+    assert not group_scans, 'Normal streaming must not enumerate all host process groups'
+
+
 def hidden_kwargs():
     if os.name != 'nt':
         return {}
@@ -150,12 +162,25 @@ def hidden_kwargs():
     return {'creationflags': subprocess.CREATE_NO_WINDOW, 'startupinfo': si}
 
 
+def cleanup_verified_test_processes(identities):
+    """Only receipts captured from processes this test created authorize cleanup."""
+    for identity in reversed(identities):
+        try:
+            proc = psutil.Process(identity['pid'])
+            if abs(proc.create_time() - identity['started_at']) < .01 and proc.status() != psutil.STATUS_ZOMBIE:
+                proc.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
+@pytest.mark.live_system_guard_bypass  # real test children become orphans after deliberate adapter death
 def test_reconcile_after_actual_adapter_death_preserves_output_and_stops_child(adapter, board):
     command = [sys.executable, str(Path(adapter.__file__)), '--db', str(board),
         '--task', 't_one', '--run', '7', '--cwd', str(board.parent), '--timeout', '90',
         '--call-id', 'crash', '--', sys.executable, '-u', '-c',
         "import time;print('persisted before adapter crash',flush=True);time.sleep(90)"]
     runner = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **hidden_kwargs())
+    owned = [{'pid': runner.pid, 'started_at': psutil.Process(runner.pid).create_time()}]
     try:
         def streamed():
             try:
@@ -164,7 +189,17 @@ def test_reconcile_after_actual_adapter_death_preserves_output_and_stops_child(a
                 return []
         eventually(streamed)
         row = read(board, 'SELECT * FROM nfos_tool_calls WHERE id=?', ('crash',))[0]
-        runner.kill()
+        # Capture provenance while the complete tree is still our own subtree.
+        owned.extend({'pid': p.pid, 'started_at': p.create_time()}
+                     for p in psutil.Process(runner.pid).children(recursive=True))
+        # A hidden Windows launcher may wrap the actual Python adapter. Its
+        # recorded PID must still be a creation-time-verified member of our tree.
+        actual_runner=next((p for p in owned if p['pid']==row['runner_pid'] and
+                            abs(p['started_at']-row['runner_started_at'])<.01),None)
+        assert actual_runner is not None
+        assert any(p['pid'] == row['worker_pid'] and
+                   abs(p['started_at'] - row['worker_started_at']) < .01 for p in owned)
+        psutil.Process(actual_runner['pid']).kill()
         runner.wait(timeout=10)
         with adapter.connect(board) as conn:
             reconciled = adapter.reconcile_calls(conn)
@@ -172,6 +207,7 @@ def test_reconcile_after_actual_adapter_death_preserves_output_and_stops_child(a
         assert read(board, 'SELECT * FROM nfos_tool_chunks')[0]['content']
         assert not psutil.pid_exists(row['worker_pid']) or psutil.Process(row['worker_pid']).status() == psutil.STATUS_ZOMBIE
     finally:
+        cleanup_verified_test_processes(owned)
         if runner.poll() is None:
             runner.kill()
             runner.wait(timeout=10)
@@ -276,14 +312,33 @@ def test_runtime_can_stop_only_the_selected_cards_calls(adapter, board):
         assert other.result(timeout=10)['status'] == 'succeeded'
 
 
+@pytest.mark.live_system_guard_bypass  # the deliberately reparented child requires a real signal
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX reparented process-group semantics')
 def test_fast_command_exit_cannot_leave_an_unbounded_descendant(adapter, board):
-    code = """import subprocess,sys
+    receipt = board.parent / 'orphan-child-created-by-this-test.json'
+    code = """import subprocess,sys,psutil,json,os
+from pathlib import Path
 p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(90)'])
+Path(%r).write_text(json.dumps({'pid':p.pid,'started_at':psutil.Process(p.pid).create_time(),'group_id':os.getpgid(0)}))
 print(p.pid,flush=True)
-"""
-    result = invoke(adapter, board, code, call_id='orphan', timeout_seconds=1)
-    assert result['status'] == 'timed_out'
-    chunks = read(board, "SELECT * FROM nfos_tool_chunks WHERE stream='stdout' ORDER BY seq")
-    pid = int(b''.join(r['content'] for r in chunks).strip())
-    assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+""" % str(receipt)
+    started = time.time()
+    try:
+        result = invoke(adapter, board, code, call_id='orphan', timeout_seconds=1)
+        assert result['status'] == 'timed_out'
+        chunks = read(board, "SELECT * FROM nfos_tool_chunks WHERE stream='stdout' ORDER BY seq")
+        pid = int(b''.join(r['content'] for r in chunks).strip())
+        identity = json.loads(receipt.read_text())
+        assert identity['pid'] == pid and identity['group_id'] == result['worker_pid']
+        assert started - .01 <= identity['started_at'] <= time.time()
+        assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    finally:
+        # Even an assertion failure must not leave this test's orphan running.
+        if receipt.exists():
+            identity = json.loads(receipt.read_text())
+            assert started - .01 <= identity['started_at'] <= time.time()
+            rows = read(board, "SELECT * FROM nfos_tool_calls WHERE id='orphan'")
+            assert rows and rows[0]['cwd'] == str(board.parent)
+            assert rows[0]['worker_pid'] == identity['group_id']
+            cleanup_verified_test_processes([
+                {'pid':rows[0]['worker_pid'],'started_at':rows[0]['worker_started_at']}, identity])
