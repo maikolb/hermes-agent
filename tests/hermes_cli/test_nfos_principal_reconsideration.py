@@ -238,3 +238,15 @@ def test_later_run_with_live_worker_still_prevents_reconsideration(delivery):
         assert reconsider(conn,old)
     finally:
         if child.poll() is None:child.kill();child.wait(timeout=10)
+
+
+def test_reconsidered_invalid_additional_proposal_replays_its_saved_changes(delivery):
+    conn,task=delivery;old=human_block(conn,task,kind='additional_tasks')
+    new=reconsider(conn,old,action='continue')
+    saved=d.get_decision(conn,new)
+    assert saved['action']=='changes' and json.loads(saved['context'])['dispatch_errors']
+    before=snapshot(conn)
+    assert reconsider(conn,old,action='continue')==new
+    assert snapshot(conn)==before
+    assert conn.execute('SELECT count(*) FROM nfos_requests').fetchone()[0]==1
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0]==1

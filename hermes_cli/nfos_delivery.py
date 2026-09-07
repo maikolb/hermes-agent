@@ -809,10 +809,11 @@ def reconsider_decision(conn, decision_id, *, action, reason, answer, author='Pr
         if old['status']=='superseded':
             current=get_decision(conn,new_id)
             if (old_context.get('superseded_by')!=new_id or not current
-                    or current['status']!='resolved' or current['action']!=action or current['answer']!=answer):
+                    or current['status']!='resolved'):
                 raise WorkflowError('Decision was already reconsidered with a different resolution')
             if json.loads(current['context']).get('reconsideration_identity')!=identity:
                 raise WorkflowError('Spec or candidate changed since reconsideration; review the current identity')
+            resolve_decision(conn,new_id,action=action,answer=answer,author=author)
             return new_id
         task=_kb().get_task(conn,old['task_id'])
         if old['status']!='human' or not task or task.status!='blocked':
