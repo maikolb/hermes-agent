@@ -10,15 +10,34 @@ import subprocess
 import sys
 import time
 
+
+def _trace_stage(stage):
+    if __name__ != '__main__' or len(sys.argv)<3 or sys.argv[1]!='--child':
+        return
+    data=json.loads(sys.argv[2])
+    path=Path(data['marker']).with_suffix('.stages.jsonl')
+    with path.open('a') as stream:
+        stream.write(json.dumps({'stage':stage,'monotonic':time.monotonic(),'pid':os.getpid()})+'\n')
+
+
+_trace_stage('python_entered')
+if __name__=='__main__' and len(sys.argv)>1 and sys.argv[1]=='--child':
+    import faulthandler
+    faulthandler.dump_traceback_later(8,repeat=True)
 import pytest
+_trace_stage('pytest_imported')
 import psutil
+_trace_stage('psutil_imported')
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from hermes_cli import kanban_db as kb
+_trace_stage('kanban_imported')
 from hermes_cli import nfos_delivery as d
+_trace_stage('delivery_imported')
 from hermes_cli import nfos_runtime as runtime
+_trace_stage('runtime_imported')
 
 
 SOURCE = {'platform': 'telegram', 'chat_id': '-100501', 'thread_id': '7', 'message_id': '42'}
@@ -37,9 +56,15 @@ def wait_path(path, proc, timeout=25):
     while not path.exists():
         if proc.poll() is not None:
             stdout, stderr = proc.communicate()
+            if getattr(proc,'nfos_stderr_path',None):
+                stderr=proc.nfos_stderr_path.read_text(errors='replace')
             raise AssertionError(f'Child exited {proc.returncode}: {stdout}\n{stderr}')
         if time.monotonic() > deadline:
-            raise AssertionError(f'Child did not reach boundary: {path.name}')
+            stages=getattr(proc,'nfos_stages_path',path.with_suffix('.stages.jsonl'))
+            diagnostic=stages.read_text(errors='replace') if stages.exists() else 'No child stage recorded'
+            if getattr(proc,'nfos_stderr_path',None):
+                diagnostic+='\n'+proc.nfos_stderr_path.read_text(errors='replace')[-9000:]
+            raise AssertionError(f'Child did not reach boundary in {timeout}s: {path.name}\n{diagnostic}')
         time.sleep(.02)
 
 
@@ -53,7 +78,12 @@ def assert_child_identity(proc, pid):
 def terminate_at_boundary(proc, marker):
     worker = assert_child_identity(proc, json.loads(marker.read_text())['pid'])
     started_at = worker.create_time()
-    worker.kill(); worker.wait(timeout=10)
+    if worker.pid==proc.pid:
+        # On POSIX psutil.wait() would reap Popen's child and discard the
+        # SIGKILL status before Popen can collect it (then it reports rc=0).
+        proc.kill(); proc.wait(timeout=10)
+    else:
+        worker.kill(); worker.wait(timeout=10)
     assert not kb._process_identity_matches(worker.pid, started_at)
     if proc.poll() is None:
         proc.kill()
@@ -79,11 +109,19 @@ def children(board):
         marker = board.parent/(mode+'-'+suffix+'.json')
         go = board.parent/(mode+'-go')
         data = dict(mode=mode, db=str(board), marker=str(marker), go=str(go), **kwargs)
-        proc = subprocess.Popen([sys.executable, '-B', str(Path(__file__).resolve()), '--child', json.dumps(data)],
-            cwd=ROOT, env=dict(os.environ, PYTHONPATH=str(ROOT)), stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        stderr_path=marker.with_suffix('.stderr.log')
+        with stderr_path.open('w') as stderr_log:
+            proc = subprocess.Popen([sys.executable, '-B', str(Path(__file__).resolve()), '--child', json.dumps(data)],
+                cwd=ROOT, env=dict(os.environ, PYTHONPATH=str(ROOT)), stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=stderr_log, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        proc.nfos_stderr_path=stderr_path
+        proc.nfos_stages_path=marker.with_suffix('.stages.jsonl')
         running.append(proc)
+        # Initialize each independent interpreter/connection before the common
+        # mutation barrier. Linux cold imports plus serialized schema checks
+        # were consuming the race assertion's 25s before it could even begin.
+        wait_path(marker.with_suffix('.ready.json'),proc)
         return proc, marker, go
     yield launch
     for proc in running:
@@ -130,7 +168,8 @@ def test_bootstrap_process_death_at_commit_preserves_one_request_and_atomic_card
     with kb.connect_closing(board) as conn:
         rid = receive(conn)
         reservation = d.reserve_request(conn, capacity=2)
-    proc, marker, _ = children('crash_bootstrap', phase=phase, rid=rid, token=reservation['claim_token'])
+    proc, marker, go = children('crash_bootstrap', phase=phase, rid=rid, token=reservation['claim_token'])
+    go.touch()
     wait_path(marker, proc)
     assert json.loads(marker.read_text())['phase'] == phase
     # Independent reader while the worker is frozen at the commit boundary.
@@ -174,7 +213,8 @@ def test_bootstrap_process_death_at_commit_preserves_one_request_and_atomic_card
 
 @pytest.mark.parametrize('phase', ['before_commit', 'after_commit'])
 def test_receive_process_death_then_retransmission_has_one_durable_identity(board, children, phase):
-    proc, marker, _ = children('crash_receive', phase=phase)
+    proc, marker, go = children('crash_receive', phase=phase)
+    go.touch()
     wait_path(marker, proc)
     terminate_at_boundary(proc,marker)
     with kb.connect_closing(board) as conn:
@@ -219,21 +259,42 @@ def test_two_processes_do_not_duplicate_intake_card_or_execution_owner(board, ch
 def _child(data):
     marker=Path(data['marker'])
     def mark(path, payload):
-        with path.open('w') as stream:
+        temporary=path.with_suffix('.tmp')
+        with temporary.open('w') as stream:
             json.dump(payload, stream); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary,path)
     mode=data['mode']
+    _trace_stage('before_connect')
     with kb.connect_closing(Path(data['db'])) as conn:
+        _trace_stage('connected')
+        mark(marker.with_suffix('.ready.json'),{'ready':True,'pid':os.getpid()})
+        if not mode.startswith('crash_'):
+            mark(marker, {'ready':True,'pid':os.getpid()})
+        _trace_stage('waiting_for_start')
+        faulthandler.cancel_dump_traceback_later()
+        # Two children each have a separate 25s preparation budget. Waiting
+        # for their shared start is fixture coordination, not an NFOS timeout.
+        deadline=time.monotonic()+2*25+5
+        while not Path(data['go']).exists():
+            if time.monotonic()>deadline:raise RuntimeError('Parent barrier not released after both preparation budgets')
+            time.sleep(.02)
+        _trace_stage('operation_started')
+        faulthandler.dump_traceback_later(8,repeat=True)
         if mode.startswith('crash_'):
             original=kb._execute_boundary_with_retry
             def boundary(target, sql):
                 if sql != 'COMMIT':
                     return original(target, sql)
                 if data['phase'] == 'before_commit':
+                    _trace_stage('before_commit')
                     mark(marker, {'phase':'before_commit', 'pid':os.getpid()})
+                    faulthandler.cancel_dump_traceback_later()
                     sys.stdin.read(1)
                 result=original(target,sql)
                 if data['phase'] == 'after_commit':
+                    _trace_stage('after_commit')
                     mark(marker, {'phase':'after_commit', 'pid':os.getpid()})
+                    faulthandler.cancel_dump_traceback_later()
                     sys.stdin.read(1)
                 return result
             kb._execute_boundary_with_retry=boundary
@@ -242,11 +303,6 @@ def _child(data):
             else:
                 d.bootstrap_card(conn,data['rid'],data['token'],pid=os.getpid())
             raise AssertionError('Parent must terminate the child before a response is returned')
-        mark(marker, {'ready':True,'pid':os.getpid()})
-        deadline=time.monotonic()+25
-        while not Path(data['go']).exists():
-            if time.monotonic()>deadline: raise RuntimeError('Parent barrier not released')
-            time.sleep(.02)
         if mode == 'receive':
             result={'rid':receive(conn),'pid':os.getpid()}
         else:
@@ -260,6 +316,8 @@ def _child(data):
                 except d.OwnershipConflict:
                     result={'outcome':'conflict','pid':os.getpid()}
         mark(marker.with_suffix('.result.json'),result)
+        _trace_stage('result_persisted')
+        faulthandler.cancel_dump_traceback_later()
         sys.stdin.read(1)
 
 

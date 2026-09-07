@@ -27,6 +27,29 @@ def _get_task(task_id: str):
         return kb.get_task(conn, task_id)
 
 
+def _leave_card_with_exited_process_owner(kb, task_id):
+    import os
+    import subprocess
+    import sys
+
+    previous = subprocess.Popen(
+        [sys.executable, '-c', 'import sys; sys.stdin.read(1)'],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+    )
+    try:
+        with kb.connect_closing() as conn:
+            kb._set_worker_pid(conn, task_id, previous.pid)
+            previous_started_at = kb.get_task(conn, task_id).worker_started_at
+        previous.communicate(input=b'x', timeout=10)
+    finally:
+        if previous.poll() is None:
+            previous.kill()
+            previous.communicate(timeout=10)
+    assert previous.returncode == 0
+    assert not kb._process_identity_matches(previous.pid, previous_started_at)
+
+
 def test_create_cards_are_running_and_claimed(kanban_env):
     from tools import delegation_kanban as dk
 
@@ -66,7 +89,16 @@ def test_create_cards_idempotent_per_delegation(kanban_env):
 def test_close_cards_completed_becomes_done_with_summary(kanban_env):
     from tools import delegation_kanban as dk
 
-    cards = dk.create_delegation_cards([{"goal": "G"}], "deleg_ok", "default")
+    run_bindings = {}
+    cards = dk.create_delegation_cards([{"goal": "G"}], "deleg_ok", "default", run_bindings=run_bindings)
+    # A legacy callback without its captured attempt, or a callback from a
+    # stale claim, must not close whichever execution happens to be current.
+    result = [{"task_index": 0, "status": "completed", "summary": "entreguei X e Y"}]
+    dk.close_delegation_cards("default", cards, result)
+    assert _get_task(cards[0]).status == "running"
+    dk.close_delegation_cards("default", cards, result,
+                              run_bindings={0: (run_bindings[0][0], 'stale-claim')})
+    assert _get_task(cards[0]).status == "running"
     dk.close_delegation_cards(
         "default",
         cards,
@@ -74,6 +106,7 @@ def test_close_cards_completed_becomes_done_with_summary(kanban_env):
         # _execute_and_aggregate (regression: the smoke on the dovcrm board
         # blocked both cards because the closer only accepted "ok").
         [{"task_index": 0, "status": "completed", "summary": "entreguei X e Y"}],
+        run_bindings=run_bindings,
     )
     task = _get_task(cards[0])
     assert task.status == "done"
@@ -82,11 +115,13 @@ def test_close_cards_completed_becomes_done_with_summary(kanban_env):
 def test_close_cards_failure_blocks_for_human(kanban_env):
     from tools import delegation_kanban as dk
 
-    cards = dk.create_delegation_cards([{"goal": "G"}], "deleg_bad", "default")
+    run_bindings = {}
+    cards = dk.create_delegation_cards([{"goal": "G"}], "deleg_bad", "default", run_bindings=run_bindings)
     dk.close_delegation_cards(
         "default",
         cards,
         [{"task_index": 0, "status": "failed", "error": "boom", "summary": ""}],
+        run_bindings=run_bindings,
     )
     task = _get_task(cards[0])
     assert task.status == "blocked"
@@ -95,11 +130,13 @@ def test_close_cards_failure_blocks_for_human(kanban_env):
 def test_close_cards_interrupted_blocks_for_human(kanban_env):
     from tools import delegation_kanban as dk
 
-    cards = dk.create_delegation_cards([{"goal": "G"}], "deleg_int", "default")
+    run_bindings = {}
+    cards = dk.create_delegation_cards([{"goal": "G"}], "deleg_int", "default", run_bindings=run_bindings)
     dk.close_delegation_cards(
         "default",
         cards,
         [{"task_index": 0, "status": "interrupted", "summary": "parcial"}],
+        run_bindings=run_bindings,
     )
     task = _get_task(cards[0])
     assert task.status == "blocked"
@@ -222,8 +259,23 @@ def test_principal_mirror_resume_reclaims_same_card(kanban_env):
     asyncio.run(interrupted.tick(61.0))
     orphan_id = interrupted._task_id
     assert orphan_id
-    assert _get_task(orphan_id).status == "running"
-    # No finish(): the gateway died here and left the claim in place.
+    original = _get_task(orphan_id)
+    assert original.status == "running"
+    competing = PrincipalTurnMirror("default", "corrigir pipeline", idempotency_key=key)
+    asyncio.run(competing.tick(61.0))
+    assert competing._task_id is None, "a live owner's card must not be stolen"
+    assert _get_task(orphan_id).current_run_id == original.current_run_id
+    # Associate a real process identity with the previous attempt, then let
+    # that process exit without finishing its card. Keeping pytest's own
+    # live PID as the owner would test stealing, not crash recovery.
+    _leave_card_with_exited_process_owner(kb, orphan_id)
+    with kb.connect_closing() as conn:
+        assert not kb.recover_interrupted_task(
+            conn, orphan_id, expected_run_id=original.current_run_id + 1,
+            expected_claim=original.claim_lock, expected_heartbeat=original.last_heartbeat_at,
+            resume_activity=True,
+        ), "a stale snapshot must not recover another attempt"
+        assert kb.get_task(conn, orphan_id).status == "running"
 
     resumed = PrincipalTurnMirror("default", "corrigir pipeline", idempotency_key=key)
     asyncio.run(resumed.tick(61.0))
@@ -233,8 +285,11 @@ def test_principal_mirror_resume_reclaims_same_card(kanban_env):
     task = _get_task(orphan_id)
     assert task.status == "running"
     assert task.claim_lock
+    assert task.current_run_id != original.current_run_id
     with kb.connect_closing() as conn:
         comments = kb.list_comments(conn, orphan_id)
+        assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
+        assert conn.execute('SELECT status FROM task_runs WHERE id=?', (original.current_run_id,)).fetchone()[0] == 'reclaimed'
     assert any("RESUMED" in c.body for c in comments)
 
     resumed.finish(240.0)
@@ -246,6 +301,24 @@ def test_principal_mirror_resume_reclaims_same_card(kanban_env):
             break
         _time.sleep(0.2)
     assert status == "done"
+
+
+def test_generic_activity_recovery_still_archives_dead_mirror(kanban_env):
+    import asyncio
+    from hermes_cli import kanban_db as kb
+    from tools.principal_turn_mirror import PrincipalTurnMirror
+
+    mirror = PrincipalTurnMirror("default", "activity cleanup", idempotency_key="generic-activity")
+    asyncio.run(mirror.tick(61.0))
+    task = _get_task(mirror._task_id)
+    _leave_card_with_exited_process_owner(kb, task.id)
+    with kb.connect_closing() as conn:
+        assert kb.recover_interrupted_task(
+            conn, task.id, expected_run_id=task.current_run_id,
+            expected_claim=task.claim_lock, expected_heartbeat=task.last_heartbeat_at,
+        )
+        assert kb.get_task(conn, task.id).status == 'archived'
+        assert kb.claim_task(conn, task.id, allow_activity=True) is None
 
 
 def test_no_board_creates_nothing(kanban_env):

@@ -87,6 +87,10 @@ def hermes_home(tmp_path, monkeypatch):
     from hermes_cli import goals
 
     goals._DB_CACHE.clear()
+    # This contract starts with a persisted goal. Prepare the real database
+    # outside the event loop so cold schema/bootstrap time cannot drop set()
+    # before the FIFO behavior under test begins.
+    assert goals._get_session_db() is not None
     yield home
     goals._DB_CACHE.clear()
 

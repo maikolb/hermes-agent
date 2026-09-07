@@ -153,7 +153,9 @@ def reserve_request(conn, *, capacity):
 
 def bootstrap_card(conn, request_id, token, *, pid):
     kb=_kb()
-    with kb.write_txn(conn):
+    # claim_task's observers must see the complete request/card/run mapping.
+    # Flush them after the outer commit, including when bootstrap returns early.
+    with kb.defer_kanban_lifecycle_hooks(), kb.write_txn(conn):
         request=get_request(conn,request_id)
         if not request or request['claim_token']!=token:
             raise OwnershipConflict('The request belongs to another worker')

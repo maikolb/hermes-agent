@@ -71,6 +71,7 @@ new locking.
 from __future__ import annotations
 
 import contextlib
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -193,6 +194,34 @@ def _assert_not_delegated_child_mutation() -> None:
         )
 
 
+_deferred_lifecycle_hooks: ContextVar = ContextVar('kanban_deferred_lifecycle_hooks', default=None)
+
+
+@contextlib.contextmanager
+def defer_kanban_lifecycle_hooks():
+    """Wrap an outer transaction so observers run only after its commit.
+
+    Nested scopes keep their own buffer: rollback discards their notifications,
+    while successful scopes forward them to the parent. This changes timing,
+    not which observers are enabled. Durable workflow events remain in SQLite.
+    """
+    parent = _deferred_lifecycle_hooks.get()
+    pending = []
+    token = _deferred_lifecycle_hooks.set(pending)
+    try:
+        yield
+    except BaseException:
+        _deferred_lifecycle_hooks.reset(token)
+        raise
+    else:
+        _deferred_lifecycle_hooks.reset(token)
+        if parent is not None:
+            parent.extend(pending)
+        else:
+            for event, task_id, fields in pending:
+                _fire_kanban_lifecycle_hook(event, task_id, **fields)
+
+
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
     """Fire a kanban lifecycle plugin hook, fully best-effort.
 
@@ -206,6 +235,10 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
     worker-side hooks both carry the right profile without the caller plumbing
     it through.
     """
+    pending = _deferred_lifecycle_hooks.get()
+    if pending is not None:
+        pending.append((event, task_id, fields))
+        return
     try:
         from hermes_cli.lifecycle import invoke_hook
         from hermes_cli.profiles import get_active_profile_name
@@ -5177,8 +5210,14 @@ def _end_run(
 def recover_interrupted_task(
     conn: sqlite3.Connection, task_id: str, *, expected_run_id: Optional[int],
     expected_claim: str, expected_heartbeat: Optional[int],
+    resume_activity: bool = False,
 ) -> bool:
-    """Recover the observed dead attempt without touching a newer owner."""
+    """Recover the observed dead attempt without touching a newer owner.
+
+    Generic activity cleanup archives its historical mirror. An explicit
+    Principal continuation can reclaim that same activity card instead;
+    its role still excludes it from the work dispatcher.
+    """
     import socket
 
     with write_txn(conn):
@@ -5202,7 +5241,10 @@ def recover_interrupted_task(
             "SELECT 1 FROM task_comments WHERE task_id=? AND body LIKE "
             "'Mirror card for in-process delegation%' LIMIT 1", (task_id,),
         ).fetchone() is not None
-        status = "archived" if task.task_role == "activity" or legacy_activity else _landing_status_after_parents(conn, task_id)
+        archive_activity = (task.task_role == "activity" or legacy_activity) and not (
+            resume_activity and task.task_role == "activity"
+        )
+        status = "archived" if archive_activity else _landing_status_after_parents(conn, task_id)
         run_id = _end_run(
             conn, task_id, outcome="reclaimed", status="reclaimed",
             # Preserve partial run summary and metadata for the next attempt.

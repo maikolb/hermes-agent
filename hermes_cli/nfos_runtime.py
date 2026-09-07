@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import nfos_delivery as delivery
@@ -52,7 +53,9 @@ def preserve_attachments(paths, types, *, directory):
                 digest.update(chunk)
         sha=digest.hexdigest();dest=directory/(sha+src.suffix.lower())
         if not dest.exists():
-            temp=directory/(sha+'.'+str(os.getpid())+'.tmp')
+            # Concurrent Telegram handlers can run in threads of the same
+            # process. Each copy owns its temporary file until atomic publish.
+            temp=directory/(sha+'.'+uuid.uuid4().hex+'.tmp')
             try:
                 with src.open('rb') as source,temp.open('wb') as target:
                     shutil.copyfileobj(source,target);target.flush();os.fsync(target.fileno())

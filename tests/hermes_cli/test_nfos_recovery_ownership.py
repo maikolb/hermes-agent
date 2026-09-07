@@ -11,33 +11,52 @@ from hermes_cli import nfos_runtime as runtime
 from tests.hermes_cli.test_nfos_candidate_delivery import delivery, A
 
 
-def test_new_run_recovers_its_publication_slot_and_unknown_effect(delivery, monkeypatch):
+def set_prior_worker(conn, task, pid):
+    """Keep the synthetic fixture's row and durable process receipt consistent."""
+    started = kb._process_start_time(pid)
+    conn.execute('UPDATE tasks SET worker_pid=?,worker_started_at=? WHERE id=?', (pid, started, task.id))
+    conn.execute('UPDATE task_runs SET worker_pid=? WHERE id=?', (pid, task.current_run_id))
+    row = conn.execute("SELECT id,payload FROM task_events WHERE task_id=? AND run_id=? AND kind='nfos_worker_created_card'",
+                       (task.id, task.current_run_id)).fetchone()
+    payload = json.loads(row['payload'])
+    payload.update(pid=pid, worker_started_at=started)
+    conn.execute('UPDATE task_events SET payload=? WHERE id=?', (json.dumps(payload), row['id']))
+    conn.commit()
+
+
+def test_new_run_recovers_its_publication_slot_and_unknown_effect(delivery):
     conn, task = delivery
     assert d.acquire_project(conn, 'pilot', task.id, task.current_run_id, A)
     conn.execute("INSERT INTO nfos_effects(id,task_id,run_id,operation,target,candidate,status,created_at,updated_at) VALUES('lost-response',?,?,'deploy','hml',?,'unknown',1,1)",
                  (task.id, task.current_run_id, A))
-    conn.execute('UPDATE tasks SET worker_pid=987654321 WHERE id=?', (task.id,))
-    conn.execute('UPDATE task_runs SET worker_pid=987654321 WHERE id=?', (task.current_run_id,))
-    conn.commit()
+    set_prior_worker(conn, task, 987654321)
     kb.reclaim_task(conn, task.id)
     current = kb.claim_task(conn, task.id)
-    monkeypatch.setattr(kb, '_pid_alive', lambda pid: False)
+    assert current is not None
     assert d.acquire_project(conn, 'pilot', task.id, current.current_run_id, A)
     assert conn.execute("SELECT status FROM nfos_effects WHERE id='lost-response'").fetchone()[0] == 'unknown'
     assert conn.execute('SELECT run_id FROM nfos_project_delivery').fetchone()[0] == current.current_run_id
 
 
-def test_publication_slot_does_not_transfer_from_a_live_previous_process(delivery, monkeypatch):
+def test_live_previous_worker_prevents_new_claim_and_keeps_publication_slot(delivery):
     conn, task = delivery
     assert d.acquire_project(conn, 'pilot', task.id, task.current_run_id, A)
-    conn.execute('UPDATE tasks SET worker_pid=987654321 WHERE id=?', (task.id,))
-    conn.execute('UPDATE task_runs SET worker_pid=987654321 WHERE id=?', (task.current_run_id,))
-    conn.commit()
-    kb.reclaim_task(conn, task.id)
-    current = kb.claim_task(conn, task.id)
-    monkeypatch.setattr(kb, '_pid_alive', lambda pid: True)
-    monkeypatch.setattr(kb, '_process_identity_matches', lambda pid, started: True)
-    assert not d.acquire_project(conn, 'pilot', task.id, current.current_run_id, A)
+    proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    try:
+        set_prior_worker(conn, task, proc.pid)
+        assert kb.reclaim_task(conn, task.id, signal_fn=lambda *args: None)
+        assert proc.poll() is None
+        assert kb.claim_task(conn, task.id) is None
+        assert conn.execute('SELECT run_id FROM nfos_project_delivery').fetchone()[0] == task.current_run_id
+        proc.terminate(); proc.wait(timeout=10)
+        current = kb.claim_task(conn, task.id)
+        assert current is not None
+        assert d.acquire_project(conn, 'pilot', task.id, current.current_run_id, A)
+    finally:
+        if proc.poll() is None:
+            proc.kill(); proc.wait(timeout=10)
 
 
 def test_initial_analysis_can_classify_report_without_git_delivery(tmp_path, monkeypatch):

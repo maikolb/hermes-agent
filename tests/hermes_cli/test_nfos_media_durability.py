@@ -3,6 +3,8 @@ import hashlib
 import os
 import stat
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -67,3 +69,21 @@ def test_retry_flushes_ancestor_links_after_interrupted_parent_sync(tmp_path,mon
     result=runtime.preserve_attachments([str(source)],['audio/wav'],directory=destination)
     assert synced==[destination,*destination.parents]
     assert Path(result[0]['original']).read_bytes()==source.read_bytes()
+
+
+def test_concurrent_requests_with_same_media_preserve_one_complete_original(tmp_path, monkeypatch):
+    source=tmp_path/'input.png';source.write_bytes(b'same original image'*8192)
+    destination=tmp_path/'request-media'
+    copying=Barrier(2)
+    copy=runtime.shutil.copyfileobj
+    def concurrent_copy(src,dst):
+        copying.wait(timeout=10)
+        copy(src,dst)
+    monkeypatch.setattr(runtime.shutil,'copyfileobj',concurrent_copy)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        calls=[executor.submit(runtime.preserve_attachments,[str(source)],['image/png'],directory=destination) for _ in range(2)]
+        results=[call.result(timeout=15)[0] for call in calls]
+    assert results[0]['original']==results[1]['original']
+    assert results[0]['sha256']==results[1]['sha256']==hashlib.sha256(source.read_bytes()).hexdigest()
+    assert Path(results[0]['original']).read_bytes()==source.read_bytes()
+    assert not list(destination.glob('*.tmp'))

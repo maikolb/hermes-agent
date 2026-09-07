@@ -264,6 +264,7 @@ class PrincipalTurnMirror:
                         conn, task_id, expected_run_id=existing.current_run_id,
                         expected_claim=existing.claim_lock,
                         expected_heartbeat=existing.last_heartbeat_at,
+                        resume_activity=True,
                     ):
                         return
                     self.resumed = True

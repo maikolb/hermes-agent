@@ -114,11 +114,25 @@ def _http(url, item=None):
 
 
 def _client(config_path, result_path, wait_after_failure):
+    startup_wall = time.monotonic()
+    startup_cpu = time.process_time()
     sys.path.insert(0, str(REPO))
-    from hermes_cli import kanban_db as kb, nfos_delivery as delivery
     config = json.loads(Path(config_path).read_text(encoding='utf-8'))
     os.environ['HERMES_HOME'] = config['home']
     os.environ['HERMES_KANBAN_DB'] = config['db']
+    from hermes_cli import kanban_db as kb, nfos_delivery as delivery
+    # Cold imports are fixture startup, not the HTTP operation being measured.
+    # The parent acknowledges a real imported interpreter before starting its
+    # unchanged result deadline. No runtime or HTTP timeout is extended here.
+    ready = Path(result_path).with_suffix('.ready.json')
+    proceed = Path(result_path).with_suffix('.proceed.json')
+    _write(ready, {'pid': os.getpid(), 'started_at': psutil.Process().create_time(),
+        'phase': 'imports_complete', 'startup_wall_seconds': time.monotonic()-startup_wall,
+        'startup_cpu_seconds': time.process_time()-startup_cpu})
+    acknowledgement_deadline = time.monotonic()+60
+    while not proceed.exists():
+        assert time.monotonic() < acknowledgement_deadline, 'Parent did not acknowledge imported client'
+        time.sleep(.025)
     args = {key: config[key] for key in ('operation', 'target', 'candidate')}
     trace = []
     with kb.connect_closing(Path(config['db'])) as conn:
@@ -162,24 +176,35 @@ class Harness:
         self.processes = []
         self.lifecycle = []
         self.sequence = 0
+        self.logs = {}
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             self.port = sock.getsockname()[1]
         self.server = None
 
     def spawn(self, *args):
-        proc = subprocess.Popen([sys.executable, '-X', 'utf8', '-B', str(Path(__file__).resolve()), *map(str, args)],
-            cwd=REPO, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=CREATE_FLAGS, env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        number = len(self.processes)+1
+        stdout_path = self.root/f'child-{number}-stdout.log'
+        stderr_path = self.root/f'child-{number}-stderr.log'
+        with stdout_path.open('wb') as stdout, stderr_path.open('wb') as stderr:
+            proc = subprocess.Popen([sys.executable, '-X', 'utf8', '-B', str(Path(__file__).resolve()), *map(str, args)],
+                cwd=REPO, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                creationflags=CREATE_FLAGS, env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        self.logs[proc] = (stdout_path, stderr_path)
         self.processes.append(proc)
-        self.lifecycle.append({'pid': proc.pid, 'action': 'spawn', 'role': args[0], 'at': time.time()})
+        self.lifecycle.append({'pid': proc.pid, 'action': 'spawn', 'role': args[0], 'at': time.time(),
+            'stdout':str(stdout_path), 'stderr':str(stderr_path)})
         return proc
 
-    def wait_file(self, path, proc):
-        deadline = time.monotonic()+15
+    def diagnostic(self, proc):
+        return '\n'.join(str(path)+':\n'+path.read_text(encoding='utf-8', errors='replace')[-5000:]
+            for path in self.logs.get(proc, ()) if path.exists())
+
+    def wait_file(self, path, proc, *, timeout=15, phase='operation result'):
+        deadline = time.monotonic()+timeout
         while not path.exists():
-            assert proc.poll() is None, f'Child exited {proc.returncode} before {path.name}'
-            assert time.monotonic() < deadline, f'Timed out waiting for {path.name}'
+            assert proc.poll() is None, f'Child exited {proc.returncode} during {phase} before {path.name}\n{self.diagnostic(proc)}'
+            assert time.monotonic() < deadline, f'Timed out during {phase} waiting for {path.name}\n{self.diagnostic(proc)}'
             time.sleep(.025)
         result = json.loads(path.read_text(encoding='utf-8'))
         if result.get('pid') and proc.poll() is None:
@@ -217,7 +242,7 @@ class Harness:
         if ready.exists():
             ready.unlink()
         self.server = self.spawn('--destination', self.root, self.port, drop_operation)
-        self.wait_file(ready, self.server)
+        self.wait_file(ready, self.server, timeout=60, phase='server startup')
 
     def client(self, config, hold=False):
         self.sequence += 1
@@ -225,6 +250,10 @@ class Harness:
         target = self.root/f'client-{self.sequence}-result.json'
         _write(source, config)
         proc = self.spawn('--client', source, target, 'hold' if hold else 'exit')
+        ready = self.wait_file(target.with_suffix('.ready.json'), proc, timeout=60, phase='client imports')
+        assert ready['phase'] == 'imports_complete'
+        self.lifecycle.append({'action':'client_imports_complete', **ready, 'at':time.time()})
+        _write(target.with_suffix('.proceed.json'), {'client_pid':ready['pid'], 'at':time.time()})
         result = self.wait_file(target, proc)
         if not hold:
             assert proc.wait(timeout=10) == 0
