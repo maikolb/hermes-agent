@@ -1,0 +1,23 @@
+{
+  "started": "2026-09-07T23:41:09.413041+00:00",
+  "finished": "2026-09-07T23:46:48.011578+00:00",
+  "exit_code": 0,
+  "command": [
+    "bash",
+    "scripts/run_tests.sh",
+    "-j",
+    "1",
+    "--file-timeout",
+    "900",
+    "--file-retries",
+    "0",
+    "tests/hermes_cli/test_nfos_principal_reconsideration.py"
+  ],
+  "production_modified": false,
+  "source_hashes": {
+    "hermes_cli/kanban_db.py": "ef93df1d8a3f4ed2695f64d0715cbf00db37bdbea99a621b4dde4af8fcd1c544",
+    "hermes_cli/nfos_runtime.py": "9592ee10edca6190918d64794ba70a923ccc0a586a31410f15e3fa2fdbe5629e",
+    "hermes_cli/nfos_delivery.py": "c8c8134e55e0e20af2e1e2f25a91eacd265a8645402cbf8f35d3959a2ad7f877",
+    "tests/hermes_cli/test_nfos_principal_reconsideration.py": "e5acdeefef1648c1bcbb82437487c72cd650f8b92df121602614b11f8f7e27a9"
+  }
+}

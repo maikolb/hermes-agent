@@ -1,0 +1,114 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:\Users\maiko\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 1 test files (~3 tests) under ['tests\\gateway\\test_nfos_principal_queue.py']; running with -j 1
+[100.0% |     3/~3 | ✓0 | ✗1] ✗ tests\gateway\test_nfos_principal_queue.py (1✗, 10.9s)
+
+  ╔╍ Failed: tests\gateway\test_nfos_principal_queue.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║             rid = delivery.receive_request(conn, source={'platform': 'telegram', 'chat_id': 'test', 'thread_id': '8', 'message_id': '1', 'chat_type': 'group'},
+  ║                 text='Audit', project={'profile': 'default', 'delivery_type': 'report'})
+  ║             request = delivery.reserve_request(conn, capacity=2)
+  ║             task = delivery.bootstrap_card(conn, rid, request['claim_token'], pid=os.getpid())
+  ║             delivery.ask_principal(conn, task.id, task.current_run_id, kind='impediment', question='Review the saved evidence', context={})
+  ║     
+  ║         class OfflineTelegram(RecordingAdapter):
+  ║             offline = True
+  ║     
+  ║             async def send(self, chat_id, text, metadata=None):
+  ║                 if self.offline:
+  ║                     raise ConnectionError('Telegram unavailable')
+  ║                 return await super().send(chat_id, text, metadata)
+  ║     
+  ║         adapter = OfflineTelegram()
+  ║         adapter.fail = False
+  ║         runner = _make_runner(adapter)
+  ║         asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+  ║ >       assert len(adapter.handled) == 1, 'Telegram egress incorrectly blocked the internal Principal'
+  ║ E       AssertionError: Telegram egress incorrectly blocked the internal Principal
+  ║ E       assert 0 == 1
+  ║ E        +  where 0 = len([])
+  ║ E        +    where [] = <tests.gateway.test_nfos_principal_queue.test_telegram_outage_does_not_block_principal_decision_delivery.<locals>.OfflineTelegram object at 0x0000026AF8F65710>.handled
+  ║ 
+  ║ tests\gateway\test_nfos_principal_queue.py:81: AssertionError
+  ║ ------------------------------ Captured log call ------------------------------
+  ║ WARNING  gateway.run:kanban_watchers.py:3133 kanban notifier: send failed for t_7ec35573 on telegram (attempt 1/12): Telegram unavailable
+  ║ =========================== short test summary info ===========================
+  ║ FAILED tests/gateway/test_nfos_principal_queue.py::test_telegram_outage_does_not_block_principal_decision_delivery
+  ║ ======================= 1 failed, 2 deselected in 3.55s =======================
+  ║
+  ║  Repro: python -m pytest tests\gateway\test_nfos_principal_queue.py -k telegram_outage
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+
+=== Summary: 1 files, 0 tests passed, 1 failed (100% complete) in 10.9s (1 workers) ===
+  Durations cached to test_durations.json (1 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   1
+  Total subprocess CPU-wall: 10.9s  (runner wall: 10.9s, parallelism: 1x)
+  P50: 10.89s  P90: 10.89s  P95: 10.89s  P99: 10.89s  Max: 10.89s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     10.89s  tests\gateway\test_nfos_principal_queue.py
+
+=== Failure output ===
+
+--- tests\gateway\test_nfos_principal_queue.py ---
+============================= test session starts =============================
+platform win32 -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 3 items / 2 deselected / 1 selected
+
+tests\gateway\test_nfos_principal_queue.py F                             [100%]
+
+================================== FAILURES ===================================
+_______ test_telegram_outage_does_not_block_principal_decision_delivery _______
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-4ryvctpl/pytest-of-unknown/pytest-0/test_telegram_outage_does_not_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000026AF8F663D0>
+
+    def test_telegram_outage_does_not_block_principal_decision_delivery(tmp_path, monkeypatch):
+        """Internal handoff and human notification have separate durable ACKs."""
+        monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+        monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'kanban.db'))
+        monkeypatch.setattr('hermes_cli.config.load_config', lambda: {'kanban': {'agent_wake_on_events': True}})
+        with kb.connect_closing() as conn:
+            rid = delivery.receive_request(conn, source={'platform': 'telegram', 'chat_id': 'test', 'thread_id': '8', 'message_id': '1', 'chat_type': 'group'},
+                text='Audit', project={'profile': 'default', 'delivery_type': 'report'})
+            request = delivery.reserve_request(conn, capacity=2)
+            task = delivery.bootstrap_card(conn, rid, request['claim_token'], pid=os.getpid())
+            delivery.ask_principal(conn, task.id, task.current_run_id, kind='impediment', question='Review the saved evidence', context={})
+    
+        class OfflineTelegram(RecordingAdapter):
+            offline = True
+    
+            async def send(self, chat_id, text, metadata=None):
+                if self.offline:
+                    raise ConnectionError('Telegram unavailable')
+                return await super().send(chat_id, text, metadata)
+    
+        adapter = OfflineTelegram()
+        adapter.fail = False
+        runner = _make_runner(adapter)
+        asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+>       assert len(adapter.handled) == 1, 'Telegram egress incorrectly blocked the internal Principal'
+E       AssertionError: Telegram egress incorrectly blocked the internal Principal
+E       assert 0 == 1
+E        +  where 0 = len([])
+E        +    where [] = <tests.gateway.test_nfos_principal_queue.test_telegram_outage_does_not_block_principal_decision_delivery.<locals>.OfflineTelegram object at 0x0000026AF8F65710>.handled
+
+tests\gateway\test_nfos_principal_queue.py:81: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  gateway.run:kanban_watchers.py:3133 kanban notifier: send failed for t_7ec35573 on telegram (attempt 1/12): Telegram unavailable
+=========================== short test summary info ===========================
+FAILED tests/gateway/test_nfos_principal_queue.py::test_telegram_outage_does_not_block_principal_decision_delivery
+======================= 1 failed, 2 deselected in 3.55s =======================
+
+=== 1 file with test failures (1 test failed) ===
+  tests\gateway\test_nfos_principal_queue.py  (1 test failed)
+

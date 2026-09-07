@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>NFOS: Linux</title><style>body{background:#101419;color:#e8edf2;font:17px system-ui;margin:32px;max-width:1370px}h1,h2{color:#d8ba77}p{overflow-wrap:anywhere}pre{font:14px ui-monospace;white-space:pre-wrap;padding:16px;background:#1b242b}</style><h1>NFOS: homologação Linux</h1><p>Execuções isoladas na VPS. Não são testes nos cards de produção.</p><p>66 testes aprovados no código final f1286be, incluindo processos reais e filhos. Outras 34 aprovações pertencem à validação anterior de isolamento e notificações. Os hashes de cada conjunto estão nos recibos.</p><p>As duas primeiras execuções terminaram com erro por timeout. Apenas os arquivos interrompidos foram repetidos com 900 s no executor de testes. Os prazos do produto foram preservados. A mensagem do runner “0 failed” não transforma timeout em aprovação.</p><p>Gerado: 2026-09-07T23:48:46.686160+00:00</p><h2>isolation-tests.log</h2><p>Fonte: /var/tmp/nfos-12h/retained-isolation-a38euft5/tests.log</p><pre>[ 17.8% |     8/~45 | ✓8 | ✗0] ✓ tests/gateway/test_kanban_notifier_durable.py (8✓, 210.5s)
+[ 24.4% |    11/~45 | ✓11 | ✗ 0] ✓ tests/gateway/test_nfos_principal_queue.py (3✓, 96.3s)
+[ 48.9% |    22/~45 | ✓23 | ✗ 0] ✓ tests/hermes_cli/test_nfos_project_rollout.py (12✓, 201.1s)
+[ 60.0% |    27/~45 | ✓28 | ✗ 0] ✓ tests/hermes_cli/test_nfos_recovery_ownership.py (5✓, 119.3s)
+[ 73.3% |    33/~45 | ✓34 | ✗ 0] ✓ tests/hermes_cli/test_nfos_retained_workspaces.py (6✓, 248.8s)
+[100.0% |    45/~45 | ✓34 | ✗ 0] ✗ tests/hermes_cli/test_nfos_worktree_recovery.py (12 tests, 301.0s)
+  ║ (300s exceeded; process tree SIGKILL&#x27;d)
+=== Summary: 6 files, 34 tests passed, 0 failed (100% complete) in 1177.2s (1 workers) ===
+(300s exceeded; process tree SIGKILL&#x27;d)</pre><h2>suspension-tests.log</h2><p>Fonte: /var/tmp/nfos-12h/principal-stop-wgalmr5f/tests.log</p><pre>[  9.3% |     4/~43 | ✓6 | ✗0] ✓ tests/hermes_cli/test_nfos_impediment_revision.py (6✓, 214.6s)
+[ 41.9% |    18/~43 | ✓6 | ✗0] ✗ tests/hermes_cli/test_nfos_principal_reconsideration.py (14 tests, 301.0s)
+  ║ (300s exceeded; process tree SIGKILL&#x27;d)
+[ 48.8% |    21/~43 | ✓9 | ✗0] ✓ tests/hermes_cli/test_nfos_principal_stop.py (3✓, 88.5s)
+[ 81.4% |    35/~43 | ✓23 | ✗ 0] ✓ tests/hermes_cli/test_nfos_tool.py (14✓, 154.2s)
+[100.0% |    43/~43 | ✓31 | ✗ 0] ✓ tests/hermes_cli/test_nfos_worker_shutdown.py (8✓, 209.9s)
+=== Summary: 5 files, 31 tests passed, 0 failed (100% complete) in 968.6s (1 workers) ===
+(300s exceeded; process tree SIGKILL&#x27;d)</pre><h2>suspension-recovery-tests.log</h2><p>Fonte: /var/tmp/nfos-12h/principal-stop-wgalmr5f/recovery-tests.log</p><pre>[100.0% |    12/~12 | ✓17 | ✗ 0] ✓ tests/hermes_cli/test_nfos_worktree_recovery.py (17✓, 476.2s)
+=== Summary: 1 files, 17 tests passed, 0 failed (100% complete) in 476.6s (1 workers) ===</pre><h2>suspension-reconsideration-tests.log</h2><p>Fonte: /var/tmp/nfos-12h/principal-stop-wgalmr5f/reconsideration-tests.log</p><pre>[100.0% |    14/~14 | ✓18 | ✗ 0] ✓ tests/hermes_cli/test_nfos_principal_reconsideration.py (18✓, 331.6s)
+=== Summary: 1 files, 18 tests passed, 0 failed (100% complete) in 331.7s (1 workers) ===</pre>

@@ -1,0 +1,28 @@
+{
+  "started": "2026-09-07T23:09:10.821160+00:00",
+  "finished": "2026-09-07T23:29:17.616675+00:00",
+  "exit_code": 1,
+  "files": {
+    "hermes_cli/nfos_workspaces.py": "c7f8b5b93bf5be12ed1c1bc3ef0bed5eafb029a9913ff2222f6523cb6592cb22",
+    "hermes_cli/kanban_db.py": "4501c874357293a05095667dc2fdd8011a65fce9727440b70c1a7b09151e6a44",
+    "hermes_cli/nfos_runtime.py": "8f0dba6f54a13facb04dde2d45a4bc7c9f306a73f65ef4446419e8a6494fea09",
+    "gateway/kanban_watchers.py": "32852822a8b733b869deea5478d9327bc7cbf543a469dbc866180afc24396397",
+    "tests/hermes_cli/test_nfos_retained_workspaces.py": "010dd409c20864d231bd352b4d0d229dd82689f1dae06390447fc0bd9de25e24",
+    "tests/gateway/test_nfos_principal_queue.py": "2f703ed7dec8363705d37328438b4553cee00ee273d2e0d038cac1290115ba87"
+  },
+  "command": [
+    "bash",
+    "scripts/run_tests.sh",
+    "-j",
+    "1",
+    "--file-retries",
+    "0",
+    "tests/hermes_cli/test_nfos_retained_workspaces.py",
+    "tests/hermes_cli/test_nfos_project_rollout.py",
+    "tests/hermes_cli/test_nfos_worktree_recovery.py",
+    "tests/hermes_cli/test_nfos_recovery_ownership.py",
+    "tests/gateway/test_nfos_principal_queue.py",
+    "tests/gateway/test_kanban_notifier_durable.py"
+  ],
+  "production_modified": false
+}

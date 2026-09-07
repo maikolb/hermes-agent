@@ -1,0 +1,63 @@
+{
+  "at": "2026-09-07T23:34:59.614835+00:00",
+  "task": {
+    "id": "t_6420099b",
+    "status": "blocked",
+    "current_run_id": null,
+    "worker_pid": null
+  },
+  "counts": {
+    "archived": 6,
+    "blocked": 2,
+    "done": 24
+  },
+  "latest_principal": [
+    {
+      "id": "t_3361fbcd",
+      "result": null
+    },
+    {
+      "id": "t_06cdb998",
+      "result": "**A parada do worker TC agora está confirmada**, incluindo seus processos descendentes.\n\nMantive o card suspenso e retirei as duas revisões pendentes da fila automática, respeitando sua ordem de parar. **Nenhum trabalho foi retomado, nenhuma revisão foi aprovada e nenhum arquivo foi excluído.**\n\n(Turno principal concluído em ~7 min.)"
+    }
+  ],
+  "run": {
+    "id": 34,
+    "status": "blocked",
+    "ended_at": 1788822857,
+    "worker_pid": null
+  },
+  "cleanup": {
+    "worker_pid": 3499436,
+    "worker_started_at": 1788819774.76,
+    "source_event_id": 250,
+    "status": "confirmed",
+    "grace_seconds": 15.0,
+    "not_before": 1788822872.0,
+    "descendants_json": "[{\"pid\": 3502709, \"started_at\": 1788819887.66}, {\"pid\": 3502825, \"started_at\": 1788819891.65}, {\"pid\": 3502858, \"started_at\": 1788819892.76}, {\"pid\": 3502749, \"started_at\": 1788819889.46}]",
+    "requested_at": 1788822882.6247928,
+    "error": null,
+    "confirmed_at": 1788822895.5182118
+  },
+  "recorded_live_processes": [],
+  "artifacts": [
+    {
+      "id": 2,
+      "kind": "report",
+      "revision": 1,
+      "created_at": 1788822171
+    },
+    {
+      "id": 3,
+      "kind": "report",
+      "revision": 2,
+      "created_at": 1788822265
+    },
+    {
+      "id": 1,
+      "kind": "spec",
+      "revision": 1,
+      "created_at": 1788821986
+    }
+  ]
+}

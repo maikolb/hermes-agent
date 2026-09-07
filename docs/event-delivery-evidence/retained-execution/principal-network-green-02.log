@@ -1,0 +1,1097 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:\Users\maiko\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 3 test files (~36 tests) under ['tests\\gateway\\test_nfos_principal_queue.py', 'tests\\gateway\\test_kanban_notifier_durable.py', 'tests\\gateway\\test_kanban_notifier.py']; running with -j 1
+[ 69.4% |    25/~36 | ✓ 8 | ✗17] ✗ tests\gateway\test_kanban_notifier.py (8✓ 17✗, 19.3s)
+
+  ╔╍ Failed: tests\gateway\test_kanban_notifier.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║             )
+  ║         candidate = _canonical_assignee(candidate)
+  ║         validate_profile_name(candidate)
+  ║         if not profile_exists(candidate):
+  ║ >           raise ValueError(
+  ║                 f"Assignee profile {candidate!r} does not exist. Choose an existing "
+  ║                 "profile or correct kanban.default_assignee in config.yaml."
+  ║             )
+  ║ E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+  ║ 
+  ║ hermes_cli\kanban_db.py:3761: ValueError
+  ║ =========================== short test summary info ===========================
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_claimed_task_notifies_only_after_material_start
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_retry_chain_converges_to_one_final_notification
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_kanban_notifier_delivers_dm_metadata_without_waking_agent
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_notifier_suppresses_pre_start_backlog_and_advances_cursor
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_worker_focus_counter_adds_advances_and_stops_at_zero
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_worker_rotation_respects_display_flags_and_indicator_edit_cadence
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_worker_focus_retry_boundary_decrements_without_chat_noise
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_worker_focus_rehydrates_fail_closed_until_principal_claim
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_active_named_profile_subscription_is_delivered
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_non_dispatch_gateway_claims_only_its_profile_subscriptions
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_legacy_subscription_requires_confirmed_dispatcher_lock_owner
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_notifier_silences_retry_crashes_until_final_give_up
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_notifier_subscription_survives_done_reopen_until_archive
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_completed_then_archived_same_tick_delivers_completion_and_unsubscribes
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_notifier_wakeup_uses_subscription_chat_type
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_kanban_notifier_isolates_per_subscription_failure
+  ║ FAILED tests/gateway/test_kanban_notifier.py::test_notifier_delivers_block_loop_detected_triage_ping
+  ║ ======================== 17 failed, 8 passed in 12.28s ========================
+  ║
+  ║  Repro: python -m pytest tests\gateway\test_kanban_notifier.py
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+[ 91.7% |    33/~36 | ✓16 | ✗17] ✓ tests\gateway\test_kanban_notifier_durable.py (8✓, 14.7s)
+[100.0% |    36/~36 | ✓19 | ✗17] ✓ tests\gateway\test_nfos_principal_queue.py (3✓, 11.3s)
+
+=== Summary: 3 files, 19 tests passed, 17 failed (100% complete) in 45.3s (1 workers) ===
+  Durations cached to test_durations.json (3 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   3
+  Total subprocess CPU-wall: 45.3s  (runner wall: 45.3s, parallelism: 1x)
+  P50: 14.67s  P90: 19.34s  P95: 19.34s  P99: 19.34s  Max: 19.34s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     19.34s  tests\gateway\test_kanban_notifier.py
+     14.67s  tests\gateway\test_kanban_notifier_durable.py
+     11.27s  tests\gateway\test_nfos_principal_queue.py
+
+=== Failure output ===
+
+--- tests\gateway\test_kanban_notifier.py ---
+============================= test session starts =============================
+platform win32 -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 25 items
+
+tests\gateway\test_kanban_notifier.py FFFF...FFF.F....FFFFFFFFF          [100%]
+
+================================== FAILURES ===================================
+____________ test_claimed_task_notifies_only_after_material_start _____________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_claimed_task_notifies_onl0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA34D9B810>
+
+    def test_claimed_task_notifies_only_after_material_start(tmp_path, monkeypatch):
+        db_path = tmp_path / "claimed-start.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+    
+        conn = kb.connect()
+        try:
+>           tid = kb.create_task(conn, title="material start", assignee="worker")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\gateway\test_kanban_notifier.py:123: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+____________ test_retry_chain_converges_to_one_final_notification _____________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_retry_chain_converges_to_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA34EC2C90>
+
+    def test_retry_chain_converges_to_one_final_notification(tmp_path, monkeypatch):
+        db_path = tmp_path / "retry-chain.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+    
+        conn = kb.connect()
+        try:
+>           tid = kb.create_task(conn, title="retry chain", assignee="worker")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\gateway\test_kanban_notifier.py:150: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+_______ test_kanban_notifier_delivers_dm_metadata_without_waking_agent ________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_kanban_notifier_delivers_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA34D5E850>
+
+    def test_kanban_notifier_delivers_dm_metadata_without_waking_agent(tmp_path, monkeypatch):
+        db_path = tmp_path / "dm-topic-metadata.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+    
+        conn = kb.connect()
+        try:
+>           tid = kb.create_task(
+                conn,
+                title="dm topic task",
+                assignee="worker",
+                session_id="agent:main:telegram:dm:chat-1",
+            )
+
+tests\gateway\test_kanban_notifier.py:190: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+_______ test_notifier_suppresses_pre_start_backlog_and_advances_cursor ________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_notifier_suppresses_pre_s0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA32938D90>
+
+    def test_notifier_suppresses_pre_start_backlog_and_advances_cursor(
+        tmp_path, monkeypatch,
+    ):
+        db_path = tmp_path / "pre-start-backlog.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+        conn = kb.connect()
+        try:
+>           tid = kb.create_task(conn, title="historical completion", assignee="worker")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\gateway\test_kanban_notifier.py:238: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+__________ test_worker_focus_counter_adds_advances_and_stops_at_zero __________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_worker_focus_counter_adds0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA32979AD0>
+
+    def test_worker_focus_counter_adds_advances_and_stops_at_zero(tmp_path, monkeypatch):
+        db_path = tmp_path / "worker-focus-counter.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {
+                "display": {
+                    "worker_rotation": True,
+                    "platforms": {
+                        "telegram": {
+                            "tool_progress": "all",
+                            "show_reasoning": True,
+                            "activity_indicator": {
+                                "update_interval_seconds": 60,
+                                "initial_text": "⏳ Trabalhando…",
+                                "elapsed_text": "⏳ Trabalhando há {elapsed_human}…",
+                            }
+                        }
+                    }
+                },
+            },
+        )
+        monkeypatch.setattr(
+            "gateway.run._load_gateway_config", lambda *a, **k: {}
+        )
+        monkeypatch.setattr(
+            kb,
+            "read_worker_log",
+            lambda task_id, **_kwargs: (
+                f"Query: work kanban task {task_id}\n"
+                "┊ Tool: read current worker file\n"
+                "┌─ Reasoning\n"
+                "│ Inspecting the current worker attempt\n"
+                "└\n"
+            ),
+        )
+        kb.init_db()
+        conn = kb.connect()
+        try:
+>           first = kb.create_task(
+                conn,
+                title="first worker",
+                assignee="worker-a",
+                project_id="project-a",
+                session_id="session-a",
+            )
+
+tests\gateway\test_kanban_notifier.py:380: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker-a'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker-a' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+___ test_worker_rotation_respects_display_flags_and_indicator_edit_cadence ____
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_worker_rotation_respects_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA2F5A4E90>
+
+    def test_worker_rotation_respects_display_flags_and_indicator_edit_cadence(
+        tmp_path, monkeypatch,
+    ):
+        db_path = tmp_path / "worker-focus-flags.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        config = {
+            "display": {
+                "platforms": {
+                    "telegram": {
+                        "worker_rotation": True,
+                        "tool_progress": "all",
+                        "show_reasoning": False,
+                        "activity_indicator": {
+                            "update_interval_seconds": 60,
+                            "initial_text": "⏳ Trabalhando…",
+                            "elapsed_text": "⏳ Trabalhando há {elapsed_human}…",
+                        },
+                    }
+                }
+            }
+        }
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
+        monkeypatch.setattr(
+            "gateway.run._load_gateway_config", lambda *a, **k: {}
+        )
+        worker_log = {
+            "text": (
+                "Query: work kanban task t_placeholder\n"
+                "┊ Tool: first visible step\n"
+                "┌─ Reasoning\n"
+                "│ Hidden reasoning\n"
+                "└\n"
+            )
+        }
+    
+        def _read_worker_log(task_id, **_kwargs):
+            return worker_log["text"].replace("t_placeholder", task_id)
+    
+        monkeypatch.setattr(kb, "read_worker_log", _read_worker_log)
+        kb.init_db()
+        conn = kb.connect()
+        try:
+>           task_id = kb.create_task(
+                conn,
+                title="flagged worker",
+                assignee="worker",
+                session_id="principal-session",
+            )
+
+tests\gateway\test_kanban_notifier.py:619: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+_______ test_worker_focus_retry_boundary_decrements_without_chat_noise ________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_worker_focus_retry_bounda0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA32ACA7D0>
+
+    def test_worker_focus_retry_boundary_decrements_without_chat_noise(
+        tmp_path, monkeypatch,
+    ):
+        db_path = tmp_path / "worker-focus-retry.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"kanban": {"worker_focus_handoff": True}},
+        )
+        monkeypatch.setattr(
+            "gateway.run._load_gateway_config", lambda *a, **k: {}
+        )
+        kb.init_db()
+        conn = kb.connect()
+        try:
+>           task_id = kb.create_task(
+                conn,
+                title="retry worker",
+                assignee="worker",
+                session_id="principal-session",
+            )
+
+tests\gateway\test_kanban_notifier.py:701: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+_______ test_worker_focus_rehydrates_fail_closed_until_principal_claim ________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_worker_focus_rehydrates_f0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA34E30110>
+
+    def test_worker_focus_rehydrates_fail_closed_until_principal_claim(
+        tmp_path, monkeypatch,
+    ):
+        db_path = tmp_path / "worker-focus-rehydrate.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"kanban": {"worker_focus_handoff": True}},
+        )
+        monkeypatch.setattr(
+            "gateway.run._load_gateway_config", lambda *a, **k: {}
+        )
+    
+        def _unreadable_worker_log(*_args, **_kwargs):
+            raise OSError("rotating")
+    
+        monkeypatch.setattr(kb, "read_worker_log", _unreadable_worker_log)
+        kb.init_db()
+        conn = kb.connect()
+        try:
+>           task_id = kb.create_task(
+                conn,
+                title="survives restart",
+                assignee="worker",
+                project_id="project-a",
+                session_id="principal-session",
+            )
+
+tests\gateway\test_kanban_notifier.py:835: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+_____________ test_active_named_profile_subscription_is_delivered _____________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_active_named_profile_subs0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA32AA0290>
+
+    def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):
+        """A sub stamped with the gateway's own named profile uses self.adapters.
+    
+        Regression for #71340: on a standalone (non-multiplex) gateway running a
+        named profile, _authorization_adapter() used to treat the active name as a
+        multiplex secondary, find no _profile_adapters entry, fail closed, and
+        rewind the claim forever — silent zero-delivery.
+        """
+        db_path = tmp_path / "actionable-block.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+        reason = "AGE-39 — https://linear.example/AGE-39 — publishing verified."
+        conn = kb.connect()
+        try:
+>           tid = kb.create_task(conn, title="approval", assignee="publisher")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\gateway\test_kanban_notifier.py:1137: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'publisher'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'publisher' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+_______ test_non_dispatch_gateway_claims_only_its_profile_subscriptions _______
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_non_dispatch_gateway_clai0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA37784090>
+
+    def test_non_dispatch_gateway_claims_only_its_profile_subscriptions(
+        tmp_path, monkeypatch,
+    ):
+        """A profile gateway delivers its events while another gateway dispatches."""
+        db_path = tmp_path / "cross-profile-notifier.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+        conn = kb.connect()
+        try:
+>           foreign_tid = kb.create_task(
+                conn, title="default-owned", assignee="worker",
+            )
+
+tests\gateway\test_kanban_notifier.py:1170: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+______ test_legacy_subscription_requires_confirmed_dispatcher_lock_owner ______
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_legacy_subscription_requi0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA34D98510>
+
+    def test_legacy_subscription_requires_confirmed_dispatcher_lock_owner(
+        tmp_path, monkeypatch,
+    ):
+        """Startup and lock-losing gateways cannot claim legacy notifications."""
+        db_path = tmp_path / "legacy-lock-owner.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+        conn = kb.connect()
+        try:
+>           task_id = kb.create_task(conn, title="legacy", assignee="worker")
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\gateway\test_kanban_notifier.py:1217: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+__________ test_notifier_silences_retry_crashes_until_final_give_up ___________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_notifier_silences_retry_c0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA32AC99D0>
+
+    def test_notifier_silences_retry_crashes_until_final_give_up(tmp_path, monkeypatch):
+        """Retry telemetry stays in the DB and only the final give-up is visible."""
+        db_path = tmp_path / "redeliver-cycle.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+    
+        conn = kb.connect()
+        try:
+>           tid = kb.create_task(conn, title="cycle test", assignee="worker")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\gateway\test_kanban_notifier.py:1293: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+________ test_notifier_subscription_survives_done_reopen_until_archive ________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_notifier_subscription_sur0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA351B1690>
+
+    def test_notifier_subscription_survives_done_reopen_until_archive(
+        tmp_path, monkeypatch,
+    ):
+        """Done is reversible; archive alone ends notification ownership."""
+        db_path = tmp_path / "done-reopen-archive.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        import hermes_cli.config as config_mod
+    
+        monkeypatch.setattr(
+            config_mod,
+            "load_config",
+            lambda: {"kanban": {"agent_wake_on_events": True}},
+        )
+        kb.init_db()
+    
+        conn = kb.connect()
+        try:
+>           tid = kb.create_task(
+                conn,
+                title="review continuation",
+                assignee="worker",
+                session_id="origin-session",
+            )
+
+tests\gateway\test_kanban_notifier.py:1348: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+_ test_completed_then_archived_same_tick_delivers_completion_and_unsubscribes _
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_completed_then_archived_s0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA329FDCD0>
+
+    def test_completed_then_archived_same_tick_delivers_completion_and_unsubscribes(
+        tmp_path, monkeypatch,
+    ):
+        """Archive is silent control state, not a reason to lose completion."""
+        db_path = tmp_path / "completed-archive-same-tick.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+    
+        conn = kb.connect()
+        try:
+>           tid = kb.create_task(conn, title="deliver before archive", assignee="worker")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\gateway\test_kanban_notifier.py:1454: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+______________ test_notifier_wakeup_uses_subscription_chat_type _______________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_notifier_wakeup_uses_subs0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA3299A950>
+
+    def test_notifier_wakeup_uses_subscription_chat_type(tmp_path, monkeypatch):
+        db_path = tmp_path / "chat-type-wakeup.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+    
+        conn = kb.connect()
+        try:
+>           tid = kb.create_task(
+                conn,
+                title="dm requester",
+                assignee="worker",
+                session_id="origin-session",
+            )
+
+tests\gateway\test_kanban_notifier.py:1486: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+___________ test_kanban_notifier_isolates_per_subscription_failure ____________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_kanban_notifier_isolates_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA34E8AC10>
+
+    def test_kanban_notifier_isolates_per_subscription_failure(tmp_path, monkeypatch):
+        """One bad subscription must not block delivery for all others.
+    
+        Regression for #59269: when claim_unseen_events_for_sub raises for one
+        subscription, the entire notifier tick used to abort — silently blocking
+        delivery for every other subscription.
+        """
+        db_path = tmp_path / "isolation.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+    
+        # Create two tasks with subscriptions and complete both. The BAD task is
+        # created first: list_notify_subs() has no ORDER BY, so SQLite's natural
+        # scan returns insertion order — the failing subscription must be
+        # processed BEFORE the good one or this test passes even without the
+        # per-subscription isolation (the good delivery happens before the tick
+        # aborts). A deterministic-order shim below removes the reliance on the
+        # scan order entirely.
+        conn = kb.connect()
+        try:
+>           tid_bad = kb.create_task(conn, title="bad task", assignee="worker")
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\gateway\test_kanban_notifier.py:1564: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+___________ test_notifier_delivers_block_loop_detected_triage_ping ____________
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-7hkcgqki/pytest-of-unknown/pytest-0/test_notifier_delivers_block_l0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DA34D994D0>
+
+    def test_notifier_delivers_block_loop_detected_triage_ping(tmp_path, monkeypatch):
+        """A `block_loop_detected` event must reach the subscriber as a triage ping.
+    
+        Regression for the silent-triage gap (PR #62712): kanban_db routes a task
+        to `triage` after BLOCK_RECURRENCE_LIMIT re-blocks for the same cause and
+        emits ONLY a `block_loop_detected` event — no `blocked`/`status` event.
+        Before `block_loop_detected` joined TERMINAL_KINDS with its own message
+        branch, that one transition (the whole point of which is to force human
+        attention) produced zero notification and the task stalled in triage
+        silently.
+        """
+        db_path = tmp_path / "block-loop.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+        kb.init_db()
+    
+        conn = kb.connect()
+        try:
+>           tid = kb.create_task(conn, title="loops forever", assignee="worker")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\gateway\test_kanban_notifier.py:1620: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+hermes_cli\kanban_db.py:4200: in create_task
+    assignee = _resolve_executable_assignee(assignee)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+assignee = 'worker'
+
+    def _resolve_executable_assignee(assignee: Optional[str]) -> str:
+        """Require an explicit executor or the current context's configured default."""
+        from hermes_cli.profiles import profile_exists, validate_profile_name
+    
+        candidate = (assignee or "").strip()
+        if not candidate or candidate.casefold() == "unassigned":
+            from hermes_cli.config import load_config
+    
+            kanban_config = load_config().get("kanban") or {}
+            candidate = (kanban_config.get("default_assignee") or "").strip()
+        if not candidate:
+            raise ValueError(
+                "Executable task requires an assignee. Choose an existing profile "
+                "or set kanban.default_assignee in the current profile's config.yaml."
+            )
+        candidate = _canonical_assignee(candidate)
+        validate_profile_name(candidate)
+        if not profile_exists(candidate):
+>           raise ValueError(
+                f"Assignee profile {candidate!r} does not exist. Choose an existing "
+                "profile or correct kanban.default_assignee in config.yaml."
+            )
+E           ValueError: Assignee profile 'worker' does not exist. Choose an existing profile or correct kanban.default_assignee in config.yaml.
+
+hermes_cli\kanban_db.py:3761: ValueError
+=========================== short test summary info ===========================
+FAILED tests/gateway/test_kanban_notifier.py::test_claimed_task_notifies_only_after_material_start
+FAILED tests/gateway/test_kanban_notifier.py::test_retry_chain_converges_to_one_final_notification
+FAILED tests/gateway/test_kanban_notifier.py::test_kanban_notifier_delivers_dm_metadata_without_waking_agent
+FAILED tests/gateway/test_kanban_notifier.py::test_notifier_suppresses_pre_start_backlog_and_advances_cursor
+FAILED tests/gateway/test_kanban_notifier.py::test_worker_focus_counter_adds_advances_and_stops_at_zero
+FAILED tests/gateway/test_kanban_notifier.py::test_worker_rotation_respects_display_flags_and_indicator_edit_cadence
+FAILED tests/gateway/test_kanban_notifier.py::test_worker_focus_retry_boundary_decrements_without_chat_noise
+FAILED tests/gateway/test_kanban_notifier.py::test_worker_focus_rehydrates_fail_closed_until_principal_claim
+FAILED tests/gateway/test_kanban_notifier.py::test_active_named_profile_subscription_is_delivered
+FAILED tests/gateway/test_kanban_notifier.py::test_non_dispatch_gateway_claims_only_its_profile_subscriptions
+FAILED tests/gateway/test_kanban_notifier.py::test_legacy_subscription_requires_confirmed_dispatcher_lock_owner
+FAILED tests/gateway/test_kanban_notifier.py::test_notifier_silences_retry_crashes_until_final_give_up
+FAILED tests/gateway/test_kanban_notifier.py::test_notifier_subscription_survives_done_reopen_until_archive
+FAILED tests/gateway/test_kanban_notifier.py::test_completed_then_archived_same_tick_delivers_completion_and_unsubscribes
+FAILED tests/gateway/test_kanban_notifier.py::test_notifier_wakeup_uses_subscription_chat_type
+FAILED tests/gateway/test_kanban_notifier.py::test_kanban_notifier_isolates_per_subscription_failure
+FAILED tests/gateway/test_kanban_notifier.py::test_notifier_delivers_block_loop_detected_triage_ping
+======================== 17 failed, 8 passed in 12.28s ========================
+
+=== 1 file with test failures (17 tests failed) ===
+  tests\gateway\test_kanban_notifier.py  (17 tests failed)
+

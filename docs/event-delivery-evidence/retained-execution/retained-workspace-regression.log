@@ -1,0 +1,25 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:\Users\maiko\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 4 test files (~34 tests) under ['tests\\hermes_cli\\test_nfos_retained_workspaces.py', 'tests\\hermes_cli\\test_nfos_project_rollout.py', 'tests\\hermes_cli\\test_nfos_worktree_recovery.py', 'tests\\hermes_cli\\test_nfos_recovery_ownership.py']; running with -j 1
+[ 32.4% |    11/~34 | ✓12 | ✗ 0] ✓ tests\hermes_cli\test_nfos_project_rollout.py (12✓, 15.7s)
+[ 47.1% |    16/~34 | ✓17 | ✗ 0] ✓ tests\hermes_cli\test_nfos_recovery_ownership.py (5✓, 16.4s)
+[ 64.7% |    22/~34 | ✓23 | ✗ 0] ✓ tests\hermes_cli\test_nfos_retained_workspaces.py (6✓, 144.1s)
+[100.0% |    34/~34 | ✓40 | ✗ 0] ✓ tests\hermes_cli\test_nfos_worktree_recovery.py (17✓, 134.6s)
+
+=== Summary: 4 files, 40 tests passed, 0 failed (100% complete) in 310.9s (1 workers) ===
+  Durations cached to test_durations.json (4 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   4
+  Total subprocess CPU-wall: 310.9s  (runner wall: 310.9s, parallelism: 1x)
+  P50: 134.62s  P90: 144.08s  P95: 144.08s  P99: 144.08s  Max: 144.08s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+    144.08s  tests\hermes_cli\test_nfos_retained_workspaces.py
+    134.62s  tests\hermes_cli\test_nfos_worktree_recovery.py
+     16.44s  tests\hermes_cli\test_nfos_recovery_ownership.py
+     15.74s  tests\hermes_cli\test_nfos_project_rollout.py
+

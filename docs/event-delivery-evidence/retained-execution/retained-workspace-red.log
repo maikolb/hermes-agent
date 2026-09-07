@@ -1,0 +1,248 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:\Users\maiko\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 1 test files (~4 tests) under ['tests\\hermes_cli\\test_nfos_retained_workspaces.py']; running with -j 1
+[100.0% |     4/~4 | ✓0 | ✗4] ✗ tests\hermes_cli\test_nfos_retained_workspaces.py (4✗, 16.6s)
+
+  ╔╍ Failed: tests\hermes_cli\test_nfos_retained_workspaces.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+  ║ INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+  ║ =========================== short test summary info ===========================
+  ║ FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_two_retained_cards_dispatch_into_distinct_checkouts
+  ║ FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_retained_dirty_files_and_index_survive_isolation
+  ║ FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_live_source_writer_is_not_interrupted_or_copied
+  ║ FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_power_loss_before_workspace_handoff_replays_saved_snapshot
+  ║ ============================= 4 failed in 10.43s ==============================
+  ║
+  ║  Repro: python -m pytest tests\hermes_cli\test_nfos_retained_workspaces.py
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+
+=== Summary: 1 files, 0 tests passed, 4 failed (100% complete) in 16.6s (1 workers) ===
+  Durations cached to test_durations.json (1 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   1
+  Total subprocess CPU-wall: 16.6s  (runner wall: 16.6s, parallelism: 1x)
+  P50: 16.62s  P90: 16.62s  P95: 16.62s  P99: 16.62s  Max: 16.62s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     16.62s  tests\hermes_cli\test_nfos_retained_workspaces.py
+
+=== Failure output ===
+
+--- tests\hermes_cli\test_nfos_retained_workspaces.py ---
+============================= test session starts =============================
+platform win32 -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 4 items
+
+tests\hermes_cli\test_nfos_retained_workspaces.py FFFF                   [100%]
+
+================================== FAILURES ===================================
+__________ test_two_retained_cards_dispatch_into_distinct_checkouts ___________
+
+retained = (<hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000002C9D5DEA450>, WindowsPath('C:/Users/maiko/AppData/Loc...st-tmproot-4utv16h5/pytest-of-unknown/pytest-0/test_two_retained_cards_dispat0/project'), ['t_eae17fb4', 't_05d837b1'])
+
+    def test_two_retained_cards_dispatch_into_distinct_checkouts(retained):
+        conn, repo, ids = retained
+        original = git(repo, 'rev-parse', 'HEAD')
+        result = dispatch(conn)
+>       assert len(result.spawned) == 2, result.skipped_workspace_leased
+E       AssertionError: [('t_05d837b1', 't_eae17fb4', 'C:\\Users\\maiko\\AppData\\Local\\Temp\\hermes-pytest-tmproot-4utv16h5\\pytest-of-unknown\\pytest-0\\test_two_retained_cards_dispat0\\project')]
+E       assert 1 == 2
+E        +  where 1 = len([('t_eae17fb4', 'default', 'C:\\Users\\maiko\\AppData\\Local\\Temp\\hermes-pytest-tmproot-4utv16h5\\pytest-of-unknown\\pytest-0\\test_two_retained_cards_dispat0\\project')])
+E        +    where [('t_eae17fb4', 'default', 'C:\\Users\\maiko\\AppData\\Local\\Temp\\hermes-pytest-tmproot-4utv16h5\\pytest-of-unknown\\pytest-0\\test_two_retained_cards_dispat0\\project')] = DispatchResult(reclaimed=0, promoted=0, reconciled_orphans=[], spawned=[('t_eae17fb4', 'default', 'C:\\Users\\maiko\\A...\test_two_retained_cards_dispat0\\project')], workspace_lease_conflicts=[], skipped_locked=False, memory_pressure=None).spawned
+
+tests\hermes_cli\test_nfos_retained_workspaces.py:53: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+____________ test_retained_dirty_files_and_index_survive_isolation ____________
+
+retained = (<hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000002C9D4CC0050>, WindowsPath('C:/Users/maiko/AppData/Loc...st-tmproot-4utv16h5/pytest-of-unknown/pytest-0/test_retained_dirty_files_and_0/project'), ['t_629972d8', 't_de6c1a52'])
+
+    def test_retained_dirty_files_and_index_survive_isolation(retained):
+        conn, repo, ids = retained
+        (repo / 'source.txt').write_text('staged\n', encoding='utf-8')
+        git(repo, 'add', 'source.txt')
+        (repo / 'source.txt').write_text('unfinished\n', encoding='utf-8')
+        (repo / 'saved-report.md').write_text('earlier evidence', encoding='utf-8')
+        result = dispatch(conn)
+>       assert len(result.spawned) == 2
+E       AssertionError: assert 1 == 2
+E        +  where 1 = len([('t_629972d8', 'default', 'C:\\Users\\maiko\\AppData\\Local\\Temp\\hermes-pytest-tmproot-4utv16h5\\pytest-of-unknown\\pytest-0\\test_retained_dirty_files_and_0\\project')])
+E        +    where [('t_629972d8', 'default', 'C:\\Users\\maiko\\AppData\\Local\\Temp\\hermes-pytest-tmproot-4utv16h5\\pytest-of-unknown\\pytest-0\\test_retained_dirty_files_and_0\\project')] = DispatchResult(reclaimed=0, promoted=0, reconciled_orphans=[], spawned=[('t_629972d8', 'default', 'C:\\Users\\maiko\\A...\test_retained_dirty_files_and_0\\project')], workspace_lease_conflicts=[], skipped_locked=False, memory_pressure=None).spawned
+
+tests\hermes_cli\test_nfos_retained_workspaces.py:72: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+____________ test_live_source_writer_is_not_interrupted_or_copied _____________
+
+retained = (<hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000002C9D680C950>, WindowsPath('C:/Users/maiko/AppData/Loc...st-tmproot-4utv16h5/pytest-of-unknown/pytest-0/test_live_source_writer_is_not0/project'), ['t_fffcc2da', 't_4ba8fdba'])
+
+    def test_live_source_writer_is_not_interrupted_or_copied(retained):
+        conn, repo, ids = retained
+        lease, _ = kb._try_acquire_workspace_lease(repo, task_id='existing-writer')
+        assert lease
+        try:
+            result = dispatch(conn)
+            assert result.spawned == []
+            assert {row[0] for row in result.skipped_workspace_leased} == set(ids)
+            assert all(kb.get_task(conn, tid).workspace_path == str(repo) for tid in ids)
+        finally:
+            kb._release_workspace_lease(lease)
+>       assert len(dispatch(conn).spawned) == 2
+E       AssertionError: assert 1 == 2
+E        +  where 1 = len([('t_fffcc2da', 'default', 'C:\\Users\\maiko\\AppData\\Local\\Temp\\hermes-pytest-tmproot-4utv16h5\\pytest-of-unknown\\pytest-0\\test_live_source_writer_is_not0\\project')])
+E        +    where [('t_fffcc2da', 'default', 'C:\\Users\\maiko\\AppData\\Local\\Temp\\hermes-pytest-tmproot-4utv16h5\\pytest-of-unknown\\pytest-0\\test_live_source_writer_is_not0\\project')] = DispatchResult(reclaimed=0, promoted=0, reconciled_orphans=[], spawned=[('t_fffcc2da', 'default', 'C:\\Users\\maiko\\A...\test_live_source_writer_is_not0\\project')], workspace_lease_conflicts=[], skipped_locked=False, memory_pressure=None).spawned
+E        +      where DispatchResult(reclaimed=0, promoted=0, reconciled_orphans=[], spawned=[('t_fffcc2da', 'default', 'C:\\Users\\maiko\\A...\test_live_source_writer_is_not0\\project')], workspace_lease_conflicts=[], skipped_locked=False, memory_pressure=None) = dispatch(<hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000002C9D680C950>)
+
+tests\hermes_cli\test_nfos_retained_workspaces.py:95: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+_______ test_power_loss_before_workspace_handoff_replays_saved_snapshot _______
+
+retained = (<hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000002C9D6971350>, WindowsPath('C:/Users/maiko/AppData/Loc...st-tmproot-4utv16h5/pytest-of-unknown/pytest-0/test_power_loss_before_workspa0/project'), ['t_243f34e9', 't_8624d4dc'])
+
+    def test_power_loss_before_workspace_handoff_replays_saved_snapshot(retained):
+        conn, repo, ids = retained
+        (repo / 'source.txt').write_text('saved before crash\n', encoding='utf-8')
+        conn.execute("CREATE TRIGGER fail_handoff BEFORE INSERT ON task_events WHEN NEW.kind='nfos_workspace_isolated' BEGIN SELECT RAISE(ABORT,'handoff power loss'); END")
+        conn.commit()
+        dispatch(conn)
+        assert all(kb.get_task(conn, tid).workspace_path == str(repo) for tid in ids)
+>       assert conn.execute('SELECT count(*) FROM tasks WHERE status=\'running\'').fetchone()[0] == 0
+E       assert 1 == 0
+
+tests\hermes_cli\test_nfos_retained_workspaces.py:105: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+=========================== short test summary info ===========================
+FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_two_retained_cards_dispatch_into_distinct_checkouts
+FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_retained_dirty_files_and_index_survive_isolation
+FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_live_source_writer_is_not_interrupted_or_copied
+FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_power_loss_before_workspace_handoff_replays_saved_snapshot
+============================= 4 failed in 10.43s ==============================
+
+=== 1 file with test failures (4 tests failed) ===
+  tests\hermes_cli\test_nfos_retained_workspaces.py  (4 tests failed)
+

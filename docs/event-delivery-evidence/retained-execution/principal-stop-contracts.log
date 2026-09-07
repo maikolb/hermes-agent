@@ -1,0 +1,33 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:\Users\maiko\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 8 test files (~60 tests) under ['tests\\hermes_cli\\test_nfos_delivery_store.py', 'tests\\hermes_cli\\test_nfos_additional_tasks.py', 'tests\\hermes_cli\\test_nfos_delivery_protocol.py', 'tests\\hermes_cli\\test_nfos_recovery_exclusivity.py', 'tests\\hermes_cli\\test_nfos_recovery_ownership.py', 'tests\\hermes_cli\\test_nfos_retained_workspaces.py', 'tests\\gateway\\test_nfos_principal_queue.py', 'tests\\gateway\\test_kanban_notifier_durable.py']; running with -j 2
+[  5.0% |     3/~60 | ✓3 | ✗0] ✓ tests\gateway\test_nfos_principal_queue.py (3✓, 12.0s)
+[ 18.3% |    11/~60 | ✓11 | ✗ 0] ✓ tests\gateway\test_kanban_notifier_durable.py (8✓, 14.2s)
+[ 20.0% |    12/~60 | ✓12 | ✗ 0] ✓ tests\hermes_cli\test_nfos_delivery_protocol.py (1✓, 7.9s)
+[ 45.0% |    27/~60 | ✓30 | ✗ 0] ✓ tests\hermes_cli\test_nfos_additional_tasks.py (18✓, 21.1s)
+[ 51.7% |    31/~60 | ✓34 | ✗ 0] ✓ tests\hermes_cli\test_nfos_recovery_exclusivity.py (4✓, 14.3s)
+[ 81.7% |    49/~60 | ✓52 | ✗ 0] ✓ tests\hermes_cli\test_nfos_delivery_store.py (18✓, 27.7s)
+[ 90.0% |    54/~60 | ✓57 | ✗ 0] ✓ tests\hermes_cli\test_nfos_recovery_ownership.py (5✓, 18.0s)
+[100.0% |    60/~60 | ✓63 | ✗ 0] ✓ tests\hermes_cli\test_nfos_retained_workspaces.py (6✓, 147.7s)
+
+=== Summary: 8 files, 63 tests passed, 0 failed (100% complete) in 197.6s (2 workers) ===
+  Durations cached to test_durations.json (8 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   8
+  Total subprocess CPU-wall: 262.9s  (runner wall: 197.6s, parallelism: 2x)
+  P50: 18.05s  P90: 147.69s  P95: 147.69s  P99: 147.69s  Max: 147.69s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+    147.69s  tests\hermes_cli\test_nfos_retained_workspaces.py
+     27.72s  tests\hermes_cli\test_nfos_delivery_store.py
+     21.06s  tests\hermes_cli\test_nfos_additional_tasks.py
+     18.05s  tests\hermes_cli\test_nfos_recovery_ownership.py
+     14.28s  tests\hermes_cli\test_nfos_recovery_exclusivity.py
+     14.25s  tests\gateway\test_kanban_notifier_durable.py
+     11.97s  tests\gateway\test_nfos_principal_queue.py
+      7.91s  tests\hermes_cli\test_nfos_delivery_protocol.py
+

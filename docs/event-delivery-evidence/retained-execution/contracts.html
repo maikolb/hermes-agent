@@ -1,0 +1,49 @@
+<!doctype html><meta charset="utf-8"><title>NFOS: validação do runtime</title><style>body{background:#101419;color:#e8edf2;font:17px system-ui;margin:36px;max-width:1350px}h1,h2{color:#d8ba77}p{overflow-wrap:anywhere}pre{font:14px ui-monospace;white-space:pre-wrap;padding:18px;background:#1b242b}h2{margin-top:36px}</style><h1>NFOS: suspensão, isolamento e entrega ao Principal</h1><p>Registro dos testes locais. Estes resultados não comprovam ativação em produção.</p><p>Candidato: f1286be030c8ee73023c1930da9d4798fd573ac1</p><p>Gerado: 2026-09-07T23:29:46.014460+00:00</p><h2>principal-stop-red</h2><p>Fonte: C:\Users\maiko\Documents\Codex\2026-09-05\quero-corrigir-a-configura-o-operacional\outputs\nfos-12h\principal-stop-red.log</p><pre>[100.0% |     3/~3 | ✓0 | ✗3] ✗ tests\hermes_cli\test_nfos_principal_stop.py (3✗, 12.3s)
+=== Summary: 1 files, 0 tests passed, 3 failed (100% complete) in 12.3s (1 workers) ===
+FAILED tests/hermes_cli/test_nfos_principal_stop.py::test_principal_human_decision_stops_uncooperative_worker_and_children
+FAILED tests/hermes_cli/test_nfos_principal_stop.py::test_suspension_prevents_more_work_before_the_next_dispatcher_tick
+FAILED tests/hermes_cli/test_nfos_principal_stop.py::test_saved_suspension_cannot_be_claimed_as_new_work</pre><h2>principal-stop-green-02</h2><p>Fonte: C:\Users\maiko\Documents\Codex\2026-09-05\quero-corrigir-a-configura-o-operacional\outputs\nfos-12h\principal-stop-green-02.log</p><pre>[  9.3% |     4/~43 | ✓6 | ✗0] ✓ tests\hermes_cli\test_nfos_impediment_revision.py (6✓, 12.5s)
+[ 41.9% |    18/~43 | ✓24 | ✗ 0] ✓ tests\hermes_cli\test_nfos_principal_reconsideration.py (18✓, 19.7s)
+[ 48.8% |    21/~43 | ✓27 | ✗ 0] ✓ tests\hermes_cli\test_nfos_principal_stop.py (3✓, 12.5s)
+[ 81.4% |    35/~43 | ✓40 | ✗ 0] ✓ tests\hermes_cli\test_nfos_tool.py (13✓ 1s, 22.7s)
+[100.0% |    43/~43 | ✓48 | ✗ 0] ✓ tests\hermes_cli\test_nfos_worker_shutdown.py (8✓, 21.6s)
+=== Summary: 5 files, 48 tests passed, 0 failed, 1 skipped (100% complete) in 89.0s (1 workers) ===</pre><h2>principal-stop-contracts</h2><p>Fonte: C:\Users\maiko\Documents\Codex\2026-09-05\quero-corrigir-a-configura-o-operacional\outputs\nfos-12h\principal-stop-contracts.log</p><pre>[  5.0% |     3/~60 | ✓3 | ✗0] ✓ tests\gateway\test_nfos_principal_queue.py (3✓, 12.0s)
+[ 18.3% |    11/~60 | ✓11 | ✗ 0] ✓ tests\gateway\test_kanban_notifier_durable.py (8✓, 14.2s)
+[ 20.0% |    12/~60 | ✓12 | ✗ 0] ✓ tests\hermes_cli\test_nfos_delivery_protocol.py (1✓, 7.9s)
+[ 45.0% |    27/~60 | ✓30 | ✗ 0] ✓ tests\hermes_cli\test_nfos_additional_tasks.py (18✓, 21.1s)
+[ 51.7% |    31/~60 | ✓34 | ✗ 0] ✓ tests\hermes_cli\test_nfos_recovery_exclusivity.py (4✓, 14.3s)
+[ 81.7% |    49/~60 | ✓52 | ✗ 0] ✓ tests\hermes_cli\test_nfos_delivery_store.py (18✓, 27.7s)
+[ 90.0% |    54/~60 | ✓57 | ✗ 0] ✓ tests\hermes_cli\test_nfos_recovery_ownership.py (5✓, 18.0s)
+[100.0% |    60/~60 | ✓63 | ✗ 0] ✓ tests\hermes_cli\test_nfos_retained_workspaces.py (6✓, 147.7s)
+=== Summary: 8 files, 63 tests passed, 0 failed (100% complete) in 197.6s (2 workers) ===</pre><h2>retained-workspace-red</h2><p>Fonte: C:\Users\maiko\Documents\Codex\2026-09-05\quero-corrigir-a-configura-o-operacional\outputs\nfos-12h\retained-workspace-red.log</p><pre>[100.0% |     4/~4 | ✓0 | ✗4] ✗ tests\hermes_cli\test_nfos_retained_workspaces.py (4✗, 16.6s)
+=== Summary: 1 files, 0 tests passed, 4 failed (100% complete) in 16.6s (1 workers) ===
+FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_two_retained_cards_dispatch_into_distinct_checkouts
+FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_retained_dirty_files_and_index_survive_isolation
+FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_live_source_writer_is_not_interrupted_or_copied
+FAILED tests/hermes_cli/test_nfos_retained_workspaces.py::test_power_loss_before_workspace_handoff_replays_saved_snapshot</pre><h2>retained-workspace-regression</h2><p>Fonte: C:\Users\maiko\Documents\Codex\2026-09-05\quero-corrigir-a-configura-o-operacional\outputs\nfos-12h\retained-workspace-regression.log</p><pre>[ 32.4% |    11/~34 | ✓12 | ✗ 0] ✓ tests\hermes_cli\test_nfos_project_rollout.py (12✓, 15.7s)
+[ 47.1% |    16/~34 | ✓17 | ✗ 0] ✓ tests\hermes_cli\test_nfos_recovery_ownership.py (5✓, 16.4s)
+[ 64.7% |    22/~34 | ✓23 | ✗ 0] ✓ tests\hermes_cli\test_nfos_retained_workspaces.py (6✓, 144.1s)
+[100.0% |    34/~34 | ✓40 | ✗ 0] ✓ tests\hermes_cli\test_nfos_worktree_recovery.py (17✓, 134.6s)
+=== Summary: 4 files, 40 tests passed, 0 failed (100% complete) in 310.9s (1 workers) ===</pre><h2>principal-network-red</h2><p>Fonte: C:\Users\maiko\Documents\Codex\2026-09-05\quero-corrigir-a-configura-o-operacional\outputs\nfos-12h\principal-network-red.log</p><pre>[100.0% |     3/~3 | ✓0 | ✗1] ✗ tests\gateway\test_nfos_principal_queue.py (1✗, 10.9s)
+=== Summary: 1 files, 0 tests passed, 1 failed (100% complete) in 10.9s (1 workers) ===
+FAILED tests/gateway/test_nfos_principal_queue.py::test_telegram_outage_does_not_block_principal_decision_delivery</pre><h2>principal-network-green-02</h2><p>Fonte: C:\Users\maiko\Documents\Codex\2026-09-05\quero-corrigir-a-configura-o-operacional\outputs\nfos-12h\principal-network-green-02.log</p><pre>[ 69.4% |    25/~36 | ✓ 8 | ✗17] ✗ tests\gateway\test_kanban_notifier.py (8✓ 17✗, 19.3s)
+[ 91.7% |    33/~36 | ✓16 | ✗17] ✓ tests\gateway\test_kanban_notifier_durable.py (8✓, 14.7s)
+[100.0% |    36/~36 | ✓19 | ✗17] ✓ tests\gateway\test_nfos_principal_queue.py (3✓, 11.3s)
+=== Summary: 3 files, 19 tests passed, 17 failed (100% complete) in 45.3s (1 workers) ===
+FAILED tests/gateway/test_kanban_notifier.py::test_claimed_task_notifies_only_after_material_start
+FAILED tests/gateway/test_kanban_notifier.py::test_retry_chain_converges_to_one_final_notification
+FAILED tests/gateway/test_kanban_notifier.py::test_kanban_notifier_delivers_dm_metadata_without_waking_agent
+FAILED tests/gateway/test_kanban_notifier.py::test_notifier_suppresses_pre_start_backlog_and_advances_cursor
+FAILED tests/gateway/test_kanban_notifier.py::test_worker_focus_counter_adds_advances_and_stops_at_zero
+FAILED tests/gateway/test_kanban_notifier.py::test_worker_rotation_respects_display_flags_and_indicator_edit_cadence
+FAILED tests/gateway/test_kanban_notifier.py::test_worker_focus_retry_boundary_decrements_without_chat_noise
+FAILED tests/gateway/test_kanban_notifier.py::test_worker_focus_rehydrates_fail_closed_until_principal_claim
+FAILED tests/gateway/test_kanban_notifier.py::test_active_named_profile_subscription_is_delivered
+FAILED tests/gateway/test_kanban_notifier.py::test_non_dispatch_gateway_claims_only_its_profile_subscriptions
+FAILED tests/gateway/test_kanban_notifier.py::test_legacy_subscription_requires_confirmed_dispatcher_lock_owner
+FAILED tests/gateway/test_kanban_notifier.py::test_notifier_silences_retry_crashes_until_final_give_up
+FAILED tests/gateway/test_kanban_notifier.py::test_notifier_subscription_survives_done_reopen_until_archive
+FAILED tests/gateway/test_kanban_notifier.py::test_completed_then_archived_same_tick_delivers_completion_and_unsubscribes
+FAILED tests/gateway/test_kanban_notifier.py::test_notifier_wakeup_uses_subscription_chat_type
+FAILED tests/gateway/test_kanban_notifier.py::test_kanban_notifier_isolates_per_subscription_failure
+FAILED tests/gateway/test_kanban_notifier.py::test_notifier_delivers_block_loop_detected_triage_ping</pre>

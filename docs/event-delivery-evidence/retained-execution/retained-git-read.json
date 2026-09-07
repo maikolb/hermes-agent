@@ -1,0 +1,223 @@
+{
+  "at": "2026-09-07T23:47:47.360213+00:00",
+  "mode": "read",
+  "pr": 91,
+  "state": "open",
+  "head": "f1286be030c8ee73023c1930da9d4798fd573ac1",
+  "base": "67cfd47d1139b763c93489ac02d92f98942a3e59",
+  "draft": true,
+  "mergeable": true,
+  "merged": false,
+  "checks": [
+    {
+      "id": 101888302282,
+      "name": "Review label gate",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888302282"
+    },
+    {
+      "id": 101888277410,
+      "name": "nix flake check",
+      "status": "queued",
+      "conclusion": null,
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169926680/job/101888277410"
+    },
+    {
+      "id": 101888275276,
+      "name": "Supply-chain scan / Aggregate review statuses",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888275276"
+    },
+    {
+      "id": 101888238465,
+      "name": "OSV scan / Emit review status",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888238465"
+    },
+    {
+      "id": 101888217173,
+      "name": "osv-scanner",
+      "status": "completed",
+      "conclusion": "neutral",
+      "details_url": "https://github.com/maikolb/hermes-agent/runs/101888217173"
+    },
+    {
+      "id": 101888185411,
+      "name": "merge",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169926651/job/101888185411"
+    },
+    {
+      "id": 101888184747,
+      "name": "publish",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169926651/job/101888184747"
+    },
+    {
+      "id": 101888184705,
+      "name": "build",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169926651/job/101888184705"
+    },
+    {
+      "id": 101888182270,
+      "name": "Check uv.lock",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888182270"
+    },
+    {
+      "id": 101888182238,
+      "name": "Desktop E2E",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888182238"
+    },
+    {
+      "id": 101888182170,
+      "name": "Docs Site",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888182170"
+    },
+    {
+      "id": 101888182160,
+      "name": "Installer tests",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888182160"
+    },
+    {
+      "id": 101888182120,
+      "name": "JS & TS checks",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888182120"
+    },
+    {
+      "id": 101888182115,
+      "name": "package-lock.json diff",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888182115"
+    },
+    {
+      "id": 101888182093,
+      "name": "Supply-chain scan / Check PyPI dependency upper bounds",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888182093"
+    },
+    {
+      "id": 101888181918,
+      "name": "Lint Docker scripts",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181918"
+    },
+    {
+      "id": 101888181901,
+      "name": "Rust tests",
+      "status": "completed",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181901"
+    },
+    {
+      "id": 101888181576,
+      "name": "Python tests / e2e",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181576"
+    },
+    {
+      "id": 101888181550,
+      "name": "OS-specific tests / macOS-only tests",
+      "status": "completed",
+      "conclusion": "failure",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181550"
+    },
+    {
+      "id": 101888181535,
+      "name": "Python tests / Run tests",
+      "status": "in_progress",
+      "conclusion": null,
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181535"
+    },
+    {
+      "id": 101888181528,
+      "name": "Python lints / ruff enforcement (blocking)",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181528"
+    },
+    {
+      "id": 101888181394,
+      "name": "OS-specific tests / Windows-only tests",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181394"
+    },
+    {
+      "id": 101888181373,
+      "name": "Python lints / ruff + ty diff",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181373"
+    },
+    {
+      "id": 101888181367,
+      "name": "Python lints / Windows footguns (blocking)",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181367"
+    },
+    {
+      "id": 101888181309,
+      "name": "Check no committed infographics / check-no-committed-infographics",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181309"
+    },
+    {
+      "id": 101888181272,
+      "name": "Supply-chain scan / Scan PR for critical supply chain risks",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181272"
+    },
+    {
+      "id": 101888181268,
+      "name": "Check contributors / check-attribution",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181268"
+    },
+    {
+      "id": 101888181262,
+      "name": "Deny unrelated histories / check-common-ancestor",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888181262"
+    },
+    {
+      "id": 101888151420,
+      "name": "OSV scan / Scan lockfiles / osv-scan",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888151420"
+    },
+    {
+      "id": 101888151300,
+      "name": "Detect affected areas",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/maikolb/hermes-agent/actions/runs/34169927188/job/101888151300"
+    }
+  ]
+}

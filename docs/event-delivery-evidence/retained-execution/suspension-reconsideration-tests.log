@@ -1,0 +1,19 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: /usr/local/lib/hermes-agent.release-20260907-53c5f68b24c4d8a40766af1d34990e92e664e20e/venv/bin/python
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+fatal: not a git repository (or any of the parent directories): .git
+▶ launching test runner
+Discovered 1 test files (~14 tests) under ['tests/hermes_cli/test_nfos_principal_reconsideration.py']; running with -j 1
+[100.0% |    14/~14 | ✓18 | ✗ 0] ✓ tests/hermes_cli/test_nfos_principal_reconsideration.py (18✓, 331.6s)
+
+=== Summary: 1 files, 18 tests passed, 0 failed (100% complete) in 331.7s (1 workers) ===
+  Durations cached to test_durations.json (1 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   1
+  Total subprocess CPU-wall: 331.6s  (runner wall: 331.7s, parallelism: 1x)
+  P50: 331.60s  P90: 331.60s  P95: 331.60s  P99: 331.60s  Max: 331.60s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+    331.60s  tests/hermes_cli/test_nfos_principal_reconsideration.py

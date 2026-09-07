@@ -1,0 +1,27 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:\Users\maiko\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 5 test files (~43 tests) under ['tests\\hermes_cli\\test_nfos_principal_stop.py', 'tests\\hermes_cli\\test_nfos_worker_shutdown.py', 'tests\\hermes_cli\\test_nfos_impediment_revision.py', 'tests\\hermes_cli\\test_nfos_principal_reconsideration.py', 'tests\\hermes_cli\\test_nfos_tool.py']; running with -j 1
+[  9.3% |     4/~43 | ✓6 | ✗0] ✓ tests\hermes_cli\test_nfos_impediment_revision.py (6✓, 12.5s)
+[ 41.9% |    18/~43 | ✓24 | ✗ 0] ✓ tests\hermes_cli\test_nfos_principal_reconsideration.py (18✓, 19.7s)
+[ 48.8% |    21/~43 | ✓27 | ✗ 0] ✓ tests\hermes_cli\test_nfos_principal_stop.py (3✓, 12.5s)
+[ 81.4% |    35/~43 | ✓40 | ✗ 0] ✓ tests\hermes_cli\test_nfos_tool.py (13✓ 1s, 22.7s)
+[100.0% |    43/~43 | ✓48 | ✗ 0] ✓ tests\hermes_cli\test_nfos_worker_shutdown.py (8✓, 21.6s)
+
+=== Summary: 5 files, 48 tests passed, 0 failed, 1 skipped (100% complete) in 89.0s (1 workers) ===
+  Durations cached to test_durations.json (5 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   5
+  Total subprocess CPU-wall: 89.0s  (runner wall: 89.0s, parallelism: 1x)
+  P50: 19.72s  P90: 22.70s  P95: 22.70s  P99: 22.70s  Max: 22.70s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     22.70s  tests\hermes_cli\test_nfos_tool.py
+     21.58s  tests\hermes_cli\test_nfos_worker_shutdown.py
+     19.72s  tests\hermes_cli\test_nfos_principal_reconsideration.py
+     12.53s  tests\hermes_cli\test_nfos_impediment_revision.py
+     12.47s  tests\hermes_cli\test_nfos_principal_stop.py
+

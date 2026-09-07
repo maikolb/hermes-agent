@@ -1,0 +1,60 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: /usr/local/lib/hermes-agent.release-20260907-53c5f68b24c4d8a40766af1d34990e92e664e20e/venv/bin/python
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+fatal: not a git repository (or any of the parent directories): .git
+▶ launching test runner
+Discovered 5 test files (~43 tests) under ['tests/hermes_cli/test_nfos_principal_stop.py', 'tests/hermes_cli/test_nfos_worker_shutdown.py', 'tests/hermes_cli/test_nfos_impediment_revision.py', 'tests/hermes_cli/test_nfos_principal_reconsideration.py', 'tests/hermes_cli/test_nfos_tool.py']; running with -j 1
+[  9.3% |     4/~43 | ✓6 | ✗0] ✓ tests/hermes_cli/test_nfos_impediment_revision.py (6✓, 214.6s)
+[ 41.9% |    18/~43 | ✓6 | ✗0] ✗ tests/hermes_cli/test_nfos_principal_reconsideration.py (14 tests, 301.0s)
+
+  ╔╍ Failed: tests/hermes_cli/test_nfos_principal_reconsideration.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║ (300s exceeded; process tree SIGKILL'd)
+  ║ ============================= test session starts ==============================
+  ║ platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+  ║ rootdir: /var/tmp/nfos-12h/principal-stop-wgalmr5f/source
+  ║ configfile: pyproject.toml
+  ║ plugins: asyncio-1.4.0, anyio-4.14.2
+  ║ asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+  ║ collected 18 items
+  ║ 
+  ║ tests/hermes_cli/test_nfos_principal_reconsideration.py ...............
+  ║
+  ║  Repro: python -m pytest tests/hermes_cli/test_nfos_principal_reconsideration.py
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+[ 48.8% |    21/~43 | ✓9 | ✗0] ✓ tests/hermes_cli/test_nfos_principal_stop.py (3✓, 88.5s)
+[ 81.4% |    35/~43 | ✓23 | ✗ 0] ✓ tests/hermes_cli/test_nfos_tool.py (14✓, 154.2s)
+[100.0% |    43/~43 | ✓31 | ✗ 0] ✓ tests/hermes_cli/test_nfos_worker_shutdown.py (8✓, 209.9s)
+
+=== Summary: 5 files, 31 tests passed, 0 failed (100% complete) in 968.6s (1 workers) ===
+  Durations cached to test_durations.json (5 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   5
+  Total subprocess CPU-wall: 968.2s  (runner wall: 968.6s, parallelism: 1x)
+  P50: 209.90s  P90: 301.00s  P95: 301.00s  P99: 301.00s  Max: 301.00s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+    301.00s  tests/hermes_cli/test_nfos_principal_reconsideration.py
+    214.60s  tests/hermes_cli/test_nfos_impediment_revision.py
+    209.90s  tests/hermes_cli/test_nfos_worker_shutdown.py
+    154.20s  tests/hermes_cli/test_nfos_tool.py
+     88.50s  tests/hermes_cli/test_nfos_principal_stop.py
+
+=== Failure output ===
+
+--- tests/hermes_cli/test_nfos_principal_reconsideration.py ---
+(300s exceeded; process tree SIGKILL'd)
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /var/tmp/nfos-12h/principal-stop-wgalmr5f/source
+configfile: pyproject.toml
+plugins: asyncio-1.4.0, anyio-4.14.2
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 18 items
+
+tests/hermes_cli/test_nfos_principal_reconsideration.py ...............
+
+=== 1 file where no tests ran (collection/import error, timeout before collection, etc.) ===
+  tests/hermes_cli/test_nfos_principal_reconsideration.py

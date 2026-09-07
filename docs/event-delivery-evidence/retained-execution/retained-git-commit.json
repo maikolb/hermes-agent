@@ -1,0 +1,32 @@
+{
+  "at": "2026-09-07T23:24:01.191850+00:00",
+  "mode": "commit",
+  "head": "f1286be030c8ee73023c1930da9d4798fd573ac1",
+  "tree": "2d79350c8a9b24ddf754d8a792a553a05cf73b6d",
+  "files": [
+    "gateway/kanban_watchers.py",
+    "hermes_cli/kanban_db.py",
+    "hermes_cli/nfos_delivery.py",
+    "hermes_cli/nfos_runtime.py",
+    "hermes_cli/nfos_tool.py",
+    "hermes_cli/nfos_workspaces.py",
+    "tests/gateway/test_nfos_principal_queue.py",
+    "tests/hermes_cli/test_nfos_retained_workspaces.py",
+    "tests/hermes_cli/test_nfos_principal_stop.py",
+    "tests/hermes_cli/test_nfos_principal_reconsideration.py"
+  ],
+  "branch": "fix/nfos-retained-workspaces-20260907",
+  "base": "67cfd47d1139b763c93489ac02d92f98942a3e59",
+  "hashes": {
+    "gateway/kanban_watchers.py": "32852822a8b733b869deea5478d9327bc7cbf543a469dbc866180afc24396397",
+    "hermes_cli/kanban_db.py": "ef93df1d8a3f4ed2695f64d0715cbf00db37bdbea99a621b4dde4af8fcd1c544",
+    "hermes_cli/nfos_delivery.py": "c8c8134e55e0e20af2e1e2f25a91eacd265a8645402cbf8f35d3959a2ad7f877",
+    "hermes_cli/nfos_runtime.py": "9592ee10edca6190918d64794ba70a923ccc0a586a31410f15e3fa2fdbe5629e",
+    "hermes_cli/nfos_tool.py": "c0598e7171879385240862e02929fc05049d23bd08325ada9cb6a0237671f8db",
+    "hermes_cli/nfos_workspaces.py": "c7f8b5b93bf5be12ed1c1bc3ef0bed5eafb029a9913ff2222f6523cb6592cb22",
+    "tests/gateway/test_nfos_principal_queue.py": "2f703ed7dec8363705d37328438b4553cee00ee273d2e0d038cac1290115ba87",
+    "tests/hermes_cli/test_nfos_retained_workspaces.py": "010dd409c20864d231bd352b4d0d229dd82689f1dae06390447fc0bd9de25e24",
+    "tests/hermes_cli/test_nfos_principal_stop.py": "6233f2fd2ebac9166c348667fc71ab0e44453c6141e44931388928b658cab766",
+    "tests/hermes_cli/test_nfos_principal_reconsideration.py": "e5acdeefef1648c1bcbb82437487c72cd650f8b92df121602614b11f8f7e27a9"
+  }
+}

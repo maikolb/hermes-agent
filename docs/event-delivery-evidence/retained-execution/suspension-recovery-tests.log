@@ -1,0 +1,19 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: /usr/local/lib/hermes-agent.release-20260907-53c5f68b24c4d8a40766af1d34990e92e664e20e/venv/bin/python
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+fatal: not a git repository (or any of the parent directories): .git
+▶ launching test runner
+Discovered 1 test files (~12 tests) under ['tests/hermes_cli/test_nfos_worktree_recovery.py']; running with -j 1
+[100.0% |    12/~12 | ✓17 | ✗ 0] ✓ tests/hermes_cli/test_nfos_worktree_recovery.py (17✓, 476.2s)
+
+=== Summary: 1 files, 17 tests passed, 0 failed (100% complete) in 476.6s (1 workers) ===
+  Durations cached to test_durations.json (1 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   1
+  Total subprocess CPU-wall: 476.2s  (runner wall: 476.6s, parallelism: 1x)
+  P50: 476.20s  P90: 476.20s  P95: 476.20s  P99: 476.20s  Max: 476.20s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+    476.20s  tests/hermes_cli/test_nfos_worktree_recovery.py

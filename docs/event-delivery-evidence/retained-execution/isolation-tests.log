@@ -1,0 +1,62 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: /usr/local/lib/hermes-agent.release-20260907-53c5f68b24c4d8a40766af1d34990e92e664e20e/venv/bin/python
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+fatal: not a git repository (or any of the parent directories): .git
+▶ launching test runner
+Discovered 6 test files (~45 tests) under ['tests/hermes_cli/test_nfos_retained_workspaces.py', 'tests/hermes_cli/test_nfos_project_rollout.py', 'tests/hermes_cli/test_nfos_worktree_recovery.py', 'tests/hermes_cli/test_nfos_recovery_ownership.py', 'tests/gateway/test_nfos_principal_queue.py', 'tests/gateway/test_kanban_notifier_durable.py']; running with -j 1
+[ 17.8% |     8/~45 | ✓8 | ✗0] ✓ tests/gateway/test_kanban_notifier_durable.py (8✓, 210.5s)
+[ 24.4% |    11/~45 | ✓11 | ✗ 0] ✓ tests/gateway/test_nfos_principal_queue.py (3✓, 96.3s)
+[ 48.9% |    22/~45 | ✓23 | ✗ 0] ✓ tests/hermes_cli/test_nfos_project_rollout.py (12✓, 201.1s)
+[ 60.0% |    27/~45 | ✓28 | ✗ 0] ✓ tests/hermes_cli/test_nfos_recovery_ownership.py (5✓, 119.3s)
+[ 73.3% |    33/~45 | ✓34 | ✗ 0] ✓ tests/hermes_cli/test_nfos_retained_workspaces.py (6✓, 248.8s)
+[100.0% |    45/~45 | ✓34 | ✗ 0] ✗ tests/hermes_cli/test_nfos_worktree_recovery.py (12 tests, 301.0s)
+
+  ╔╍ Failed: tests/hermes_cli/test_nfos_worktree_recovery.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║ (300s exceeded; process tree SIGKILL'd)
+  ║ ============================= test session starts ==============================
+  ║ platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+  ║ rootdir: /var/tmp/nfos-12h/retained-isolation-a38euft5/source
+  ║ configfile: pyproject.toml
+  ║ plugins: asyncio-1.4.0, anyio-4.14.2
+  ║ asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+  ║ collected 17 items
+  ║ 
+  ║ tests/hermes_cli/test_nfos_worktree_recovery.py ........
+  ║
+  ║  Repro: python -m pytest tests/hermes_cli/test_nfos_worktree_recovery.py
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+
+=== Summary: 6 files, 34 tests passed, 0 failed (100% complete) in 1177.2s (1 workers) ===
+  Durations cached to test_durations.json (6 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   6
+  Total subprocess CPU-wall: 1177.0s  (runner wall: 1177.2s, parallelism: 1x)
+  P50: 210.50s  P90: 301.00s  P95: 301.00s  P99: 301.00s  Max: 301.00s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+    301.00s  tests/hermes_cli/test_nfos_worktree_recovery.py
+    248.80s  tests/hermes_cli/test_nfos_retained_workspaces.py
+    210.50s  tests/gateway/test_kanban_notifier_durable.py
+    201.10s  tests/hermes_cli/test_nfos_project_rollout.py
+    119.30s  tests/hermes_cli/test_nfos_recovery_ownership.py
+     96.30s  tests/gateway/test_nfos_principal_queue.py
+
+=== Failure output ===
+
+--- tests/hermes_cli/test_nfos_worktree_recovery.py ---
+(300s exceeded; process tree SIGKILL'd)
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /var/tmp/nfos-12h/retained-isolation-a38euft5/source
+configfile: pyproject.toml
+plugins: asyncio-1.4.0, anyio-4.14.2
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 17 items
+
+tests/hermes_cli/test_nfos_worktree_recovery.py ........
+
+=== 1 file where no tests ran (collection/import error, timeout before collection, etc.) ===
+  tests/hermes_cli/test_nfos_worktree_recovery.py
