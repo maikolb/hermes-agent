@@ -52,9 +52,27 @@ def test_gateway_delivery_and_worker_verification_keep_resume_semantics(tmp_path
     routing = {'kanban_task_id':'t-saved', 'kanban_db':'board.db'} if worker else {'platform':'telegram'}
     store.start_turn('saved', 'original', 'Finish', messages, routing=routing)
     store.mark_deliverable('saved', 'Existing answer', verification_pending=verification_pending)
-    restored = store.start_turn('saved', 'replacement', 'Finish', messages, routing=routing)
+    restored = store.start_turn('saved', 'replacement', 'Finish', messages, routing=routing,
+                                resume_existing=not worker)
     assert restored['turn_id'] == 'original'
     assert restored['pending_deliverable']['content'] == 'Existing answer'
+
+
+@pytest.mark.parametrize('phase', ['deliverable_composed', 'delivery_pending'])
+def test_repeated_principal_request_opens_new_turn_after_previous_answer(tmp_path, phase):
+    from agent.turn_checkpoint import TurnCheckpointStore
+    store=TurnCheckpointStore(tmp_path/'checkpoints')
+    prompt='Process the pending report review'
+    messages=[{'role':'user','content':prompt}]
+    store.start_turn('principal','review-one',prompt,messages)
+    store.mark_deliverable('principal','Review one resolved',verification_pending=False)
+    store.transition('principal',phase=phase,next_action='finalize_delivery')
+    messages += [{'role':'assistant','content':'Review one resolved'}, {'role':'user','content':prompt}]
+    current=store.start_turn('principal','review-two',prompt,messages)
+    assert current['turn_id']=='review-two'
+    assert current['phase']=='turn_started'
+    assert current['pending_deliverable'] is None
+    assert not current['recovery']['restored']
 
 
 @pytest.mark.parametrize('phase', ['deliverable_composed', 'delivery_pending'])

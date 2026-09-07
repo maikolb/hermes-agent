@@ -507,9 +507,19 @@ class TurnCheckpointStore:
             and prior_routing.get("kanban_db") == routing.get("kanban_db")
             and not checkpoint_is_worker_resumable(existing)
         )
+        # A repeated coordinator/user instruction is a new request after an
+        # answer was composed. Text equality alone cannot identify the old
+        # delivery. Explicit gateway recovery still replays an undelivered
+        # answer, and pending verification still resumes its unfinished work.
+        new_request_after_answer = bool(
+            existing and not resume_existing and raw_user.strip()
+            and existing.get("phase") in {"deliverable_composed", "delivery_pending"}
+            and not existing.get("verification", {}).get("pending")
+        )
         if (
             existing
             and not worker_next_turn
+            and not new_request_after_answer
             and existing.get("phase") not in {"terminal", "delivered", "cancelled"}
             and (
                 resume_existing
