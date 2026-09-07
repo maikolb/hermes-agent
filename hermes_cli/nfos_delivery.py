@@ -106,7 +106,15 @@ def get_decision(conn, decision_id):
     return _row(conn,'nfos_decisions','id',decision_id)
 
 
+def active_suspension(conn, task_id):
+    """A Principal's human decision fences work until its supported resolution."""
+    return conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status='human' "
+                        "ORDER BY resolved_at DESC,rowid DESC LIMIT 1", (task_id,)).fetchone()
+
+
 def _owned(conn, task_id, run_id):
+    if active_suspension(conn, task_id):
+        raise OwnershipConflict('The Principal suspended this task; await its supported resumption')
     task=_kb().get_task(conn,task_id)
     if task is None or task.status!='running' or task.current_run_id!=run_id:
         raise OwnershipConflict('The task no longer belongs to this execution')
@@ -725,6 +733,9 @@ def wait_decision(conn,decision_id,*,timeout=300):
         row=get_decision(conn,decision_id)
         if row is None:
             raise WorkflowError('Unknown decision')
+        suspension = active_suspension(conn, row['task_id'])
+        if suspension:
+            return dict(suspension)
         if row['status']!='pending' or time.monotonic()>=deadline:
             return row
         time.sleep(min(1,max(0,deadline-time.monotonic())))
@@ -753,17 +764,20 @@ def reconcile_human_answers(conn):
     resumed=[]
     rows=conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()
     for row in rows:
-        if (_run_process_alive(conn,row['task_id'],row['run_id'])
-                or run_termination_pending(conn,row['task_id'],row['run_id'])):
-            continue
         task=_kb().get_task(conn,row['task_id'])
         if not task or task.status in {'done','archived'}:
             continue
-        # A crash before kanban_block must not turn a human question into
-        # an automatic execution retry at startup.
+        # Apply the Principal's persisted decision even when the model ignores
+        # it or waits on a newer question. Closing the run enables the existing
+        # process-tree reconciler; waiting for the live worker first deadlocks.
+        if task.status=='running' and task.current_run_id!=row['run_id']:
+            continue
         if task.status in {'running','ready'}:
             _kb().block_task(conn,task.id,reason=row['answer'],kind='needs_input',
                              expected_run_id=task.current_run_id if task.status=='running' else None)
+        if (_run_process_alive(conn,row['task_id'],row['run_id'])
+                or run_termination_pending(conn,row['task_id'],row['run_id'])):
+            continue
         reply=json.loads(row['context']).get('human_reply')
         if not reply:
             continue
@@ -1090,6 +1104,8 @@ def completion_ready(conn, task_id, *, evidence_check=None):
     wf=get_workflow(conn,task_id)
     if wf is None:
         return True
+    if active_suspension(conn, task_id):
+        return False
     if _scope_needs_new_spec(wf) or not _spec_matches_instruction(conn,task_id):
         return False
     report=_artifact(conn,task_id,'report')

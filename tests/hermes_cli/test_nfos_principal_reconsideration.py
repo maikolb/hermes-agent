@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from contextlib import redirect_stdout
 
 import pytest
@@ -37,6 +38,16 @@ def reconsider(conn, decision, *, action='approve', **kwargs):
 def snapshot(conn):
     return {table:[dict(row) for row in conn.execute('SELECT * FROM '+table+' ORDER BY rowid')]
         for table in ('tasks','task_runs','nfos_workflows','nfos_decisions','task_events')}
+
+
+def later_legacy_run(conn, task):
+    # Model historical rows from before suspension fenced new claims. The
+    # current claim API must not create this inconsistent history again.
+    with kb.write_txn(conn):
+        run = conn.execute("INSERT INTO task_runs(task_id,status,started_at) VALUES(?,'running',?)",
+                           (task.id, int(time.time()))).lastrowid
+        conn.execute("UPDATE tasks SET status='running',current_run_id=? WHERE id=?", (run, task.id))
+    return kb.get_task(conn, task.id)
 
 
 def test_reconsideration_preserves_old_answer_and_workspace_and_restores_same_card(delivery,tmp_path):
@@ -96,8 +107,8 @@ def test_repeated_reconsideration_cannot_reuse_approval_for_changed_candidate(de
 def test_reconsideration_keeps_other_human_question_blocked(delivery):
     conn,task=delivery
     other=d.ask_principal(conn,task.id,task.current_run_id,kind='impediment',question='Which account is authorized?',context={})
-    d.resolve_decision(conn,other,action='human',answer='Need the actual tenant identity',author='Principal')
     old=human_block(conn,task)
+    d.resolve_decision(conn,other,action='human',answer='Need the actual tenant identity',author='Principal')
     reconsider(conn,old)
     assert kb.get_task(conn,task.id).status=='blocked'
     assert d.get_decision(conn,other)['status']=='human'
@@ -203,7 +214,7 @@ def test_changes_resume_same_card_without_publication_approval(delivery):
 def test_old_human_question_can_be_reconsidered_after_a_later_run_ends(delivery):
     conn,task=delivery;old=human_block(conn,task)
     assert kb.unblock_task(conn,task.id)
-    later=kb.claim_task(conn,task.id)
+    later=later_legacy_run(conn,task)
     assert later and later.current_run_id!=task.current_run_id
     assert kb.reclaim_task(conn,task.id)
     assert kb.block_task(conn,task.id,kind='needs_input',reason='Original question still needs a decision')
@@ -219,7 +230,7 @@ def test_old_human_question_can_be_reconsidered_after_a_later_run_ends(delivery)
 def test_later_run_with_live_worker_still_prevents_reconsideration(delivery):
     conn,task=delivery;old=human_block(conn,task)
     assert kb.unblock_task(conn,task.id)
-    later=kb.claim_task(conn,task.id)
+    later=later_legacy_run(conn,task)
     child=subprocess.Popen([sys.executable,'-c','import sys;sys.stdin.readline()'],
         stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,text=True,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
