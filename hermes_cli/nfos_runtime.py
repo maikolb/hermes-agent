@@ -39,10 +39,7 @@ def _sync_directory(directory):
 
 def preserve_attachments(paths, types, *, directory):
     """Copy originals before receipt; publish each copy atomically by content hash."""
-    directory=Path(directory)
-    created=[];parent=directory
-    while not parent.exists():
-        created.append(parent);parent=parent.parent
+    directory=Path(directory).resolve()
     directory.mkdir(parents=True,exist_ok=True)
     attachments=[]
     for index,value in enumerate(paths):
@@ -64,7 +61,10 @@ def preserve_attachments(paths, types, *, directory):
                 temp.unlink(missing_ok=True)
         attachments.append({'original':str(dest),'source_path':str(src),'sha256':sha,
                             'mime_type':types[index] if index<len(types) else ''})
-    for parent in dict.fromkeys([directory,*(path.parent for path in created)]):
+    # A previous attempt may have created these directories but failed before
+    # flushing their parent links. Existence on retry is not durability proof.
+    # Flush the ancestry as well, without a second recovery marker/store.
+    for parent in (directory,*directory.parents):
         _sync_directory(parent)
     return attachments
 
@@ -149,7 +149,7 @@ def _worker_identity_receipt(conn, run):
 
 
 def run_termination_pending(conn, task_id, run_id):
-    """A saved human answer must not start a replacement over known live work."""
+    """Neither a human answer nor a retry may replace known live work."""
     if run_id is None:
         return False
     from hermes_cli import nfos_tool as tool
@@ -170,11 +170,27 @@ def run_termination_pending(conn, task_id, run_id):
     return any(tool._matches(item['pid'],item['started_at']) for item in identities)
 
 
+def previous_runs_termination_pending(conn, task_id):
+    """Read-only predicate called inside the atomic claim transaction.
+
+    Reclaim clears the card's current pointer, so the run history is the
+    authority for old process receipts. Cards outside NFOS retain their
+    existing claim behavior. Process termination stays outside this transaction
+    in the canonical runtime reconciliation.
+    """
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_workflows'").fetchone():
+        return False
+    if not conn.execute('SELECT 1 FROM nfos_workflows WHERE task_id=?',(task_id,)).fetchone():
+        return False
+    return any(run_termination_pending(conn,task_id,row['id']) for row in conn.execute(
+        'SELECT id FROM task_runs WHERE task_id=? ORDER BY id DESC',(task_id,)).fetchall())
+
+
 def reconcile_terminal_workers(conn, *, worker_exit_grace_seconds=15):
     """Clean only closed runs. Pending Principal decisions keep their worker."""
     from hermes_cli import nfos_tool as tool
     rows=conn.execute("""SELECT r.* FROM task_runs r JOIN nfos_workflows w ON w.task_id=r.task_id
-        WHERE r.ended_at IS NOT NULL AND (r.status='done' OR (r.status='blocked' AND EXISTS (
+        WHERE r.ended_at IS NOT NULL AND (r.status<>'blocked' OR (r.status='blocked' AND EXISTS (
             SELECT 1 FROM nfos_decisions d WHERE d.task_id=r.task_id AND d.run_id=r.id
             AND (d.status='human' OR (d.action='continue' AND json_extract(d.context,'$.human_reply') IS NOT NULL)))))
         ORDER BY r.ended_at,r.id""").fetchall()
@@ -187,10 +203,13 @@ def reconcile_terminal_workers(conn, *, worker_exit_grace_seconds=15):
         if not task:
             continue
         if receipt is None:
-            grace=float(worker_exit_grace_seconds)
+            # A completed/human-blocked worker gets time to flush its final
+            # state. An interrupted run has already lost execution ownership;
+            # its surviving commands must stop before a replacement can claim.
+            grace=float(worker_exit_grace_seconds) if run['status'] in {'done','blocked'} else 0
             request=conn.execute('SELECT q.payload FROM nfos_workflows w JOIN nfos_requests q ON q.id=w.request_id WHERE w.task_id=?',
                                  (run['task_id'],)).fetchone()
-            if request:
+            if request and run['status'] in {'done','blocked'}:
                 grace=float(json.loads(request['payload']).get('project',{}).get('worker_exit_grace_seconds',grace))
             grace=max(0,grace)
             receipt=dict(_worker_identity_receipt(conn,run),status='waiting',grace_seconds=grace,
@@ -345,8 +364,11 @@ answer means save the next step, block the card with that concrete question and
 exit along with this task's children. Continue/changes preserves this execution.
 For report/audit delivery, save the complete report on the card with `save-report`
 BEFORE requesting review. The review binds that saved report revision; do not
-change it after approval without requesting another review. Its JSON contains
-summary, artifacts, and criteria [{id,status:'PASS',evidence:[...]}].
+change it after approval without requesting another review. Minimal report JSON:
+{"summary":"Result","artifacts":[{"id":"proof","path":"result.json"}],
+"criteria":[{"id":"C1","status":"PASS","evidence":["proof"]}]}.
+Each criteria.evidence entry names the id or path of a declared artifact, not a
+free-text claim. Use FAIL or NOT_RUN for criteria that have not been demonstrated.
 For code delivery, acquire the project slot with `acquire-project --candidate SHA`
 before homologation; if occupied, save state and let the predecessor finish.
 Record the HML deployment with `effect --operation homolog --target HML_URL
@@ -364,7 +386,7 @@ Use `effect --operation homolog|pr|merge|deploy --target ... --candidate SHA` be
 external effect. An execute=false/reconcile=true response requires reading the
 destination before trying again. Record that read with `reconcile`.
 Before completion save the report with `save-report --input report.json`.
-It contains summary, artifacts, and criteria [{id,status:'PASS',evidence:[...]}].
+Use the same report JSON format above, linking each criterion to its artifacts.
 After verified delivery, release the project slot with `release-project`.
 Record homolog_sha, integrated_sha, artifact and production_readback in progress
 state for code delivery. Report-only tasks need no PR/deploy. Evidence must prove

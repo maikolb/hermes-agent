@@ -5509,6 +5509,9 @@ def claim_task(
         task = get_task(conn, task_id)
         if task is None or (task.task_role != "work" and not allow_activity):
             return None
+        from hermes_cli.nfos_runtime import previous_runs_termination_pending
+        if task.status == 'ready' and previous_runs_termination_pending(conn, task_id):
+            return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -13370,6 +13373,12 @@ def _dispatch_once_locked(
     if _crash_rate_limited:
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
+    if not dry_run and any((result.reclaimed, result.reconciled_orphans,
+                            result.stale, result.crashed, result.timed_out)):
+        # Reclaim can close a run after the initial reconciliation. Finish its
+        # recorded process tree before this tick considers a replacement;
+        # claim_task also refuses the claim if termination remains pending.
+        reconcile_runtime(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
     # Existing workers may predate this process/code version. Adopt their
     # workspaces before looking at ready/review lanes so activation cannot

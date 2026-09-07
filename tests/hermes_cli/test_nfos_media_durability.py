@@ -18,7 +18,7 @@ def test_media_and_new_directory_links_are_synced_before_return(tmp_path, monkey
         synced.append(Path(path))
     monkeypatch.setattr(runtime,'_sync_directory',sync,raising=False)
     attachments=runtime.preserve_attachments([str(source)],['audio/ogg'],directory=destination)
-    assert synced==[destination,destination.parent,tmp_path]
+    assert synced==[destination,*destination.parents]
     assert attachments[0]['sha256']==hashlib.sha256(source.read_bytes()).hexdigest()
 
 
@@ -34,7 +34,7 @@ def test_failed_directory_flush_does_not_claim_media_ready_and_retry_keeps_origi
     synced=[]
     monkeypatch.setattr(runtime,'_sync_directory',lambda path:synced.append(Path(path)),raising=False)
     result=runtime.preserve_attachments([str(source)],['image/png'],directory=destination)
-    assert synced==[destination]
+    assert synced==[destination,*destination.parents]
     assert Path(result[0]['original'])==copies[0]
 
 
@@ -48,4 +48,22 @@ def test_linux_flushes_actual_file_then_directory_descriptors(tmp_path,monkeypat
         original(fd)
     monkeypatch.setattr(runtime.os,'fsync',sync)
     runtime.preserve_attachments([str(source)],['audio/wav'],directory=destination)
-    assert flushed==['file','directory','directory']
+    assert flushed==['file']+['directory']*(1+len(destination.parents))
+
+
+def test_retry_flushes_ancestor_links_after_interrupted_parent_sync(tmp_path,monkeypatch):
+    source=tmp_path/'input.wav';source.write_bytes(b'original after interrupted flush')
+    destination=tmp_path/'board'/'request-media'
+    def interrupt(path):
+        if Path(path)==destination.parent:
+            raise OSError('simulated parent directory flush interruption')
+    monkeypatch.setattr(runtime,'_sync_directory',interrupt)
+    with pytest.raises(OSError,match='parent directory'):
+        runtime.preserve_attachments([str(source)],['audio/wav'],directory=destination)
+    # Both directories now exist. Their presence does not prove their links
+    # reached stable storage in the interrupted attempt.
+    synced=[]
+    monkeypatch.setattr(runtime,'_sync_directory',lambda path:synced.append(Path(path)))
+    result=runtime.preserve_attachments([str(source)],['audio/wav'],directory=destination)
+    assert synced==[destination,*destination.parents]
+    assert Path(result[0]['original']).read_bytes()==source.read_bytes()
