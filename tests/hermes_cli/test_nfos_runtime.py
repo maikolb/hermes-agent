@@ -1,6 +1,8 @@
 """Runtime identity and recovery must preserve exclusive ownership."""
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,3 +56,19 @@ def test_two_full_slots_preserve_pending_request(tmp_path,monkeypatch):
         rid=request(conn)
         assert delivery.reserve_request(conn,capacity=2) is None
         assert delivery.get_request(conn,rid)['status']=='pending'
+
+
+def test_workflow_cli_survives_terminal_pythonpath_sanitization(tmp_path,monkeypatch):
+    monkeypatch.setenv('HERMES_HOME',str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB',str(tmp_path/'kanban.db'))
+    with kb.connect_closing() as conn:
+        rid=request(conn);reservation=delivery.reserve_request(conn,capacity=2)
+        task=delivery.bootstrap_card(conn,rid,reservation['claim_token'],pid=os.getpid())
+    env=dict(os.environ);env.pop('PYTHONPATH',None)
+    result=subprocess.run([sys.executable,'-B',str(Path(delivery.__file__)),'show','--task',task.id],
+        cwd=tmp_path,env=env,capture_output=True,text=True,timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+    assert result.returncode==0,result.stderr
+    payload=json.loads(result.stdout)
+    assert payload['workflow']['task_id']==task.id
+    assert payload['runtime']['code_root']==str(Path(kb.__file__).resolve().parents[1])

@@ -12,7 +12,14 @@ import os
 import sqlite3
 import time
 import uuid
+import sys
+from pathlib import Path
 from typing import Any
+
+# Terminal tools intentionally sanitize inherited PYTHONPATH. An absolute
+# script invocation must still use the source that owns this workflow.
+if __package__ in (None, ''):
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 
 class WorkflowError(ValueError):
@@ -156,15 +163,30 @@ def bootstrap_card(conn, request_id, token, *, pid):
         profile=project['profile'];kind=project.get('delivery_type','code')
         original=payload['text']
         body=original+'\n\nOriginal attachments:\n'+_json(payload['attachments'])
-        task_id=kb.create_task(conn,title=(original.strip().splitlines() or ['Analyze attached request'])[0][:200],
-            body=body,assignee=profile,created_by='worker:'+profile,
-            workspace_kind='worktree' if kind=='code' else 'scratch',
-            workspace_path=project.get('repo_path') if kind=='code' else None,
-            project_id=project.get('project_id'),requires_repo=kind=='code',delivery_type=kind,
-            board=project.get('board'),idempotency_key=request_id,goal_mode=True,
-            max_runtime_seconds=project.get('max_runtime_seconds',7200),
-            model_override=project.get('model'),provider_override=project.get('provider'),
-            reasoning_effort=project.get('reasoning_effort'))
+        task_id=project.get('existing_task_id')
+        if task_id:
+            prior=kb.get_task(conn,task_id)
+            if not prior or prior.status not in {'backlog','ready','todo'} or prior.current_run_id or get_workflow(conn,task_id):
+                raise OwnershipConflict('Existing card is not available for this explicit recovery request')
+            if not kb._parents_satisfied(conn,task_id):
+                raise WorkflowError('Existing card is waiting for its predecessors')
+            profile=kb._resolve_executable_assignee(profile)
+            conn.execute("UPDATE tasks SET assignee=?,status='ready',body=?,workspace_kind=?,workspace_path=?,requires_repo=?,delivery_type=?,goal_mode=1,max_runtime_seconds=?,model_override=?,provider_override=?,reasoning_effort=? WHERE id=?",
+                (profile,(prior.body or '')+'\n\nNFOS delivery request:\n'+body,
+                 'worktree' if kind=='code' else prior.workspace_kind,
+                 prior.workspace_path or (project.get('repo_path') if kind=='code' else None),
+                 int(kind=='code'),kind,project.get('max_runtime_seconds',7200),project.get('model'),
+                 project.get('provider'),project.get('reasoning_effort'),task_id))
+        else:
+            task_id=kb.create_task(conn,title=(original.strip().splitlines() or ['Analyze attached request'])[0][:200],
+                body=body,assignee=profile,created_by='worker:'+profile,
+                workspace_kind='worktree' if kind=='code' else 'scratch',
+                workspace_path=project.get('repo_path') if kind=='code' else None,
+                project_id=project.get('project_id'),requires_repo=kind=='code',delivery_type=kind,
+                board=project.get('board'),idempotency_key=request_id,goal_mode=True,
+                max_runtime_seconds=project.get('max_runtime_seconds',7200),
+                model_override=project.get('model'),provider_override=project.get('provider'),
+                reasoning_effort=project.get('reasoning_effort'))
         task=kb.claim_task(conn,task_id,claimer=token)
         if task is None:
             raise OwnershipConflict('Card could not be claimed')
@@ -182,7 +204,9 @@ def bootstrap_card(conn, request_id, token, *, pid):
         kb.add_notify_sub(conn,task_id=task_id,platform=source['platform'],chat_id=source['chat_id'],
             thread_id=source['thread_id'],user_id=source.get('user_id'),chat_type=source.get('chat_type'),
             notifier_profile=source.get('profile') or profile,delivery_mode='notify+wake')
-        _event(conn,task_id,task.current_run_id,'nfos_worker_created_card',{'request_id':request_id,'pid':pid})
+        _event(conn,task_id,task.current_run_id,
+            'nfos_worker_recovered_card' if project.get('existing_task_id') else 'nfos_worker_created_card',
+            {'request_id':request_id,'pid':pid})
         return kb.get_task(conn,task_id)
 
 
@@ -278,6 +302,20 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
 
 def pending_decisions(conn):
     return [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE status='pending' ORDER BY created_at,id")]
+
+
+def wait_decision(conn,decision_id,*,timeout=300):
+    """Wait outside a transaction, without repeatedly invoking the model."""
+    if conn.in_transaction:
+        raise WorkflowError('Decision wait cannot hold a write transaction')
+    deadline=time.monotonic()+max(0,float(timeout))
+    while True:
+        row=get_decision(conn,decision_id)
+        if row is None:
+            raise WorkflowError('Unknown decision')
+        if row['status']!='pending' or time.monotonic()>=deadline:
+            return row
+        time.sleep(min(1,max(0,deadline-time.monotonic())))
 
 
 def resume_after_answer(conn,task_id,*,answer,source):
@@ -474,7 +512,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','save-spec','save-report','progress','ask','decide',
-        'pending','effect','reconcile','acquire-project','release-project','receive','resume'])
+        'pending','effect','reconcile','acquire-project','release-project','receive','resume','wait'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -484,6 +522,7 @@ def main():
     parser.add_argument('--next',dest='next_action',default='')
     parser.add_argument('--kind',choices=['review','impediment'])
     parser.add_argument('--decision')
+    parser.add_argument('--timeout',type=float,default=300,help='Maximum wait duration; pending is not failure')
     parser.add_argument('--resolution',choices=['continue','approve','changes','human'])
     parser.add_argument('--operation',choices=['pr','merge','deploy'])
     parser.add_argument('--target')
@@ -496,6 +535,7 @@ def main():
     with _kb().connect_closing() as conn:
         if args.action=='show':
             result={'workflow':get_workflow(conn,args.task),'spec':get_spec(conn,args.task),
+                'runtime':{'code_root':str(Path(__file__).resolve().parents[1]),'python':sys.executable},
                 'report':_artifact(conn,args.task,'report'),
                 'decisions':[dict(r) for r in conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? ORDER BY created_at',(args.task,))],
                 'effects':[dict(r) for r in conn.execute('SELECT * FROM nfos_effects WHERE task_id=?',(args.task,))]}
@@ -510,6 +550,8 @@ def main():
                 question=payload['question'],context=payload.get('context',{}))}
         elif args.action=='pending':
             result=pending_decisions(conn)
+        elif args.action=='wait':
+            result=wait_decision(conn,args.decision,timeout=args.timeout)
         elif args.action=='resume':
             resume_after_answer(conn,args.task,answer=payload['answer'],source=payload['source']);result={'resumed':True}
         elif args.action=='decide':

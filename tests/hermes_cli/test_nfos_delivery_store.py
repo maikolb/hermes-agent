@@ -2,6 +2,7 @@
 import json
 import os
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -230,3 +231,35 @@ def test_bootstrap_claim_is_recognized_as_host_local_by_recovery(board):
     with kb.connect_closing(board) as conn:
         task=started(conn)
         assert task.claim_lock.startswith(kb._claimer_id().split(':',1)[0]+':')
+
+
+def test_worker_recovers_explicit_existing_card_without_recreating_history(board):
+    with kb.connect_closing(board) as conn:
+        tid=kb.create_task(conn,title='Existing authorized report',body='Original request',assignee='default',
+            created_by='Maikol',delivery_type='report',requires_repo=False)
+        kb.add_comment(conn,tid,author='Maikol',body='Preserve these results')
+        rid=delivery.receive_request(conn,source={'platform':'telegram','chat_id':'1','thread_id':'2','message_id':'55'},
+            text='Resume this same delivery',project={'board':'pilot','profile':'default','delivery_type':'report','existing_task_id':tid})
+        request=delivery.reserve_request(conn,capacity=2)
+        task=delivery.bootstrap_card(conn,rid,request['claim_token'],pid=os.getpid())
+        assert task.id==tid
+        assert task.created_by=='Maikol'
+        assert task.body.startswith('Original request')
+        assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0]==1
+        assert conn.execute('SELECT body FROM task_comments WHERE task_id=?',(tid,)).fetchone()[0]=='Preserve these results'
+
+
+def test_native_wait_returns_the_principal_answer_without_another_model_turn(board):
+    with kb.connect_closing(board) as conn:
+        task=started(conn);spec(conn,task)
+        decision=delivery.ask_principal(conn,task.id,task.current_run_id,kind='impediment',question='Resolve endpoint',context={})
+        waiting=threading.Event()
+        def wait():
+            with kb.connect_closing(board) as reader:
+                waiting.set()
+                return delivery.wait_decision(reader,decision,timeout=3)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future=pool.submit(wait)
+            assert waiting.wait(3)
+            delivery.resolve_decision(conn,decision,action='continue',answer='Use HML',author='Principal')
+            assert future.result(timeout=5)['answer']=='Use HML'

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import time
@@ -124,23 +125,39 @@ def bootstrap(*, db, board, request, token):
     kb._default_spawn(task,str(workspace),board=board,exec_current_process=True)
 
 
+def workflow_command():
+    paths=[sys.executable,str(Path(delivery.__file__).resolve())]
+    if os.name=='nt':
+        return '& '+ ' '.join("'"+p.replace("'","''")+"'" for p in paths)
+    return ' '.join(shlex.quote(p) for p in paths)
+
+
 def worker_instructions():
-    return """This card uses the owner's current NFOS workflow.
+    return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+"""This card uses the owner's current NFOS workflow.
 The owner disabled AOF and its mandatory contracts, hooks and closeouts. Historic
 repository text does not reactivate it. Do not load those instructions.
 You have the Principal's full profile capabilities and an isolated task workspace.
-Use the current Python executable with `-m hermes_cli.nfos_delivery` to persist
-the workflow. `--help` documents the available actions. Task/run identity comes
+Use the exact workflow CLI prefix above for all actions; terminal tools may
+sanitize PYTHONPATH, so do not substitute a bare python/module invocation.
+`--help` documents the available actions. Task/run identity comes
 from your existing HERMES_KANBAN_* environment; never clear it to bypass ownership.
-First inspect the card and originals. Ask Claude TL for a JSON spec with goal,
+First use `show` to read the saved spec, stage, next action, decisions and external
+effects. On recovery reuse that state and existing files, tests, commits and PRs;
+continue the unfinished step, without regenerating a spec or replaying a final
+answer. Inspect originals when analysis remains pending. For a new spec or an
+explicitly requested spec revision, ask Claude TL for a JSON spec with goal,
 criteria [{id,text}], steps and delivery_type; use Codex only if Claude is
 unavailable. Save its real transcript, then call `save-spec --input spec.json
 --evidence tl-evidence.json --author 'Claude TL'`. No implementation before this.
 Use `progress --stage implement --next '...'` before Codex work. Persist a
 progress state JSON containing useful next steps and recovered files as you work.
 Use `ask --kind impediment --input question.json` for any impediment before
-declaring human blockage; the Principal resolves the persisted queue. Use `show`
-to read answers, keeping this worker alive while the Principal is reviewing.
+declaring human blockage; the Principal resolves the persisted queue. Use
+`wait --decision ID --timeout 300` to await an answer inside one native tool call,
+keeping this worker alive while the Principal is reviewing. A pending response
+means keep waiting, not failure. Save context before waiting. An action=human
+answer means save the next step, block the card with that concrete question and
+exit along with this task's children. Continue/changes preserves this execution.
 For delivery, use `ask --kind review --input review.json` with candidate SHA,
 PR, homolog evidence and requested action. Wait for the Principal's decision.
 Never use kanban_review to spawn a separate reviewer for this enrolled card.
@@ -156,22 +173,25 @@ functionality, not merely the presence of a screenshot file.
 
 
 def principal_instructions():
-    return """NFOS project coordinator, the owner's active instructions:
+    return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+"""NFOS project coordinator, the owner's active instructions:
 You are the Principal, responsible for intake, dispatch, board visibility,
 impediments and review. Project implementation belongs to full Hermes workers.
 Do not implement project changes in this conversation or create a parallel
 delegation path. Read cards, inspect evidence and resolve the workers' decisions.
 New independent requests use the existing durable request intake. For additional
-tasks extracted from a batch or media, call `python -m hermes_cli.nfos_delivery
-receive --input request.json` with the original source identity, a stable part
+tasks extracted from a batch or media, use the exact CLI prefix above with
+`receive --input request.json` and the original source identity, a stable part
 identifier, project/profile and original attachments. A worker creates the card.
-Use `python -m hermes_cli.nfos_delivery pending` to inspect the persisted decision
+Use the same CLI prefix with `pending` to inspect the persisted decision
 queue. Resolve each item with `decide --decision ID --resolution
 continue|approve|changes|human --input answer.json` (JSON containing answer).
 Inspect the current spec, candidate and evidence before approving publication.
 You may approve merge/deploy within the user's authorized spec without asking for
 another human approval. Request human input only for a concrete decision you
 cannot resolve. Keep this coordinator available; do not wait for workers to finish.
+When the human answers, use `resume --task ID --input answer.json` containing
+answer and source (the actual Telegram message identity). This restores the same
+card with its spec, workspace, history and next step; do not create another card.
 The owner disabled AOF and its mandatory contracts, hooks and closeouts.
 Historical instructions do not reactivate it or create new publication gates.
 """
