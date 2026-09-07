@@ -284,22 +284,29 @@ def test_runtime_can_stop_only_the_selected_cards_calls(adapter, board):
     with sqlite3.connect(board) as conn:
         conn.execute("INSERT INTO tasks VALUES('t_other','running',8)")
         conn.execute("INSERT INTO task_runs VALUES(8,'t_other','running')")
-    code = "import time;print('active',flush=True);time.sleep(2)"
+    def code(release):
+        return "from pathlib import Path;import time;print('active',flush=True)\nwhile not Path(%r).exists():time.sleep(.05)" % str(release)
+    selected_release=board.parent/'selected-release'
+    unrelated_release=board.parent/'unrelated-release'
     with concurrent.futures.ThreadPoolExecutor() as pool:
-        first = pool.submit(invoke, adapter, board, code, call_id='selected')
+        first = pool.submit(invoke, adapter, board, code(selected_release), call_id='selected',timeout_seconds=90)
         other = pool.submit(adapter.run_command, board, task_id='t_other', run_id=8,
-            argv=[sys.executable,'-u','-c',code], cwd=board.parent,
-            timeout_seconds=10, call_id='unrelated')
+            argv=[sys.executable,'-u','-c',code(unrelated_release)], cwd=board.parent,
+            timeout_seconds=90, call_id='unrelated')
         def both_streamed():
             try:
                 return len(read(board, 'SELECT DISTINCT call_id FROM nfos_tool_chunks')) == 2
             except sqlite3.OperationalError:
                 return False
-        eventually(both_streamed)
-        with adapter.connect(board) as conn:
-            adapter.terminate_calls(conn, 't_one', 7, reason='Human answer required')
-        assert not other.done()
-        assert first.result(timeout=10)['status'] == 'interrupted'
+        try:
+            eventually(both_streamed,timeout=45)
+            with adapter.connect(board) as conn:
+                adapter.terminate_calls(conn, 't_one', 7, reason='Human answer required')
+            assert not other.done(), 'The unrelated command is still waiting for its explicit release'
+            assert first.result(timeout=10)['status'] == 'interrupted'
+        finally:
+            selected_release.touch()
+            unrelated_release.touch()
         assert other.result(timeout=10)['status'] == 'succeeded'
 
 
@@ -314,22 +321,35 @@ Path(%r).write_text(json.dumps({'pid':p.pid,'started_at':psutil.Process(p.pid).c
 print(p.pid,flush=True)
 """ % str(receipt)
     started = time.time()
-    try:
-        result = invoke(adapter, board, code, call_id='orphan', timeout_seconds=1)
-        assert result['status'] == 'timed_out'
-        chunks = read(board, "SELECT * FROM nfos_tool_chunks WHERE stream='stdout' ORDER BY seq")
-        pid = int(b''.join(r['content'] for r in chunks).strip())
-        identity = json.loads(receipt.read_text())
-        assert identity['pid'] == pid and identity['group_id'] == result['worker_pid']
-        assert started - .01 <= identity['started_at'] <= time.time()
-        assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
-    finally:
-        # Even an assertion failure must not leave this test's orphan running.
-        if receipt.exists():
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        future=pool.submit(invoke,adapter,board,code,call_id='orphan',timeout_seconds=90)
+        try:
+            eventually(receipt.exists,timeout=45)
+            def stdout():
+                chunks=read(board,"SELECT * FROM nfos_tool_chunks WHERE stream='stdout' ORDER BY seq")
+                return b''.join(r['content'] for r in chunks).strip()
+            pid=int(eventually(stdout,timeout=45))
             identity = json.loads(receipt.read_text())
+            row=read(board,"SELECT * FROM nfos_tool_calls WHERE id='orphan'")[0]
+            assert identity['pid'] == pid and identity['group_id'] == row['worker_pid']
             assert started - .01 <= identity['started_at'] <= time.time()
-            rows = read(board, "SELECT * FROM nfos_tool_calls WHERE id='orphan'")
-            assert rows and rows[0]['cwd'] == str(board.parent)
-            assert rows[0]['worker_pid'] == identity['group_id']
-            cleanup_verified_test_processes([
-                {'pid':rows[0]['worker_pid'],'started_at':rows[0]['worker_started_at']}, identity])
+            assert adapter._matches(pid,identity['started_at']) and not future.done()
+            with adapter.connect(board) as conn:
+                conn.execute("UPDATE nfos_tool_calls SET deadline_at=? WHERE id='orphan'",(time.time()-1,))
+                conn.commit()
+                adapter.reconcile_calls(conn)
+            result=future.result(timeout=15)
+            assert result['status']=='timed_out' and result['timed_out'] is True
+            assert not adapter._matches(pid,identity['started_at'])
+        finally:
+            # Even an assertion failure must not leave this test's orphan running.
+            with adapter.connect(board) as conn:
+                adapter.terminate_calls(conn,'t_one',7,reason='Fixture cleanup')
+            if receipt.exists():
+                identity = json.loads(receipt.read_text())
+                assert started - .01 <= identity['started_at'] <= time.time()
+                rows = read(board, "SELECT * FROM nfos_tool_calls WHERE id='orphan'")
+                assert rows and rows[0]['cwd'] == str(board.parent)
+                assert rows[0]['worker_pid'] == identity['group_id']
+                cleanup_verified_test_processes([
+                    {'pid':rows[0]['worker_pid'],'started_at':rows[0]['worker_started_at']}, identity])

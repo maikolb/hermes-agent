@@ -21,6 +21,7 @@ import time
 import uuid
 import unicodedata
 from contextvars import Context
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -869,6 +870,130 @@ def _wake_scope_id(adapter: Any, sub: dict) -> Optional[str]:
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
+    @staticmethod
+    def _nfos_receipt_text(request_id, payload=None):
+        origin=(payload or {}).get('origin') or {}
+        if origin:
+            return (f"Atividade adicional registrada: {request_id}, identificada na tarefa "
+                    f"{origin.get('task_id') or origin.get('request_id') or 'de origem'}. "
+                    'O worker seguirá o pedido e os anexos preservados no mesmo projeto.')
+        return (f'Pedido registrado: {request_id}. O worker criará o card e iniciará a análise. '
+                'Se as vagas estiverem ocupadas, o pedido permanece na fila. Continuo disponível para coordenar as tarefas.')
+
+    def _nfos_receipt_profiles(self):
+        profiles={str(self._active_profile_name() or 'default')}
+        profiles.update(str(name) for name in (getattr(self,'_profile_adapters',{}) or {}))
+        return profiles
+
+    @staticmethod
+    def _nfos_receipt_owner(payload):
+        source=payload.get('source') or {}
+        return str(source.get('transport_profile') or source.get('profile') or 'default')
+
+    def _nfos_receipt_candidates(self, profiles, board=None, request_id=None, limit=20):
+        """Read pending obligations even when their worker has no card yet."""
+        from hermes_cli import kanban_db as kb
+        boards=[{'slug':board}] if board else kb.list_boards(include_archived=False)
+        seen=set();pending=[]
+        for meta in boards:
+            slug=meta.get('slug') or kb.DEFAULT_BOARD
+            path=Path(meta.get('db_path') or kb.kanban_db_path(board=slug)).resolve()
+            if path in seen or not path.is_file():continue
+            seen.add(path)
+            try:
+                with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=2)) as conn:
+                    conn.row_factory=sqlite3.Row
+                    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_requests'").fetchone():continue
+                    sql='SELECT id,payload FROM nfos_requests WHERE acknowledged_at IS NULL'
+                    rows=conn.execute(sql+(' AND id=?' if request_id else '')+' ORDER BY created_at,id',
+                                      (request_id,) if request_id else ()).fetchall()
+                for row in rows:
+                    payload=json.loads(row['payload']);source=payload.get('source') or {}
+                    if source.get('platform')!='telegram' or self._nfos_receipt_owner(payload) not in profiles:continue
+                    if not all(source.get(key) for key in ('chat_id','thread_id','message_id')):continue
+                    receipt=payload.get('receipt') or {};now=time.time()
+                    if max(receipt.get('claim_until',0),receipt.get('next_attempt_at',0))>now:continue
+                    pending.append((path,row['id'],payload))
+                    if len(pending)>=limit:return pending
+            except (sqlite3.Error,OSError,ValueError,TypeError):
+                logger.warning('NFOS receipt scan failed for board %s',slug,exc_info=True)
+        return pending
+
+    def _nfos_claim_receipt(self,path,request_id,profiles):
+        from hermes_cli import kanban_db as kb
+        with kb.connect_closing(path) as conn, kb.write_txn(conn):
+            row=conn.execute('SELECT payload,acknowledged_at FROM nfos_requests WHERE id=?',(request_id,)).fetchone()
+            if row is None or row['acknowledged_at'] is not None:return None
+            payload=json.loads(row['payload']);source=payload.get('source') or {};now=time.time()
+            if source.get('platform')!='telegram' or self._nfos_receipt_owner(payload) not in profiles:return None
+            receipt=payload.setdefault('receipt',{})
+            if max(receipt.get('claim_until',0),receipt.get('next_attempt_at',0))>now:return None
+            receipt.setdefault('content',self._nfos_receipt_text(request_id,payload))
+            receipt.update(claim_token=uuid.uuid4().hex,claim_until=now+60,attempts=int(receipt.get('attempts',0))+1)
+            conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(json.dumps(payload,ensure_ascii=False),request_id))
+            return payload
+
+    @staticmethod
+    def _nfos_finish_receipt(path,request_id,token,*,success,message_id=None,error=None,retry_after=0):
+        from hermes_cli import kanban_db as kb
+        with kb.connect_closing(path) as conn, kb.write_txn(conn):
+            row=conn.execute('SELECT payload,acknowledged_at FROM nfos_requests WHERE id=?',(request_id,)).fetchone()
+            if row is None or row['acknowledged_at'] is not None:return
+            payload=json.loads(row['payload']);receipt=payload.get('receipt') or {}
+            if receipt.get('claim_token')!=token:return
+            receipt.pop('claim_token',None);receipt.pop('claim_until',None)
+            if success:
+                receipt.update(message_id=str(message_id) if message_id is not None else None,last_error=None)
+                receipt.pop('next_attempt_at',None)
+            else:
+                from agent.redact import redact_sensitive_text
+                delay=max(min(300,5*2**min(int(receipt.get('attempts',1))-1,6)),float(retry_after or 0))
+                diagnostic=redact_sensitive_text(str(error or 'Transport did not confirm receipt'),force=True,redact_url_credentials=True)
+                receipt.update(last_error=diagnostic[:500],next_attempt_at=time.time()+delay)
+            payload['receipt']=receipt
+            conn.execute('UPDATE nfos_requests SET payload=?,acknowledged_at=? WHERE id=?',
+                         (json.dumps(payload,ensure_ascii=False),int(time.time()) if success else None,request_id))
+
+    async def _nfos_retry_receipts(self, *, board=None, request_id=None):
+        """One bounded send per claim; failed/unknown results remain durable.
+
+        Telegram cannot promise exactly-once delivery after a lost response.
+        Retries retain the request ID and text; task intake remains idempotent.
+        """
+        from gateway.platforms.base import Platform,SessionSource
+        profiles={profile for profile in self._nfos_receipt_profiles()
+                  if self._adapter_for_source(SessionSource(platform=Platform.TELEGRAM,chat_id='',profile=profile)) is not None}
+        if not profiles:return
+        try:
+            candidates=await _to_thread_process_service(self._nfos_receipt_candidates,profiles,board,request_id)
+        except Exception:
+            logger.warning('NFOS receipt collection failed; obligations remain pending',exc_info=True)
+            return
+        for path,rid,payload in candidates:
+            source=payload['source'];owner=self._nfos_receipt_owner(payload)
+            restored=SessionSource(platform=Platform.TELEGRAM,chat_id=source['chat_id'],thread_id=source['thread_id'],
+                                   chat_type=source.get('chat_type') or 'group',user_id=source.get('user_id'),profile=owner)
+            adapter=self._adapter_for_source(restored)
+            if adapter is None:continue
+            try:
+                claimed=await _to_thread_process_service(self._nfos_claim_receipt,path,rid,profiles)
+                if claimed is None:continue
+                receipt=claimed['receipt'];origin=claimed['source']
+                try:
+                    result=await asyncio.wait_for(adapter._send_with_retry(
+                        chat_id=origin['chat_id'],content=receipt['content'],reply_to=origin['message_id'],
+                        metadata=self._thread_metadata_for_source(restored,origin['message_id']),
+                        max_retries=0,allow_content_fallback=False),timeout=15)
+                    success=getattr(result,'success',False) is True
+                    finish=lambda:self._nfos_finish_receipt(path,rid,receipt['claim_token'],success=success,
+                        message_id=getattr(result,'message_id',None),error=getattr(result,'error',None),
+                        retry_after=getattr(result,'retry_after',0))
+                except Exception as exc:
+                    finish=lambda error=str(exc):self._nfos_finish_receipt(path,rid,receipt['claim_token'],success=False,error=error)
+                await _to_thread_process_service(finish)
+            except Exception:
+                logger.warning('NFOS receipt %s remains pending after delivery failure',rid,exc_info=True)
+
     async def _nfos_receive(self, event, project_context=None):
         """Opted-in project intake; the worker, not this handler, creates the card."""
         source=getattr(event,'source',None)
@@ -901,6 +1026,9 @@ class GatewayKanbanWatchersMixin:
         identity={'platform':platform,'chat_id':str(source.chat_id),'thread_id':str(source.thread_id),
             'message_id':str(event.message_id or ''),'user_id':str(source.user_id or ''),
             'chat_type':str(source.chat_type or 'group'),'profile':str(getattr(source,'profile','') or self._active_profile_name() or 'default')}
+        owner_resolver=getattr(self,'_adapter_profile_for_source',None)
+        owner=owner_resolver(source) if callable(owner_resolver) else identity['profile']
+        identity['transport_profile']=str(owner or self._active_profile_name() or 'default')
         def persist():
             path=kb.kanban_db_path(board=board)
             attachments=preserve_attachments(media,list(getattr(event,'media_types',[]) or []),
@@ -908,8 +1036,8 @@ class GatewayKanbanWatchersMixin:
             with kb.connect_closing(board=board) as conn:
                 return delivery.receive_request(conn,source=identity,text=text,project=project,attachments=attachments)
         request_id=await asyncio.to_thread(persist)
-        return (f'Pedido registrado: {request_id}. O worker criará o card e iniciará a análise. '
-                'Se as vagas estiverem ocupadas, o pedido permanece na fila. Continuo disponível para coordenar as tarefas.')
+        await self._nfos_retry_receipts(board=board,request_id=request_id)
+        return self._nfos_receipt_text(request_id)
 
     def _owns_kanban_dispatcher_lock(self) -> bool:
         """Return whether this gateway currently owns the singleton lock."""
@@ -1020,14 +1148,7 @@ class GatewayKanbanWatchersMixin:
         """Turn an independent busy-topic request into a subscribed Kanban card."""
         receipt=await self._nfos_receive(event)
         if receipt is not None:
-            source=event.source
-            adapter=self._adapter_for_source(source)
-            if adapter is not None:
-                try:
-                    await adapter._send_with_retry(chat_id=source.chat_id,content=receipt,
-                        metadata=self._thread_metadata_for_source(source,self._reply_anchor_for_event(event)))
-                except Exception:
-                    logger.warning('NFOS intake committed but receipt delivery failed',exc_info=True)
+            # The persisted receipt owns egress for idle, busy and retry paths.
             return True
         source = getattr(event, "source", None)
         if source is None or getattr(event, "internal", False):
@@ -2216,6 +2337,8 @@ class GatewayKanbanWatchersMixin:
 
         while self._running:
             try:
+                # Requests may owe a receipt before any card/subscription exists.
+                await self._nfos_retry_receipts()
                 _gc_due = time.monotonic() >= _gc_next_at
                 _gc_retention_days = 30
                 if _gc_due:

@@ -117,7 +117,7 @@ def _event(conn, task_id, run_id, kind, payload):
     _kb()._append_event(conn,task_id,kind,payload,run_id=run_id)
 
 
-def receive_request(conn, *, source, text, project, attachments=(), part='0'):
+def receive_request(conn, *, source, text, project, attachments=(), part='0', origin=None):
     required=('platform','chat_id','thread_id','message_id')
     if any(not str(source.get(k) or '').strip() for k in required):
         raise WorkflowError('A request needs its original platform/chat/topic/message identity')
@@ -125,7 +125,10 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0'):
         raise WorkflowError('A request needs text or attachments')
     source_key=_json([str(source[k]) for k in required]+[str(part)])
     request_id='req_'+hashlib.sha256(source_key.encode()).hexdigest()[:24]
-    payload=_json({'source':source,'text':text,'project':project,'attachments':list(attachments)})
+    payload={'source':source,'text':text,'project':project,'attachments':list(attachments)}
+    if origin is not None:
+        payload['origin']=origin
+    payload=_json(payload)
     with _kb().write_txn(conn,allow_nested=True):
         conn.execute('INSERT OR IGNORE INTO nfos_requests(id,source_key,payload,created_at) VALUES(?,?,?,?)',
                      (request_id,source_key,payload,int(time.time())))
@@ -165,6 +168,8 @@ def bootstrap_card(conn, request_id, token, *, pid):
         profile=project['profile'];kind=project.get('delivery_type','code')
         original=payload['text']
         body=original+'\n\nOriginal attachments:\n'+_json(payload['attachments'])
+        if payload.get('origin'):
+            body+='\n\nOriginal request lineage:\n'+_json(payload['origin'])
         task_id=project.get('existing_task_id')
         if task_id:
             prior=kb.get_task(conn,task_id)
@@ -259,6 +264,12 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         return revision
 
 
+def _scope_needs_new_spec(workflow):
+    partition=json.loads(workflow['state_json']).get('task_partition') or {}
+    after=partition.get('spec_revision_after')
+    return after is not None and workflow['spec_revision']<=after
+
+
 def advance(conn, task_id, run_id, stage, *, next_action, state=None):
     if stage not in {'analysis','implement','homolog','review','publish','verify','report'}:
         raise WorkflowError('Unknown delivery stage')
@@ -267,14 +278,23 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
         wf=get_workflow(conn,task_id)
         if stage!='analysis' and not wf['spec_revision']:
             raise WorkflowError('Persist the spec before implementation')
-        saved=json.loads(wf['state_json']);saved.update(state or {})
+        if stage!='analysis' and _scope_needs_new_spec(wf):
+            raise WorkflowError('Principal changed the primary task; persist a newer spec before continuing delivery')
+        updates=dict(state or {})
+        updates.pop('task_partition',None)  # Only Principal decisions own this receipt.
+        saved=json.loads(wf['state_json']);saved.update(updates)
+        if stage=='implement' and wf['stage'] in {'analysis','spec'} and not json.loads(wf['state_json']).get('task_partition'):
+            partition=conn.execute("SELECT status,action FROM nfos_decisions WHERE task_id=? AND kind='additional_tasks' ORDER BY rowid DESC LIMIT 1",
+                                   (task_id,)).fetchone()
+            if partition and (partition['status']!='resolved' or partition['action']!='continue'):
+                raise WorkflowError('Principal must resolve the additional task boundaries before implementation; analysis can continue')
         if task.delivery_type=='code' and stage in {'homolog','publish'}:
             if stage=='publish' and not _approved(conn,task_id,wf['spec_revision'],state=saved):
                 raise WorkflowError('Principal review of this candidate is pending')
             _project_owned(conn,task_id,run_id,saved.get('homolog_sha'))
         conn.execute('UPDATE nfos_workflows SET stage=?,next_action=?,state_json=?,updated_at=? WHERE task_id=?',
                      (stage,next_action,_json(saved),int(time.time()),task_id))
-        _event(conn,task_id,run_id,'nfos_progress',{'stage':stage,'next_action':next_action,'state':state or {}})
+        _event(conn,task_id,run_id,'nfos_progress',{'stage':stage,'next_action':next_action,'state':updates})
 
 
 def _report_results(spec, report):
@@ -432,23 +452,109 @@ def save_report(conn, task_id, run_id, report):
 
 
 def ask_principal(conn, task_id, run_id, *, kind, question, context):
-    if kind not in {'review','impediment'} or not question.strip():
+    if kind not in {'review','impediment','additional_tasks'} or not question.strip():
         raise WorkflowError('A decision needs its kind and concrete question')
     with _kb().write_txn(conn):
         _owned(conn,task_id,run_id)
+        context=dict(context)
+        if kind=='additional_tasks':
+            # Identity follows the saved proposal, not the execution/question
+            # wording. A restarted worker can recover the same answered item.
+            request_id=get_workflow(conn,task_id)['request_id']
+            if not get_request(conn,request_id):
+                raise WorkflowError('Additional tasks need their original persisted request')
+            context['request_id']=request_id
+            decision_id='dec_'+hashlib.sha256(_json([task_id,context]).encode()).hexdigest()[:24]
+            if get_decision(conn,decision_id):
+                return decision_id
+        else:
+            decision_id='dec_'+uuid.uuid4().hex[:20]
         existing=conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND run_id=? AND kind=? AND question=? AND status='pending'",
                                (task_id,run_id,kind,question)).fetchone()
-        if existing:
+        if existing and kind!='additional_tasks':
             return existing['id']
         revision=get_workflow(conn,task_id)['spec_revision']
-        context=dict(context)
         if kind=='review':
             context['review_identity']=_review_identity(conn,task_id)
-        decision_id='dec_'+uuid.uuid4().hex[:20]
         conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
                      (decision_id,task_id,run_id,kind,question,_json(context),revision,int(time.time())))
         _event(conn,task_id,run_id,'nfos_principal_requested',{'decision_id':decision_id,'kind':kind,'question':question})
         return decision_id
+
+
+def _additional_requests(conn, decision, proposal):
+    """Plan the whole batch before writing any child. No external I/O."""
+    if not isinstance(proposal,dict) or not isinstance(proposal.get('primary_task'),str) or not proposal['primary_task'].strip():
+        raise WorkflowError('Identify the first task retained on this card in primary_task')
+    items=proposal.get('tasks')
+    if not isinstance(items,list):
+        raise WorkflowError('tasks must list the additional items; an explicit empty list keeps only the first task')
+    parent=get_request(conn,json.loads(decision['context'])['request_id'])
+    parent_payload=json.loads(parent['payload'])
+    root_id=(parent_payload.get('origin') or {}).get('request_id') or parent['id']
+    root=get_request(conn,root_id)
+    if not root:
+        raise WorkflowError('The original request in this task lineage is unavailable')
+    original=json.loads(root['payload'])
+    project={key:value for key,value in original['project'].items() if key!='existing_task_id'}
+    seen=set();planned=[]
+    for item in items:
+        if not isinstance(item,dict) or any(not isinstance(item.get(key),str) or not item[key].strip()
+                                          for key in ('key','text','source_ref')):
+            raise WorkflowError('Every additional item needs a stable key, text and source_ref in the original message/media')
+        key=item['key'].strip()
+        if key=='0' or key in seen:
+            raise WorkflowError('Additional keys must be unique; key 0 belongs to the first task')
+        seen.add(key)
+        part='additional:'+hashlib.sha256(_json([root['id'],key]).encode()).hexdigest()
+        source_key=_json([str(original['source'][k]) for k in ('platform','chat_id','thread_id','message_id')]+[part])
+        request_id='req_'+hashlib.sha256(source_key.encode()).hexdigest()[:24]
+        if request_id==parent['id']:
+            raise WorkflowError('This item is the current task, not an additional task')
+        origin={'request_id':root['id'],'task_id':root['task_id'],'decision_id':decision['id'],
+                'item_key':key,'source_ref':item['source_ref'],'original_text':original['text'],
+                'discovered_by_task_id':decision['task_id'],'proposal_request_id':parent['id']}
+        payload={'source':original['source'],'text':item['text'],'project':project,
+                 'attachments':original['attachments'],'origin':origin}
+        existing=get_request(conn,request_id)
+        if existing:
+            prior=json.loads(existing['payload'])
+            # Receipt state belongs to delivery, and another accepted batch may
+            # reference the same item. Neither changes the original request.
+            comparable={k:prior.get(k) for k in ('source','text','project','attachments','origin')}
+            prior_origin=dict(comparable.get('origin') or {})
+            for metadata in ('decision_id','discovered_by_task_id','proposal_request_id'):
+                prior_origin[metadata]=origin[metadata]
+            comparable['origin']=prior_origin
+            if comparable!=payload:
+                raise WorkflowError(f'Additional key {key!r} already identifies different work; review the existing request {request_id}')
+        planned.append({'id':request_id,'part':part,'payload':payload})
+    return planned
+
+
+def _dispatch_additional_tasks(conn, decision, proposal):
+    planned=_additional_requests(conn,decision,proposal)
+    for item in planned:
+        payload=item['payload']
+        receive_request(conn,source=payload['source'],text=payload['text'],project=payload['project'],
+                        attachments=payload['attachments'],part=item['part'],origin=payload['origin'])
+    wf=get_workflow(conn,decision['task_id'])
+    state=json.loads(wf['state_json'])
+    previous=state.get('task_partition') or {}
+    prior_primary=previous.get('primary_task')
+    if prior_primary is None and wf['spec_revision']:
+        prior_primary=json.loads(get_spec(conn,decision['task_id'])['content'])['goal']
+    spec_after=previous.get('spec_revision_after')
+    if wf['spec_revision'] and prior_primary.strip()!=proposal['primary_task'].strip():
+        spec_after=wf['spec_revision']
+    state['task_partition']={'decision_id':decision['id'],'primary_task':proposal['primary_task'],
+                             'request_ids':[item['id'] for item in planned]}
+    if spec_after is not None:
+        state['task_partition']['spec_revision_after']=spec_after
+    conn.execute('UPDATE nfos_workflows SET state_json=?,updated_at=? WHERE task_id=?',
+                 (_json(state),int(time.time()),decision['task_id']))
+    _event(conn,decision['task_id'],decision['run_id'],'nfos_additional_tasks_dispatched',state['task_partition'])
+    return [item['id'] for item in planned]
 
 
 def pending_decisions(conn):
@@ -512,14 +618,24 @@ def reconcile_human_answers(conn):
                 continue
             if not _kb().unblock_task(conn,row['task_id']):
                 continue
-            conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',answer=?,author=?,resolved_at=? WHERE task_id=? AND status='human'",
+            splits=conn.execute("SELECT id,question FROM nfos_decisions WHERE task_id=? AND status='human' AND kind='additional_tasks'",
+                                (row['task_id'],)).fetchall()
+            conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',answer=?,author=?,resolved_at=? WHERE task_id=? AND status='human' AND kind!='additional_tasks'",
                          (reply['answer'],reply.get('author','Human'),int(time.time()),row['task_id']))
+            # A human reply supplies information, not an implicit batch dispatch.
+            # The Principal uses that saved reply through the same atomic path.
+            conn.execute("UPDATE nfos_decisions SET status='pending',action=NULL,answer=NULL,author=NULL,resolved_at=NULL,dispatched_at=NULL WHERE task_id=? AND status='human' AND kind='additional_tasks'",
+                         (row['task_id'],))
             _event(conn,row['task_id'],None,'nfos_human_answered',reply)
+            for split in splits:
+                _event(conn,row['task_id'],None,'nfos_principal_requested',
+                       {'decision_id':split['id'],'kind':'additional_tasks','question':split['question'],
+                        'human_reply_available':True})
             resumed.append(row['task_id'])
     return resumed
 
 
-def resolve_decision(conn, decision_id, *, action, answer, author):
+def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None):
     if action not in {'continue','approve','changes','human'} or not answer.strip() or author!='Principal':
         raise WorkflowError('Principal decision requires its concrete answer and action')
     with _kb().write_txn(conn):
@@ -528,12 +644,36 @@ def resolve_decision(conn, decision_id, *, action, answer, author):
             raise WorkflowError('Unknown decision')
         if row['status']!='pending':
             if row['action']==action and row['answer']==answer:
+                if proposal is not None and json.loads(row['context']).get('dispatch_proposal')!=proposal:
+                    raise WorkflowError('Decision already dispatched a different proposal')
+                return
+            saved=json.loads(row['context'])
+            if saved.get('dispatch_errors') and action=='continue' and saved.get('requested_answer')==answer:
+                if proposal is not None and saved.get('dispatch_proposal')!=proposal:
+                    raise WorkflowError('Decision already returned changes for a different proposal')
                 return
             raise WorkflowError('Decision was already resolved')
         if action=='approve' and row['kind']!='review':
             raise WorkflowError('Only a delivery review can authorize publication')
-        if row['spec_revision']!=get_workflow(conn,row['task_id'])['spec_revision']:
+        if row['kind']!='additional_tasks' and row['spec_revision']!=get_workflow(conn,row['task_id'])['spec_revision']:
             raise WorkflowError('Spec changed during review; review the current revision')
+        if proposal is not None and row['kind']!='additional_tasks':
+            raise WorkflowError('A revised task proposal applies only to additional_tasks')
+        if row['kind']=='additional_tasks' and action=='continue':
+            context=json.loads(row['context'])
+            selected=proposal if proposal is not None else {key:context.get(key) for key in ('primary_task','tasks')}
+            context['dispatch_proposal']=selected
+            # Validate everything first. An ambiguous extraction remains visible
+            # and goes back to its worker; it is never partially dispatched.
+            try:
+                _additional_requests(conn,row,selected)
+            except WorkflowError as exc:
+                context['dispatch_errors']=[str(exc)]
+                context['requested_answer']=answer
+                action='changes';answer+='\nRevise the saved proposal: '+str(exc)
+            else:
+                context['request_ids']=_dispatch_additional_tasks(conn,row,selected)
+            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?',(_json(context),decision_id))
         if action=='approve':
             identity=_review_identity(conn,row['task_id'])
             if json.loads(row['context']).get('review_identity')!=identity:
@@ -588,6 +728,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         raise WorkflowError('External effect needs operation, destination and exact candidate')
     with _kb().write_txn(conn):
         task=_owned(conn,task_id,run_id)
+        if _scope_needs_new_spec(get_workflow(conn,task_id)):
+            raise WorkflowError('Principal changed the primary task; persist a newer spec before external effects')
         if task.delivery_type=='code':
             wf=get_workflow(conn,task_id);state=json.loads(wf['state_json'])
             if not wf['spec_revision']:
@@ -699,6 +841,8 @@ def completion_ready(conn, task_id, *, evidence_check=None):
     wf=get_workflow(conn,task_id)
     if wf is None:
         return True
+    if _scope_needs_new_spec(wf):
+        return False
     report=_artifact(conn,task_id,'report')
     if not wf['spec_revision'] or not report or json.loads(report['evidence']).get('spec_revision')!=wf['spec_revision']:
         return False
@@ -789,7 +933,7 @@ def main():
     parser.add_argument('--author',default='Claude TL',choices=['Claude TL','Codex'])
     parser.add_argument('--stage')
     parser.add_argument('--next',dest='next_action',default='')
-    parser.add_argument('--kind',choices=['review','impediment'])
+    parser.add_argument('--kind',choices=['review','impediment','additional_tasks'])
     parser.add_argument('--decision')
     parser.add_argument('--timeout',type=float,default=300,help='Maximum wait duration; pending is not failure')
     parser.add_argument('--resolution',choices=['continue','approve','changes','human'])
@@ -808,6 +952,8 @@ def main():
                 'report':_artifact(conn,args.task,'report'),
                 'decisions':[dict(r) for r in conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? ORDER BY created_at',(args.task,))],
                 'effects':[dict(r) for r in conn.execute('SELECT * FROM nfos_effects WHERE task_id=?',(args.task,))]}
+            if result['workflow']:
+                result['request']=get_request(conn,result['workflow']['request_id'])
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_tool_calls'").fetchone():
                 from hermes_cli.nfos_tool import read_calls
                 result['native_calls']=read_calls(conn,args.task)
@@ -832,7 +978,9 @@ def main():
         elif args.action=='decide':
             if os.environ.get('HERMES_KANBAN_TASK'):
                 raise WorkflowError('The Principal resolves reviews in its own coordinator session')
-            resolve_decision(conn,args.decision,action=args.resolution,answer=payload['answer'],author='Principal');result={'saved':True}
+            resolve_decision(conn,args.decision,action=args.resolution,answer=payload['answer'],author='Principal',
+                             proposal=payload.get('proposal'))
+            result={'saved':True,'decision':get_decision(conn,args.decision)}
         elif args.action=='effect':
             result=begin_effect(conn,args.task,args.run,operation=args.operation,target=args.target,candidate=args.candidate)
         elif args.action=='reconcile':
@@ -843,6 +991,8 @@ def main():
         elif args.action=='release-project':
             result={'released':release_project(conn,args.project,args.task,args.run)}
         elif args.action=='receive':
+            if os.environ.get('HERMES_KANBAN_TASK'):
+                raise WorkflowError('The Principal dispatches additional tasks; use ask --kind additional_tasks')
             result={'request_id':receive_request(conn,source=payload['source'],text=payload['text'],
                 project=payload['project'],attachments=payload.get('attachments',[]),part=payload.get('part','0'))}
         print(_json(result))

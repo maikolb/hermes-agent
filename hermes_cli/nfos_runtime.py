@@ -26,9 +26,24 @@ def project_config(board, config=None):
     return dict(project,board=board) if isinstance(project,dict) and project.get('enabled') is True else None
 
 
+def _sync_directory(directory):
+    # Production runs on Linux. Flushing the file alone does not persist its
+    # rename or newly created parent directory entries across a power loss.
+    if os.name=='posix':
+        fd=os.open(directory,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
 def preserve_attachments(paths, types, *, directory):
     """Copy originals before receipt; publish each copy atomically by content hash."""
-    directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
+    directory=Path(directory)
+    created=[];parent=directory
+    while not parent.exists():
+        created.append(parent);parent=parent.parent
+    directory.mkdir(parents=True,exist_ok=True)
     attachments=[]
     for index,value in enumerate(paths):
         src=Path(value)
@@ -49,6 +64,8 @@ def preserve_attachments(paths, types, *, directory):
                 temp.unlink(missing_ok=True)
         attachments.append({'original':str(dest),'source_path':str(src),'sha256':sha,
                             'mime_type':types[index] if index<len(types) else ''})
+    for parent in dict.fromkeys([directory,*(path.parent for path in created)]):
+        _sync_directory(parent)
     return attachments
 
 
@@ -281,7 +298,30 @@ from your existing HERMES_KANBAN_* environment; never clear it to bypass ownersh
 First use `show` to read the saved spec, stage, next action, decisions and external
 effects. On recovery reuse that state and existing files, tests, commits and PRs;
 continue the unfinished step, without regenerating a spec or replaying a final
-answer. Inspect originals when analysis remains pending. For a new spec or an
+answer. Inspect originals when analysis remains pending. The saved request in
+`show` retains the original Telegram identity and attachments. If a batch or media
+contains additional independent tasks, persist them for the Principal with
+`ask --kind additional_tasks --input tasks.json`. JSON:
+{"question":"Dispatch additional tasks?","primary_task":"First task on this card",
+"tasks":[{"key":"audio:00:42","text":"The additional requested task",
+"source_ref":"original audio 00:42-00:57"}]}. Use stable locations in the original
+message/media as keys, never transient numbering or a newly generated identifier.
+Key 0 is reserved for the original task. Do not include this task again. A derived
+card's original media also contains its siblings: stay within this card's assigned
+text and use the saved lineage when identifying any genuinely additional item.
+The Principal reviews the saved proposal and dispatches its items atomically;
+do not call receive or implement independent tasks secretly inside this card.
+Keep reading/analyzing while that decision is pending. Before implementation
+whose scope depends on the split, wait for its resolution and use task_partition
+from show for this card's scope. A changes answer retains the full proposal:
+correct it and ask again with the same item keys; already dispatched items are
+reused. Continue keeps this worker on the first task; other workers create their
+own cards. Delimit an initial batch before its first spec. Later discoveries of
+independent items keep the accepted primary_task unchanged. If the Principal
+explicitly changes that task's scope, request TL/Codex to revise and persist the
+spec before more implementation, effects or completion; task_partition records
+the revision that must be superseded. Single-task requests need no split decision.
+For a new spec or an
 explicitly requested spec revision, ask Claude TL for a JSON spec with goal,
 criteria [{id,text}], steps and delivery_type; use Codex only if Claude is
 unavailable. Save its real transcript, then call `save-spec --input spec.json
@@ -338,10 +378,23 @@ You are the Principal, responsible for intake, dispatch, board visibility,
 impediments and review. Project implementation belongs to full Hermes workers.
 Do not implement project changes in this conversation or create a parallel
 delegation path. Read cards, inspect evidence and resolve the workers' decisions.
-New independent requests use the existing durable request intake. For additional
-tasks extracted from a batch or media, use the exact CLI prefix above with
-`receive --input request.json` and the original source identity, a stable part
-identifier, project/profile and original attachments. A worker creates the card.
+New independent messages use the existing durable request intake. Additional
+tasks found by a worker arrive as kind=additional_tasks in your decision queue.
+Read primary_task, tasks and their source_ref against the original request and
+media. Resolve with continue to atomically dispatch all accepted items through
+the same intake. You may refine the split by adding "proposal":{"primary_task":
+"First task","tasks":[{"key":"stable original location","text":"Task",
+"source_ref":"Original message/media reference"}]} to answer.json. Keep stable
+keys for the same task. An explicit empty tasks list keeps only the first task.
+Delimit the initial batch before the first spec. If you change an already
+specified primary_task, explicitly instruct the worker to revise/persist its spec
+against that changed scope before implementation. Additional independent items
+that preserve primary_task do not require another spec for the current card.
+Use changes for unclear boundaries; the original proposal remains saved. Invalid
+or conflicting keys return changes without partial dispatch. Do not reconstruct
+manual receive calls for this proposal or create its cards yourself. The runtime
+reserves capacity and each new worker creates its own card. No new human approval
+is required for additional tasks already present in the authorized request.
 Use the same CLI prefix with `pending` to inspect the persisted decision
 queue. Resolve each item with `decide --decision ID --resolution
 continue|approve|changes|human --input answer.json` (JSON containing answer).

@@ -20933,7 +20933,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return project_route_denial
         nfos_receipt = await self._nfos_receive(event, project_context)
         if nfos_receipt is not None:
-            return nfos_receipt
+            # Receipt egress and its retry obligation belong to the same
+            # persisted path; returning text here would send it a second time.
+            return None
         event_metadata = getattr(event, "metadata", None) or {}
         if not isinstance(event_metadata, dict):
             event_metadata = {}
