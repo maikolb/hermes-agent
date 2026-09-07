@@ -79,6 +79,13 @@ checkpoint da sessão. O mesmo pedido passa a `pending` quando o Principal o
 identifica como trabalho. Uma pergunta de status ou resposta humana continua
 sendo coordenação e não cria tarefa apenas por conter esse contexto.
 
+Se o Principal descobrir uma solução para uma pergunta que ele próprio havia
+encaminhado ao humano, pode reconsiderar essa decisão com `reconsider`, razão e
+resposta concretas. A decisão anterior permanece no histórico. A nova revisão
+usa a spec e o candidato atuais, e a retomada aguarda o encerramento da execução
+anterior. Isso não registra uma resposta humana fictícia nem conclui critérios
+que continuam sem comprovação.
+
 ## Fonte de cada informação
 
 | Informação | Autoridade |

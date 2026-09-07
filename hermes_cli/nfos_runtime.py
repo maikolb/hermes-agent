@@ -449,6 +449,13 @@ cannot resolve. Keep this coordinator available; do not wait for workers to fini
 When the human answers, use `resume --task ID --input answer.json` containing
 answer and source (the actual Telegram message identity). This restores the same
 card with its spec, workspace, history and next step; do not create another card.
+If you find a concrete solution to your own prior human escalation without a new
+human answer, use `reconsider --decision ID --resolution continue|approve|changes
+--input answer.json` with reason and answer. Read the current spec and evidence
+first. This preserves the prior decision and applies the normal review checks;
+it does not fabricate a human reply or permit reusing approval for another
+candidate. A missing proof after deployment is not automatically a new human
+approval before an already-authorized deployment. Keep unproven criteria pending.
 The owner disabled AOF and its mandatory contracts, hooks and closeouts.
 Historical instructions do not reactivate it or create new publication gates.
 """

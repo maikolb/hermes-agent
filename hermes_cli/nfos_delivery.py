@@ -731,7 +731,8 @@ def reconcile_human_answers(conn):
 def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None):
     if action not in {'continue','approve','changes','human'} or not answer.strip() or author!='Principal':
         raise WorkflowError('Principal decision requires its concrete answer and action')
-    with _kb().write_txn(conn):
+    # Reconsideration composes this same validation with the unblock atomically.
+    with _kb().write_txn(conn, allow_nested=True):
         row=get_decision(conn,decision_id)
         if not row:
             raise WorkflowError('Unknown decision')
@@ -782,6 +783,73 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
         conn.execute('UPDATE nfos_decisions SET status=?,answer=?,author=?,action=?,resolved_at=? WHERE id=?',
                      ('human' if action=='human' else 'resolved',answer,author,action,int(time.time()),decision_id))
         _event(conn,row['task_id'],row['run_id'],'nfos_principal_resolved',{'decision_id':decision_id,'action':action,'answer':answer})
+
+
+def reconsider_decision(conn, decision_id, *, action, reason, answer, author='Principal'):
+    """Correct a Principal escalation without replacing it with a human reply."""
+    if author!='Principal' or os.environ.get('HERMES_KANBAN_TASK'):
+        raise WorkflowError('The Principal reconsiders decisions in its own coordinator session')
+    if action not in {'continue','approve','changes'}:
+        raise WorkflowError('Principal reconsideration requires continue, approve or changes')
+    if not isinstance(reason,str) or not reason.strip():
+        raise WorkflowError('Principal reconsideration requires a concrete reason')
+    if not isinstance(answer,str) or not answer.strip():
+        raise WorkflowError('Principal reconsideration requires a concrete answer')
+    from hermes_cli.nfos_runtime import previous_runs_termination_pending
+    new_id='nd_'+hashlib.sha256(_json([decision_id,action,reason,answer]).encode()).hexdigest()[:24]
+    with _kb().write_txn(conn):
+        old=get_decision(conn,decision_id)
+        if not old:
+            raise WorkflowError('Unknown decision')
+        wf=get_workflow(conn,old['task_id'])
+        if not wf:
+            raise WorkflowError('Unknown NFOS card')
+        identity={'spec_revision':wf['spec_revision'],'review_identity':_review_identity(conn,old['task_id'])}
+        old_context=json.loads(old['context'])
+        if old['status']=='superseded':
+            current=get_decision(conn,new_id)
+            if (old_context.get('superseded_by')!=new_id or not current
+                    or current['status']!='resolved' or current['action']!=action or current['answer']!=answer):
+                raise WorkflowError('Decision was already reconsidered with a different resolution')
+            if json.loads(current['context']).get('reconsideration_identity')!=identity:
+                raise WorkflowError('Spec or candidate changed since reconsideration; review the current identity')
+            return new_id
+        task=_kb().get_task(conn,old['task_id'])
+        if old['status']!='human' or not task or task.status!='blocked':
+            raise WorkflowError('Reconsideration requires a human decision on a blocked card')
+        last=conn.execute('SELECT * FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1',(task.id,)).fetchone()
+        if (not last or last['ended_at'] is None
+                or _run_process_alive(conn,task.id,last['id'])
+                or previous_runs_termination_pending(conn,task.id)):
+            raise OwnershipConflict('Confirm the previous run and its children finished termination before reconsidering')
+        now=int(time.time())
+        context={k:v for k,v in old_context.items() if k not in {'human_reply','superseded_by'}}
+        context.update(supersedes=decision_id,reconsideration_reason=reason,
+            reconsideration_identity=identity,
+            workflow_at_reconsideration={'stage':wf['stage'],'next_action':wf['next_action'],
+                'state':json.loads(wf['state_json'])})
+        if old['kind']=='review':
+            context['review_identity']=identity['review_identity']
+        conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
+            (new_id,task.id,last['id'],old['kind'],old['question'],_json(context),wf['spec_revision'],now))
+        resolve_decision(conn,new_id,action=action,answer=answer,author=author)
+        old_context['superseded_by']=new_id
+        conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?",(_json(old_context),decision_id))
+        resolved=get_decision(conn,new_id)
+        next_action=(f"Principal reconsidered {decision_id} through {new_id} ({resolved['action']}) "
+                     f"under spec r{wf['spec_revision']}. This supersedes the former human escalation. "
+                     f"Resume from the preserved work: {resolved['answer']}")
+        conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',(next_action,now,task.id))
+        another_human=conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='human' LIMIT 1",(task.id,)).fetchone()
+        unblocked=False
+        if not another_human:
+            unblocked=_kb().unblock_task(conn,task.id)
+            if not unblocked:
+                raise OwnershipConflict('The blocked card changed before reconsideration could resume it')
+        _event(conn,task.id,last['id'],'nfos_principal_reconsidered',
+            {'decision_id':new_id,'supersedes':decision_id,'reason':reason,'action':resolved['action'],
+             'answer':resolved['answer'],'identity':identity,'unblocked':unblocked})
+        return new_id
 
 
 def _review_identity(conn,task_id,*,state=None):
@@ -1018,7 +1086,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','save-spec','save-report','progress','ask','decide',
-        'pending','effect','reconcile','acquire-project','release-project','receive','resume','wait'])
+        'pending','effect','reconcile','acquire-project','release-project','receive','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -1075,6 +1143,12 @@ def main():
             resolve_decision(conn,args.decision,action=args.resolution,answer=payload['answer'],author='Principal',
                              proposal=payload.get('proposal'))
             result={'saved':True,'decision':get_decision(conn,args.decision)}
+        elif args.action=='reconsider':
+            decision_id=reconsider_decision(conn,args.decision,action=args.resolution,
+                reason=payload.get('reason'),answer=payload.get('answer'),author='Principal')
+            decision=get_decision(conn,decision_id)
+            result={'decision_id':decision_id,'decision':decision,
+                    'task_status':_kb().get_task(conn,decision['task_id']).status}
         elif args.action=='effect':
             result=begin_effect(conn,args.task,args.run,operation=args.operation,target=args.target,candidate=args.candidate)
         elif args.action=='reconcile':
