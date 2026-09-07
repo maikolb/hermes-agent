@@ -913,7 +913,7 @@ class GatewayKanbanWatchersMixin:
                     if source.get('platform')!='telegram' or self._nfos_receipt_owner(payload) not in profiles:continue
                     # A retained session row is recovery lineage, not a new
                     # Telegram message that can receive a transport reply/ACK.
-                    if not coordination and source.get('message_identity_kind')=='retained-session-row':continue
+                    if not coordination and source.get('message_identity_kind') in {'retained-session-row','retained-card'}:continue
                     if not all(source.get(key) for key in ('chat_id','thread_id','message_id')):continue
                     receipt=payload.get('coordination' if coordination else 'receipt') or {};now=time.time()
                     if coordination and receipt.get('wake_accepted'):continue
@@ -3216,7 +3216,8 @@ class GatewayKanbanWatchersMixin:
                                 from hermes_cli.nfos_runtime import workflow_command
                                 _synth += (f"\nNFOS: consulte `{workflow_command()} pending` "
                                     "no board desta mensagem. Leia a spec e as evidências e resolva cada decisão "
-                                    "por `decide`. O worker atual aguarda sua resposta; não crie outro worker "
+                                    "por `decide`. Um worker ativo continua após sua resposta; um card migrado sem worker "
+                                    "volta ao distribuidor pelo mesmo decide. Não crie outro worker "
                                     "nem encerre o card para fazer a revisão. Se resolver, use continue ou approve; "
                                     "se depender de humano, registre human com a pergunta concreta.")
 

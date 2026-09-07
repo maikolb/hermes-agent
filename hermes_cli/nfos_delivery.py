@@ -855,6 +855,13 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
         _event(conn,row['task_id'],row['run_id'],'nfos_principal_resolved',
                {'decision_id':decision_id,'action':action,'answer':answer,
                 'asked_spec_revision':row['spec_revision'],'resolved_spec_revision':current_spec_revision})
+        if json.loads(row['context']).get('legacy_adoption') and action in {'continue','changes'}:
+            from hermes_cli.nfos_runtime import previous_runs_termination_pending
+            if previous_runs_termination_pending(conn,row['task_id']):
+                raise OwnershipConflict('Previous execution must exit before resuming retained work')
+            _kb().unblock_task(conn,row['task_id'])
+            if _kb().get_task(conn,row['task_id']).status=='review':
+                _kb().reopen_review_task(conn,row['task_id'])
 
 
 def reconsider_decision(conn, decision_id, *, action, reason, answer, author='Principal'):
