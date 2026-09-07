@@ -869,6 +869,48 @@ def _wake_scope_id(adapter: Any, sub: dict) -> Optional[str]:
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
+    async def _nfos_receive(self, event, project_context=None):
+        """Opted-in project intake; the worker, not this handler, creates the card."""
+        source=getattr(event,'source',None)
+        if source is None or getattr(event,'internal',False):
+            return None
+        platform=str(getattr(getattr(source,'platform',None),'value','')).lower()
+        if platform!='telegram' or not getattr(source,'thread_id',None):
+            return None
+        text=str(getattr(event,'text','') or '').strip()
+        media=list(getattr(event,'media_urls',[]) or [])
+        if text.startswith('/') or getattr(event,'reply_to_message_id',None):
+            return None
+        if not media and _classify_parallel_intake_message(text)!='new_task':
+            return None
+        if project_context is None:
+            project_context,denial=await asyncio.to_thread(self._resolve_project_context_for_message,event,source)
+            if denial is not None:
+                return None
+        if project_context is None or getattr(project_context,'is_management',False):
+            return None
+        from hermes_cli.nfos_runtime import project_config,preserve_attachments
+        from hermes_cli import kanban_db as kb
+        from hermes_cli import nfos_delivery as delivery
+        board=str(project_context.board_slug)
+        project=project_config(board,self._kanban_parallel_dispatch_config(source))
+        if not project:
+            return None
+        project.setdefault('profile',str(getattr(source,'profile','') or self._active_profile_name() or 'default'))
+        project.setdefault('project_id',getattr(project_context,'project_id',None))
+        identity={'platform':platform,'chat_id':str(source.chat_id),'thread_id':str(source.thread_id),
+            'message_id':str(event.message_id or ''),'user_id':str(source.user_id or ''),
+            'chat_type':str(source.chat_type or 'group'),'profile':str(getattr(source,'profile','') or self._active_profile_name() or 'default')}
+        def persist():
+            path=kb.kanban_db_path(board=board)
+            attachments=preserve_attachments(media,list(getattr(event,'media_types',[]) or []),
+                directory=path.parent/'request-media') if media else []
+            with kb.connect_closing(board=board) as conn:
+                return delivery.receive_request(conn,source=identity,text=text,project=project,attachments=attachments)
+        request_id=await asyncio.to_thread(persist)
+        return (f'Pedido registrado: {request_id}. O worker criará o card e iniciará a análise. '
+                'Se as vagas estiverem ocupadas, o pedido permanece na fila. Continuo disponível para coordenar as tarefas.')
+
     def _owns_kanban_dispatcher_lock(self) -> bool:
         """Return whether this gateway currently owns the singleton lock."""
         return getattr(self, "_kanban_dispatcher_lock_handle", None) is not None
@@ -976,8 +1018,22 @@ class GatewayKanbanWatchersMixin:
         session_key: str,
     ) -> bool:
         """Turn an independent busy-topic request into a subscribed Kanban card."""
+        receipt=await self._nfos_receive(event)
+        if receipt is not None:
+            source=event.source
+            adapter=self._adapter_for_source(source)
+            if adapter is not None:
+                try:
+                    await adapter._send_with_retry(chat_id=source.chat_id,content=receipt,
+                        metadata=self._thread_metadata_for_source(source,self._reply_anchor_for_event(event)))
+                except Exception:
+                    logger.warning('NFOS intake committed but receipt delivery failed',exc_info=True)
+            return True
         source = getattr(event, "source", None)
         if source is None or getattr(event, "internal", False):
+            return False
+        # Media outside the opted-in NFOS path retains the existing handling.
+        if getattr(event, 'media_urls', None) or getattr(event, 'media_types', None):
             return False
         if not str(getattr(source, "thread_id", "") or "").strip():
             return False
@@ -2101,7 +2157,7 @@ class GatewayKanbanWatchersMixin:
         # intentionally excluded to avoid one notification per minute.
         NOTIFY_KINDS = (
             "claimed", "completed", "blocked", "gave_up", "status",
-            "block_loop_detected", "review_requested",
+            "block_loop_detected", "review_requested", "nfos_principal_requested",
         )
         # Focus accounting consumes worker-run boundaries too, but these
         # internal retry/recovery events must never become chat messages.
@@ -2698,6 +2754,10 @@ class GatewayKanbanWatchersMixin:
                             if ev.payload and ev.payload.get("status"):
                                 new_status = str(ev.payload["status"])
                             msg = f"🔄 {board_tag}{tag}Kanban {sub['task_id']} → {new_status}"
+                        elif kind == "nfos_principal_requested":
+                            decision_payload = ev.payload or {}
+                            msg = (f"👀 {board_tag}Principal analisando {sub['task_id']}: "
+                                   f"{str(decision_payload.get('question') or '')[:500]}")
                         elif kind == "review_requested":
                             # Implementation complete; task moved to the
                             # first-class review lane. Wake the origin thread.
@@ -2849,7 +2909,7 @@ class GatewayKanbanWatchersMixin:
                         # obligations are confirmed. The API path retains its
                         # existing response acknowledgement boundary.
                         task_terminal = task and task.status == "archived"
-                        _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked")
+                        _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "nfos_principal_requested")
                         _wake_kinds = (
                             {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
                             if wake_agent and agent_wake_on_events
@@ -2886,6 +2946,8 @@ class GatewayKanbanWatchersMixin:
                             if "crashed" in _wake_kinds: _parts.append(t("gateway.kanban.wake.crashed"))
                             if "timed_out" in _wake_kinds: _parts.append(t("gateway.kanban.wake.timed_out"))
                             if "blocked" in _wake_kinds: _parts.append(t("gateway.kanban.wake.blocked"))
+                            if "nfos_principal_requested" in _wake_kinds:
+                                _parts.append("worker aguardando sua decisão")
                             _status = t("gateway.kanban.wake.status_joiner").join(_parts) or t("gateway.kanban.wake.status_default")
                             _synth = t(
                                 "gateway.kanban.wake.message",
@@ -2908,6 +2970,12 @@ class GatewayKanbanWatchersMixin:
                             _synth += "\n\n" + t(
                                 "gateway.kanban.wake.guidance"
                             )
+                            if "nfos_principal_requested" in _wake_kinds:
+                                _synth += ("\nNFOS: consulte `python -m hermes_cli.nfos_delivery pending` "
+                                    "no board desta mensagem. Leia a spec e as evidências e resolva cada decisão "
+                                    "por `decide`. O worker atual aguarda sua resposta; não crie outro worker "
+                                    "nem encerre o card para fazer a revisão. Se resolver, use continue ou approve; "
+                                    "se depender de humano, registre human com a pergunta concreta.")
 
                         if not _is_push_adapter and _wake_kinds and _session_key:
                             # Wake self-post IS the delivery on this path —

@@ -2924,7 +2924,8 @@ def connect(
                     # process are cheap. The lock prevents same-process dispatcher
                     # threads from racing through the additive ALTER TABLE pass with
                     # stale PRAGMA snapshots during gateway startup.
-                    conn.executescript(SCHEMA_SQL)
+                    from hermes_cli.nfos_delivery import SCHEMA as delivery_schema
+                    conn.executescript(SCHEMA_SQL + delivery_schema)
                     _migrate_add_optional_columns(conn)
                     _INITIALIZED_PATHS.add(resolved)
         except Exception:
@@ -5300,41 +5301,21 @@ def _synthesize_ended_run(
 # ---------------------------------------------------------------------------
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return True when ``task_id`` is sticky-blocked by an explicit
-    worker/operator ``kanban_block`` call (#28712).
+    """Keep explicit blocks and exhausted attempts until recorded unblock.
 
-    A ``blocked`` status can come from two very different sources:
-
-    * **Worker- or operator-initiated** — a worker called
-      ``kanban_block(reason="review-required: ...")`` (or somebody ran
-      ``hermes kanban block <id>``).  This is a deliberate handoff that
-      should stay blocked until an operator unblocks it.  The block tool
-      emits a ``"blocked"`` event row in ``task_events``.
-
-    * **Circuit-breaker** — ``_record_task_failure`` tripped after
-      repeated crashes / spawn failures / timeouts.  This emits
-      ``"gave_up"``, *not* ``"blocked"``, and is meant to recover
-      automatically once the underlying conditions change (e.g. parents
-      finish, transient infra error clears).
-
-    The cheapest signal that distinguishes the two is the most recent
-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
-    recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
-    no ``"unblocked"`` event has fired since), the task is sticky and
-    ``recompute_ready`` must *not* auto-promote it.
-
-    Returns ``False`` when there is no such event at all (e.g. the task
-    was set to ``status='blocked'`` by the circuit breaker or by direct
-    DB manipulation) — preserves the pre-#28712 auto-recover semantics
-    for that path.
+    ``gave_up`` is the durable breaker decision, including protocol
+    violations that exhaust a separate budget below consecutive_failures.
+    Recomputing dependency readiness cannot undo that decision. The existing
+    unblock API records when a coordinator or operator authorizes continuation.
+    A dependency-only wait has no sticky event and still recovers normally.
     """
     row = conn.execute(
         "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'block_loop_detected', 'unblocked') "
+        "WHERE task_id = ? AND kind IN ('blocked', 'block_loop_detected', 'gave_up', 'unblocked') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] in {"blocked", "block_loop_detected"}
+    return bool(row) and row["kind"] in {"blocked", "block_loop_detected", "gave_up"}
 
 
 def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
@@ -6970,6 +6951,10 @@ def complete_task(
     if not _parents_satisfied(conn, task_id):
         return False
 
+    from hermes_cli.nfos_delivery import completion_ready
+    if not completion_ready(conn, task_id):
+        return False
+
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a
     # tiny dedicated txn, then raise. The caller is responsible for
@@ -7057,6 +7042,8 @@ def complete_task(
         # approval. A parent may have been reopened after this task entered
         # ``review`` or ``running``.
         if not _parents_satisfied(conn, task_id):
+            return False
+        if not completion_ready(conn, task_id):
             return False
         prior = conn.execute(
             "SELECT status, current_run_id, workspace_kind, workspace_path, "
@@ -13227,6 +13214,25 @@ def _dispatch_once_locked(
             )
             spawn_budget = 1
 
+    from hermes_cli.nfos_runtime import project_config, dispatch_requests
+    delivery_project = project_config(_normalize_board_slug(board) or get_current_board())
+    if delivery_project is not None:
+        # Bootstrap is part of this same serialized dispatch tick. A reserved
+        # request counts as a worker until its child atomically creates a run.
+        delivery_capacity = max(1, int(delivery_project.get('workers', 2)))
+        if max_spawn is not None:
+            delivery_capacity = min(delivery_capacity, max_spawn)
+        if max_in_progress is not None:
+            delivery_capacity = min(delivery_capacity,
+                max(0, max_in_progress - count_running_tasks_other_boards(board)))
+        if not dry_run:
+            dispatch_requests(conn, board=_normalize_board_slug(board) or get_current_board(),
+                capacity=delivery_capacity, spawn_limit=spawn_budget)
+        reserved_count = int(conn.execute(
+            "SELECT count(*) FROM nfos_requests WHERE status='starting'").fetchone()[0])
+        available = max(0, delivery_capacity - count_running_tasks(conn) - reserved_count)
+        spawn_budget = available if spawn_budget is None else min(spawn_budget, available)
+
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'ready' AND task_role = 'work' AND claim_lock IS NULL "
@@ -14015,14 +14021,14 @@ def _worker_resume_context(task: Task, home: str, *, board=None) -> tuple[Option
         "and latest instructions before acting. Preserve completed work and existing PRs. "
         "Check the target before repeating an external operation whose result is uncertain."
     )
-    from agent.turn_checkpoint import TurnCheckpointStore, build_checkpoint_resume_note, checkpoint_is_resumable
+    from agent.turn_checkpoint import TurnCheckpointStore, build_checkpoint_resume_note, checkpoint_is_worker_resumable
     checkpoint_root = Path(home) / "sessions" / "turn-checkpoints"
     if checkpoint_root.is_dir():
         try:
             checkpoint = TurnCheckpointStore(checkpoint_root).load(session_id)
         except FileNotFoundError:
             checkpoint = None
-        if checkpoint_is_resumable(checkpoint):
+        if checkpoint_is_worker_resumable(checkpoint):
             note += "\n\n" + build_checkpoint_resume_note(checkpoint)
     return session_id, note
 
@@ -14032,6 +14038,7 @@ def _default_spawn(
     workspace: str,
     *,
     board: Optional[str] = None,
+    exec_current_process: bool = False,
 ) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
@@ -14053,15 +14060,19 @@ def _default_spawn(
 
     profile_arg = normalize_profile_name(task.assignee)
 
-    # The bare task pointer plus the AOF protocol block. Delegated
-    # subagents get the protocol from delegate_tool (gap 6); dispatcher
-    # workers ran without it and completed cards with an empty result —
-    # no closeout on the board or in the completion trace (28/08 audit).
+    # The card supplies scope; delivery instructions preserve the current
+    # owner's workflow in newly created and replacement worker sessions.
     from hermes_cli.worker_protocol import dispatcher_worker_protocol
 
     prompt = (
         f"work kanban task {task.id}\n\n{dispatcher_worker_protocol()}"
     )
+    from hermes_cli.nfos_delivery import get_workflow
+    with connect_closing(board=board) as delivery_conn:
+        delivery_worker = bool(get_workflow(delivery_conn, task.id))
+        if delivery_worker:
+            from hermes_cli.nfos_runtime import worker_instructions
+            prompt += "\n\n" + worker_instructions()
     env = dict(os.environ)
     # The dispatcher is detached from every conversation. Its worker must never
     # inherit routing mirrored by a previous gateway turn, even before the first
@@ -14178,8 +14189,14 @@ def _default_spawn(
             pythonpath_parts.append(inherited_pythonpath)
         env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
 
+    if delivery_worker and not _IS_WINDOWS:
+        # Match the code that created this execution, including isolated
+        # homologation. PATH may still point at another production release.
+        env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1]) + (
+            os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
+    worker_argv = _module_hermes_argv() if delivery_worker else _resolve_hermes_argv()
     cmd = [
-        *_resolve_hermes_argv(),
+        *worker_argv,
         "-p", profile_arg,
         "--cli",
         # Worker subprocesses switch to a profile-scoped HERMES_HOME above,
@@ -14238,6 +14255,16 @@ def _default_spawn(
 
     # Use 'a' so a re-run on unblock appends rather than overwrites.
     log_f = open(log_path, "ab")
+    if exec_current_process:
+        # The bootstrap worker created and claimed the card with this PID.
+        # Replacing its executable keeps ownership continuous across setup.
+        if os.path.isdir(workspace):
+            os.chdir(workspace)
+        with open(os.devnull, "rb") as stdin_f:
+            os.dup2(stdin_f.fileno(), 0)
+        os.dup2(log_f.fileno(), 1)
+        os.dup2(log_f.fileno(), 2)
+        os.execvpe(cmd[0], cmd, env)
     try:
         proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
             cmd,

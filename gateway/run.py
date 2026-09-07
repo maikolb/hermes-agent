@@ -11618,10 +11618,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Commands, media, conversational follow-ups, and corrections keep the
         # established steer/queue/interrupt path below.
         if (
-            event.message_type == MessageType.TEXT
-            and not getattr(event, "media_urls", None)
-            and not getattr(event, "media_types", None)
-            and await self._kanban_parallel_dispatch_busy_message(
+            await self._kanban_parallel_dispatch_busy_message(
                 event,
                 session_key,
             )
@@ -20934,6 +20931,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         if project_route_denial is not None:
             return project_route_denial
+        nfos_receipt = await self._nfos_receive(event, project_context)
+        if nfos_receipt is not None:
+            return nfos_receipt
         event_metadata = getattr(event, "metadata", None) or {}
         if not isinstance(event_metadata, dict):
             event_metadata = {}
@@ -21180,6 +21180,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         if project_context is not None:
             context_prompt += _project_context_prompt_block(project_context)
+            from hermes_cli.nfos_runtime import project_config, principal_instructions
+            if project_config(project_context.board_slug, self._kanban_parallel_dispatch_config(source)):
+                context_prompt += "\n\n" + principal_instructions()
 
         # Per-turn must-deliver notes.  These used to be appended to
         # context_prompt (the ephemeral system prompt), which guaranteed a

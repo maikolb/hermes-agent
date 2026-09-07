@@ -69,6 +69,20 @@ def checkpoint_is_resumable(state: Mapping[str, Any] | None) -> bool:
     )
 
 
+def checkpoint_is_worker_resumable(state: Mapping[str, Any] | None) -> bool:
+    """A worker resumes unfinished execution, not a composed answer.
+
+    Gateway delivery may still need to replay a sealed answer. A replacement
+    Kanban worker must instead read the current card in a new turn of the same
+    session. Otherwise delivery replay exits without invoking any task tools.
+    Pending verification remains executable work and retains its checkpoint.
+    """
+    return checkpoint_is_resumable(state) and not (
+        state.get("phase") in {"deliverable_composed", "delivery_pending"}
+        and not (state.get("verification") or {}).get("pending")
+    )
+
+
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.RLock] = {}
 _REDACTED_SENTINEL_RE = re.compile(r"«redacted(?::[^»]*)?»")
@@ -486,8 +500,16 @@ class TurnCheckpointStore:
             existing = self.restore(session_id, messages)
         except FileNotFoundError:
             existing = None
+        prior_routing = (existing or {}).get("routing") or {}
+        worker_next_turn = bool(
+            routing and routing.get("kanban_task_id")
+            and prior_routing.get("kanban_task_id") == routing["kanban_task_id"]
+            and prior_routing.get("kanban_db") == routing.get("kanban_db")
+            and not checkpoint_is_worker_resumable(existing)
+        )
         if (
             existing
+            and not worker_next_turn
             and existing.get("phase") not in {"terminal", "delivered", "cancelled"}
             and (
                 resume_existing
@@ -1689,7 +1711,7 @@ def initialize_agent_turn_checkpoint(
         except FileNotFoundError:
             prior = None
         prior_route = (prior or {}).get("routing") or {}
-        if (checkpoint_is_resumable(prior)
+        if (checkpoint_is_worker_resumable(prior)
                 and prior_route.get("kanban_task_id") == kanban_task
                 and prior_route.get("kanban_db") == routing["kanban_db"]):
             resume_existing = True
