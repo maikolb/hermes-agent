@@ -1104,6 +1104,7 @@ def _handle_block(args: dict, **kw) -> str:
             task
             and task.goal_mode
             and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS
+            and not conn.execute('SELECT 1 FROM nfos_workflows WHERE task_id=?',(tid,)).fetchone()
         ):
             conn.close()
             return tool_error(

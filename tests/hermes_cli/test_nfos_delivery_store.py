@@ -175,3 +175,58 @@ def test_project_homolog_and_publication_have_one_owner(board):
         assert not delivery.acquire_project(conn,'pilot',second.id,second.current_run_id,'b'*40)
         delivery.release_project(conn,'pilot',first.id,first.current_run_id)
         assert delivery.acquire_project(conn,'pilot',second.id,second.current_run_id,'b'*40)
+
+
+def test_native_review_tool_routes_to_principal_without_ending_worker(board):
+    with kb.connect_closing(board) as conn:
+        task=started(conn);spec(conn,task)
+        assert kb.request_review(conn,task.id,summary='Review the saved report',expected_run_id=task.current_run_id)
+        assert kb.get_task(conn,task.id).current_run_id==task.current_run_id
+        assert kb.get_task(conn,task.id).status=='running'
+        assert delivery.pending_decisions(conn)[0]['kind']=='review'
+
+
+def test_enrolled_code_uses_current_workflow_without_legacy_second_reviewer(board):
+    with kb.connect_closing(board) as conn:
+        rid=delivery.receive_request(conn,source={'platform':'telegram','chat_id':'1','thread_id':'2','message_id':'code'},
+            text='Fix accepted behavior',project={'profile':'default','delivery_type':'code','repo_path':str(board.parent)})
+        request=delivery.reserve_request(conn,capacity=2)
+        task=delivery.bootstrap_card(conn,rid,request['claim_token'],pid=os.getpid())
+        assert conn.execute('SELECT required FROM task_git_delivery WHERE task_id=?',(task.id,)).fetchone()[0]==0
+    kb.init_db(board)
+    with kb.connect_closing(board) as conn:
+        assert conn.execute('SELECT required FROM task_git_delivery WHERE task_id=?',(task.id,)).fetchone()[0]==0
+        assert kb.complete_task(conn,task.id,result='No evidence yet') is False
+
+
+def test_native_block_asks_principal_before_releasing_the_worker(board):
+    with kb.connect_closing(board) as conn:
+        task=started(conn);spec(conn,task)
+        assert kb.block_task(conn,task.id,reason='Need endpoint clarification',kind='needs_input',expected_run_id=task.current_run_id)
+        current=kb.get_task(conn,task.id)
+        assert current.status=='running'
+        assert current.current_run_id==task.current_run_id
+        decision=delivery.pending_decisions(conn)[0]
+        assert decision['kind']=='impediment'
+        delivery.resolve_decision(conn,decision['id'],action='continue',answer='Use project HML endpoint',author='Principal')
+        assert kb.get_task(conn,task.id).current_run_id==task.current_run_id
+
+
+def test_principal_human_decision_is_durable_until_worker_stops_and_answer_arrives(board):
+    with kb.connect_closing(board) as conn:
+        task=started(conn);spec(conn,task)
+        decision=delivery.ask_principal(conn,task.id,task.current_run_id,kind='impediment',question='Which business rule?',context={'saved':'checkpoint'})
+        delivery.resolve_decision(conn,decision,action='human',answer='Maikol must choose A or B',author='Principal')
+        assert kb.block_task(conn,task.id,reason='Maikol must choose A or B',kind='needs_input',expected_run_id=task.current_run_id)
+        assert kb.get_task(conn,task.id).status=='blocked'
+        assert delivery.get_decision(conn,decision)['status']=='human'
+        delivery.resume_after_answer(conn,task.id,answer='Use A',source={'platform':'telegram','message_id':'55'})
+        assert kb.get_task(conn,task.id).status=='ready'
+        assert delivery.get_decision(conn,decision)['status']=='resolved'
+        assert delivery.get_spec(conn,task.id)['revision']==1
+
+
+def test_bootstrap_claim_is_recognized_as_host_local_by_recovery(board):
+    with kb.connect_closing(board) as conn:
+        task=started(conn)
+        assert task.claim_lock.startswith(kb._claimer_id().split(':',1)[0]+':')

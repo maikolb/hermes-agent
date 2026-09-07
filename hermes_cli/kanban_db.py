@@ -1994,6 +1994,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
 """
+from hermes_cli.nfos_delivery import SCHEMA as _NFOS_SCHEMA
+SCHEMA_SQL += _NFOS_SCHEMA
 
 
 # ---------------------------------------------------------------------------
@@ -2924,8 +2926,7 @@ def connect(
                     # process are cheap. The lock prevents same-process dispatcher
                     # threads from racing through the additive ALTER TABLE pass with
                     # stale PRAGMA snapshots during gateway startup.
-                    from hermes_cli.nfos_delivery import SCHEMA as delivery_schema
-                    conn.executescript(SCHEMA_SQL + delivery_schema)
+                    conn.executescript(SCHEMA_SQL)
                     _migrate_add_optional_columns(conn)
                     _INITIALIZED_PATHS.add(resolved)
         except Exception:
@@ -3046,6 +3047,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         "UPDATE task_git_delivery SET required = 1 WHERE task_id IN ("
         "SELECT id FROM tasks WHERE workspace_kind = 'worktree' "
         "AND status NOT IN ('done', 'archived')"
+        " AND id NOT IN (SELECT task_id FROM nfos_workflows)"
         ")"
     )
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
@@ -6951,7 +6953,8 @@ def complete_task(
     if not _parents_satisfied(conn, task_id):
         return False
 
-    from hermes_cli.nfos_delivery import completion_ready
+    from hermes_cli.nfos_delivery import completion_ready, get_workflow
+    delivery_enrolled = get_workflow(conn, task_id) is not None
     if not completion_ready(conn, task_id):
         return False
 
@@ -7068,7 +7071,7 @@ def complete_task(
                 )
                 == "review"
             )
-            if is_worktree and (
+            if is_worktree and not delivery_enrolled and (
                 delivery is None or not bool(delivery["required"])
             ):
                 _append_event(
@@ -7086,7 +7089,7 @@ def complete_task(
                     ),
                 )
                 return False
-            if is_worktree and not review_phase:
+            if is_worktree and not delivery_enrolled and not review_phase:
                 _append_event(
                     conn,
                     task_id,
@@ -7699,6 +7702,11 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     when provably free of work (clean tree, every commit reachable from a
     remote-tracking ref); ``dir`` workspaces are intentionally preserved.
     """
+    from hermes_cli.nfos_delivery import get_workflow
+    if get_workflow(conn, task_id):
+        # NFOS retains the task folder, including evidence and uncommitted
+        # context, independently of its current worker process.
+        return
     row: Optional[sqlite3.Row] = None
     try:
         row = conn.execute(
@@ -8384,6 +8392,18 @@ def block_task(
         raise ValueError(
             f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None"
         )
+    from hermes_cli.nfos_delivery import get_workflow, ask_principal
+    if get_workflow(conn, task_id):
+        current = get_task(conn, task_id)
+        if current and current.status == 'running':
+            if expected_run_id is not None and current.current_run_id != expected_run_id:
+                return False
+            human = conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND run_id=? AND status='human'",
+                (task_id,current.current_run_id)).fetchone()
+            if not human and kind != 'dependency':
+                ask_principal(conn,task_id,current.current_run_id,kind='impediment',
+                    question=reason or 'Diagnose why this task cannot advance',context={'requested_block_kind':kind})
+                return True
     recurrences = 0
     with write_txn(conn):
         cur_row = conn.execute(
@@ -8623,6 +8643,18 @@ def request_review(
 
     def _ret(ok: bool, reason: Optional[str] = None):
         return (ok, reason) if with_reason else ok
+
+    from hermes_cli.nfos_delivery import get_workflow, ask_principal
+    if get_workflow(conn, task_id):
+        current = get_task(conn, task_id)
+        if current is None or current.current_run_id is None:
+            return _ret(False, 'No current worker to review')
+        if expected_run_id is not None and current.current_run_id != expected_run_id:
+            return _ret(False, 'Execution changed before review request')
+        decision = ask_principal(conn, task_id, current.current_run_id,
+            kind='review', question=summary or 'Review the current spec and delivery evidence',
+            context={**(metadata or {}), 'git_delivery_request': git_delivery_request})
+        return _ret(True, 'Principal review queued: ' + decision)
 
     summary = redact_review_value(summary)
     metadata = redact_review_value(metadata)
@@ -9107,7 +9139,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     state) holds for the rest of this function's lifetime.
     """
     now = int(time.time())
-    with write_txn(conn):
+    # NFOS records the human answer and the resumed state atomically.
+    with write_txn(conn, allow_nested=True):
         current = conn.execute(
             "SELECT status FROM tasks WHERE id = ? "
             "AND status IN ('blocked', 'scheduled')",
