@@ -184,6 +184,20 @@ async def test_additional_request_receipt_identifies_its_origin(env):
 
 
 @pytest.mark.asyncio
+async def test_migrated_card_does_not_send_a_fake_telegram_message_receipt(env):
+    from hermes_cli.nfos_runtime import adopt_existing_tasks
+    runner,event,adapter,clock=env
+    with kb.connect_closing() as conn:
+        tid=kb.create_task(conn,title='Retained report',assignee='default',delivery_type='report',requires_repo=False)
+        kb.add_notify_sub(conn,task_id=tid,platform='telegram',chat_id='-1000',thread_id='8',
+                          notifier_profile='default',delivery_mode='notify+wake')
+        adopt_existing_tasks(conn,board='default',project={'profile':'default','delivery_type':'report'})
+    await runner._nfos_retry_receipts()
+    adapter._send_with_retry.assert_not_awaited()
+    assert request()['acknowledged_at'] is None
+
+
+@pytest.mark.asyncio
 async def test_lost_response_can_repeat_receipt_but_cannot_repeat_intake(env):
     runner,event,adapter,clock=env
     delivered=[]

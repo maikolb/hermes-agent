@@ -33,3 +33,28 @@ def test_principal_wake_survives_failed_acceptance_and_keeps_same_worker(tmp_pat
     assert len(adapter.sent)==1
     with kb.connect_closing() as conn:
         assert kb.get_task(conn,task.id).worker_pid==os.getpid()
+
+
+def test_retained_notify_only_block_reaches_principal_via_existing_notifier(tmp_path,monkeypatch):
+    from hermes_cli.nfos_runtime import adopt_existing_tasks
+    monkeypatch.setenv('HERMES_HOME',str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB',str(tmp_path/'kanban.db'))
+    monkeypatch.setattr('hermes_cli.config.load_config',lambda:{'kanban':{'agent_wake_on_events':True}})
+    with kb.connect_closing() as conn:
+        tid=kb.create_task(conn,title='Existing impediment',assignee='default',delivery_type='report',requires_repo=False)
+        kb.block_task(conn,tid,reason='Existing tool error',kind='transient')
+        prior_runs=[tuple(row) for row in conn.execute('SELECT * FROM task_runs WHERE task_id=?',(tid,))]
+        kb.add_notify_sub(conn,task_id=tid,platform='telegram',chat_id='test',thread_id='8',
+                          chat_type='group',notifier_profile='default',delivery_mode='notify')
+        cursor=conn.execute('SELECT last_event_id FROM kanban_notify_subs').fetchone()[0]
+        adopt_existing_tasks(conn,board='default',project={'profile':'default','delivery_type':'report'})
+        assert conn.execute('SELECT last_event_id FROM kanban_notify_subs').fetchone()[0]==cursor
+    adapter=RecordingAdapter();adapter.fail=False
+    asyncio.run(_run_one_notifier_tick(monkeypatch,_make_runner(adapter)))
+    assert len(adapter.handled)==1
+    with kb.connect_closing() as conn:
+        assert len(delivery.pending_decisions(conn))==1
+        assert kb.get_task(conn,tid).status=='blocked'
+        assert [tuple(row) for row in conn.execute('SELECT * FROM task_runs WHERE task_id=?',(tid,))]==prior_runs
+    asyncio.run(_run_one_notifier_tick(monkeypatch,_make_runner(adapter)))
+    assert len(adapter.handled)==1

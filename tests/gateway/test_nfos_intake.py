@@ -86,3 +86,26 @@ async def test_other_project_does_not_use_pilot_path(setup):
     runner,event,adapter,root=setup
     runner._resolve_project_context_for_message=lambda event,source:(SimpleNamespace(board_slug='other',is_management=False),None)
     assert await runner._nfos_receive(event) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('board,topic', [('concursa-ai','41'),('recuperacli','6'),('dovcrm','4')])
+async def test_each_enabled_project_uses_its_own_durable_intake(setup,board,topic):
+    runner,event,adapter,root=setup
+    projects={name:{'enabled':True,'profile':'default','delivery_type':'report','workers':2}
+              for name in ('concursa-ai','recuperacli','dovcrm')}
+    runner._kanban_parallel_dispatch_config=lambda source:{'kanban':{'delivery':{'projects':projects}}}
+    runner._resolve_project_context_for_message=lambda event,source:(
+        SimpleNamespace(board_slug=board,project_id=board,is_management=False),None)
+    event.source.thread_id=topic
+    assert await runner._nfos_receive(event)
+    assert await runner._nfos_receive(event)
+    with kb.connect_closing() as conn:
+        rows=conn.execute('SELECT payload FROM nfos_requests').fetchall()
+        assert len(rows)==1
+        payload=json.loads(rows[0]['payload'])
+        assert payload['project']['board']==board
+        assert payload['project']['project_id']==board
+        assert payload['source']['thread_id']==topic
+        assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0]==0
+    runner._handle_kanban_command.assert_not_called()

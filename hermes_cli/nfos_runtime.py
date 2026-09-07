@@ -27,6 +27,94 @@ def project_config(board, config=None):
     return dict(project,board=board) if isinstance(project,dict) and project.get('enabled') is True else None
 
 
+def adopt_existing_tasks(conn, *, board, project):
+    """Enroll idle retained work in the same dispatcher, without replaying it.
+
+    The task and its run/file history remain authoritative. This is an attached
+    recovery request, never a new transport message or a synthetic worker run.
+    A live old executor keeps its protocol until it exits; a later tick adopts
+    its unfinished card before any replacement can be dispatched.
+    """
+    adopted=[]
+    ids=conn.execute("""SELECT id FROM tasks WHERE task_role='work'
+        AND status NOT IN ('running','done','archived') AND current_run_id IS NULL
+        AND id NOT IN (SELECT task_id FROM nfos_workflows) ORDER BY created_at,id""").fetchall()
+    for candidate in ids:
+        with kb.write_txn(conn):
+            task=kb.get_task(conn,candidate['id'])
+            if (task.status in {'running','done','archived'} or task.current_run_id
+                    or delivery.get_workflow(conn,task.id)):
+                continue
+            if task.worker_pid and (kb._process_identity_matches(task.worker_pid,task.worker_started_at)
+                                    if task.worker_started_at is not None else kb._pid_alive(task.worker_pid)):
+                continue
+            runs=conn.execute('SELECT id FROM task_runs WHERE task_id=? ORDER BY id DESC',(task.id,)).fetchall()
+            if any(run_termination_pending(conn,task.id,run['id']) for run in runs):
+                continue
+            # Explicit intake recovery already owns this card. It must keep
+            # its original request identity rather than race the rollout.
+            if conn.execute("""SELECT 1 FROM nfos_requests WHERE status IN ('pending','starting')
+                AND json_extract(payload,'$.project.existing_task_id')=?""",(task.id,)).fetchone():
+                continue
+            sub=conn.execute('SELECT * FROM kanban_notify_subs WHERE task_id=? ORDER BY created_at,platform,chat_id,thread_id LIMIT 1',(task.id,)).fetchone()
+            source=(dict(platform=sub['platform'],chat_id=sub['chat_id'],thread_id=sub['thread_id'],
+                         profile=sub['notifier_profile']) if sub else dict(project.get('source') or {}))
+            source.update(message_id=task.id,message_identity_kind='retained-card')
+            source.setdefault('platform','kanban');source.setdefault('chat_id',board)
+            source.setdefault('thread_id',board)
+            profile=task.assignee or project.get('profile','default')
+            retained_project=dict(project,profile=profile,board=board)
+            retained_project.pop('existing_task_id',None)
+            source_key=delivery._json(['retained-card',board,task.id])
+            request_id='req_'+hashlib.sha256(source_key.encode()).hexdigest()[:24]
+            last_run=runs[0]['id'] if runs else None
+            origin={'kind':'retained-card','board':board,'task_id':task.id,
+                    'last_run_id':last_run,'status':task.status,
+                    'workspace_path':task.workspace_path,'branch_name':task.branch_name,
+                    'previous_goal_mode':task.goal_mode,'previous_delivery_type':task.delivery_type}
+            attachments=[dict(row) for row in conn.execute('SELECT * FROM task_attachments WHERE task_id=?',(task.id,))]
+            payload={'source':source,'text':task.body or task.title,'project':retained_project,
+                     'attachments':attachments,'origin':origin}
+            now=int(time.time())
+            conn.execute("INSERT INTO nfos_requests(id,source_key,payload,status,task_id,created_at) VALUES(?,?,?,'attached',?,?)",
+                         (request_id,source_key,delivery._json(payload),task.id,now))
+            conn.execute('INSERT INTO nfos_workflows(task_id,request_id,state_json,next_action,updated_at) VALUES(?,?,?,?,?)',
+                         (task.id,request_id,delivery._json({'legacy_adoption':origin}),
+                          'Read retained history and evidence; persist missing NFOS spec, then continue the unfinished step',now))
+            # The same NFOS delivery authority used for new cards replaces
+            # the old review gate. Preserve all old receipts for readback.
+            conn.execute('UPDATE task_git_delivery SET required=0 WHERE task_id=?',(task.id,))
+            conn.execute('UPDATE tasks SET goal_mode=1 WHERE id=?',(task.id,))
+            if task.delivery_type is None:
+                conn.execute('UPDATE tasks SET delivery_type=? WHERE id=?',
+                             (project.get('delivery_type','code'),task.id))
+            if source.get('platform')=='telegram' and source.get('chat_id') and source.get('thread_id'):
+                # Older subscriptions only displayed notifications. NFOS
+                # also persists the wake obligation for its Principal. The
+                # existing upsert preserves the subscription's read cursor.
+                kb.add_notify_sub(conn,task_id=task.id,platform='telegram',chat_id=source['chat_id'],
+                    thread_id=source['thread_id'],notifier_profile=source.get('profile') or profile,
+                    chat_type=None if sub else source.get('chat_type','group'),
+                    delivery_mode='notify+wake')
+            kb._append_event(conn,task.id,'nfos_legacy_adopted',dict(origin,request_id=request_id))
+            if task.status in {'blocked','review'}:
+                event=conn.execute("SELECT id,kind,payload FROM task_events WHERE task_id=? AND kind IN ('blocked','gave_up','review_requested') ORDER BY id DESC LIMIT 1",(task.id,)).fetchone()
+                context={'legacy_adoption':origin,'last_event':dict(event) if event else None,
+                         'instruction_revision':task.instruction_revision}
+                question=('Reavaliar o impedimento registrado no histórico e retomar o mesmo card se resolvível.'
+                          if task.status=='blocked' else
+                          'Conferir a entrega preservada e retomar no mesmo card para registrar a spec e evidências no NFOS.')
+                decision_id='dec_'+hashlib.sha256(source_key.encode()).hexdigest()[:24]
+                # Zero explicitly means this retained card has no historical
+                # run. Do not manufacture a run merely to ask its Principal.
+                conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,0,?)',
+                             (decision_id,task.id,last_run or 0,'impediment',question,delivery._json(context),now))
+                kb._append_event(conn,task.id,'nfos_principal_requested',
+                    {'decision_id':decision_id,'kind':'impediment','question':question,'retained_card':True},run_id=last_run)
+            adopted.append(task.id)
+    return adopted
+
+
 def _sync_directory(directory):
     # Production runs on Linux. Flushing the file alone does not persist its
     # rename or newly created parent directory entries across a power loss.
@@ -321,6 +409,13 @@ First use `show` to read the saved spec, stage, next action, decisions and exter
 effects. On recovery reuse that state and existing files, tests, commits and PRs;
 continue the unfinished step, without regenerating a spec or replaying a final
 answer. Inspect originals when analysis remains pending. The saved request in
+`show` may identify a retained card adopted from the previous workflow. Read its
+original comments, runs, attachments and workspace. Have TL verify and persist a
+missing NFOS spec from that existing scope and evidence before new implementation.
+Reuse completed work and verify existing PR/deploy effects before registering
+their readback; do not repeat delivery merely to fill new records. The adoption
+is neither proof of delivery nor a new request or authorization to expand scope.
+The saved request in
 `show` retains the original Telegram identity and attachments. If a batch or media
 contains additional independent tasks, persist them for the Principal with
 `ask --kind additional_tasks --input tasks.json`. JSON:

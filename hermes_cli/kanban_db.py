@@ -9277,7 +9277,7 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
     clears it.) Returns False when the task is missing or not in ``review``.
     """
     now = int(time.time())
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         _reclaim_dangling_run(
             conn, task_id, statuses=("review",), now=now,
             note="invariant recovery on review reopen",
@@ -9323,7 +9323,10 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
         )
         if cur.rowcount != 1:
             return False
-        _invalidate_git_delivery_candidate(conn, task_id)
+        # A retained NFOS review reopens only to formalize its saved delivery.
+        # Its old candidate/remote receipt remains evidence for readback.
+        if not conn.execute('SELECT 1 FROM nfos_workflows WHERE task_id=?',(task_id,)).fetchone():
+            _invalidate_git_delivery_candidate(conn, task_id)
         payload: dict[str, Any] = {"status": new_status}
         if implementer:
             payload["implementer"] = implementer
@@ -13428,6 +13431,11 @@ def _dispatch_once_locked(
         # claim_task also refuses the claim if termination remains pending.
         reconcile_runtime(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
+    from hermes_cli.nfos_runtime import project_config, dispatch_requests, adopt_existing_tasks
+    delivery_project = project_config(_normalize_board_slug(board) or get_current_board())
+    if delivery_project is not None and not dry_run:
+        adopt_existing_tasks(conn, board=_normalize_board_slug(board) or get_current_board(),
+                             project=delivery_project)
     # Existing workers may predate this process/code version. Adopt their
     # workspaces before looking at ready/review lanes so activation cannot
     # create a parallel writer beside an already-running task.
@@ -13495,8 +13503,6 @@ def _dispatch_once_locked(
             )
             spawn_budget = 1
 
-    from hermes_cli.nfos_runtime import project_config, dispatch_requests
-    delivery_project = project_config(_normalize_board_slug(board) or get_current_board())
     if delivery_project is not None:
         # Bootstrap is part of this same serialized dispatch tick. A reserved
         # request counts as a worker until its child atomically creates a run.
@@ -13526,6 +13532,7 @@ def _dispatch_once_locked(
         review_rows = conn.execute(
             "SELECT id, assignee FROM tasks "
             "WHERE status = 'review' AND task_role = 'work' AND claim_lock IS NULL "
+            "AND id NOT IN (SELECT task_id FROM nfos_workflows) "
             "ORDER BY priority DESC, created_at ASC"
         ).fetchall()
     # Review-lane reservation (OOF-30 review finding): the ready loop runs
