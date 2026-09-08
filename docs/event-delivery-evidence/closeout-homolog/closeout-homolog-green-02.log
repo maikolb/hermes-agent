@@ -1,0 +1,33 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:\Users\maiko\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 8 test files (~55 tests) under ['tests\\gateway\\test_nfos_terminal_receipt.py', 'tests\\gateway\\test_worker_closeout_traces.py', 'tests\\gateway\\test_kanban_notifier_durable.py', 'tests\\gateway\\test_nfos_principal_queue.py', 'tests\\hermes_cli\\test_nfos_homologation_binding.py', 'tests\\hermes_cli\\test_nfos_candidate_delivery.py', 'tests\\hermes_cli\\test_nfos_delivery_protocol.py', 'tests\\hermes_cli\\test_nfos_delivery_store.py']; running with -j 2
+[  5.5% |     3/~55 | ✓3 | ✗0] ✓ tests\gateway\test_nfos_principal_queue.py (3✓, 11.5s)
+[ 20.0% |    11/~55 | ✓11 | ✗ 0] ✓ tests\gateway\test_kanban_notifier_durable.py (8✓, 14.2s)
+[ 21.8% |    12/~55 | ✓12 | ✗ 0] ✓ tests\gateway\test_nfos_terminal_receipt.py (1✓, 9.3s)
+[ 43.6% |    24/~55 | ✓24 | ✗ 0] ✓ tests\gateway\test_worker_closeout_traces.py (12✓, 9.5s)
+[ 45.5% |    25/~55 | ✓25 | ✗ 0] ✓ tests\hermes_cli\test_nfos_delivery_protocol.py (1✓, 7.7s)
+[ 58.2% |    32/~55 | ✓32 | ✗ 0] ✓ tests\hermes_cli\test_nfos_candidate_delivery.py (7✓, 12.7s)
+[ 67.3% |    37/~55 | ✓37 | ✗ 0] ✓ tests\hermes_cli\test_nfos_homologation_binding.py (5✓, 11.5s)
+[100.0% |    55/~55 | ✓55 | ✗ 0] ✓ tests\hermes_cli\test_nfos_delivery_store.py (18✓, 26.4s)
+
+=== Summary: 8 files, 55 tests passed, 0 failed (100% complete) in 57.7s (2 workers) ===
+  Durations cached to test_durations.json (8 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   8
+  Total subprocess CPU-wall: 102.7s  (runner wall: 57.7s, parallelism: 2x)
+  P50: 11.53s  P90: 26.39s  P95: 26.39s  P99: 26.39s  Max: 26.39s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     26.39s  tests\hermes_cli\test_nfos_delivery_store.py
+     14.16s  tests\gateway\test_kanban_notifier_durable.py
+     12.67s  tests\hermes_cli\test_nfos_candidate_delivery.py
+     11.53s  tests\gateway\test_nfos_principal_queue.py
+     11.53s  tests\hermes_cli\test_nfos_homologation_binding.py
+      9.45s  tests\gateway\test_worker_closeout_traces.py
+      9.30s  tests\gateway\test_nfos_terminal_receipt.py
+      7.66s  tests\hermes_cli\test_nfos_delivery_protocol.py
+

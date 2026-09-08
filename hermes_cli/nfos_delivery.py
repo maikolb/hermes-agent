@@ -450,7 +450,7 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
         if task.delivery_type=='code' and stage in {'homolog','publish'}:
             if stage=='publish' and not _approved(conn,task_id,wf['spec_revision'],state=saved):
                 raise WorkflowError('Principal review of this candidate is pending')
-            _project_owned(conn,task_id,run_id,saved.get('homolog_sha'))
+            _project_owned(conn,task_id,run_id,_delivery_candidate(conn,task_id,saved))
         conn.execute('UPDATE nfos_workflows SET stage=?,next_action=?,state_json=?,updated_at=? WHERE task_id=?',
                      (stage,next_action,_json(saved),int(time.time()),task_id))
         _event(conn,task_id,run_id,'nfos_progress',{'stage':stage,'next_action':next_action,'state':updates})
@@ -613,13 +613,16 @@ def save_report(conn, task_id, run_id, report):
 
 
 def ask_principal(conn, task_id, run_id, *, kind, question, context):
-    if kind not in {'review','impediment','additional_tasks'} or not question.strip():
+    if kind not in {'review','impediment','additional_tasks','homologation'} or not question.strip():
         raise WorkflowError('A decision needs its kind and concrete question')
     with _kb().write_txn(conn):
         _owned(conn,task_id,run_id)
         if kind=='review':
             _require_current_instruction_spec(conn,task_id)
         context=dict(context)
+        if kind=='homologation':
+            _require_current_instruction_spec(conn,task_id)
+            context=_homologation_context(conn,task_id,context)
         if kind=='additional_tasks':
             # Identity follows the saved proposal, not the execution/question
             # wording. A restarted worker can recover the same answered item.
@@ -634,7 +637,7 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
             decision_id='dec_'+uuid.uuid4().hex[:20]
         existing=conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND run_id=? AND kind=? AND question=? AND status='pending'",
                                (task_id,run_id,kind,question)).fetchone()
-        if existing and kind!='additional_tasks':
+        if existing and kind not in {'additional_tasks','homologation'}:
             return existing['id']
         revision=get_workflow(conn,task_id)['spec_revision']
         if kind=='review':
@@ -830,6 +833,8 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             raise WorkflowError('Decision was already resolved')
         if action=='approve' and row['kind']!='review':
             raise WorkflowError('Only a delivery review can authorize publication')
+        if row['kind']=='homologation' and action=='continue':
+            _accept_homologation(conn,row)
         current_spec_revision=get_workflow(conn,row['task_id'])['spec_revision']
         # Operational questions can outlive spec preparation. Their answers
         # resolve the original question, never approve a different delivery.
@@ -860,7 +865,7 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             if task.delivery_type=='code':
                 if not all(identity.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')):
                     raise WorkflowError('Review needs the actual homologated candidate and evidence')
-                if not _confirmed(conn,task.id,'pr',identity['homolog_sha']):
+                if not _confirmed(conn,task.id,'pr',_delivery_candidate(conn,task.id)):
                     raise WorkflowError('Review needs the confirmed PR for this candidate')
             elif not identity.get('report_revision'):
                 raise WorkflowError('Review needs the saved report')
@@ -946,12 +951,79 @@ def reconsider_decision(conn, decision_id, *, action, reason, answer, author='Pr
         return new_id
 
 
+def _homologation_context(conn, task_id, context):
+    """Snapshot the evidence submitted for a bounded Principal judgment."""
+    if _kb().get_task(conn,task_id).delivery_type!='code':
+        raise WorkflowError('Homologation binding applies only to code delivery')
+    identity=dict(context.get('homologation') or {})
+    for key in ('candidate_sha','candidate_tree','homolog_sha','homolog_tree','baseline_sha'):
+        value=identity.get(key)
+        if not isinstance(value,str) or len(value) not in (40,64) or any(c not in '0123456789abcdef' for c in value):
+            raise WorkflowError('Homologation needs exact candidate, tested tree and baseline identities')
+    if identity.get('scope') not in {'same_tree','limited_delta'}:
+        raise WorkflowError('State whether homologation covers the same tree or a limited delta')
+    if identity['scope']=='same_tree' and identity['candidate_tree']!=identity['homolog_tree']:
+        raise WorkflowError('Different trees cannot claim same-tree homologation')
+    spec=get_spec(conn,task_id)
+    criteria=identity.get('criteria')
+    if not spec or not isinstance(criteria,list) or not criteria or not all(isinstance(x,str) for x in criteria) or not set(criteria)<={c['id'] for c in json.loads(spec['content'])['criteria']}:
+        raise WorkflowError('Homologation must identify the current spec criteria it covers')
+    refs=identity.get('evidence')
+    if not isinstance(refs,list) or not refs or not all(isinstance(x,str) for x in refs):
+        raise WorkflowError('Homologation requires readable local evidence of comparison, baseline and validation')
+    checks=[_inspect_local_evidence(path) for path in refs]
+    state=json.loads(get_workflow(conn,task_id)['state_json'])
+    receipt=_confirmed(conn,task_id,'homolog',identity['homolog_sha'])
+    actual=json.loads(receipt['evidence']) if receipt else {}
+    if state.get('homolog_sha')!=identity['homolog_sha'] or actual.get('tree')!=identity['homolog_tree']:
+        raise WorkflowError('Confirm the real homologation deployment before requesting equivalence')
+    return {'homologation':identity,'evidence_checks':checks,
+            'instruction_revision':_kb().get_task(conn,task_id).instruction_revision}
+
+
+def _accept_homologation(conn, decision):
+    wf=get_workflow(conn,decision['task_id'])
+    context=json.loads(decision['context'])
+    if decision['spec_revision']!=wf['spec_revision'] or context!=_homologation_context(conn,decision['task_id'],context):
+        raise WorkflowError('Homologation evidence or spec changed; request a new decision')
+    state=json.loads(wf['state_json']); identity=context['homologation']
+    state.update(candidate_sha=identity['candidate_sha'],candidate_tree=identity['candidate_tree'],
+                 homologation_decision=decision['id'])
+    conn.execute('UPDATE nfos_workflows SET state_json=?,updated_at=? WHERE task_id=?',
+                 (_json(state),int(time.time()),decision['task_id']))
+    _event(conn,decision['task_id'],decision['run_id'],'nfos_homologation_bound',
+           {'decision_id':decision['id'],'identity':identity,'evidence_checks':context['evidence_checks']})
+
+
+def _delivery_candidate(conn, task_id, state=None):
+    wf=get_workflow(conn,task_id)
+    state=json.loads(wf['state_json']) if state is None else state
+    candidate=state.get('candidate_sha') or state.get('homolog_sha')
+    if candidate==state.get('homolog_sha'):
+        return candidate
+    decision=get_decision(conn,state.get('homologation_decision'))
+    context=json.loads(decision['context']) if decision else {}
+    identity=context.get('homologation') or {}
+    task=_kb().get_task(conn,task_id)
+    if (not decision or decision['task_id']!=task_id or decision['kind']!='homologation'
+            or decision['status']!='resolved' or decision['action']!='continue' or decision['author']!='Principal'
+            or decision['spec_revision']!=wf['spec_revision'] or context.get('instruction_revision')!=task.instruction_revision
+            or any(identity.get(k)!=state.get(k) for k in ('candidate_sha','candidate_tree','homolog_sha'))):
+        raise WorkflowError('Distinct candidate requires current Principal homologation acceptance')
+    if any(_inspect_local_evidence(check['path'])!=check for check in context.get('evidence_checks',[])):
+        raise WorkflowError('Accepted homologation evidence changed; request a new decision')
+    return candidate
+
+
 def _review_identity(conn,task_id,*,state=None):
     wf=get_workflow(conn,task_id)
     task=_kb().get_task(conn,task_id)
     if task.delivery_type=='code':
         state=json.loads(wf['state_json']) if state is None else state
         identity={k:state.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')}
+        if state.get('candidate_sha'):
+            identity.update(candidate_sha=_delivery_candidate(conn,task_id,state),
+                            homologation_decision=state.get('homologation_decision'))
     else:
         report=_artifact(conn,task_id,'report')
         identity={'report_revision':report['revision'] if report else None}
@@ -999,11 +1071,12 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             _require_current_instruction_spec(conn,task_id)
             if operation in {'merge','deploy'} and not _approved(conn,task_id,wf['spec_revision']):
                 raise WorkflowError('Principal review of this candidate is pending')
-            _project_owned(conn,task_id,run_id,candidate if operation=='homolog' else state.get('homolog_sha'))
-            expected=candidate if operation=='homolog' else (state.get('integrated_sha') if operation=='deploy' else state.get('homolog_sha'))
+            delivery_candidate=_delivery_candidate(conn,task_id,state) if operation!='homolog' else candidate
+            _project_owned(conn,task_id,run_id,delivery_candidate)
+            expected=candidate if operation=='homolog' else (state.get('integrated_sha') if operation=='deploy' else delivery_candidate)
             if candidate!=expected:
                 raise WorkflowError('Use the confirmed integrated candidate' if operation=='deploy' else 'Use the homologated candidate')
-            if operation=='deploy' and not _confirmed(conn,task_id,'merge',state.get('homolog_sha')):
+            if operation=='deploy' and not _confirmed(conn,task_id,'merge',delivery_candidate):
                 raise WorkflowError('Confirm the integrated merge before deploy')
         key=hashlib.sha256(_json([task_id,operation,target,candidate]).encode()).hexdigest()
         existing=_row(conn,'nfos_effects','id',key)
@@ -1120,7 +1193,10 @@ def completion_ready(conn, task_id, *, evidence_check=None):
             'spec_revision':wf['spec_revision'],
             'evidence_sha256':hashlib.sha256(report['evidence'].encode()).hexdigest()}:
         return False
-    if not _approved(conn,task_id,wf['spec_revision']):
+    try:
+        if not _approved(conn,task_id,wf['spec_revision']):
+            return False
+    except WorkflowError:
         return False
     task=_kb().get_task(conn,task_id)
     if task.delivery_type=='code':
@@ -1129,7 +1205,7 @@ def completion_ready(conn, task_id, *, evidence_check=None):
         if any(not state.get(k) for k in required):
             return False
         if not all(_confirmed(conn,task_id,operation,candidate) for operation,candidate in
-                [('pr',state['homolog_sha']),('merge',state['homolog_sha']),('deploy',state['integrated_sha'])]):
+                [('pr',_delivery_candidate(conn,task_id,state)),('merge',_delivery_candidate(conn,task_id,state)),('deploy',state['integrated_sha'])]):
             return False
     return True
 
@@ -1199,7 +1275,7 @@ def main():
     parser.add_argument('--author',default='Claude TL',choices=['Claude TL','Codex'])
     parser.add_argument('--stage')
     parser.add_argument('--next',dest='next_action',default='')
-    parser.add_argument('--kind',choices=['review','impediment','additional_tasks'])
+    parser.add_argument('--kind',choices=['review','impediment','additional_tasks','homologation'])
     parser.add_argument('--decision')
     parser.add_argument('--timeout',type=float,default=300,help='Maximum wait duration; pending is not failure')
     parser.add_argument('--resolution',choices=['continue','approve','changes','human'])
