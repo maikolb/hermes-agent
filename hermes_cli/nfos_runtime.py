@@ -477,6 +477,26 @@ change it after approval without requesting another review. Minimal report JSON:
 "criteria":[{"id":"C1","status":"PASS","evidence":["proof"]}]}.
 Each criteria.evidence entry names the id or path of a declared artifact, not a
 free-text claim. Use FAIL or NOT_RUN for criteria that have not been demonstrated.
+For code delivery whose canonical HML deployment requires staging integration,
+use a separate preparation review BEFORE that integration; do not fabricate HML.
+Keep candidate_sha and candidate_tree in progress state. Ask with
+`ask --kind preparation --input preparation.json`, whose context.preparation is
+{"candidate_sha":"FULL_SHA","candidate_tree":"FULL_TREE",
+ "repository":"https://github.com/OWNER/REPO","base_ref":"staging",
+ "target":"https://github.com/OWNER/REPO/tree/staging"}.
+The Principal's `continue` binds that task/spec/candidate/tree/exact staging
+repository and destination; it is NOT production approval. Acquire the project
+slot for this candidate. Journal `effect --operation staging_pr|staging_merge`
+with --target equal to that exact staging target and --candidate equal to the
+reviewed SHA. Read back the staging PR before merge. Both receipts identify
+candidate, tree, repository, base_ref, target, actual PR url and readback;
+staging_merge also identifies integrated_sha. The integrated tree must match
+this prepared candidate. Unknown/repeated effects require readback before retry.
+These separate staging effects never satisfy production PR/merge/review gates.
+After integration, reconcile the actual HML artifact and test it normally below.
+If HML and the production PR candidate differ, use the explicit homologation
+binding review below; never erase candidate_sha or invent equivalence.
+
 For code delivery, acquire the project slot with `acquire-project --candidate SHA`
 before homologation; if occupied, save state and let the predecessor finish.
 Record the HML deployment with `effect --operation homolog --target HML_URL
