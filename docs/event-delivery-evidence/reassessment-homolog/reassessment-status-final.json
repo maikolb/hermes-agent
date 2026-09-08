@@ -1,0 +1,42 @@
+{
+  "at": "2026-09-08T03:56:16.125879+00:00",
+  "hml": [
+    {
+      "root": "/var/tmp/nfos-12h/reassessment-homolog-2lkz3iwq",
+      "runner_ready": true,
+      "result": {
+        "started": "2026-09-08T03:50:03.124752+00:00",
+        "finished": "2026-09-08T03:54:33.421404+00:00",
+        "exit_code": 0,
+        "files": {
+          "gateway/kanban_watchers.py": "96d2e806ed7b6cd515aaf6e2b0dd7bce8886996437952072ff3b5f7cf2cd9157",
+          "hermes_cli/nfos_delivery.py": "5469b046e5b8bc1babb6a08c36917825552633fcf20fd6852869a1bf3ab98991",
+          "hermes_cli/nfos_runtime.py": "05c658eb04236ec9e3951e21ade3ffef8f40bfd454864ad830bc3d527f11f807",
+          "tests/gateway/test_nfos_terminal_receipt.py": "0f65b1e4ccd2e74e8efbb3b51d1d679d313b59c939757f28c16ab0fd5a9c238d",
+          "tests/hermes_cli/test_nfos_homologation_binding.py": "bbae694c1e8b955d5899a94a188fcb389426f9415a4d60249a7b9090555c581d"
+        },
+        "command": [
+          "bash",
+          "scripts/run_tests.sh",
+          "-j",
+          "1",
+          "--file-retries",
+          "0",
+          "--file-timeout",
+          "900",
+          "tests/gateway/test_nfos_terminal_receipt.py",
+          "tests/gateway/test_kanban_alert_integrity.py",
+          "tests/gateway/test_kanban_notifier_durable.py"
+        ],
+        "production_modified": false
+      },
+      "progress": [
+        "[ 35.7% |     5/~14 | ✓5 | ✗0] ✓ tests/gateway/test_kanban_alert_integrity.py (5✓, 93.4s)",
+        "[ 92.9% |    13/~14 | ✓13 | ✗ 0] ✓ tests/gateway/test_kanban_notifier_durable.py (8✓, 105.3s)",
+        "[100.0% |    14/~14 | ✓14 | ✗ 0] ✓ tests/gateway/test_nfos_terminal_receipt.py (1✓, 46.1s)",
+        "=== Summary: 3 files, 14 tests passed, 0 failed (100% complete) in 245.0s (1 workers) ==="
+      ]
+    }
+  ],
+  "release_prepared": true
+}

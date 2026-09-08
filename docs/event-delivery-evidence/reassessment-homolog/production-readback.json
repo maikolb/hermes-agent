@@ -1,0 +1,86 @@
+{
+  "at": "2026-09-08T04:06:22.925793+00:00",
+  "candidate": "e7a01798709491c71fd01c6a3157777198dac147",
+  "services": {
+    "default": {
+      "pid": 4006116,
+      "started_at": 1788840230.76,
+      "code_paths": [
+        "/usr/local/lib/hermes-agent.release-20260907-e7a01798709491c71fd01c6a3157777198dac147/venv/bin/python3",
+        "/usr/local/lib/hermes-agent.release-20260907-e7a01798709491c71fd01c6a3157777198dac147/venv/bin/hermes"
+      ],
+      "matches_candidate": true,
+      "state": "active",
+      "runtime": {
+        "pid": 4006116,
+        "gateway_state": "running",
+        "active_agents": 0,
+        "updated_at": "2026-09-08T04:04:55.925724+00:00"
+      },
+      "drain_files": []
+    },
+    "hermes-project-factory": {
+      "pid": 4006819,
+      "started_at": 1788840260.96,
+      "code_paths": [
+        "/usr/local/lib/hermes-agent.release-20260907-e7a01798709491c71fd01c6a3157777198dac147/venv/bin/python3",
+        "/usr/local/lib/hermes-agent.release-20260907-e7a01798709491c71fd01c6a3157777198dac147/venv/bin/hermes"
+      ],
+      "matches_candidate": true,
+      "state": "active",
+      "runtime": {
+        "pid": 4006819,
+        "gateway_state": "running",
+        "active_agents": 1,
+        "updated_at": "2026-09-08T04:05:33.628347+00:00"
+      },
+      "drain_files": []
+    }
+  },
+  "configuration": [
+    {
+      "path": "/srv/hermes/config.yaml",
+      "before_sha256": "80ecccf9c6f2e51bcf24550599d9658bc7da144fb76195e2b5c76d2fae813888",
+      "current_sha256": "80ecccf9c6f2e51bcf24550599d9658bc7da144fb76195e2b5c76d2fae813888",
+      "preserved": true
+    },
+    {
+      "path": "/srv/hermes/profiles/hermes-project-factory/config.yaml",
+      "before_sha256": "3b17c0f9d4575e5adc945f2512b6e524f2b337c80b9d569269b4a3600f8e9d12",
+      "current_sha256": "3b17c0f9d4575e5adc945f2512b6e524f2b337c80b9d569269b4a3600f8e9d12",
+      "preserved": true
+    }
+  ],
+  "gateways_activated": true,
+  "activation": {
+    "started": "2026-09-08T03:59:16.225268+00:00",
+    "finished": "2026-09-08T04:04:23.222096+00:00",
+    "sha": "e7a01798709491c71fd01c6a3157777198dac147",
+    "merged_sha": "face7e0429f1ae907acc4bb05c7bc869091b27ae",
+    "activated": true,
+    "phase": "activated",
+    "maintenance_released": true
+  },
+  "running": [
+    {
+      "board": "concursa-ai",
+      "id": "t_0a2495e1",
+      "current_run_id": 438,
+      "worker_pid": 4008075,
+      "identity_alive": true,
+      "code_paths": [
+        "/usr/local/lib/hermes-agent.release-20260907-e7a01798709491c71fd01c6a3157777198dac147/venv/bin/python3"
+      ]
+    },
+    {
+      "board": "concursa-ai",
+      "id": "t_db5abada",
+      "current_run_id": 439,
+      "worker_pid": 4008121,
+      "identity_alive": true,
+      "code_paths": [
+        "/usr/local/lib/hermes-agent.release-20260907-e7a01798709491c71fd01c6a3157777198dac147/venv/bin/python3"
+      ]
+    }
+  ]
+}
