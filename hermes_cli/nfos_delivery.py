@@ -613,13 +613,16 @@ def save_report(conn, task_id, run_id, report):
 
 
 def ask_principal(conn, task_id, run_id, *, kind, question, context):
-    if kind not in {'review','impediment','additional_tasks','homologation'} or not question.strip():
+    if kind not in {'review','impediment','additional_tasks','homologation','preparation'} or not question.strip():
         raise WorkflowError('A decision needs its kind and concrete question')
     with _kb().write_txn(conn):
         _owned(conn,task_id,run_id)
         if kind=='review':
             _require_current_instruction_spec(conn,task_id)
         context=dict(context)
+        if kind=='preparation':
+            from hermes_cli import nfos_preparation
+            context['preparation_identity']=nfos_preparation.identity(conn,task_id,context.get('preparation'))
         if kind=='homologation':
             _require_current_instruction_spec(conn,task_id)
             context=_homologation_context(conn,task_id,context)
@@ -833,6 +836,9 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             raise WorkflowError('Decision was already resolved')
         if action=='approve' and row['kind']!='review':
             raise WorkflowError('Only a delivery review can authorize publication')
+        if row['kind']=='preparation' and action=='continue':
+            from hermes_cli import nfos_preparation
+            nfos_preparation.check_current(conn,row)
         if row['kind']=='homologation' and action=='continue':
             _accept_homologation(conn,row)
         current_spec_revision=get_workflow(conn,row['task_id'])['spec_revision']
@@ -1058,12 +1064,16 @@ def _project_owned(conn,task_id,run_id,candidate):
 
 
 def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
-    if operation not in {'homolog','pr','merge','deploy'} or not target or not candidate:
+    if operation not in {'homolog','pr','merge','deploy','staging_pr','staging_merge'} or not target or not candidate:
         raise WorkflowError('External effect needs operation, destination and exact candidate')
     with _kb().write_txn(conn):
         task=_owned(conn,task_id,run_id)
         if _scope_needs_new_spec(get_workflow(conn,task_id)):
             raise WorkflowError('Principal changed the primary task; persist a newer spec before external effects')
+        staging=operation in {'staging_pr','staging_merge'}
+        preparation=None
+        if staging and task.delivery_type!='code':
+            raise WorkflowError('Staging preparation applies only to code delivery')
         if task.delivery_type=='code':
             wf=get_workflow(conn,task_id);state=json.loads(wf['state_json'])
             if not wf['spec_revision']:
@@ -1071,7 +1081,12 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             _require_current_instruction_spec(conn,task_id)
             if operation in {'merge','deploy'} and not _approved(conn,task_id,wf['spec_revision']):
                 raise WorkflowError('Principal review of this candidate is pending')
-            delivery_candidate=_delivery_candidate(conn,task_id,state) if operation!='homolog' else candidate
+            if staging:
+                from hermes_cli import nfos_preparation
+                preparation=nfos_preparation.authorized(conn,task_id,target,candidate)
+                if operation=='staging_merge':
+                    nfos_preparation.confirmed_pr(conn,task_id,candidate,target)
+            delivery_candidate=candidate if staging or operation=='homolog' else _delivery_candidate(conn,task_id,state)
             _project_owned(conn,task_id,run_id,delivery_candidate)
             expected=candidate if operation=='homolog' else (state.get('integrated_sha') if operation=='deploy' else delivery_candidate)
             if candidate!=expected:
@@ -1090,6 +1105,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         now=int(time.time())
         conn.execute('INSERT INTO nfos_effects(id,task_id,run_id,operation,target,candidate,status,created_at,updated_at) VALUES(?,?,?,?,?,?,\'unknown\',?,?)',
                      (key,task_id,run_id,operation,target,candidate,now,now))
+        if preparation:
+            conn.execute('UPDATE nfos_effects SET evidence=? WHERE id=?',(_json(preparation),key))
         _event(conn,task_id,run_id,'nfos_effect_requested',{'effect_id':key,'operation':operation,'target':target,'candidate':candidate})
         return {'id':key,'execute':True,'reconcile':False,'status':'unknown'}
 
@@ -1108,7 +1125,14 @@ def reconcile_effect(conn, effect_id, *, found, evidence, caller_task_id=None, c
         if effect['status']=='confirmed' and not found:
             raise WorkflowError('Confirmed effect cannot be undone by an absent lookup')
         task=_kb().get_task(conn,effect['task_id'])
-        if found and task.delivery_type=='code':
+        staging=effect['operation'] in {'staging_pr','staging_merge'}
+        if staging:
+            from hermes_cli import nfos_preparation
+            wf=get_workflow(conn,task.id);state=json.loads(wf['state_json'])
+            evidence=nfos_preparation.reconcile(conn,effect,found,evidence,state)
+            conn.execute('UPDATE nfos_workflows SET state_json=?,updated_at=? WHERE task_id=?',
+                         (_json(state),int(time.time()),task.id))
+        if found and task.delivery_type=='code' and not staging:
             wf=get_workflow(conn,task.id);state=json.loads(wf['state_json'])
             if evidence.get('candidate')!=effect['candidate']:
                 raise WorkflowError('Destination readback must identify this exact candidate')
@@ -1235,7 +1259,7 @@ def acquire_project(conn, project, task_id, run_id, candidate):
                                   (current['run_id'],current['task_id'])).fetchone()
             if not previous or not previous['ended_at'] or _run_process_alive(conn,current['task_id'],current['run_id']):
                 return False
-            unknown=conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('homolog','merge','deploy')",
+            unknown=conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('homolog','merge','deploy','staging_pr','staging_merge')",
                                  (current['task_id'],)).fetchone()
             # The replacement run may reconcile its own exact candidate.
             # Another candidate/task cannot overwrite an ambiguous delivery.
@@ -1251,7 +1275,7 @@ def acquire_project(conn, project, task_id, run_id, candidate):
 
 def release_project(conn, project, task_id, run_id):
     with _kb().write_txn(conn):
-        if conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('homolog','merge','deploy')",(task_id,)).fetchone():
+        if conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('homolog','merge','deploy','staging_pr','staging_merge')",(task_id,)).fetchone():
             raise WorkflowError('Read the unresolved homologation/merge/deploy destination before releasing publication')
         changed=conn.execute('DELETE FROM nfos_project_delivery WHERE project=? AND task_id=? AND run_id=?',
                              (project,task_id,run_id)).rowcount
@@ -1275,11 +1299,11 @@ def main():
     parser.add_argument('--author',default='Claude TL',choices=['Claude TL','Codex'])
     parser.add_argument('--stage')
     parser.add_argument('--next',dest='next_action',default='')
-    parser.add_argument('--kind',choices=['review','impediment','additional_tasks','homologation'])
+    parser.add_argument('--kind',choices=['review','impediment','additional_tasks','homologation','preparation'])
     parser.add_argument('--decision')
     parser.add_argument('--timeout',type=float,default=300,help='Maximum wait duration; pending is not failure')
     parser.add_argument('--resolution',choices=['continue','approve','changes','human'])
-    parser.add_argument('--operation',choices=['homolog','pr','merge','deploy'])
+    parser.add_argument('--operation',choices=['homolog','pr','merge','deploy','staging_pr','staging_merge'])
     parser.add_argument('--target')
     parser.add_argument('--candidate')
     parser.add_argument('--effect-id')
