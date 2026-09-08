@@ -1,0 +1,96 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:\Users\maiko\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 1 test files (~5 tests) under ['tests\\gateway\\test_kanban_alert_integrity.py']; running with -j 2
+[100.0% |     5/~5 | ✓4 | ✗1] ✗ tests\gateway\test_kanban_alert_integrity.py (4✓ 1✗, 11.1s)
+
+  ╔╍ Failed: tests\gateway\test_kanban_alert_integrity.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║ plugins: anyio-4.12.1, asyncio-1.4.0
+  ║ asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+  ║ collected 5 items
+  ║ 
+  ║ tests\gateway\test_kanban_alert_integrity.py ....F                       [100%]
+  ║ 
+  ║ ================================== FAILURES ===================================
+  ║ ____ test_native_notifier_keeps_reassessment_brief_without_internal_prompt ____
+  ║ 
+  ║ card = 't_561d415e'
+  ║ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000023BAB607D90>
+  ║ 
+  ║     def test_native_notifier_keeps_reassessment_brief_without_internal_prompt(card,monkeypatch):
+  ║         with kb.connect_closing() as c:
+  ║             kb.block_task(c,card,reason='Missing source evidence',kind='needs_input')
+  ║             kb.add_notify_sub(c,task_id=card,platform='telegram',chat_id='chat-1')
+  ║             with kb.write_txn(c):
+  ║                 kb._append_event(c,card,'blocked',{'reassessment_requested':True,
+  ║                     'summary':'INTERNAL recovery instructions','reason':'INTERNAL reasoning'})
+  ║         adapter=RecordingAdapter()
+  ║         asyncio.run(_run_one_notifier_tick(monkeypatch,_make_runner(adapter)))
+  ║         assert len(adapter.sent)==1
+  ║         text=adapter.sent[0]['text']
+  ║ >       assert 'em reavaliação' in text and 'INTERNAL' not in text and 'Worker bloqueado' not in text
+  ║ E       AssertionError: assert ('em reavaliação' in '⛔ Worker bloqueado: Existing report\n\nMissing source evidence\n\n[default] Kanban t_561d415e')
+  ║ 
+  ║ tests\gateway\test_kanban_alert_integrity.py:79: AssertionError
+  ║ =========================== short test summary info ===========================
+  ║ FAILED tests/gateway/test_kanban_alert_integrity.py::test_native_notifier_keeps_reassessment_brief_without_internal_prompt
+  ║ ========================= 1 failed, 4 passed in 5.11s =========================
+  ║
+  ║  Repro: python -m pytest tests\gateway\test_kanban_alert_integrity.py
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+
+=== Summary: 1 files, 4 tests passed, 1 failed (100% complete) in 11.1s (2 workers) ===
+  Durations cached to test_durations.json (1 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   1
+  Total subprocess CPU-wall: 11.1s  (runner wall: 11.1s, parallelism: 2x)
+  P50: 11.11s  P90: 11.11s  P95: 11.11s  P99: 11.11s  Max: 11.11s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     11.11s  tests\gateway\test_kanban_alert_integrity.py
+
+=== Failure output ===
+
+--- tests\gateway\test_kanban_alert_integrity.py ---
+============================= test session starts =============================
+platform win32 -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 5 items
+
+tests\gateway\test_kanban_alert_integrity.py ....F                       [100%]
+
+================================== FAILURES ===================================
+____ test_native_notifier_keeps_reassessment_brief_without_internal_prompt ____
+
+card = 't_561d415e'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000023BAB607D90>
+
+    def test_native_notifier_keeps_reassessment_brief_without_internal_prompt(card,monkeypatch):
+        with kb.connect_closing() as c:
+            kb.block_task(c,card,reason='Missing source evidence',kind='needs_input')
+            kb.add_notify_sub(c,task_id=card,platform='telegram',chat_id='chat-1')
+            with kb.write_txn(c):
+                kb._append_event(c,card,'blocked',{'reassessment_requested':True,
+                    'summary':'INTERNAL recovery instructions','reason':'INTERNAL reasoning'})
+        adapter=RecordingAdapter()
+        asyncio.run(_run_one_notifier_tick(monkeypatch,_make_runner(adapter)))
+        assert len(adapter.sent)==1
+        text=adapter.sent[0]['text']
+>       assert 'em reavaliação' in text and 'INTERNAL' not in text and 'Worker bloqueado' not in text
+E       AssertionError: assert ('em reavaliação' in '⛔ Worker bloqueado: Existing report\n\nMissing source evidence\n\n[default] Kanban t_561d415e')
+
+tests\gateway\test_kanban_alert_integrity.py:79: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/gateway/test_kanban_alert_integrity.py::test_native_notifier_keeps_reassessment_brief_without_internal_prompt
+========================= 1 failed, 4 passed in 5.11s =========================
+
+=== 1 file with test failures (1 test failed) ===
+  tests\gateway\test_kanban_alert_integrity.py  (1 test failed)
+
