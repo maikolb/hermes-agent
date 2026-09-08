@@ -1,0 +1,29 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:\Users\maiko\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 6 test files (~38 tests) under ['tests\\gateway\\test_kanban_alert_integrity.py', 'tests\\gateway\\test_nfos_terminal_receipt.py', 'tests\\gateway\\test_kanban_notifier_durable.py', 'tests\\gateway\\test_worker_closeout_traces.py', 'tests\\hermes_cli\\test_nfos_homologation_binding.py', 'tests\\hermes_cli\\test_nfos_candidate_delivery.py']; running with -j 2
+[ 13.2% |     5/~38 | ✓5 | ✗0] ✓ tests\gateway\test_kanban_alert_integrity.py (5✓, 12.0s)
+[ 34.2% |    13/~38 | ✓13 | ✗ 0] ✓ tests\gateway\test_kanban_notifier_durable.py (8✓, 14.5s)
+[ 36.8% |    14/~38 | ✓14 | ✗ 0] ✓ tests\gateway\test_nfos_terminal_receipt.py (1✓, 10.1s)
+[ 68.4% |    26/~38 | ✓26 | ✗ 0] ✓ tests\gateway\test_worker_closeout_traces.py (12✓, 10.0s)
+[ 86.8% |    33/~38 | ✓33 | ✗ 0] ✓ tests\hermes_cli\test_nfos_candidate_delivery.py (7✓, 12.5s)
+[100.0% |    38/~38 | ✓38 | ✗ 0] ✓ tests\hermes_cli\test_nfos_homologation_binding.py (5✓, 11.0s)
+
+=== Summary: 6 files, 38 tests passed, 0 failed (100% complete) in 35.5s (2 workers) ===
+  Durations cached to test_durations.json (6 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   6
+  Total subprocess CPU-wall: 70.1s  (runner wall: 35.5s, parallelism: 2x)
+  P50: 12.00s  P90: 14.47s  P95: 14.47s  P99: 14.47s  Max: 14.47s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     14.47s  tests\gateway\test_kanban_notifier_durable.py
+     12.47s  tests\hermes_cli\test_nfos_candidate_delivery.py
+     12.00s  tests\gateway\test_kanban_alert_integrity.py
+     11.02s  tests\hermes_cli\test_nfos_homologation_binding.py
+     10.09s  tests\gateway\test_nfos_terminal_receipt.py
+     10.01s  tests\gateway\test_worker_closeout_traces.py
+

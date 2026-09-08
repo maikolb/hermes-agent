@@ -3037,7 +3037,8 @@ class GatewayKanbanWatchersMixin:
                             # internal transition. They are also excluded from
                             # _WAKE_KINDS below, so they never wake the creator.
                             continue
-                        if kind in {"completed", "blocked"} and sub.get("_notify_receipt"):
+                        if (kind in {"completed", "blocked"} and sub.get("_notify_receipt")
+                                and not (kind == "blocked" and (ev.payload or {}).get("reassessment_requested"))):
                             from gateway.display_config import resolve_display_setting
                             summary = await asyncio.to_thread(
                                 _read_worker_trace_summary, board_slug, sub["task_id"], kind
