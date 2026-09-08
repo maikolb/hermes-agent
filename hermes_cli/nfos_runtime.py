@@ -486,6 +486,16 @@ and requires the reviewed integrated SHA. HML readback does not itself prove
 that the acceptance tests passed.
 Save candidate_sha, candidate_tree, homolog_sha and homolog_evidence in progress
 state after testing the exact candidate in the project's actual homologation.
+If the actual HML SHA differs from the PR candidate, preserve both identities.
+Use `ask --kind homologation --input binding.json` for a Principal judgment,
+with context.homologation containing candidate_sha, candidate_tree, homolog_sha,
+homolog_tree, baseline_sha, scope (same_tree or limited_delta), covered criteria
+IDs and evidence (local file paths). First reconcile the actual HML deployment.
+Evidence must compare the complete PR delta, explain the candidate baseline and
+show which criteria the real validation covers. A partial comparison is not
+full-tree equivalence. The Principal may reject it and require exact-candidate
+homologation. Only its continue decision binds distinct identities; this does
+not authorize publication. Reacquire the slot for the bound candidate afterward.
 Create or update its PR through the effect/reconcile protocol. Then use
 `ask --kind review --input review.json` with candidate SHA,
 PR, homolog evidence and requested action. Wait for the Principal's decision.

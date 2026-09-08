@@ -1,0 +1,356 @@
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: C:\Users\maiko\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 2 test files (~4 tests) under ['tests\\gateway\\test_nfos_terminal_receipt.py', 'tests\\hermes_cli\\test_nfos_homologation_binding.py']; running with -j 2
+[ 25.0% |     1/~4 | ✓0 | ✗1] ✗ tests\gateway\test_nfos_terminal_receipt.py (1✗, 10.9s)
+
+  ╔╍ Failed: tests\gateway\test_nfos_terminal_receipt.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║ RuntimeError: delivery failed
+  ║ WARNING  gateway.run:kanban_watchers.py:3330 kanban notifier: wake-only delivery failed for t_55b2acc4 (attempt 1/12): delivery failed
+  ║ Traceback (most recent call last):
+  ║   File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\kanban_watchers.py", line 3320, in _kanban_notifier_watcher
+  ║     if not await _push_wake():
+  ║            ^^^^^^^^^^^^^^^^^^
+  ║   File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\kanban_watchers.py", line 3301, in _push_wake
+  ║     accepted = await deliver_wake(
+  ║                ^^^^^^^^^^^^^^^^^^^
+  ║   File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\wake.py", line 148, in deliver_wake
+  ║     await adapter.handle_message(synth_event)
+  ║   File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\tests\gateway\test_kanban_notifier_durable.py", line 49, in handle_message
+  ║     raise RuntimeError("delivery failed")
+  ║ RuntimeError: delivery failed
+  ║ WARNING  gateway.run:kanban_watchers.py:3330 kanban notifier: wake-only delivery failed for t_55b2acc4 (attempt 1/12): delivery failed
+  ║ Traceback (most recent call last):
+  ║   File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\kanban_watchers.py", line 3320, in _kanban_notifier_watcher
+  ║     if not await _push_wake():
+  ║            ^^^^^^^^^^^^^^^^^^
+  ║   File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\kanban_watchers.py", line 3301, in _push_wake
+  ║     accepted = await deliver_wake(
+  ║                ^^^^^^^^^^^^^^^^^^^
+  ║   File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\wake.py", line 148, in deliver_wake
+  ║     await adapter.handle_message(synth_event)
+  ║   File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\tests\gateway\test_kanban_notifier_durable.py", line 49, in handle_message
+  ║     raise RuntimeError("delivery failed")
+  ║ RuntimeError: delivery failed
+  ║ =========================== short test summary info ===========================
+  ║ FAILED tests/gateway/test_nfos_terminal_receipt.py::test_block_closeout_is_once_across_failed_wakes_and_gateway_restarts
+  ║ ============================== 1 failed in 3.63s ==============================
+  ║
+  ║  Repro: python -m pytest tests\gateway\test_nfos_terminal_receipt.py
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+[100.0% |     4/~4 | ✓0 | ✗4] ✗ tests\hermes_cli\test_nfos_homologation_binding.py (3✗, 12.1s)
+
+  ╔╍ Failed: tests\hermes_cli\test_nfos_homologation_binding.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║ ----------------------------- Captured log setup ------------------------------
+  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+  ║ INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+  ║ INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+  ║ INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+  ║ INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+  ║ INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+  ║ =========================== short test summary info ===========================
+  ║ FAILED tests/hermes_cli/test_nfos_homologation_binding.py::test_distinct_shas_keep_real_hml_and_require_separate_release_review
+  ║ FAILED tests/hermes_cli/test_nfos_homologation_binding.py::test_equivalence_cannot_be_self_declared_or_approve_publication
+  ║ FAILED tests/hermes_cli/test_nfos_homologation_binding.py::test_changed_evidence_or_spec_cannot_receive_stale_acceptance
+  ║ ============================== 3 failed in 5.44s ==============================
+  ║
+  ║  Repro: python -m pytest tests\hermes_cli\test_nfos_homologation_binding.py
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+
+=== Summary: 2 files, 0 tests passed, 4 failed (100% complete) in 12.1s (2 workers) ===
+  Durations cached to test_durations.json (2 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   2
+  Total subprocess CPU-wall: 22.9s  (runner wall: 12.1s, parallelism: 2x)
+  P50: 12.06s  P90: 12.06s  P95: 12.06s  P99: 12.06s  Max: 12.06s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     12.06s  tests\hermes_cli\test_nfos_homologation_binding.py
+     10.88s  tests\gateway\test_nfos_terminal_receipt.py
+
+=== Failure output ===
+
+--- tests\gateway\test_nfos_terminal_receipt.py ---
+============================= test session starts =============================
+platform win32 -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 1 item
+
+tests\gateway\test_nfos_terminal_receipt.py F                            [100%]
+
+================================== FAILURES ===================================
+____ test_block_closeout_is_once_across_failed_wakes_and_gateway_restarts _____
+
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-iljos282/pytest-of-unknown/pytest-0/test_block_closeout_is_once_ac0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001B3B62B8590>
+
+    def test_block_closeout_is_once_across_failed_wakes_and_gateway_restarts(tmp_path, monkeypatch):
+        monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+        monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path/'board.db'))
+        config = {'kanban': {'agent_wake_on_events': True}, 'display': {'worker_rotation': True}}
+        monkeypatch.setattr('hermes_cli.config.load_config', lambda: config)
+        monkeypatch.setattr(kw, '_load_worker_focus_config', lambda *args: config)
+        with kb.connect_closing() as conn:
+            tid = kb.create_task(conn, title='Publish tested candidate', assignee='default', requires_repo=False)
+            kb.add_notify_sub(conn, task_id=tid, platform='telegram', chat_id='test', thread_id='8', delivery_mode='notify+wake')
+            kb.block_task(conn, tid, reason='Homologation binding unsupported', kind='needs_input')
+        adapter = RecordingAdapter()
+        for _ in range(3):
+            runner = _make_runner(adapter)
+            asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+            asyncio.run(runner._kanban_refresh_worker_focus())
+>       assert len(adapter.sent) == 1, 'Display closeout bypassed the durable delivery receipt'
+E       AssertionError: Display closeout bypassed the durable delivery receipt
+E       assert 4 == 1
+E        +  where 4 = len(['⏸ [default] @default Kanban t_55b2acc4 blocked: Homologation binding unsupported', '⛔ Worker bloqueado: Publish test...c4', '⛔ Worker bloqueado: Publish tested candidate\n\nHomologation binding unsupported\n\n[default] Kanban t_55b2acc4'])
+E        +    where ['⏸ [default] @default Kanban t_55b2acc4 blocked: Homologation binding unsupported', '⛔ Worker bloqueado: Publish test...c4', '⛔ Worker bloqueado: Publish tested candidate\n\nHomologation binding unsupported\n\n[default] Kanban t_55b2acc4'] = <tests.gateway.test_kanban_notifier_durable.RecordingAdapter object at 0x000001B3B62938D0>.sent
+
+tests\gateway\test_nfos_terminal_receipt.py:25: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  gateway.run:kanban_watchers.py:3330 kanban notifier: wake-only delivery failed for t_55b2acc4 (attempt 1/12): delivery failed
+Traceback (most recent call last):
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\kanban_watchers.py", line 3320, in _kanban_notifier_watcher
+    if not await _push_wake():
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\kanban_watchers.py", line 3301, in _push_wake
+    accepted = await deliver_wake(
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\wake.py", line 148, in deliver_wake
+    await adapter.handle_message(synth_event)
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\tests\gateway\test_kanban_notifier_durable.py", line 49, in handle_message
+    raise RuntimeError("delivery failed")
+RuntimeError: delivery failed
+WARNING  gateway.run:kanban_watchers.py:3330 kanban notifier: wake-only delivery failed for t_55b2acc4 (attempt 1/12): delivery failed
+Traceback (most recent call last):
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\kanban_watchers.py", line 3320, in _kanban_notifier_watcher
+    if not await _push_wake():
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\kanban_watchers.py", line 3301, in _push_wake
+    accepted = await deliver_wake(
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\wake.py", line 148, in deliver_wake
+    await adapter.handle_message(synth_event)
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\tests\gateway\test_kanban_notifier_durable.py", line 49, in handle_message
+    raise RuntimeError("delivery failed")
+RuntimeError: delivery failed
+WARNING  gateway.run:kanban_watchers.py:3330 kanban notifier: wake-only delivery failed for t_55b2acc4 (attempt 1/12): delivery failed
+Traceback (most recent call last):
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\kanban_watchers.py", line 3320, in _kanban_notifier_watcher
+    if not await _push_wake():
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\kanban_watchers.py", line 3301, in _push_wake
+    accepted = await deliver_wake(
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\gateway\wake.py", line 148, in deliver_wake
+    await adapter.handle_message(synth_event)
+  File "C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree\tests\gateway\test_kanban_notifier_durable.py", line 49, in handle_message
+    raise RuntimeError("delivery failed")
+RuntimeError: delivery failed
+=========================== short test summary info ===========================
+FAILED tests/gateway/test_nfos_terminal_receipt.py::test_block_closeout_is_once_across_failed_wakes_and_gateway_restarts
+============================== 1 failed in 3.63s ==============================
+
+--- tests\hermes_cli\test_nfos_homologation_binding.py ---
+============================= test session starts =============================
+platform win32 -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\maiko\Projetos\default-64c4270e467b6d39\new-chat-f520c76c60\assignee-publish-worktree
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 3 items
+
+tests\hermes_cli\test_nfos_homologation_binding.py FFF                   [100%]
+
+================================== FAILURES ===================================
+____ test_distinct_shas_keep_real_hml_and_require_separate_release_review _____
+
+delivery = (<hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000001AD6E9C0250>, Task(id='t_4a2d2ecd', title='Fix accept...ck_kind=None, block_recurrences=0, task_role='work', delivery_type='code', requires_repo=True, instruction_revision=0))
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-khk9g0ak/pytest-of-unknown/pytest-0/test_distinct_shas_keep_real_h0')
+
+    def test_distinct_shas_keep_real_hml_and_require_separate_release_review(delivery, tmp_path):
+        conn, task = delivery
+>       decision, _ = binding(conn, task, tmp_path)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\hermes_cli\test_nfos_homologation_binding.py:25: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\hermes_cli\test_nfos_homologation_binding.py:18: in binding
+    decision = d.ask_principal(conn, task.id, task.current_run_id, kind='homologation',
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000001AD6E9C0250>
+task_id = 't_4a2d2ecd', run_id = 1, kind = 'homologation'
+question = 'Review limited delta and remaining baseline; not publication'
+context = {'homologation': {'candidate_sha': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'candidate_tree': 'cccccccccccccccccccc...log_sha': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'homolog_tree': 'dddddddddddddddddddddddddddddddddddddddd', ...}}
+
+    def ask_principal(conn, task_id, run_id, *, kind, question, context):
+        if kind not in {'review','impediment','additional_tasks'} or not question.strip():
+>           raise WorkflowError('A decision needs its kind and concrete question')
+E           hermes_cli.nfos_delivery.WorkflowError: A decision needs its kind and concrete question
+
+hermes_cli\nfos_delivery.py:617: WorkflowError
+----------------------------- Captured log setup ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+_______ test_equivalence_cannot_be_self_declared_or_approve_publication _______
+
+delivery = (<hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000001AD6EC75650>, Task(id='t_0c903edb', title='Fix accept...ck_kind=None, block_recurrences=0, task_role='work', delivery_type='code', requires_repo=True, instruction_revision=0))
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-khk9g0ak/pytest-of-unknown/pytest-0/test_equivalence_cannot_be_sel0')
+
+    def test_equivalence_cannot_be_self_declared_or_approve_publication(delivery, tmp_path):
+        conn, task = delivery
+>       decision, _ = binding(conn, task, tmp_path)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\hermes_cli\test_nfos_homologation_binding.py:49: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\hermes_cli\test_nfos_homologation_binding.py:18: in binding
+    decision = d.ask_principal(conn, task.id, task.current_run_id, kind='homologation',
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000001AD6EC75650>
+task_id = 't_0c903edb', run_id = 1, kind = 'homologation'
+question = 'Review limited delta and remaining baseline; not publication'
+context = {'homologation': {'candidate_sha': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'candidate_tree': 'cccccccccccccccccccc...log_sha': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'homolog_tree': 'dddddddddddddddddddddddddddddddddddddddd', ...}}
+
+    def ask_principal(conn, task_id, run_id, *, kind, question, context):
+        if kind not in {'review','impediment','additional_tasks'} or not question.strip():
+>           raise WorkflowError('A decision needs its kind and concrete question')
+E           hermes_cli.nfos_delivery.WorkflowError: A decision needs its kind and concrete question
+
+hermes_cli\nfos_delivery.py:617: WorkflowError
+----------------------------- Captured log setup ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+________ test_changed_evidence_or_spec_cannot_receive_stale_acceptance ________
+
+delivery = (<hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000001AD6F5F6950>, Task(id='t_b06477e8', title='Fix accept...ck_kind=None, block_recurrences=0, task_role='work', delivery_type='code', requires_repo=True, instruction_revision=0))
+tmp_path = WindowsPath('C:/Users/maiko/AppData/Local/Temp/hermes-pytest-tmproot-khk9g0ak/pytest-of-unknown/pytest-0/test_changed_evidence_or_spec_0')
+
+    def test_changed_evidence_or_spec_cannot_receive_stale_acceptance(delivery, tmp_path):
+        conn, task = delivery
+>       decision, proof = binding(conn, task, tmp_path)
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\hermes_cli\test_nfos_homologation_binding.py:59: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\hermes_cli\test_nfos_homologation_binding.py:18: in binding
+    decision = d.ask_principal(conn, task.id, task.current_run_id, kind='homologation',
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <hermes_cli.sqlite_safe_read.TrackedConnection object at 0x000001AD6F5F6950>
+task_id = 't_b06477e8', run_id = 1, kind = 'homologation'
+question = 'Review limited delta and remaining baseline; not publication'
+context = {'homologation': {'candidate_sha': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'candidate_tree': 'cccccccccccccccccccc...log_sha': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'homolog_tree': 'dddddddddddddddddddddddddddddddddddddddd', ...}}
+
+    def ask_principal(conn, task_id, run_id, *, kind, question, context):
+        if kind not in {'review','impediment','additional_tasks'} or not question.strip():
+>           raise WorkflowError('A decision needs its kind and concrete question')
+E           hermes_cli.nfos_delivery.WorkflowError: A decision needs its kind and concrete question
+
+hermes_cli\nfos_delivery.py:617: WorkflowError
+----------------------------- Captured log setup ------------------------------
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browser-use' registered browser provider: browser-use
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-browserbase' registered browser provider: browserbase
+INFO     hermes_cli.plugins:plugins.py:2593 Plugin 'browser-firecrawl' registered browser provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'deepinfra' registered image_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'fal' registered image_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'krea' registered image_gen provider: krea
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai' registered image_gen provider: openai
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openai-codex' registered image_gen provider: openai-codex
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: openrouter
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'openrouter' registered image_gen provider: nous
+INFO     hermes_cli.plugins:plugins.py:2378 Plugin 'xai' registered image_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'deepinfra' registered video_gen provider: deepinfra
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'fal' registered video_gen provider: fal
+INFO     hermes_cli.plugins:plugins.py:2489 Plugin 'xai' registered video_gen provider: xai
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-brave-free' registered web provider: brave-free
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-ddgs' registered web provider: ddgs
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-exa' registered web provider: exa
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-firecrawl' registered web provider: firecrawl
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-keenable' registered web provider: keenable
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-parallel' registered web provider: parallel
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-searxng' registered web provider: searxng
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-tavily' registered web provider: tavily
+INFO     hermes_cli.plugins:plugins.py:2539 Plugin 'web-xai' registered web provider: xai
+INFO     hermes_cli.plugins:plugins.py:4208 Plugin discovery complete: 55 found, 49 enabled
+=========================== short test summary info ===========================
+FAILED tests/hermes_cli/test_nfos_homologation_binding.py::test_distinct_shas_keep_real_hml_and_require_separate_release_review
+FAILED tests/hermes_cli/test_nfos_homologation_binding.py::test_equivalence_cannot_be_self_declared_or_approve_publication
+FAILED tests/hermes_cli/test_nfos_homologation_binding.py::test_changed_evidence_or_spec_cannot_receive_stale_acceptance
+============================== 3 failed in 5.44s ==============================
+
+=== 2 files with test failures (4 tests failed) ===
+  tests\gateway\test_nfos_terminal_receipt.py  (1 test failed)
+  tests\hermes_cli\test_nfos_homologation_binding.py  (3 tests failed)
+

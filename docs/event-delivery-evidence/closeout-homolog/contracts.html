@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><style>body{font:19px system-ui;background:#101923;color:#edf2f6;padding:35px;max-width:1250px}h1{font-size:30px}pre{white-space:pre-wrap;background:#182b38;padding:24px;font:17px monospace}td,th{padding:14px;border:1px solid #536877;text-align:left}table{border-collapse:collapse}</style><h1>NFOS: avisos únicos e identidades de homologação</h1><p>Captura real dos resultados locais. Não comprova publicação nem entrega de produto.</p><table><tr><th>Requisito</th><th>Evidência executada</th></tr><tr><td>Aviso não se repete após falha do Principal e reinício</td><td>test_nfos_terminal_receipt: RED enviou 4; GREEN enviou 1, mantendo o card bloqueado.</td></tr><tr><td>SHAs separados, decisão vinculada e revisão obrigatória</td><td>5 testes de binding + 7 contratos de candidato; troca de evidência/spec/candidato rejeitada.</td></tr></table><pre>[  5.5% |     3/~55 | ✓3 | ✗0] ✓ tests\gateway\test_nfos_principal_queue.py (3✓, 11.5s)
+[ 20.0% |    11/~55 | ✓11 | ✗ 0] ✓ tests\gateway\test_kanban_notifier_durable.py (8✓, 14.2s)
+[ 21.8% |    12/~55 | ✓12 | ✗ 0] ✓ tests\gateway\test_nfos_terminal_receipt.py (1✓, 9.3s)
+[ 43.6% |    24/~55 | ✓24 | ✗ 0] ✓ tests\gateway\test_worker_closeout_traces.py (12✓, 9.5s)
+[ 45.5% |    25/~55 | ✓25 | ✗ 0] ✓ tests\hermes_cli\test_nfos_delivery_protocol.py (1✓, 7.7s)
+[ 58.2% |    32/~55 | ✓32 | ✗ 0] ✓ tests\hermes_cli\test_nfos_candidate_delivery.py (7✓, 12.7s)
+[ 67.3% |    37/~55 | ✓37 | ✗ 0] ✓ tests\hermes_cli\test_nfos_homologation_binding.py (5✓, 11.5s)
+[100.0% |    55/~55 | ✓55 | ✗ 0] ✓ tests\hermes_cli\test_nfos_delivery_store.py (18✓, 26.4s)
+=== Summary: 8 files, 55 tests passed, 0 failed (100% complete) in 57.7s (2 workers) ===</pre><p>Origem: C:\Users\maiko\Documents\Codex\2026-09-05\quero-corrigir-a-configura-o-operacional\outputs\nfos-12h\closeout-homolog-green-02.log</p>

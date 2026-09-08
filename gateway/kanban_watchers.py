@@ -1843,7 +1843,11 @@ class GatewayKanbanWatchersMixin:
                     # even when it never held the focus bubble (gap 5: the
                     # trace is per WORKER, not per display lane).
                     exits.setdefault(key, {})[str(task.id)] = {
-                        "kind": str(event.kind),
+                        # Receipt-backed notifications own terminal text. The
+                        # display must not send it again while wake ACK retries.
+                        "kind": ("notifier_owned" if sub.get("_notify_receipt")
+                                 and event.kind in {"completed", "blocked"}
+                                 else str(event.kind)),
                         "sub": dict(sub) if isinstance(sub, dict) else {},
                         "title": str(getattr(task, "title", "") or "")[:96],
                         "run_id": getattr(task, "current_run_id", None),
@@ -3033,6 +3037,20 @@ class GatewayKanbanWatchersMixin:
                             # internal transition. They are also excluded from
                             # _WAKE_KINDS below, so they never wake the creator.
                             continue
+                        if kind in {"completed", "blocked"} and sub.get("_notify_receipt"):
+                            from gateway.display_config import resolve_display_setting
+                            summary = await asyncio.to_thread(
+                                _read_worker_trace_summary, board_slug, sub["task_id"], kind
+                            )
+                            msg = _render_worker_trace_content(
+                                kind=kind, title=title, board=board_slug,
+                                task_id=sub["task_id"], run_id=getattr(ev, "run_id", None),
+                                summary=summary,
+                                trace_url_template=resolve_display_setting(
+                                    _load_worker_focus_config(sub.get("notifier_profile"), _load_config),
+                                    platform_str, "worker_rotation_trace_url", "",
+                                ),
+                            )
                         delivery_metadata = sub.get("delivery_metadata")
                         metadata: dict[str, Any] = (
                             dict(delivery_metadata)
