@@ -883,7 +883,9 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
         _event(conn,row['task_id'],row['run_id'],'nfos_principal_resolved',
                {'decision_id':decision_id,'action':action,'answer':answer,
                 'asked_spec_revision':row['spec_revision'],'resolved_spec_revision':current_spec_revision})
-        if json.loads(row['context']).get('legacy_adoption') and action in {'continue','changes'}:
+        context=json.loads(row['context'])
+        if (context.get('legacy_adoption') and not context.get('reconsideration_identity')
+                and action in {'continue','changes'}):
             from hermes_cli.nfos_runtime import previous_runs_termination_pending
             if previous_runs_termination_pending(conn,row['task_id']):
                 raise OwnershipConflict('Previous execution must exit before resuming retained work')
@@ -964,6 +966,8 @@ def reconsider_decision(conn, decision_id, *, action, reason, answer, author='Pr
             unblocked=_kb().unblock_task(conn,task.id)
             if not unblocked:
                 raise OwnershipConflict('The blocked card changed before reconsideration could resume it')
+            if old_context.get('legacy_adoption') and _kb().get_task(conn,task.id).status=='review':
+                _kb().reopen_review_task(conn,task.id)
         _event(conn,task.id,last['id'],'nfos_principal_reconsidered',
             {'decision_id':new_id,'supersedes':decision_id,'reason':reason,'action':resolved['action'],
              'answer':resolved['answer'],'identity':identity,'unblocked':unblocked})

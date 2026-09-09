@@ -279,3 +279,20 @@ def test_reconsidered_invalid_additional_proposal_replays_its_saved_changes(deli
     assert snapshot(conn)==before
     assert conn.execute('SELECT count(*) FROM nfos_requests').fetchone()[0]==1
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0]==1
+
+
+@pytest.mark.parametrize('another_human',[False,True])
+def test_legacy_reconsideration_unblocks_once_after_all_dependencies_resolve(delivery,another_human):
+    conn,task=delivery;old=human_block(conn,task,kind='impediment')
+    context=json.loads(d.get_decision(conn,old)['context']);context['legacy_adoption']=True
+    conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?',(json.dumps(context),old))
+    if another_human:
+        conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,status,created_at) SELECT 'other-human',task_id,run_id,kind,'Need authorized test account','{}',spec_revision,'human',created_at FROM nfos_decisions WHERE id=?",(old,))
+    conn.commit()
+    count=conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='unblocked'",(task.id,)).fetchone()[0]
+    new=reconsider(conn,old,action='continue',answer='Workspace identity was repaired; resume the preserved work')
+    assert d.get_decision(conn,old)['status']=='superseded'
+    assert d.get_decision(conn,new)['status']=='resolved'
+    assert kb.get_task(conn,task.id).status==('blocked' if another_human else 'ready')
+    assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='unblocked'",(task.id,)).fetchone()[0]==count+(not another_human)
+    assert not d._approved(conn,task.id,1)
