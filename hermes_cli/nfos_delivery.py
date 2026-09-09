@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 import time
@@ -250,6 +251,39 @@ def reserve_request(conn, *, capacity):
         return get_request(conn,row['id'])
 
 
+# Telegram group intake hands over the adapter's attribution envelope, one
+# ``[Sender|user_id]`` line followed by the message. The card title must show
+# the request, never that envelope: on 09/09 the dovcrm and concursa-ai boards
+# filled with cards titled ``[Maikol|996979567]`` and no request was readable.
+_ATTRIBUTION_LINE=re.compile(r'^\[[^\]\n]*\|[^\]\n]*\]$')
+_LEADING_MENTIONS=re.compile(r'^(?:@\w+\s*)+')
+_URL=re.compile(r'https?://([^\s/]+)(/\S*)?')
+REQUEST_TITLE_MAX=160
+
+
+def request_card_title(text, attachments=()):
+    """Title a request card with the request itself.
+
+    Drops the attribution line(s) and the bot mention that triggered the
+    intake, folds what remains into one line with links reduced to their host,
+    and cuts at a word boundary. Attachment-only requests name the attachment
+    kinds so the card still says what arrived.
+    """
+    lines=[line.strip() for line in str(text or '').splitlines()]
+    while lines and (not lines[0] or _ATTRIBUTION_LINE.match(lines[0])):
+        lines.pop(0)
+    excerpt=_LEADING_MENTIONS.sub('',' '.join(line for line in lines if line))
+    excerpt=_URL.sub(lambda m:m.group(1)+('/…' if (m.group(2) or '').strip('/') else ''),excerpt)
+    excerpt=' '.join(excerpt.split())
+    if not excerpt:
+        kinds=sorted({str(item.get('mime_type') or '').split('/')[0] for item in attachments if isinstance(item,dict)}-{''})
+        return 'Analyze attached request'+(' ('+', '.join(kinds)+')' if kinds else '')
+    if len(excerpt)<=REQUEST_TITLE_MAX:
+        return excerpt
+    cut=excerpt.rfind(' ',0,REQUEST_TITLE_MAX)
+    return excerpt[:cut if cut>REQUEST_TITLE_MAX//2 else REQUEST_TITLE_MAX-1].rstrip(' ,;:-')+'…'
+
+
 def bootstrap_card(conn, request_id, token, *, pid):
     kb=_kb()
     # claim_task's observers must see the complete request/card/run mapping.
@@ -286,7 +320,7 @@ def bootstrap_card(conn, request_id, token, *, pid):
                  int(kind=='code'),kind,project.get('max_runtime_seconds',7200),project.get('model'),
                  project.get('provider'),project.get('reasoning_effort'),task_id))
         else:
-            task_id=kb.create_task(conn,title=(original.strip().splitlines() or ['Analyze attached request'])[0][:200],
+            task_id=kb.create_task(conn,title=request_card_title(original,payload.get('attachments') or ()),
                 body=body,assignee=profile,created_by='worker:'+profile,
                 workspace_kind='worktree' if kind=='code' else 'scratch',
                 workspace_path=project.get('repo_path') if kind=='code' else None,
