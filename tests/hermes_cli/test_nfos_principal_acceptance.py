@@ -178,6 +178,8 @@ def test_config_applies_to_retained_tasks_without_changing_card_overrides(task_c
 
 def test_worker_spawn_uses_role_policy(task_context, monkeypatch):
     conn, task, _, _ = task_context
+    # Model a retained spec predating the new policy: no acceptance request yet.
+    conn.execute("DELETE FROM nfos_decisions WHERE task_id=?",(task.id,));conn.commit()
     captured = []
     monkeypatch.setattr(kb, '_retag_legacy_worker_sessions', lambda path: None)
     monkeypatch.setattr(kb, '_resolve_worker_cli_toolsets', lambda path: [])
@@ -187,6 +189,8 @@ def test_worker_spawn_uses_role_policy(task_context, monkeypatch):
     cmd = captured[0]
     assert cmd[cmd.index('-m', 3) + 1] == 'gpt-5.6-luna'
     assert cmd[cmd.index('--reasoning') + 1] == 'high'
+    assert len(d.pending_decisions(conn)) == 1
+    assert d.pending_decisions(conn)[0]['kind'] == 'spec_review'
 
 
 def test_decision_cli_persists_principal_assessment(task_context, tmp_path):
@@ -228,3 +232,16 @@ def test_instruction_change_invalidates_spec_acceptance(task_context):
     accept(conn, task, 'spec_review')
     kb.update_task_instruction(conn, task.id, body='Verify another count instead', author='Principal', expected_revision=0)
     assert not review.accepted(conn, task.id, 'spec_review')
+
+
+def test_native_command_does_not_start_before_spec_acceptance(task_context):
+    from hermes_cli.nfos_tool import run_command
+    conn, task, _, artifact = task_context
+    argv=[sys.executable, '-c', 'print("native-proof")']
+    kwargs=dict(task_id=task.id,run_id=task.current_run_id,argv=argv,cwd=artifact.parent,timeout_seconds=10)
+    with pytest.raises(d.WorkflowError, match='spec acceptance'):
+        run_command(os.environ['HERMES_KANBAN_DB'],**kwargs)
+    assert conn.execute('SELECT count(*) FROM nfos_tool_calls').fetchone()[0] == 0
+    accept(conn,task,'spec_review')
+    result=run_command(os.environ['HERMES_KANBAN_DB'],**kwargs)
+    assert result['status']=='succeeded'
