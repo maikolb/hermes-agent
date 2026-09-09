@@ -145,3 +145,39 @@ def test_binary_and_deleted_tracked_files_are_restored(retained):
         assert (path / 'binary.dat').read_bytes() == b'\x00unfinished\xfe'
         assert not (path / 'source.txt').exists()
     assert (repo / 'binary.dat').read_bytes() == b'\x00unfinished\xfe'
+
+
+@pytest.mark.parametrize('interrupted',[False,True])
+@pytest.mark.parametrize('previously_isolated',[False,True])
+def test_dispatch_repairs_foreign_repository_before_claim_without_losing_history(retained,interrupted,previously_isolated):
+    conn,repo,ids=retained
+    foreign=repo.parent/'old-envelope';foreign.mkdir()
+    git(foreign,'init');git(foreign,'config','user.email','fixture@example.invalid')
+    git(foreign,'config','user.name','Fixture')
+    (foreign/'old.txt').write_text('old repository\n');git(foreign,'add','old.txt');git(foreign,'commit','-m','old')
+    (foreign/'old.txt').write_text('unfinished unrelated edit\n')
+    (foreign/'proof.json').write_text('{"preserved":true}')
+    conn.execute('UPDATE tasks SET workspace_path=? WHERE id=?',(str(foreign),ids[0]));conn.commit()
+    if previously_isolated:
+        state=json.loads(delivery.get_workflow(conn,ids[0])['state_json'])
+        state['retained_workspace']={'restored_at':1,'source':str(foreign)}
+        conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?',(json.dumps(state),ids[0]));conn.commit()
+    history={table:[tuple(x) for x in conn.execute('SELECT * FROM '+table+' WHERE task_id=?',(ids[0],))] for table in ['task_comments','nfos_artifacts','nfos_decisions']}
+    if interrupted:
+        conn.execute("CREATE TRIGGER fail_repair BEFORE INSERT ON task_events WHEN NEW.kind='nfos_workspace_repaired' BEGIN SELECT RAISE(ABORT,'repair interrupted'); END");conn.commit()
+        dispatch(conn)
+        task=kb.get_task(conn,ids[0]);assert task.status=='ready'
+        plan=json.loads(delivery.get_workflow(conn,ids[0])['state_json'])['workspace_repair']
+        assert not plan.get('completed_at')
+        conn.execute('DROP TRIGGER fail_repair');conn.commit()
+    dispatch(conn)
+    task=kb.get_task(conn,ids[0]);assert task.status=='running'
+    assert kb._git_common_dir(task.workspace_path)==kb._git_common_dir(repo)
+    assert Path(task.workspace_path,'source.txt').read_text()=='base\n'
+    assert not Path(task.workspace_path,'old.txt').exists()
+    assert (foreign/'old.txt').read_text()=='unfinished unrelated edit\n'
+    assert (foreign/'proof.json').read_text()=='{"preserved":true}'
+    saved=json.loads(delivery.get_workflow(conn,ids[0])['state_json'])['workspace_repair']
+    assert saved['artifacts_location']==str(foreign.resolve()) and saved['completed_at']
+    if interrupted:assert saved['canonical_worktree']==plan['canonical_worktree']
+    assert history=={table:[tuple(x) for x in conn.execute('SELECT * FROM '+table+' WHERE task_id=?',(ids[0],))] for table in history}

@@ -28,6 +28,11 @@ production comparison in Nexa Factory OS output/delivery-comparison-20260908.
 7. Allow reconsideration of a technical impediment when candidate/homologation
    binding is incomplete. Preserve both identities and require the existing
    homologation and publication approvals before external delivery effects.
+8. Prevent recurrence at retained-card dispatch: compare the inherited Git
+   repository with the configured project repository before reusing or creating
+   a checkout. Repair a proven mismatch through the existing recoverable path,
+   preserve source files/history, and resume the same repair after interruption.
+   A previous isolation receipt must not bless the wrong repository forever.
 
 No model, provider, product scope, customer data, permission boundary, existing
 stop instruction or AOF disabled state is changed by this recovery.
