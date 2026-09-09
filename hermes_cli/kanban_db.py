@@ -7018,6 +7018,9 @@ def complete_task(
     delivery obligation. They cannot become ``done`` until the existing Git
     verifier has sealed a receipt for this same card/worktree/branch.
     """
+    from hermes_cli.kanban_cancellation import cancel_task, requested
+    if requested(metadata):
+        return cancel_task(conn, task_id, metadata=metadata, expected_run_id=expected_run_id)
     now = int(time.time())
     # Fail before validating cards or staging artifacts; re-check inside the
     # final write transaction below to close the parent-reopen race.

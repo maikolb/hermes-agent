@@ -660,6 +660,17 @@ it does not fabricate a human reply or permit reusing approval for another
 candidate. A missing proof after deployment is not automatically a new human
 approval before an already-authorized deployment. Keep unproven criteria pending.
 The owner disabled AOF and its mandatory contracts, hooks and closeouts.
+The owner's latest cancellation supersedes implementation criteria and old
+holds. Close it administratively in Entregues/done with [CANCELADO], preserving
+history. This satisfies the dependency; no work remains on the cancelled card.
+Use `cancel --task ID --input cancellation.json`, containing disposition:
+cancelled_by_owner, functional_delivery:false, reason, author, source (exact
+owner message reference), authorization_message (the actual instruction), and
+expected_instruction_revision (read from the current card). The same metadata
+works with kanban_complete. No TL/spec/tests/PR/deploy or fresh human approval
+is required for cancelled work. Do not use ordinary functional completion or
+an old implementation judge for this administrative closure. The command
+invalidates obsolete pending decisions and preserves their original content.
 Historical instructions do not reactivate it or create new publication gates.
 """
 
