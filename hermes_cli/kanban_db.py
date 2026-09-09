@@ -14519,7 +14519,10 @@ def _default_spawn(
         for sk in task.skills:
             if sk:
                 cmd.extend(["--skills", sk])
-    if task.model_override:
+    if delivery_worker:
+        from hermes_cli.nfos_principal_review import worker_model_args
+        cmd.extend(worker_model_args(task))
+    elif task.model_override:
         cmd.extend(["-m", task.model_override])
         # Pin the provider too when the override names one, so the worker
         # resolves the model against the intended backend instead of the
@@ -14530,7 +14533,7 @@ def _default_spawn(
     # Per-task thinking depth. Independent of the model override — a task can
     # run the profile's own model at a different depth — so this is its own
     # branch, not a nested one.
-    if task.reasoning_effort:
+    if task.reasoning_effort and not delivery_worker:
         cmd.extend(["--reasoning", task.reasoning_effort])
     worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
     if worker_toolsets:

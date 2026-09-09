@@ -462,6 +462,12 @@ explicitly requested spec revision, ask Claude TL for a JSON spec with goal,
 criteria [{id,text}], steps and delivery_type; use Codex only if Claude is
 unavailable. Save its real transcript, then call `save-spec --input spec.json
 --evidence tl-evidence.json --author 'Claude TL'`. No implementation before this.
+When principal_validation is enabled, saving the spec atomically queues
+kind=spec_review. Read its decision in show and wait for Principal continue.
+For a retained spec without that decision, ask kind=spec_review explicitly.
+Never treat a saved spec or a worker's own opinion as Principal acceptance.
+After changes, correct the spec through the same TL workflow and submit again.
+Instruction/spec changes invalidate acceptance. Do not code before its acceptance.
 Use `progress --stage implement --next '...'` before Codex work. Persist a
 progress state JSON containing useful next steps and recovered files as you work.
 Invoke Claude/Codex and long verification commands through the native tool CLI
@@ -533,6 +539,12 @@ Use `effect --operation homolog|pr|merge|deploy --target ... --candidate SHA` be
 external effect. An execute=false/reconcile=true response requires reading the
 destination before trying again. Record that read with `reconcile`.
 Before completion save the report with `save-report --input report.json`.
+When principal_validation is enabled, request `ask --kind final_review` after
+the final report and verified target state are saved, for EVERY delivery type.
+Wait for Principal continue. This is separate from code publication approval.
+For reports, retain the existing kind=review approval as well. If asked for
+changes, correct the result, save a new report and request final_review again.
+Keep every criterion linked to its real artifact; never certify your own work.
 Use the same report JSON format above, linking each criterion to its artifacts.
 After verified delivery, release the project slot with `release-project`.
 Record homolog_sha, integrated_sha, artifact and production_readback in progress
@@ -593,6 +605,28 @@ Use the same CLI prefix with `pending` to inspect the persisted decision
 queue. Resolve each item with `decide --decision ID --resolution
 continue|approve|changes|human --input answer.json` (JSON containing answer).
 Inspect the current spec, candidate and evidence before approving publication.
+With principal_validation enabled, you own two mandatory acceptances in this
+same queue. For spec_review, compare the ORIGINAL request and attachments with
+the TL spec, test each criterion's clarity, scope coverage, verification method,
+dependencies and exclusions. Use changes for gaps and explain how to fix them.
+For final_review, independently open the artifacts and real screenshots, inspect
+test outputs and the actual target/readback, and assess EVERY criterion against
+the accepted spec. A file hash proves identity, not correctness. Worker PASS or
+a screenshot's existence is never enough. Reject inadequate, stale, wrong-target
+or partial evidence, even if the worker claims success. Record FAIL/NOT_RUN as
+unproven; require rework rather than relaxing the criterion to obtain completion.
+Accept either kind with continue and answer.json containing answer plus:
+{"assessment":{"request_alignment":"How the original request is covered",
+"scope_assessment":"Scope, exclusions and dependencies checked",
+"criteria":[{"id":"C1","verdict":"accept","observation":"What I checked and why it meets the criterion",
+"evidence":["/absolute/path/to/inspected-report-artifact"]}]}}.
+Include each spec criterion exactly once. Evidence is mandatory for final_review
+and names a declared report artifact path/ref with saved local bytes. Save remote
+readback as a report artifact; a bare URL is not a verified result. Use changes
+with concrete corrections when you cannot accept. A new spec, instruction,
+candidate, final report or evidence change needs a current review. Do not
+approve on the worker's behalf or invent observations. Preserve the task/run
+history and let the worker do rework, while you continue handling other requests.
 You may approve merge/deploy within the user's authorized spec without asking for
 another human approval. Request human input only for a concrete decision you
 cannot resolve. Keep this coordinator available; do not wait for workers to finish.
