@@ -90,6 +90,24 @@ def test_failed_reconsidered_approval_rolls_back_decision_unblock_and_events(del
     assert snapshot(conn)==before
 
 
+def test_impediment_with_unbound_candidate_resumes_without_approving_publication(delivery):
+    conn,task=delivery
+    old=human_block(conn,task,kind='impediment',confirmed_pr=False)
+    state=json.loads(d.get_workflow(conn,task.id)['state_json'])
+    state.update(candidate_sha=B,homolog_sha=A,candidate_tree='c'*40)
+    conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?',(json.dumps(state),task.id));conn.commit()
+    new=reconsider(conn,old,action='continue',reason='The runtime now supports the missing homologation binding',
+                   answer='Resume the same candidate and request its actual equivalence review')
+    assert kb.get_task(conn,task.id).status=='ready'
+    assert not d._approved(conn,task.id,1)
+    saved=json.loads(d.get_workflow(conn,task.id)['state_json'])
+    assert saved['candidate_sha']==B and saved['homolog_sha']==A
+    with pytest.raises(d.WorkflowError,match='homologation acceptance'):
+        d._delivery_candidate(conn,task.id)
+    assert d.get_decision(conn,new)['kind']=='impediment'
+    assert conn.execute("SELECT COUNT(*) FROM task_events WHERE kind LIKE 'nfos_human_answer%'").fetchone()[0]==0
+
+
 @pytest.mark.parametrize('field,value', [('homolog_sha',B),('candidate_tree','d'*40)])
 def test_repeated_reconsideration_cannot_reuse_approval_for_changed_candidate(delivery,field,value):
     conn,task=delivery
