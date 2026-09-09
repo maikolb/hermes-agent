@@ -2314,7 +2314,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 expected_run_id=_worker_run_id_for(tid),
             ):
                 failed.append(tid)
-                print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
+                from hermes_cli.kanban_cancellation import completion_refusal
+                print(f"cannot complete {tid}: {completion_refusal(conn,tid,_worker_run_id_for(tid))}", file=sys.stderr)
             else:
                 print(f"Completed {tid}")
     return 0 if not failed else 1

@@ -926,6 +926,11 @@ def _handle_complete(args: dict, **kw) -> str:
             # Only enforce when a judge is actually reachable — see
             # _goal_judge_available for why an unavailable judge fails open.
             task = kb.get_task(conn, tid)
+            from hermes_cli.kanban_cancellation import requested
+            if requested(metadata):
+                kb.complete_task(conn,tid,result=result,summary=summary,metadata=metadata,
+                                 expected_run_id=_worker_run_id(tid))
+                return _ok(task_id=tid,disposition='cancelled_by_owner',functional_delivery=False)
             rejection = _goal_mode_handoff_rejection(
                 task,
                 (summary or result or "").strip(),
@@ -1049,9 +1054,8 @@ def _handle_complete(args: dict, **kw) -> str:
                         f"gate{detail} The card remains retryable; restore the "
                         "exact worktree/branch/PR evidence and retry."
                     )
-                return tool_error(
-                    f"could not complete {tid} (unknown id or already terminal)"
-                )
+                from hermes_cli.kanban_cancellation import completion_refusal
+                return tool_error(f"could not complete {tid}: {completion_refusal(conn,tid,_worker_run_id(tid))}")
             run = kb.latest_run(conn, tid)
             return _ok(task_id=tid, run_id=run.id if run else None)
         finally:

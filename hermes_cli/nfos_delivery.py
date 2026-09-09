@@ -1345,7 +1345,7 @@ def main():
     import argparse
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['show','save-spec','save-report','progress','ask','decide',
+    parser.add_argument('action',choices=['show','cancel','save-spec','save-report','progress','ask','decide',
         'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','acquire-project','release-project','receive','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
@@ -1379,6 +1379,11 @@ def main():
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_tool_calls'").fetchone():
                 from hermes_cli.nfos_tool import read_calls
                 result['native_calls']=read_calls(conn,args.task)
+        elif args.action=='cancel':
+            from hermes_cli.kanban_cancellation import cancel_task
+            cancel_task(conn,args.task,metadata=payload,
+                        expected_run_id=args.run if os.environ.get('HERMES_KANBAN_TASK') else None)
+            result={'task_id':args.task,'status':'done','disposition':'cancelled_by_owner','functional_delivery':False}
         elif args.action=='save-spec':
             result={'revision':save_spec(conn,args.task,args.run,payload,author=args.author,evidence=evidence)}
         elif args.action=='save-report':
