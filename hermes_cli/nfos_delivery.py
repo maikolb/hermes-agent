@@ -421,7 +421,13 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         conn.execute("UPDATE nfos_workflows SET stage='spec',spec_revision=?,next_action='Implement and verify the persisted spec',updated_at=? WHERE task_id=?",
                      (revision,int(time.time()),task_id))
         _event(conn,task_id,run_id,'nfos_spec_saved',{'revision':revision,'author':author,'evidence':saved_evidence})
-        return revision
+        from hermes_cli.nfos_principal_review import required
+        if required(conn,task_id):
+            ask_principal(conn,task_id,run_id,kind='spec_review',
+                          question='Validate the saved spec against the original request before implementation',context={})
+            conn.execute('UPDATE nfos_workflows SET next_action=? WHERE task_id=?',
+                         ('Wait for Principal spec acceptance; revise the spec if changes are requested',task_id))
+    return revision
 
 
 def _scope_needs_new_spec(workflow):
@@ -442,6 +448,8 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
             raise WorkflowError('Principal changed the primary task; persist a newer spec before continuing delivery')
         if stage!='analysis':
             _require_current_instruction_spec(conn,task_id)
+            from hermes_cli.nfos_principal_review import require_spec
+            require_spec(conn,task_id)
         updates=dict(state or {})
         updates.pop('task_partition',None)  # Only Principal decisions own this receipt.
         saved=json.loads(wf['state_json']);saved.update(updates)
@@ -616,13 +624,23 @@ def save_report(conn, task_id, run_id, report):
 
 
 def ask_principal(conn, task_id, run_id, *, kind, question, context):
-    if kind not in {'review','impediment','additional_tasks','homologation','preparation'} or not question.strip():
+    if kind not in {'review','spec_review','final_review','impediment','additional_tasks','homologation','preparation'} or not question.strip():
         raise WorkflowError('A decision needs its kind and concrete question')
-    with _kb().write_txn(conn):
+    with _kb().write_txn(conn,allow_nested=True):
         _owned(conn,task_id,run_id)
         if kind=='review':
             _require_current_instruction_spec(conn,task_id)
         context=dict(context)
+        if kind in {'spec_review','final_review'}:
+            from hermes_cli.nfos_principal_review import identity
+            _require_current_instruction_spec(conn,task_id)
+            context.pop('assessment',None)
+            context['acceptance_identity']=identity(conn,task_id,kind)
+            latest=conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',
+                                (task_id,kind)).fetchone()
+            if (latest and latest['status']=='pending'
+                    and json.loads(latest['context']).get('acceptance_identity')==context['acceptance_identity']):
+                return latest['id']
         if kind=='preparation':
             from hermes_cli import nfos_preparation
             context['preparation_identity']=nfos_preparation.identity(conn,task_id,context.get('preparation'))
@@ -643,7 +661,7 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
             decision_id='dec_'+uuid.uuid4().hex[:20]
         existing=conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND run_id=? AND kind=? AND question=? AND status='pending'",
                                (task_id,run_id,kind,question)).fetchone()
-        if existing and kind not in {'additional_tasks','homologation'}:
+        if existing and kind not in {'additional_tasks','homologation','spec_review','final_review'}:
             return existing['id']
         revision=get_workflow(conn,task_id)['spec_revision']
         if kind=='review':
@@ -813,9 +831,18 @@ def reconcile_human_answers(conn):
     return resumed
 
 
-def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None):
+def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None, assessment=None):
+    if os.environ.get('HERMES_KANBAN_TASK'):
+        raise WorkflowError('The Principal resolves reviews in its own coordinator session')
     if action not in {'continue','approve','changes','human'} or not answer.strip() or author!='Principal':
         raise WorkflowError('Principal decision requires its concrete answer and action')
+    initial=get_decision(conn,decision_id)
+    assessed=None
+    if initial and initial['status']=='pending' and initial['kind'] in {'spec_review','final_review'} and action=='continue':
+        from hermes_cli.nfos_principal_review import assess
+        if conn.in_transaction:
+            raise WorkflowError('Acceptance evidence must be inspected outside a write transaction; ask for a fresh review')
+        assessed=assess(conn,initial,assessment)
     # Reconsideration composes this same validation with the unblock atomically.
     with _kb().write_txn(conn, allow_nested=True):
         row=get_decision(conn,decision_id)
@@ -844,6 +871,13 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             nfos_preparation.check_current(conn,row)
         if row['kind']=='homologation' and action=='continue':
             _accept_homologation(conn,row)
+        if row['kind'] in {'spec_review','final_review'} and action=='continue':
+            from hermes_cli.nfos_principal_review import identity
+            context=json.loads(row['context'])
+            if context.get('acceptance_identity')!=identity(conn,row['task_id'],row['kind']):
+                raise WorkflowError('Spec, instruction, candidate or report changed while reviewing')
+            context['assessment']=assessed
+            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?',(_json(context),decision_id))
         current_spec_revision=get_workflow(conn,row['task_id'])['spec_revision']
         # Operational questions can outlive spec preparation. Their answers
         # resolve the original question, never approve a different delivery.
@@ -1087,6 +1121,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         task=_owned(conn,task_id,run_id)
         if _scope_needs_new_spec(get_workflow(conn,task_id)):
             raise WorkflowError('Principal changed the primary task; persist a newer spec before external effects')
+        from hermes_cli.nfos_principal_review import require_spec
+        require_spec(conn,task_id)
         staging=operation in {'staging_pr','staging_merge'}
         preparation=None
         if staging and task.delivery_type!='code':
@@ -1220,6 +1256,9 @@ def completion_ready(conn, task_id, *, evidence_check=None):
         return True
     if active_suspension(conn, task_id):
         return False
+    from hermes_cli.nfos_principal_review import accepted
+    if not accepted(conn,task_id,'spec_review') or not accepted(conn,task_id,'final_review'):
+        return False
     if _scope_needs_new_spec(wf) or not _spec_matches_instruction(conn,task_id):
         return False
     report=_artifact(conn,task_id,'report')
@@ -1316,7 +1355,7 @@ def main():
     parser.add_argument('--author',default='Claude TL',choices=['Claude TL','Codex'])
     parser.add_argument('--stage')
     parser.add_argument('--next',dest='next_action',default='')
-    parser.add_argument('--kind',choices=['review','impediment','additional_tasks','homologation','preparation'])
+    parser.add_argument('--kind',choices=['review','spec_review','final_review','impediment','additional_tasks','homologation','preparation'])
     parser.add_argument('--decision')
     parser.add_argument('--timeout',type=float,default=300,help='Maximum wait duration; pending is not failure')
     parser.add_argument('--resolution',choices=['continue','approve','changes','human'])
@@ -1370,7 +1409,7 @@ def main():
             if os.environ.get('HERMES_KANBAN_TASK'):
                 raise WorkflowError('The Principal resolves reviews in its own coordinator session')
             resolve_decision(conn,args.decision,action=args.resolution,answer=payload['answer'],author='Principal',
-                             proposal=payload.get('proposal'))
+                             proposal=payload.get('proposal'),assessment=payload.get('assessment'))
             result={'saved':True,'decision':get_decision(conn,args.decision)}
         elif args.action=='reconsider':
             decision_id=reconsider_decision(conn,args.decision,action=args.resolution,
