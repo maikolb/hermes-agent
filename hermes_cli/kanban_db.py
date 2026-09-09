@@ -6436,7 +6436,9 @@ def _seal_materialized_worktree_ownership(
         separators=(",", ":"),
     )
     fingerprint = hashlib.sha256(ownership_json.encode("utf-8")).hexdigest()
-    with write_txn(conn):
+    # Sealing performs only DB writes after read-only Git validation. A
+    # maintainer repair commits its new binding and this receipt together.
+    with write_txn(conn, allow_nested=True):
         row = conn.execute(
             "SELECT workspace_kind FROM tasks WHERE id = ?",
             (task_id,),
