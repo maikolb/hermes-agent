@@ -25,6 +25,9 @@ production comparison in Nexa Factory OS output/delivery-comparison-20260908.
 6. Apply confirmed repairs to the affected VPS cards through this supported path,
    preserving explicit suspensions and concrete external dependencies. Verify the
    installed code, resulting repository identity and preserved evidence.
+7. Allow reconsideration of a technical impediment when candidate/homologation
+   binding is incomplete. Preserve both identities and require the existing
+   homologation and publication approvals before external delivery effects.
 
 No model, provider, product scope, customer data, permission boundary, existing
 stop instruction or AOF disabled state is changed by this recovery.

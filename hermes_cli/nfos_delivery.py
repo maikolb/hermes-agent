@@ -911,7 +911,17 @@ def reconsider_decision(conn, decision_id, *, action, reason, answer, author='Pr
         wf=get_workflow(conn,old['task_id'])
         if not wf:
             raise WorkflowError('Unknown NFOS card')
-        identity={'spec_revision':wf['spec_revision'],'review_identity':_review_identity(conn,old['task_id'])}
+        if old['kind']=='impediment':
+            # Recovery may be needed precisely because candidate/HML binding is
+            # incomplete. Snapshot its identity without approving that binding.
+            # Publication reviews still use the strict verifier below.
+            state=json.loads(wf['state_json'])
+            review_identity={k:state.get(k) for k in (
+                'candidate_sha','candidate_tree','homolog_sha','homologation_decision','homolog_evidence')}
+            review_identity['instruction_revision']=_kb().get_task(conn,old['task_id']).instruction_revision
+        else:
+            review_identity=_review_identity(conn,old['task_id'])
+        identity={'spec_revision':wf['spec_revision'],'review_identity':review_identity}
         old_context=json.loads(old['context'])
         if old['status']=='superseded':
             current=get_decision(conn,new_id)
