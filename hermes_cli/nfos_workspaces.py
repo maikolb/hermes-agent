@@ -41,12 +41,35 @@ def isolate_retained_workspace(conn, task, *, board=None):
         return task, None
     if not state.get('legacy_adoption'):
         return task, None
+    if task.status != 'ready' or task.current_run_id or task.worker_pid:
+        return task, None
+    # The inherited directory is evidence, not the project's repository
+    # authority. Otherwise recovery can manufacture a fresh, valid ownership
+    # receipt for the wrong Git repository on every subsequent adoption.
+    from hermes_cli.nfos_runtime import project_config
+    from hermes_cli.nfos_workspace_repair import repair_workspace
+    project = project_config(board) or {}
+    source = Path(task.workspace_path).expanduser().resolve() if task.workspace_path else None
+    configured = Path(project['repo_path']).expanduser().resolve() if project.get('repo_path') else None
+    repair = state.get('workspace_repair')
+    pending_repair = repair and not repair.get('completed_at')
+    mismatch = (source and configured and kb._git_toplevel(source) is not None
+                and kb._git_common_dir(source) != kb._git_common_dir(configured))
+    if pending_repair or mismatch:
+        lease, owner = kb._try_acquire_workspace_lease(source, task_id=task.id)
+        if lease is None:
+            return task, owner
+        kb._release_workspace_lease(lease)
+        identity = repair['identity'] if pending_repair else dict(
+            board=board, repo_path=str(configured), base_sha=_git(configured, 'rev-parse', 'HEAD').strip(),
+            expected_workspace=task.workspace_path, expected_source_sha=_git(source, 'rev-parse', 'HEAD').strip())
+        repair_workspace(conn, task.id, **identity, apply=True, actor='Runtime',
+                         reason='Retained workspace differs from the configured project repository; preserve its artifacts and repair before dispatch')
+        return kb.get_task(conn, task.id), None
     snapshot = state.get('retained_workspace')
     if snapshot and snapshot.get('restored_at'):
         return task, None
     if not snapshot and task.workspace_kind != 'dir':
-        return task, None
-    if task.status != 'ready' or task.current_run_id or task.worker_pid:
         return task, None
     source = Path(snapshot['source'] if snapshot else task.workspace_path).expanduser().resolve()
     repo = kb._git_toplevel(source)
