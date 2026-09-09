@@ -338,6 +338,9 @@ def _spec_matches_instruction(conn, task_id):
     spec=get_spec(conn,task_id)
     if not task or not spec:
         return False
+    wf=get_workflow(conn,task_id)
+    if wf and wf['spec_revision'] < json.loads(wf['state_json']).get('classification_revision_floor',0):
+        return False
     evidence=json.loads(spec['evidence'])
     if 'instruction_revision' in evidence or task.instruction_revision==0:
         return evidence.get('instruction_revision',0)==task.instruction_revision
@@ -1290,7 +1293,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','save-spec','save-report','progress','ask','decide',
-        'pending','effect','reconcile','reconcile-spec','acquire-project','release-project','receive','resume','wait','reconsider'])
+        'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','acquire-project','release-project','receive','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -1329,6 +1332,12 @@ def main():
             save_report(conn,args.task,args.run,payload);result={'saved':True}
         elif args.action=='reconcile-spec':
             result=reconcile_legacy_spec(conn,args.task,**payload)
+        elif args.action=='repair-workspace':
+            from hermes_cli.nfos_workspace_repair import repair_workspace
+            result=repair_workspace(conn,args.task,board=args.project,**payload)
+        elif args.action=='repair-card':
+            from hermes_cli.nfos_workspace_repair import repair_card
+            result=repair_card(conn,args.task,board=args.project,**payload)
         elif args.action=='progress':
             advance(conn,args.task,args.run,args.stage,next_action=args.next_action,state=payload);result={'saved':True}
         elif args.action=='ask':

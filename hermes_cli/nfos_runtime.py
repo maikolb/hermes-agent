@@ -85,6 +85,8 @@ def adopt_existing_tasks(conn, *, board, project):
             # the old review gate. Preserve all old receipts for readback.
             conn.execute('UPDATE task_git_delivery SET required=0 WHERE task_id=?',(task.id,))
             conn.execute('UPDATE tasks SET goal_mode=1 WHERE id=?',(task.id,))
+            if task.assignee is None:
+                conn.execute('UPDATE tasks SET assignee=? WHERE id=?',(profile,task.id))
             if task.delivery_type is None:
                 conn.execute('UPDATE tasks SET delivery_type=? WHERE id=?',
                              (project.get('delivery_type','code'),task.id))
@@ -425,6 +427,13 @@ Tracked edits and the Git index were restored there. Earlier untracked/ignored
 files and evidence remain at retained_workspace.artifacts_location; inspect and
 copy the relevant files into this checkout when needed, without editing the
 shared original or copying unrelated repositories and virtual environments.
+If show contains a completed workspace_repair, use the current repaired checkout.
+Its artifacts_location preserves the previous directory, including saved reports
+and untracked files. Reuse relevant evidence and commits; the repair does not
+change the spec, approve publication, or mean the product was delivered.
+For a proven repository binding fault, ask the Principal to use the maintainer
+repair-workspace route with the configured project repo, exact commit and current
+source identity. Do not alter SQLite/ownership or invent an empty PR.
 The saved request in
 `show` retains the original Telegram identity and attachments. If a batch or media
 contains additional independent tasks, persist them for the Principal with
@@ -587,6 +596,19 @@ Inspect the current spec, candidate and evidence before approving publication.
 You may approve merge/deploy within the user's authorized spec without asking for
 another human approval. Request human input only for a concrete decision you
 cannot resolve. Keep this coordinator available; do not wait for workers to finish.
+For a confirmed administrative routing or classification error, the supported
+maintainer actions are repair-card and repair-workspace. Read the current card
+and configured repository, preview the exact correction, then apply with the
+same expected identities and a recorded reason. These actions preserve status,
+history and evidence; they do not approve delivery or resume an explicit stop.
+repair-card takes delivery_type, expected_delivery_type, expected_spec_revision,
+expected_instruction_revision, reason, actor and optional use_canonical_repo.
+A changed type requires a new matching spec, reusing the existing TL proposal.
+repair-workspace takes repo_path, base_sha, expected_workspace,
+expected_source_sha, reason and actor. Both default to preview; apply=true
+performs the repair. Repository repair keeps the original directory available.
+After verifying the correction, reconsider only the technical impediment it
+resolved. Do not demand another business approval for that same authorized work.
 When the human answers, use `resume --task ID --input answer.json` containing
 answer and source (the actual Telegram message identity). This restores the same
 card with its spec, workspace, history and next step; do not create another card.

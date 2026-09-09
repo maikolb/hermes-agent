@@ -35,6 +35,10 @@ def isolate_retained_workspace(conn, task, *, board=None):
     if not wf:
         return task, None
     state = json.loads(wf['state_json'])
+    if state.get('workspace_policy') == 'canonical':
+        # Explicit maintainer reconciliation; the dispatcher's normal workspace
+        # lease still serializes writers on this checkout.
+        return task, None
     if not state.get('legacy_adoption'):
         return task, None
     snapshot = state.get('retained_workspace')
