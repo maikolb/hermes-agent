@@ -14376,6 +14376,12 @@ def _default_spawn(
     with connect_closing(board=board) as delivery_conn:
         delivery_worker = bool(get_workflow(delivery_conn, task.id))
         if delivery_worker:
+            from hermes_cli import nfos_delivery as delivery
+            from hermes_cli.nfos_principal_review import accepted, required
+            if (required(delivery_conn,task.id) and delivery._spec_matches_instruction(delivery_conn,task.id)
+                    and not accepted(delivery_conn,task.id,'spec_review')):
+                delivery.ask_principal(delivery_conn,task.id,task.current_run_id,kind='spec_review',
+                    question='Validate the retained spec before this worker continues execution',context={})
             from hermes_cli.nfos_runtime import worker_instructions
             prompt += "\n\n" + worker_instructions()
     env = dict(os.environ)

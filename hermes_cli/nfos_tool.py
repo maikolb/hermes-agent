@@ -25,6 +25,9 @@ import uuid
 
 import psutil
 
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS nfos_tool_calls (
@@ -458,6 +461,11 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
                 return previous
             if not _owned(conn, task_id, run_id):
                 raise ToolExecutionError('The task no longer belongs to this execution')
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_workflows'").fetchone():
+                workflow=conn.execute('SELECT stage FROM nfos_workflows WHERE task_id=?',(task_id,)).fetchone()
+                if workflow and workflow['stage']!='analysis':
+                    from hermes_cli.nfos_principal_review import require_spec
+                    require_spec(conn,task_id)
             identity = _identity(os.getpid())
             conn.execute('''INSERT INTO nfos_tool_calls
                 (id,task_id,run_id,argv_json,cwd,stdin_path,stdin_sha256,status,created_at,timeout_seconds,runner_pid,runner_started_at,runner_kind)
