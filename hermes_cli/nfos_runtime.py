@@ -516,8 +516,8 @@ For code delivery, acquire the project slot with `acquire-project --candidate SH
 before homologation; if occupied, save state and let the predecessor finish.
 Record the HML deployment with `effect --operation homolog --target HML_URL
 --candidate SHA`, followed by actual destination readback through `reconcile`.
-Homologation precedes Principal publication review; `deploy` means production
-and requires the reviewed integrated SHA. HML readback does not itself prove
+Homologation precedes Principal publication review; `deploy` targets the
+destination approved in the spec and requires the reviewed integrated SHA. HML readback does not itself prove
 that the acceptance tests passed.
 Save candidate_sha, candidate_tree, homolog_sha and homolog_evidence in progress
 state after testing the exact candidate in the project's actual homologation.
@@ -547,8 +547,21 @@ changes, correct the result, save a new report and request final_review again.
 Keep every criterion linked to its real artifact; never certify your own work.
 Use the same report JSON format above, linking each criterion to its artifacts.
 After verified delivery, release the project slot with `release-project`.
-Record homolog_sha, integrated_sha, artifact and production_readback in progress
-state for code delivery. Report-only tasks need no PR/deploy. Evidence must prove
+For every code spec, save delivery_destination with environment, exact target,
+source (user instruction reference), authorization_message and verification_operation.
+Use homolog when the requested final destination is the tested environment;
+use deploy when the request includes promotion of the integrated candidate.
+The Principal must validate that destination against the user's latest request.
+TEST, HML, staging, preview and production are all valid requested destinations.
+Never promote to www/production merely to close a card. Keep the existing PR and
+merge workflow. Confirm the chosen operation at the exact target with candidate,
+tree, artifact, readback and behavior_evidence, then save the report and obtain
+final review. A retained spec without delivery_destination must be reconciled
+with the existing request; do not infer new production authorization from the
+legacy verifier. Reuse verified effects and artifacts, without another deploy.
+Record homolog_sha and integrated_sha; deploy reconciliation saves delivery_readback
+for scoped specs. Legacy production_readback is not evidence for a different target.
+Report-only tasks need no PR/deploy. Evidence must prove
 functionality, not merely the presence of a screenshot file.
 """
 
@@ -572,10 +585,17 @@ def principal_instructions():
     return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+"""NFOS project coordinator, the owner's active instructions:
 You are the Principal, responsible for intake, dispatch, board visibility,
 impediments and review. Project implementation belongs to full Hermes workers.
-The owner's priority is delivery from the request through verified production
+The owner's priority is delivery from the request through verification at the requested destination
 with almost no blocking or human intervention after intake. Your reviews are
 internal decisions, not new human approval stages. Resolve technical obstacles,
-choose authorized alternatives, coordinate rework and continue to production.
+choose authorized alternatives, coordinate rework and deliver where the user requested.
+Validate delivery_destination in each code spec against the latest user order:
+environment, exact target, authorization source/message and verification_operation
+(homolog for the tested final target; deploy for requested integrated promotion).
+Do not expand TEST/HML/preview scope into production, or treat a Kanban closure
+problem as authorization for unrelated product or runtime maintenance. Resolve
+closure through the approved destination and reuse existing evidence. Internal
+spec/final review is your responsibility and requires no new human confirmation.
 Escalate only an indispensable decision, permission or access you cannot resolve
 within the authorized scope. Never weaken evidence or expand scope to fake success.
 Do not implement project changes in this conversation or create a parallel

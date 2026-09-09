@@ -392,6 +392,9 @@ def _require_current_instruction_spec(conn, task_id):
 
 
 def save_spec(conn, task_id, run_id, spec, *, author, evidence):
+    if 'delivery_destination' in spec:
+        from hermes_cli.nfos_destination import validate
+        validate(spec['delivery_destination'])
     if not spec.get('goal') or not spec.get('criteria') or not spec.get('steps'):
         raise WorkflowError('A spec needs a goal, verifiable criteria and direct steps')
     ids=[c.get('id') for c in spec['criteria']]
@@ -1128,6 +1131,12 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         if staging and task.delivery_type!='code':
             raise WorkflowError('Staging preparation applies only to code delivery')
         if task.delivery_type=='code':
+            from hermes_cli.nfos_destination import destination
+            scope=destination(conn,task_id)
+            if scope and operation=='deploy' and (scope['verification_operation']!='deploy' or target!=scope['target']):
+                raise WorkflowError('Deploy is outside the approved delivery destination; do not promote beyond the requested environment')
+            if scope and operation==scope['verification_operation'] and target!=scope['target']:
+                raise WorkflowError('Use the exact delivery destination from the approved spec')
             wf=get_workflow(conn,task_id);state=json.loads(wf['state_json'])
             if not wf['spec_revision']:
                 raise WorkflowError('Persist the spec before changing an environment')
@@ -1203,7 +1212,10 @@ def reconcile_effect(conn, effect_id, *, found, evidence, caller_task_id=None, c
             if effect['operation']=='deploy':
                 if not evidence.get('artifact') or not evidence.get('behavior_evidence'):
                     raise WorkflowError('Read the deployed artifact and verify actual behavior')
-                state.update(artifact=evidence['artifact'],production_readback=evidence)
+                from hermes_cli.nfos_destination import destination
+                scope=destination(conn,task.id)
+                state.update(artifact=evidence['artifact'])
+                state['delivery_readback' if scope else 'production_readback']=evidence
             conn.execute('UPDATE nfos_workflows SET state_json=?,updated_at=? WHERE task_id=?',
                 (_json(state),int(time.time()),task.id))
         status='confirmed' if found else 'absent'
@@ -1281,11 +1293,18 @@ def completion_ready(conn, task_id, *, evidence_check=None):
     task=_kb().get_task(conn,task_id)
     if task.delivery_type=='code':
         state=json.loads(wf['state_json'])
-        required=('homolog_sha','integrated_sha','artifact','production_readback')
+        from hermes_cli.nfos_destination import destination, verified
+        scope=destination(conn,task_id)
+        required=('homolog_sha','integrated_sha') if scope else ('homolog_sha','integrated_sha','artifact','production_readback')
         if any(not state.get(k) for k in required):
             return False
+        if scope and not verified(conn,task_id,state):
+            return False
+        effects=[('pr',_delivery_candidate(conn,task_id,state)),('merge',_delivery_candidate(conn,task_id,state))]
+        if not scope:
+            effects.append(('deploy',state['integrated_sha']))
         if not all(_confirmed(conn,task_id,operation,candidate) for operation,candidate in
-                [('pr',_delivery_candidate(conn,task_id,state)),('merge',_delivery_candidate(conn,task_id,state)),('deploy',state['integrated_sha'])]):
+                effects):
             return False
     return True
 

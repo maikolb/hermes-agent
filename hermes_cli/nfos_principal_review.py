@@ -17,6 +17,9 @@ def required(conn, task_id):
     workflow = d.get_workflow(conn, task_id)
     if not workflow:
         return False
+    spec = d.get_spec(conn, task_id)
+    if spec and json.loads(spec['content']).get('delivery_destination'):
+        return True
     request = d.get_request(conn, workflow['request_id'])
     project = json.loads(request['payload']).get('project', {}) if request else {}
     # The profile switch applies to retained cards too. A request cannot opt
@@ -55,6 +58,14 @@ def identity(conn, task_id, kind):
         result['candidate'] = {k: state.get(k) for k in (
             'candidate_sha', 'candidate_tree', 'homolog_sha', 'homolog_evidence',
             'integrated_sha', 'artifact', 'production_readback', 'homologation_decision')}
+        from hermes_cli.nfos_destination import destination
+        scope = destination(conn, task_id)
+        if scope:
+            result['delivery_destination'] = scope
+            result['delivery_readback'] = state.get('delivery_readback')
+            result['destination_effects'] = [dict(row) for row in conn.execute(
+                "SELECT id,status,evidence FROM nfos_effects WHERE task_id=? AND operation=? AND target=? ORDER BY id",
+                (task_id, scope['verification_operation'], scope['target']))]
     return result
 
 
