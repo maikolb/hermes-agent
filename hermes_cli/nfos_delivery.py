@@ -707,6 +707,15 @@ _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principa
 ]
 
 
+def _owner_mode():
+    """BLOCK_LESS8_20260910: modo das premissas do owner = principal_validation explicitamente false no perfil."""
+    try:
+        from hermes_cli.nfos_principal_review import settings
+        return settings().get('principal_validation') is False
+    except Exception:
+        return False
+
+
 def _auto_continue_answer(kind, question):
     """BLOCK_LESS_20260910: resposta automática do principal para perguntas que não mudam o resultado."""
     if kind=='homologation':
@@ -726,8 +735,7 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
     with _kb().write_txn(conn,allow_nested=True):
         _owned(conn,task_id,run_id)
         if kind in {'spec_review','final_review'}:  # BLOCK_LESS2_20260910: validação desligada no perfil = pergunta sem efeito
-            from hermes_cli.nfos_principal_review import required
-            if not required(conn,task_id):
+            if _owner_mode():  # BLOCK_LESS8_20260910
                 decision_id='dec_'+uuid.uuid4().hex[:20]; now=int(time.time())
                 revision=get_workflow(conn,task_id)['spec_revision']
                 auto='CONTINUE (automático, premissa do owner 10/09): validação do principal desligada no perfil; não peça '+kind+'. Siga: implemente, salve o relatório e chame kanban_complete.'
@@ -738,7 +746,7 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
         if kind=='review':  # BLOCK_LESS3_20260910: relatório/operação não tem publicação a aprovar
             from hermes_cli.nfos_principal_review import required
             _t=_kb().get_task(conn,task_id)
-            if _t and _t.delivery_type in {'report','operation'} and not required(conn,task_id):
+            if _t and _t.delivery_type in {'report','operation'} and _owner_mode():  # BLOCK_LESS8_20260910
                 decision_id='dec_'+uuid.uuid4().hex[:20]; now=int(time.time())
                 revision=get_workflow(conn,task_id)['spec_revision']
                 auto='APPROVE (automático, premissa do owner 10/09): entrega de relatório/operação não passa por revisão de publicação. Chame kanban_complete.'
@@ -1395,16 +1403,14 @@ def completion_evidence_check(conn, task_id):
     try:
         content=json.loads(report['content']); metadata=json.loads(report['evidence'])
         results=_report_results(spec,content)
-        from hermes_cli.nfos_principal_review import required
-        strict=required(conn,task_id)  # BLOCK_LESS4_20260910: sem validação, NOT_RUN não impede; FAIL impede
+        strict=not _owner_mode()  # BLOCK_LESS4/BLOCK_LESS8_20260910: fora do owner mode a prova completa continua exigida
         if any((row['status']!='PASS') if strict else (row['status']=='FAIL') for row in results.values()):
             return None
         digest=hashlib.sha256(report['content'].encode()).hexdigest()
         if (metadata.get('schema_version')!=1 or metadata.get('report_sha256')!=digest
                 or metadata.get('spec_revision')!=spec['revision']):
             return None
-        from hermes_cli.nfos_principal_review import required
-        strict=required(conn,task_id)  # BLOCK_LESS2_20260910: com validação desligada, todos os critérios PASS no relatório basta
+        strict=not _owner_mode()  # BLOCK_LESS2/BLOCK_LESS8_20260910
         proved=set()
         for check in (metadata.get('artifact_checks',[]) if strict else []):
             if (check.get('task_id')!=task_id or check.get('run_id')!=report['run_id']
@@ -1480,8 +1486,7 @@ def completion_ready(conn, task_id, *, evidence_check=None):
             'spec_revision':wf['spec_revision'],
             'evidence_sha256':hashlib.sha256(report['evidence'].encode()).hexdigest()}:
         return False
-    from hermes_cli.nfos_principal_review import required as _required
-    if not _required(conn,task_id):  # BLOCK_LESS4_20260910: validação desligada = relatório coerente fecha qualquer tipo de card
+    if _owner_mode():  # BLOCK_LESS4/BLOCK_LESS8_20260910: relatório coerente fecha qualquer tipo de card
         return True
     try:
         if not _approved(conn,task_id,wf['spec_revision']):
