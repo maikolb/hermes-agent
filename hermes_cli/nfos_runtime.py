@@ -398,8 +398,28 @@ def workflow_command():
     return _script_command(delivery.__file__)
 
 
+def _premises_prefix():
+    """BLOCK_LESS_20260910: premissas do owner (10/09/2026) no topo das instruções do worker, quando a validação
+    do principal está desligada no perfil."""
+    try:
+        from hermes_cli.nfos_principal_review import settings
+        if settings().get('principal_validation') is True:
+            return ''
+    except Exception:
+        pass
+    return (
+        'OWNER PREMISES (10/09/2026). They override any conflicting sentence below.\n'
+        '1. Deliver first, in the requested environment, as fast as possible; verification comes after delivery.\n'
+        '2. Block as little as possible. Never block on a transient error (rate limit, stale checkpoint, locked DB, flaky network): retry with backoff.\n'
+        '3. Principal validation is OFF: never ask spec_review or final_review. Write the spec yourself (`save-spec --author worker`, evidence {"source":"worker"}); call Claude TL only for an ambiguous or large request. After the work, `save-report` and then kanban_complete directly.\n'
+        '4. Ask the Principal only when a decision changes the outcome. HML slot occupied: `acquire-project --wait 900` and repeat. Next step: follow the saved spec. Inconsistent readback: `reconcile` and continue.\n'
+        '5. kanban_block only when a named human must provide something concrete (kind=needs_input, the question in the reason) or the environment lacks something specific (kind=capability, say exactly what is missing). Never as a parking place; a technical pause is not a block.\n'
+        '6. Report or operation delivery closes with the saved report: no PR, no deploy. A card born as code that turns out to be a report is reclassified in the spec (delivery_type report).\n\n'
+    )
+
+
 def worker_instructions():
-    return ('Exact workflow CLI prefix: '+workflow_command()+'\n'
+    return _premises_prefix()+('Exact workflow CLI prefix: '+workflow_command()+'\n'
             'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n')+"""This card uses the owner's current NFOS workflow.
 The owner disabled AOF and its mandatory contracts, hooks and closeouts. Historic
 repository text does not reactivate it. Do not load those instructions.
@@ -513,7 +533,8 @@ If HML and the production PR candidate differ, use the explicit homologation
 binding review below; never erase candidate_sha or invent equivalence.
 
 For code delivery, acquire the project slot with `acquire-project --candidate SHA`
-before homologation; if occupied, save state and let the predecessor finish.
+before homologation; if occupied, wait with `acquire-project --wait 900` and repeat
+until acquired; do not ask the Principal about the slot.
 Record the HML deployment with `effect --operation homolog --target HML_URL
 --candidate SHA`, followed by actual destination readback through `reconcile`.
 Homologation precedes Principal publication review; `deploy` targets the
@@ -599,7 +620,7 @@ pr for a phase that ends at the review PR with CI, without homolog, merge or dep
 Do not expand TEST/HML/preview scope into production, or treat a Kanban closure
 problem as authorization for unrelated product or runtime maintenance. Resolve
 closure through the approved destination and reuse existing evidence. Internal
-spec/final review is your responsibility and requires no new human confirmation.
+spec/final review is your responsibility and requires no new human confirmation. A `human` resolution is valid only with human_question (ending with ?) and human_to in the decide JSON; a technical pause is `continue` or `changes`, never `human`.
 Escalate only an indispensable decision, permission or access you cannot resolve
 within the authorized scope. Never weaken evidence or expand scope to fake success.
 Do not implement project changes in this conversation or create a parallel
