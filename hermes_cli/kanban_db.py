@@ -11664,6 +11664,26 @@ def heartbeat_worker(
     return True
 
 
+def _apply_project_max_runtime_default(conn, delivery_project, task_id):
+    """MAX_RUNTIME_DEFAULT_20260910 (ordem do Maikol): card sem orçamento (max_runtime_seconds NULL) herda o
+    max_runtime_seconds do projeto NFOS do board antes do claim, para que enforce_max_runtime e a
+    classe P/M/G da barra valham para todo card, não só para os criados pelo bootstrap NFOS.
+    Devolve o valor aplicado, ou None quando nada mudou."""
+    if not delivery_project:
+        return None
+    try:
+        default = int(delivery_project.get("max_runtime_seconds") or 0)
+    except (TypeError, ValueError):
+        return None
+    if default <= 0:
+        return None
+    cur = conn.execute(
+        "UPDATE tasks SET max_runtime_seconds = ? WHERE id = ? AND max_runtime_seconds IS NULL",
+        (default, task_id),
+    )
+    return default if cur.rowcount else None
+
+
 def enforce_max_runtime(
     conn: sqlite3.Connection,
     *,
@@ -13828,6 +13848,7 @@ def _dispatch_once_locked(
                 )
             )
             continue
+        _apply_project_max_runtime_default(conn, delivery_project, row["id"])  # MAX_RUNTIME_DEFAULT_20260910
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
             _release_workspace_lease(workspace_lease)
@@ -13989,6 +14010,7 @@ def _dispatch_once_locked(
                 )
             )
             continue
+        _apply_project_max_runtime_default(conn, delivery_project, row["id"])  # MAX_RUNTIME_DEFAULT_20260910
         claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
             _release_workspace_lease(workspace_lease)
