@@ -126,6 +126,83 @@ def _event(conn, task_id, run_id, kind, payload):
     _kb()._append_event(conn,task_id,kind,payload,run_id=run_id)
 
 
+URGENT_PRIORITY = 100  # URGENT_20260910
+_URGENT_RE = re.compile(r"prioridade\s+m[áa]xima|\burgent[ei]\b|urg[êe]ncia|\basap\b|\bp0\b", re.I)
+_REF_RE = re.compile(r"https?://[^\s<>\"')\]]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
+
+def _references(text):
+    return [t.rstrip('.,;:)') for t in _REF_RE.findall(text or '')]
+
+
+def _open_task_for_references(conn, refs):
+    for ref in refs:
+        if len(ref) < 12:
+            continue
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE status NOT IN ('done','archived') AND task_role = 'work' "
+            "AND (body LIKE ? OR title LIKE ?) ORDER BY created_at DESC LIMIT 1", ('%' + ref + '%', '%' + ref + '%')
+        ).fetchone()
+        if row:
+            return row[0]
+    return None
+
+
+def _same_thread_request(conn, source, *, message_id=None, within=900, exclude=None):
+    """Request anterior do mesmo platform/chat/thread: pelo message_id (reply) ou o mais recente em `within` s."""
+    rows = conn.execute("SELECT id, task_id, payload, created_at FROM nfos_requests ORDER BY created_at DESC, id DESC LIMIT 200").fetchall()
+    now = time.time()
+    for r in rows:
+        if exclude and r['id'] == exclude:
+            continue
+        try:
+            p = json.loads(r['payload'] or '{}')
+        except Exception:
+            continue
+        s = p.get('source') or {}
+        if (s.get('platform'), str(s.get('chat_id')), str(s.get('thread_id'))) != (source.get('platform'), str(source.get('chat_id')), str(source.get('thread_id'))):
+            continue
+        if message_id is not None:
+            if str(s.get('message_id')) == str(message_id):
+                return r, p
+            continue
+        if str(s.get('message_id')) != str(source.get('message_id')) and now - float(r['created_at'] or 0) <= within:
+            return r, p
+    return None, None
+
+
+def _urgent_intake(conn, request_id, source, text, reply_to_message_id, *, author):
+    """URGENT_20260910 (ordem do Maikol): pedido urgente ou repetição de referência de card aberto anexa ao card
+    existente (sem card novo) e, se urgente, sobe a prioridade e libera o card; devolve o que fez."""
+    urgent = bool(_URGENT_RE.search(text or ''))
+    refs = _references(text)
+    target = None; how = None
+    if reply_to_message_id:
+        r, p = _same_thread_request(conn, source, message_id=reply_to_message_id)
+        if r is not None:
+            target = r['task_id'] or _open_task_for_references(conn, _references(p.get('text') or '')); how = 'reply'
+    if target is None and refs:
+        target = _open_task_for_references(conn, refs); how = 'same_reference'
+    if target is None and urgent and not refs:
+        r, p = _same_thread_request(conn, source, exclude=request_id)
+        if r is not None:
+            target = r['task_id'] or _open_task_for_references(conn, _references(p.get('text') or '')); how = 'previous_message'
+    if target is None:
+        return {'urgent': urgent}
+    trow = conn.execute("SELECT status, priority, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()
+    if trow is None or trow['status'] in ('done', 'archived'):
+        return {'urgent': urgent}
+    conn.execute("UPDATE nfos_requests SET status='attached', task_id=? WHERE id=? AND status IN ('pending','coordinating')", (target, request_id))
+    _kb().add_comment(conn, target, author, ('[prioridade máxima] ' if urgent else '[reenvio] ') + (text or '').strip()[:1500])
+    _event(conn, target, None, 'request_attached', {'request_id': request_id, 'how': how, 'urgent': urgent})
+    if urgent:
+        conn.execute("UPDATE tasks SET priority = MAX(COALESCE(priority,0), ?) WHERE id = ?", (URGENT_PRIORITY, target))
+        if trow['status'] == 'backlog' or (trow['status'] == 'blocked' and (trow['block_kind'] or '') in ('dependency', 'capability', '')):
+            conn.execute("UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL WHERE id=? AND status IN ('backlog','blocked')", (target,))
+        _event(conn, target, None, 'priority_escalated', {'request_id': request_id, 'priority': URGENT_PRIORITY, 'how': how, 'previous_status': trow['status']})
+    return {'urgent': urgent, 'attached_to': target, 'how': how}
+
+
 def receive_request(conn, *, source, text, project, attachments=(), part='0', origin=None,
                     defer_to_principal=False, reply_to_message_id=None):
     required=('platform','chat_id','thread_id','message_id')
@@ -136,6 +213,8 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
     source_key=_json([str(source[k]) for k in required]+[str(part)])
     request_id='req_'+hashlib.sha256(source_key.encode()).hexdigest()[:24]
     payload={'source':source,'text':text,'project':project,'attachments':list(attachments)}
+    if _URGENT_RE.search(text or ''):  # URGENT_20260910
+        payload['urgent']=True
     if origin is not None:
         payload['origin']=origin
     if defer_to_principal:
@@ -144,6 +223,11 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
     with _kb().write_txn(conn,allow_nested=True):
         conn.execute('INSERT OR IGNORE INTO nfos_requests(id,source_key,payload,status,created_at) VALUES(?,?,?,?,?)',
                      (request_id,source_key,payload,'coordinating' if defer_to_principal else 'pending',int(time.time())))
+        try:  # URGENT_20260910: anexa a card aberto e/ou escala prioridade; nunca derruba o intake
+            _author=(re.match(r'\s*\[([^|\]]+)\|', text or '') or [None, None])[1] or 'nfos-intake'
+            _urgent_intake(conn, request_id, source, text, reply_to_message_id, author=_author)
+        except Exception:
+            pass
         if not defer_to_principal:
             # The Principal classifies the preserved message through the same
             # intake. Its original bytes/identity remain authoritative.
@@ -322,6 +406,7 @@ def bootstrap_card(conn, request_id, token, *, pid):
         else:
             task_id=kb.create_task(conn,title=request_card_title(original,payload.get('attachments') or ()),
                 body=body,assignee=profile,created_by='worker:'+profile,
+                priority=URGENT_PRIORITY if payload.get('urgent') else 0,  # URGENT_20260910
                 workspace_kind='worktree' if kind=='code' else 'scratch',
                 workspace_path=project.get('repo_path') if kind=='code' else None,
                 project_id=project.get('project_id'),requires_repo=kind=='code',delivery_type=kind,
