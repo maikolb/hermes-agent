@@ -127,6 +127,23 @@ def _event(conn, task_id, run_id, kind, payload):
 
 
 URGENT_PRIORITY = 100  # URGENT_20260910
+HUMAN_REQUEST_PRIORITY = 10  # HUMAN_PRIORITY_20260910
+_HUMAN_PLATFORMS = {'telegram', 'whatsapp', 'discord', 'slack', 'signal', 'email'}
+
+
+def _intake_priority(payload):
+    """HUMAN_PRIORITY_20260910 (ordem do Maikol): pedido nascido de mensagem humana entra acima de backlog promovido
+    (priority 0); card retido/adotado de sessão antiga fica em 0; urgente continua 100."""
+    if payload.get('urgent'):
+        return URGENT_PRIORITY
+    src = payload.get('source') or {}
+    if str(src.get('message_identity_kind') or '') in ('retained-session-row', 'retained-card'):
+        return 0
+    if str(src.get('platform') or '').lower() in _HUMAN_PLATFORMS:
+        return HUMAN_REQUEST_PRIORITY
+    return 0
+
+
 _URGENT_RE = re.compile(r"prioridade\s+m[áa]xima|\burgent[ei]\b|urg[êe]ncia|\basap\b|\bp0\b", re.I)
 _REF_RE = re.compile(r"https?://[^\s<>\"')\]]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
@@ -403,10 +420,11 @@ def bootstrap_card(conn, request_id, token, *, pid):
                  prior.workspace_path or (project.get('repo_path') if kind=='code' else None),
                  int(kind=='code'),kind,project.get('max_runtime_seconds',7200),project.get('model'),
                  project.get('provider'),project.get('reasoning_effort'),task_id))
+            conn.execute('UPDATE tasks SET priority=MAX(COALESCE(priority,0),?) WHERE id=?',(_intake_priority(payload),task_id))  # HUMAN_PRIORITY_20260910
         else:
             task_id=kb.create_task(conn,title=request_card_title(original,payload.get('attachments') or ()),
                 body=body,assignee=profile,created_by='worker:'+profile,
-                priority=URGENT_PRIORITY if payload.get('urgent') else 0,  # URGENT_20260910
+                priority=_intake_priority(payload),  # HUMAN_PRIORITY_20260910
                 workspace_kind='worktree' if kind=='code' else 'scratch',
                 workspace_path=project.get('repo_path') if kind=='code' else None,
                 project_id=project.get('project_id'),requires_repo=kind=='code',delivery_type=kind,
