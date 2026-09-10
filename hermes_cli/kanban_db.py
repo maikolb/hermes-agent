@@ -15121,6 +15121,14 @@ def _decode_notify_delivery_metadata(raw: Any) -> dict[str, Any]:
     }
 
 
+def _default_sub_chat_type(platform, chat_id):
+    """Default de chat_type quando o assinante não informa (DM_NEG_CHAT_20260910): no Telegram um chat_id
+    negativo é grupo/supergrupo; 'dm' só para os demais casos."""
+    if str(platform or "").lower() == "telegram" and str(chat_id or "").startswith("-"):
+        return "group"
+    return "dm"
+
+
 def add_notify_sub(
     conn: sqlite3.Connection,
     *,
@@ -15173,7 +15181,7 @@ def add_notify_sub(
         # carrying a session_id always woke. Explicit modes still win.
         "notify+wake" if platform == "api_server" else "notify"
     )
-    insert_chat_type = chat_type or "dm"
+    insert_chat_type = chat_type or _default_sub_chat_type(platform, chat_id)  # DM_NEG_CHAT_20260910
     now = int(time.time())
     metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
     with write_txn(conn, allow_nested=True):
