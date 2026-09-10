@@ -943,10 +943,16 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                 raise WorkflowError('Candidate or report changed during review')
             task=_kb().get_task(conn,row['task_id'])
             if task.delivery_type=='code':
-                if not all(identity.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')):
-                    raise WorkflowError('Review needs the actual homologated candidate and evidence')
-                if not _confirmed(conn,task.id,'pr',_delivery_candidate(conn,task.id)):
-                    raise WorkflowError('Review needs the confirmed PR for this candidate')
+                from hermes_cli.nfos_destination import destination, review_only, verified
+                if review_only(destination(conn,task.id)):
+                    # The review PR with green CI is the verified destination itself.
+                    if not verified(conn,task.id,json.loads(get_workflow(conn,task.id)['state_json'])):
+                        raise WorkflowError('Review needs the confirmed review PR with CI for the accepted candidate')
+                else:
+                    if not all(identity.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')):
+                        raise WorkflowError('Review needs the actual homologated candidate and evidence')
+                    if not _confirmed(conn,task.id,'pr',_delivery_candidate(conn,task.id)):
+                        raise WorkflowError('Review needs the confirmed PR for this candidate')
             elif not identity.get('report_revision'):
                 raise WorkflowError('Review needs the saved report')
         conn.execute('UPDATE nfos_decisions SET status=?,answer=?,author=?,action=?,resolved_at=? WHERE id=?',
@@ -1116,8 +1122,9 @@ def _review_identity(conn,task_id,*,state=None):
         state=json.loads(wf['state_json']) if state is None else state
         identity={k:state.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')}
         if state.get('candidate_sha'):
-            identity.update(candidate_sha=_delivery_candidate(conn,task_id,state),
-                            homologation_decision=state.get('homologation_decision'))
+            from hermes_cli.nfos_destination import destination, review_only
+            candidate=state['candidate_sha'] if review_only(destination(conn,task_id)) else _delivery_candidate(conn,task_id,state)
+            identity.update(candidate_sha=candidate,homologation_decision=state.get('homologation_decision'))
     else:
         report=_artifact(conn,task_id,'report')
         identity={'report_revision':report['revision'] if report else None}
@@ -1165,8 +1172,10 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         if staging and task.delivery_type!='code':
             raise WorkflowError('Staging preparation applies only to code delivery')
         if task.delivery_type=='code':
-            from hermes_cli.nfos_destination import destination
+            from hermes_cli.nfos_destination import destination, review_only
             scope=destination(conn,task_id)
+            if review_only(scope) and operation!='pr':
+                raise WorkflowError('The approved delivery destination ends at the review PR; homolog, merge and deploy are outside it')
             if scope and operation=='deploy' and (scope['verification_operation']!='deploy' or target!=scope['target']):
                 raise WorkflowError('Deploy is outside the approved delivery destination; do not promote beyond the requested environment')
             if scope and operation==scope['verification_operation'] and target!=scope['target']:
@@ -1182,11 +1191,19 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
                 preparation=nfos_preparation.authorized(conn,task_id,target,candidate)
                 if operation=='staging_merge':
                     nfos_preparation.confirmed_pr(conn,task_id,candidate,target)
-            delivery_candidate=candidate if staging or operation=='homolog' else _delivery_candidate(conn,task_id,state)
+            if review_only(scope):
+                # A review-PR phase has no homologated candidate by definition:
+                # the accepted local candidate is what the PR and CI verify.
+                delivery_candidate=state.get('candidate_sha')
+                if not delivery_candidate:
+                    raise WorkflowError('Record the accepted local candidate before opening its review PR')
+            else:
+                delivery_candidate=candidate if staging or operation=='homolog' else _delivery_candidate(conn,task_id,state)
             _project_owned(conn,task_id,run_id,delivery_candidate)
             expected=candidate if operation=='homolog' else (state.get('integrated_sha') if operation=='deploy' else delivery_candidate)
             if candidate!=expected:
-                raise WorkflowError('Use the confirmed integrated candidate' if operation=='deploy' else 'Use the homologated candidate')
+                raise WorkflowError('Use the confirmed integrated candidate' if operation=='deploy'
+                                    else 'Use the accepted local candidate' if review_only(scope) else 'Use the homologated candidate')
             if operation=='deploy' and not _confirmed(conn,task_id,'merge',delivery_candidate):
                 raise WorkflowError('Confirm the integrated merge before deploy')
         key=hashlib.sha256(_json([task_id,operation,target,candidate]).encode()).hexdigest()
@@ -1239,6 +1256,15 @@ def reconcile_effect(conn, effect_id, *, found, evidence, caller_task_id=None, c
             if effect['operation'] in {'merge','deploy'}:
                 if evidence.get('tree')!=state.get('candidate_tree'):
                     raise WorkflowError('Integrated tree differs from homologation; verify the new tree in homolog first')
+            if effect['operation']=='pr':
+                from hermes_cli.nfos_destination import destination, review_only, review_pr_problem
+                if review_only(destination(conn,task.id)):
+                    if evidence.get('tree')!=state.get('candidate_tree'):
+                        raise WorkflowError('Review PR readback must show the accepted candidate tree')
+                    problem=review_pr_problem(evidence)
+                    if problem:
+                        raise WorkflowError(problem)
+                    state['review_pr']=evidence
             if effect['operation']=='merge':
                 if not evidence.get('integrated_sha'):
                     raise WorkflowError('Read the exact integrated SHA')
@@ -1327,16 +1353,22 @@ def completion_ready(conn, task_id, *, evidence_check=None):
     task=_kb().get_task(conn,task_id)
     if task.delivery_type=='code':
         state=json.loads(wf['state_json'])
-        from hermes_cli.nfos_destination import destination, verified
+        from hermes_cli.nfos_destination import destination, verified, review_only
         scope=destination(conn,task_id)
-        required=('homolog_sha','integrated_sha') if scope else ('homolog_sha','integrated_sha','artifact','production_readback')
+        if review_only(scope):
+            required=('candidate_sha','candidate_tree')
+        else:
+            required=('homolog_sha','integrated_sha') if scope else ('homolog_sha','integrated_sha','artifact','production_readback')
         if any(not state.get(k) for k in required):
             return False
         if scope and not verified(conn,task_id,state):
             return False
-        effects=[('pr',_delivery_candidate(conn,task_id,state)),('merge',_delivery_candidate(conn,task_id,state))]
-        if not scope:
-            effects.append(('deploy',state['integrated_sha']))
+        if review_only(scope):
+            effects=[('pr',state['candidate_sha'])]
+        else:
+            effects=[('pr',_delivery_candidate(conn,task_id,state)),('merge',_delivery_candidate(conn,task_id,state))]
+            if not scope:
+                effects.append(('deploy',state['integrated_sha']))
         if not all(_confirmed(conn,task_id,operation,candidate) for operation,candidate in
                 effects):
             return False
