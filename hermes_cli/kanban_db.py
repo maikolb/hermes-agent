@@ -12159,6 +12159,28 @@ def _interrupted_by_gateway_restart(row, kind: str, gateway_started) -> bool:
         return False
 
 
+URGENT_PRIORITY = 100  # URGENT_20260910
+
+
+def _urgent_burst_slots(conn: sqlite3.Connection) -> int:
+    """URGENT_20260910 (ordem do Maikol): uma vaga extra por board enquanto houver card ready/review com
+    priority >= URGENT_PRIORITY e nenhum urgente rodando. Quando o urgente sobe, a vaga some e o board
+    volta ao seu teto normal conforme os outros workers terminam."""
+    try:
+        waiting = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status IN ('ready', 'review') AND task_role = 'work' "
+            "AND claim_lock IS NULL AND priority >= ?", (URGENT_PRIORITY,),
+        ).fetchone()[0]
+        if not waiting:
+            return 0
+        running = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status = 'running' AND priority >= ?", (URGENT_PRIORITY,),
+        ).fetchone()[0]
+        return 1 if running == 0 else 0
+    except Exception:
+        return 0
+
+
 def _resume_first(conn: sqlite3.Connection, rows: list) -> list:
     """INTERRUPTED_20260910: cards interrompidos por restart do gateway (evento interrupted mais novo
     que o último claimed) voltam antes dos demais na fila; ordem original preservada entre iguais."""
@@ -12172,9 +12194,14 @@ def _resume_first(conn: sqlite3.Connection, rows: list) -> list:
         }
     except Exception:
         return rows
-    if not resume:
-        return rows
-    return sorted(rows, key=lambda r: 0 if r["id"] in resume else 1)
+    def _rank(r):  # URGENT_20260910: urgente antes de tudo, depois interrompidos, depois a ordem normal
+        try:
+            if "priority" in r.keys() and int(r["priority"] or 0) >= URGENT_PRIORITY:
+                return 0
+        except Exception:
+            pass
+        return 1 if r["id"] in resume else 2
+    return sorted(rows, key=_rank)
 
 
 def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
@@ -13695,6 +13722,7 @@ def _dispatch_once_locked(
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
     from hermes_cli.nfos_runtime import project_config, dispatch_requests, adopt_existing_tasks
     delivery_project = project_config(_normalize_board_slug(board) or get_current_board())
+    _burst = _urgent_burst_slots(conn) if delivery_project is not None else 0  # URGENT_20260910
     if delivery_project is not None and not dry_run:
         adopt_existing_tasks(conn, board=_normalize_board_slug(board) or get_current_board(),
                              project=delivery_project)
@@ -13736,10 +13764,10 @@ def _dispatch_once_locked(
     # the memory-derived default exists to prevent.
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board)
-        if total_running >= max_in_progress:
+        if total_running >= max_in_progress + _burst:  # URGENT_20260910
             result.skipped_capacity.append({"reason": "max_in_progress", "running": total_running, "limit": max_in_progress})
             return result
-        remaining = max_in_progress - total_running
+        remaining = max_in_progress + _burst - total_running  # URGENT_20260910
         if spawn_budget is None or spawn_budget > remaining:
             spawn_budget = remaining
 
@@ -13770,12 +13798,12 @@ def _dispatch_once_locked(
     if delivery_project is not None:
         # Bootstrap is part of this same serialized dispatch tick. A reserved
         # request counts as a worker until its child atomically creates a run.
-        delivery_capacity = max(1, int(delivery_project.get('workers', 2)))
+        delivery_capacity = max(1, int(delivery_project.get('workers', 2))) + _burst  # URGENT_20260910
         if max_spawn is not None:
             delivery_capacity = min(delivery_capacity, max_spawn)
         if max_in_progress is not None:
             delivery_capacity = min(delivery_capacity,
-                max(0, max_in_progress - count_running_tasks_other_boards(board)))
+                max(0, max_in_progress + _burst - count_running_tasks_other_boards(board)))  # URGENT_20260910
         if not dry_run:
             dispatch_requests(conn, board=_normalize_board_slug(board) or get_current_board(),
                 capacity=delivery_capacity, spawn_limit=spawn_budget)
@@ -13788,7 +13816,7 @@ def _dispatch_once_locked(
         spawn_budget = available if spawn_budget is None else min(spawn_budget, available)
 
     ready_rows = _resume_first(conn, conn.execute(  # INTERRUPTED_20260910
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, priority FROM tasks "
         "WHERE status = 'ready' AND task_role = 'work' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall())
@@ -13797,7 +13825,7 @@ def _dispatch_once_locked(
     review_rows = []
     if review_dispatch_enabled():
         review_rows = _resume_first(conn, conn.execute(  # INTERRUPTED_20260910
-            "SELECT id, assignee FROM tasks "
+            "SELECT id, assignee, priority FROM tasks "
             "WHERE status = 'review' AND task_role = 'work' AND claim_lock IS NULL "
             "AND id NOT IN (SELECT task_id FROM nfos_workflows) "
             "ORDER BY priority DESC, created_at ASC"
