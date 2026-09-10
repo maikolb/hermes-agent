@@ -460,6 +460,10 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         validate(spec['delivery_destination'])
     if not spec.get('goal') or not spec.get('criteria') or not spec.get('steps'):
         raise WorkflowError('A spec needs a goal, verifiable criteria and direct steps')
+    if spec.get('delivery_type')=='operation':  # OPERATION_FAST_20260910: guarda contra classificar como operation para pular o caminho de código
+        _op=spec.get('operation') if isinstance(spec.get('operation'),dict) else {}
+        if not str(_op.get('target') or '').strip() or not str(_op.get('mutation') or '').strip() or not str(spec.get('no_code_reason') or '').strip():
+            raise WorkflowError('An operation spec needs operation.target (the production system or object), operation.mutation (what changes) and no_code_reason (why no repository change is needed). If any step edits the repository, builds, deploys or opens a PR, the card is code.')
     ids=[c.get('id') for c in spec['criteria']]
     if not all(ids) or len(set(ids))!=len(ids) or any(not c.get('text') for c in spec['criteria']):
         raise WorkflowError('Each spec criterion needs a unique id and description')
@@ -484,13 +488,21 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         if spec.get('delivery_type')!=task.delivery_type:
             # The project default is provisional until TL has analyzed the
             # request. An audit must not inherit a Git delivery requirement.
-            if spec.get('delivery_type') not in {'report','operation'}:  # BLOCK_LESS_20260910: reclassificar para report/operation em qualquer estágio
-                raise WorkflowError('Spec delivery type can only change to report or operation')
-            conn.execute('UPDATE tasks SET delivery_type=?,requires_repo=0 WHERE id=?',
-                         (spec['delivery_type'],task_id))
-            conn.execute('UPDATE task_git_delivery SET required=0 WHERE task_id=?',(task_id,))
+            _new=spec.get('delivery_type')
+            if _new=='code':  # OPERATION_FAST_20260910: corrigir classificação errada só com worktree
+                _wk=conn.execute('SELECT workspace_kind FROM tasks WHERE id=?',(task_id,)).fetchone()
+                if not _wk or (_wk[0] or '')!='worktree':
+                    raise WorkflowError('Reclassifying to code needs a worktree workspace; this card has none: create a code card for the repository change')
+                conn.execute('UPDATE tasks SET delivery_type=?,requires_repo=1 WHERE id=?',('code',task_id))
+                conn.execute('UPDATE task_git_delivery SET required=1 WHERE task_id=?',(task_id,))
+            elif _new not in {'report','operation'}:  # BLOCK_LESS_20260910: reclassificar para report/operation em qualquer estágio
+                raise WorkflowError('Spec delivery type can only change to code, report or operation')
+            else:
+                conn.execute('UPDATE tasks SET delivery_type=?,requires_repo=0 WHERE id=?',
+                             (_new,task_id))
+                conn.execute('UPDATE task_git_delivery SET required=0 WHERE task_id=?',(task_id,))
             _event(conn,task_id,run_id,'nfos_delivery_classified',
-                   {'previous':task.delivery_type,'delivery_type':spec['delivery_type'],'author':author})
+                   {'previous':task.delivery_type,'delivery_type':_new,'author':author})
         revision=wf['spec_revision']+1
         saved_evidence=dict(evidence, instruction_revision=task.instruction_revision)
         conn.execute('INSERT INTO nfos_artifacts(task_id,run_id,kind,revision,content,author,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)',
@@ -1288,6 +1300,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             raise WorkflowError('Principal changed the primary task; persist a newer spec before external effects')
         from hermes_cli.nfos_principal_review import require_spec
         require_spec(conn,task_id)
+        if task.delivery_type in {'report','operation'}:  # OPERATION_FAST_20260910: card sem código não publica código
+            raise WorkflowError('A report/operation card publishes no code: homolog, pr, merge, deploy and staging effects are refused. If the request needs a repository change, save a spec with delivery_type code (allowed from a worktree workspace) and do the repository/HML/PR reconciliation first.')
         staging=operation in {'staging_pr','staging_merge'}
         preparation=None
         if staging and task.delivery_type!='code':
@@ -1626,6 +1640,7 @@ def main():
                         '3. Principal validation is OFF: do not ask spec_review or final_review, nor review for report/operation cards; they resolve automatically. Write the spec yourself (save-spec --author worker) with size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class. After the work, save-report then kanban_complete.',  # BLOCK_LESS9_20260910
                         '4. Ask the Principal only when a decision changes the outcome. Slot occupied: acquire-project --wait 900. Next step: follow the saved spec.',
                         '5. Credentials for production, HML and databases are in the project vault listed under credentials in this output. Use them; never ask a human for something that is already there.',  # BLOCK_LESS6_20260910
+                        '6. operation = administrative change on a system already in production without touching the repository; the spec needs operation.target, operation.mutation and no_code_reason; homolog/pr/merge/deploy effects are refused on it, so never classify as operation to skip the code path (reclassify with delivery_type code if a repository change is needed). operation and report cards skip HML/repository/PR reconciliation and progress steps 5 and 6.',  # OPERATION_FAST_20260910
                     ]
             except Exception:
                 pass

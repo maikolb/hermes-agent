@@ -409,13 +409,14 @@ def _premises_prefix():  # BLOCK_LESS7_20260910
         pass
     return (
         'OWNER PREMISES (10/09/2026). They override any conflicting sentence below.\n'
-        '0. Before any spec or implementation, check production (and HML/staging) and the existing PRs/commits for this request. If it is already delivered, save a short report (criteria PASS with the readback as evidence) and call kanban_complete. If partially delivered, scope only the delta. Never re-implement delivered work. Record it with `precheck --input precheck.json` (checked=[{target,method,result}], verdict=already_delivered|partial|not_delivered); save-spec refuses a new spec without it.\n'  # BLOCK_LESS3_20260910
+        '0. For a code request: before any spec or implementation, check production (and HML/staging) and the existing PRs/commits for this request. For an operation or report request: read only the current state of the production target (no HML, no repository, no PR search). If it is already delivered, save a short report (criteria PASS with the readback as evidence) and call kanban_complete. If partially delivered, scope only the delta. Never re-implement delivered work. Record it with `precheck --input precheck.json` (checked=[{target,method,result}], verdict=already_delivered|partial|not_delivered); save-spec refuses a new spec without it.\n'  # BLOCK_LESS3_20260910
         '1. Deliver first, in the requested environment, as fast as possible; verification comes after delivery.\n'
         '2. Block as little as possible. Never block on a transient error (rate limit, stale checkpoint, locked DB, flaky network): retry with backoff.\n'
         '3. Principal validation is OFF: never ask spec_review or final_review. Write the spec yourself (`save-spec --author worker`, evidence {"source":"worker"}); call Claude TL only for an ambiguous or large request. Give the spec a size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class. After the work, `save-report` and then kanban_complete directly.\n'  # BLOCK_LESS9_20260910
         '4. Ask the Principal only when a decision changes the outcome. HML slot occupied: `acquire-project --wait 900` and repeat. Next step: follow the saved spec. Inconsistent readback: `reconcile` and continue.\n'
         '5. kanban_block only when a named human must provide something concrete (kind=needs_input, the question in the reason) or the environment lacks something specific (kind=capability, say exactly what is missing). Never as a parking place; a technical pause is not a block.\n'
-        '6. Report or operation delivery closes with the saved report: no PR, no deploy. A card born as code that turns out to be a report is reclassified in the spec (delivery_type report).\n\n'
+        '6. Report or operation delivery closes with the saved report: no PR, no deploy. A card born as code that turns out to be a report is reclassified in the spec (delivery_type report).\n'
+        '7. operation = an administrative change on a system already in production without touching the repository (plan, tenant, config, data, credentials, infrastructure state). Its spec needs operation.target, operation.mutation and no_code_reason, and the runtime refuses homolog/pr/merge/deploy effects on it, so never classify as operation to skip the code path: if any step edits the repository, builds, deploys or opens a PR, the card is code (reclassify with a spec delivery_type code). operation and report cards skip progress steps 5 (PR) and 6 (merge/deploy) without commenting them: after [etapa 4/7 testar] write [etapa 7/7 readback].\n\n'  # OPERATION_FAST_20260910
     )
 
 
@@ -430,8 +431,10 @@ sanitize PYTHONPATH, so do not substitute a bare python/module invocation.
 `--help` documents the available actions. Task/run identity comes
 from your existing HERMES_KANBAN_* environment; never clear it to bypass ownership.
 First use `show` to read the saved spec, stage, next action, decisions and external
-effects. For every task, check existing Git changes/PRs and the project's actual
-homologation and production before deciding what remains to implement. Record
+effects. For a code task, check existing Git changes/PRs and the project's actual
+homologation and production before deciding what remains to implement. For an
+operation or report task, skip HML, repository and PR reconciliation: read the
+current state of the production target, apply, read back (OPERATION_FAST_20260910). Record
 which version and behavior you could verify; a failed connection is not proof
 that the requested change is absent or that production is down for everyone.
 On recovery reuse that state and existing files, tests, commits and PRs;
