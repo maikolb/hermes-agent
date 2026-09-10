@@ -99,6 +99,35 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
 
+_CHUNK_CAP_DEFAULT = 262144
+
+
+def _chunk_cap():
+    """Patch 10/09/2026: teto de bytes de saída gravados em nfos_tool_chunks por chamada.
+    Config kanban.nfos.tool_chunk_max_bytes (padrão 256 KiB, mínimo 4 KiB). O excedente vai para arquivo."""
+    try:
+        from hermes_cli.config import load_config
+        nfos = ((load_config() or {}).get('kanban') or {}).get('nfos') or {}
+        return max(4096, int(nfos.get('tool_chunk_max_bytes', _CHUNK_CAP_DEFAULT) or _CHUNK_CAP_DEFAULT))
+    except Exception:
+        return _CHUNK_CAP_DEFAULT
+
+
+def _spill_path(db_path, task_id, call_id):
+    """<raiz do hermes>/reports/<board>/tool-output/<task>/<call>.log, fora do repositório do produto."""
+    p = Path(db_path).resolve()
+    parts = p.parts
+    if 'boards' in parts:
+        idx = parts.index('boards')
+        board = parts[idx + 1] if idx + 1 < len(parts) else 'default'
+        root = Path(*parts[:max(1, idx - 1)])
+    else:
+        board, root = 'default', p.parent
+    target = root / 'reports' / board / 'tool-output' / str(task_id)
+    target.mkdir(parents=True, exist_ok=True)
+    return target / f'{call_id}.log'
+
+
 def _event(conn, row, kind, **payload):
     conn.execute('INSERT INTO task_events(task_id,run_id,kind,payload,created_at) VALUES(?,?,?,?,?)',
         (row['task_id'], row['run_id'], kind, _json(dict(call_id=row['id'], **payload)), int(time.time())))
@@ -513,6 +542,7 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
             process.stdin.close()
             deadline = time.monotonic() + timeout_seconds
             eof, sequence = set(), 0
+            chunk_cap, stored_bytes, spilled_bytes, spill_fh = _chunk_cap(), 0, 0, None
             last_identity_refresh = 0
             stopped_reason = None
             timed_out = False
@@ -545,10 +575,26 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
                     eof.add(stream)
                     continue
                 sequence += 1
-                with _transaction(conn):
-                    conn.execute('INSERT INTO nfos_tool_chunks(call_id,seq,stream,content,created_at) VALUES(?,?,?,?,?)',
-                                 (call_id, sequence, stream, data, time.time()))
-                    _event(conn, get_call(conn, call_id), 'nfos_tool_chunk', seq=sequence, stream=stream, bytes=len(data))
+                if stored_bytes + len(data) <= chunk_cap:
+                    stored_bytes += len(data)
+                    with _transaction(conn):
+                        conn.execute('INSERT INTO nfos_tool_chunks(call_id,seq,stream,content,created_at) VALUES(?,?,?,?,?)',
+                                     (call_id, sequence, stream, data, time.time()))
+                        _event(conn, get_call(conn, call_id), 'nfos_tool_chunk', seq=sequence, stream=stream, bytes=len(data))
+                else:
+                    # patch 10/09/2026: acima do teto a saída vai para arquivo; o banco recebe um marcador único
+                    if spill_fh is None:
+                        spill_file = _spill_path(db_path, task_id, call_id)
+                        spill_fh = open(spill_file, 'ab')
+                        marker = f'[nfos: saída acima de {chunk_cap} bytes; o restante está em {spill_file}]'.encode()
+                        with _transaction(conn):
+                            conn.execute('INSERT INTO nfos_tool_chunks(call_id,seq,stream,content,created_at) VALUES(?,?,?,?,?)',
+                                         (call_id, sequence, 'stderr', marker, time.time()))
+                            _event(conn, get_call(conn, call_id), 'nfos_tool_chunk_truncated', seq=sequence, limit=chunk_cap, spill=str(spill_file))
+                    spill_fh.write(data)
+                    spilled_bytes += len(data)
+            if spill_fh is not None:
+                spill_fh.close()
             returncode = process.wait()
             if stopped_reason:
                 return _finish(conn, call_id, 'timed_out' if timed_out else 'interrupted',
