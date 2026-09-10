@@ -1,6 +1,6 @@
 """LEASE_RELEASE_20260910: card ready com decisão aberta (pending/human) não é relançado e não deixa o lease do
 workspace preso em nome do dispatcher (bug do OPEN_DECISION_SKIP #126: t_998efb26 e t_35bd4a15 presos em 10/09)."""
-import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -24,14 +24,27 @@ def board(tmp_path, monkeypatch):
     return tmp_path / "kanban.db"
 
 
-def _ready_card_with_open_question(conn):
+@pytest.fixture
+def worker_process():
+    # O run precisa de um pid de worker que não seja o próprio pytest: a reconciliação do dispatcher
+    # encerra o processo de um run fechado (SIGKILL), e com os.getpid() ela mataria o runner.
+    proc = subprocess.Popen(["sleep", "120"])
+    try:
+        yield proc.pid
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+
+def _ready_card_with_open_question(conn, worker_pid):
     rid = delivery.receive_request(conn,
         source={"platform": "telegram", "chat_id": "-10001", "thread_id": "8", "message_id": "11"},
         text="Corrigir escolaridade do cargo 133.",
         project={"board": "pilot", "profile": "default", "delivery_type": "report"},
         attachments=[])
     request = delivery.reserve_request(conn, capacity=2)
-    task = delivery.bootstrap_card(conn, rid, request["claim_token"], pid=os.getpid())
+    task = delivery.bootstrap_card(conn, rid, request["claim_token"], pid=worker_pid)
     decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind="impediment",
                                       question="Autoriza corrigir o dado pelo mecanismo oficial?", context={})
     # O worker saiu sem fechar (protocol_violation) com a pergunta ainda aberta: run encerrado, card de volta a ready.
@@ -43,7 +56,7 @@ def _ready_card_with_open_question(conn):
     return kb.get_task(conn, task.id), decision
 
 
-def test_open_decision_skip_releases_the_workspace_lease(board, all_assignees_spawnable):
+def test_open_decision_skip_releases_the_workspace_lease(board, all_assignees_spawnable, worker_process):
     spawns = []
 
     def fake_spawn(task, workspace, board=None):
@@ -51,7 +64,7 @@ def test_open_decision_skip_releases_the_workspace_lease(board, all_assignees_sp
         return 4242
 
     with kb.connect_closing() as conn:
-        task, decision = _ready_card_with_open_question(conn)
+        task, decision = _ready_card_with_open_question(conn, worker_process)
         res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
         assert task.id not in spawns
         assert task.id not in [s[0] for s in res.spawned]
