@@ -550,7 +550,10 @@ After verified delivery, release the project slot with `release-project`.
 For every code spec, save delivery_destination with environment, exact target,
 source (user instruction reference), authorization_message and verification_operation.
 Use homolog when the requested final destination is the tested environment;
-use deploy when the request includes promotion of the integrated candidate.
+use deploy when the request includes promotion of the integrated candidate;
+use pr when the approved phase ends at a review PR with CI on the exact candidate
+(target is the GitHub repository URL). A pr destination refuses homolog, merge and
+deploy; reconcile its pr effect with candidate, tree, pull_request URL and ci_status.
 The Principal must validate that destination against the user's latest request.
 TEST, HML, staging, preview and production are all valid requested destinations.
 Never promote to www/production merely to close a card. Keep the existing PR and
@@ -591,7 +594,8 @@ internal decisions, not new human approval stages. Resolve technical obstacles,
 choose authorized alternatives, coordinate rework and deliver where the user requested.
 Validate delivery_destination in each code spec against the latest user order:
 environment, exact target, authorization source/message and verification_operation
-(homolog for the tested final target; deploy for requested integrated promotion).
+(homolog for the tested final target; deploy for requested integrated promotion;
+pr for a phase that ends at the review PR with CI, without homolog, merge or deploy).
 Do not expand TEST/HML/preview scope into production, or treat a Kanban closure
 problem as authorization for unrelated product or runtime maintenance. Resolve
 closure through the approved destination and reuse existing evidence. Internal
