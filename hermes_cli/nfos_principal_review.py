@@ -17,6 +17,10 @@ def required(conn, task_id):
     workflow = d.get_workflow(conn, task_id)
     if not workflow:
         return False
+    if settings().get('principal_validation') is False:
+        # BLOCK_LESS_20260910 (premissa do owner, 10/09): desligado no perfil vale para toda spec,
+        # inclusive as que gravam delivery_destination.
+        return False
     spec = d.get_spec(conn, task_id)
     if spec and json.loads(spec['content']).get('delivery_destination'):
         return True

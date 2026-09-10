@@ -434,8 +434,8 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
     ids=[c.get('id') for c in spec['criteria']]
     if not all(ids) or len(set(ids))!=len(ids) or any(not c.get('text') for c in spec['criteria']):
         raise WorkflowError('Each spec criterion needs a unique id and description')
-    if author not in {'Claude TL','Codex'} or not evidence:
-        raise WorkflowError('Record the actual TL/Codex execution evidence')
+    if author not in {'Claude TL','Codex','worker'} or not evidence:  # BLOCK_LESS_20260910: o worker pode autorar a própria spec
+        raise WorkflowError('Record the actual TL/Codex/worker execution evidence')
     if author=='Codex' and not evidence.get('fallback_reason'):
         raise WorkflowError('Codex spec fallback needs the Claude unavailability reason')
     with _kb().write_txn(conn):
@@ -444,8 +444,8 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         if spec.get('delivery_type')!=task.delivery_type:
             # The project default is provisional until TL has analyzed the
             # request. An audit must not inherit a Git delivery requirement.
-            if wf['spec_revision'] or wf['stage']!='analysis' or spec.get('delivery_type') not in {'report','operation'}:
-                raise WorkflowError('Spec delivery type must match the card after initial classification')
+            if spec.get('delivery_type') not in {'report','operation'}:  # BLOCK_LESS_20260910: reclassificar para report/operation em qualquer estágio
+                raise WorkflowError('Spec delivery type can only change to report or operation')
             conn.execute('UPDATE tasks SET delivery_type=?,requires_repo=0 WHERE id=?',
                          (spec['delivery_type'],task_id))
             conn.execute('UPDATE task_git_delivery SET required=0 WHERE task_id=?',(task_id,))
@@ -660,6 +660,33 @@ def save_report(conn, task_id, run_id, report):
         _event(conn,task_id,run_id,'nfos_report_saved',{'revision':revision,'spec_revision':spec['revision']})
 
 
+_AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principal respondeu 'continue' em 223 de 302 casos (7 dias)
+    (r'slot|acquire-project|acquired.{0,4}false|hml (window|remains|slot)|janela (de )?hml|occupied|ocupad',
+     'CONTINUE (automático, premissa do owner 10/09): slot HML ocupado não é decisão do principal. Espere com `acquire-project --wait 900` (repita até adquirir) e siga; não pergunte de novo.'),
+    (r'readback.{0,40}inconsisten|inconsisten.{0,40}readback|release receipt',
+     'CONTINUE (automático): faça a releitura (`reconcile`) do alvo e siga com o que a releitura mostrar; não bloqueie.'),
+    (r'stale lease|retained lease|partial hml delivery',
+     'CONTINUE (automático): trate o lease retido com `repair-workspace`/`reconcile` e siga no mesmo card.'),
+    (r'next authorized action|next step|pr[oó]xim[oa] (passo|a[cç][aã]o)|what should .{0,30} do',
+     'CONTINUE (automático): siga a próxima etapa da spec salva. O principal não decide passo a passo.'),
+    (r'rate.?limit|\b429\b|usage limit|quota|\bcota\b',
+     'CONTINUE (automático): rate limit é transitório. Aguarde com backoff (60 s, 120 s, 300 s) e repita; não bloqueie o card.'),
+]
+
+
+def _auto_continue_answer(kind, question):
+    """BLOCK_LESS_20260910: resposta automática do principal para perguntas que não mudam o resultado."""
+    if kind=='homologation':
+        return 'CONTINUE (automático, premissa do owner 10/09): candidato exato aceito para publicação em HML; publique, valide e siga.'
+    if kind!='impediment':
+        return None
+    q=(question or '').lower()
+    for rx,ans in _AUTO_CONTINUE:
+        if re.search(rx,q):
+            return ans
+    return None
+
+
 def ask_principal(conn, task_id, run_id, *, kind, question, context):
     if kind not in {'review','spec_review','final_review','impediment','additional_tasks','homologation','preparation'} or not question.strip():
         raise WorkflowError('A decision needs its kind and concrete question')
@@ -701,6 +728,19 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
         if existing and kind not in {'additional_tasks','homologation','spec_review','final_review'}:
             return existing['id']
         revision=get_workflow(conn,task_id)['spec_revision']
+        auto=_auto_continue_answer(kind,question)  # BLOCK_LESS_20260910
+        if auto:
+            now=int(time.time())
+            conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                         (decision_id,task_id,run_id,kind,question,_json(context),revision,now,'resolved','continue',auto,'Principal',now))
+            try:
+                if kind=='homologation':
+                    _accept_homologation(conn,get_decision(conn,decision_id))
+            except WorkflowError:
+                conn.execute('DELETE FROM nfos_decisions WHERE id=?',(decision_id,))
+            else:
+                _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'question':question,'answer':auto})
+                return decision_id
         if kind=='review':
             context['review_identity']=_review_identity(conn,task_id)
         conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
@@ -866,6 +906,12 @@ def reconcile_human_answers(conn):
                         'human_reply_available':True})
             resumed.append(row['task_id'])
     return resumed
+
+
+def _human_question_valid(question, to):
+    """BLOCK_LESS_20260910: human só com pergunta concreta (termina em ?) e destinatário nomeado."""
+    q=str(question or '').strip(); t=str(to or '').strip()
+    return bool(q) and '?' in q and bool(t)
 
 
 def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None, assessment=None):
@@ -1437,7 +1483,7 @@ def main():
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
     parser.add_argument('--db',help='Exact board database supplied by the current gateway event')
     parser.add_argument('--evidence',help='JSON file with the TL session/output and fallback reason when applicable')
-    parser.add_argument('--author',default='Claude TL',choices=['Claude TL','Codex'])
+    parser.add_argument('--author',default='Claude TL',choices=['Claude TL','Codex','worker'])  # BLOCK_LESS_20260910
     parser.add_argument('--stage')
     parser.add_argument('--next',dest='next_action',default='')
     parser.add_argument('--kind',choices=['review','spec_review','final_review','impediment','additional_tasks','homologation','preparation'])
@@ -1447,6 +1493,7 @@ def main():
     parser.add_argument('--operation',choices=['homolog','pr','merge','deploy','staging_pr','staging_merge'])
     parser.add_argument('--target')
     parser.add_argument('--candidate')
+    parser.add_argument('--wait',type=int,default=0,help='Seconds to keep trying the project slot (max 900); BLOCK_LESS_20260910')
     parser.add_argument('--effect-id')
     parser.add_argument('--project',default=os.environ.get('HERMES_KANBAN_BOARD'))
     args=parser.parse_args()
@@ -1498,6 +1545,10 @@ def main():
         elif args.action=='decide':
             if os.environ.get('HERMES_KANBAN_TASK'):
                 raise WorkflowError('The Principal resolves reviews in its own coordinator session')
+            if args.resolution=='human':  # BLOCK_LESS_20260910: na fronteira do principal, human só com pergunta concreta e destinatário
+                if not _human_question_valid(payload.get('human_question'),payload.get('human_to')):
+                    raise WorkflowError('human exige human_question (com "?") e human_to (quem responde). Pausa técnica não é human: use continue ou changes.')
+                payload['answer']='PERGUNTA para '+str(payload['human_to']).strip()+': '+str(payload['human_question']).strip()+'\n'+str(payload.get('answer') or '').strip()
             resolve_decision(conn,args.decision,action=args.resolution,answer=payload['answer'],author='Principal',
                              proposal=payload.get('proposal'),assessment=payload.get('assessment'))
             result={'saved':True,'decision':get_decision(conn,args.decision)}
@@ -1513,7 +1564,12 @@ def main():
             reconcile_effect(conn,args.effect_id,found=payload['found'],evidence=payload['evidence'],
                 caller_task_id=args.task,caller_run_id=args.run);result={'saved':True}
         elif args.action=='acquire-project':
-            result={'acquired':acquire_project(conn,args.project,args.task,args.run,args.candidate)}
+            wait=max(0,min(900,int(args.wait or 0)))  # BLOCK_LESS_20260910: espera o slot em vez de perguntar ao principal
+            started=time.time(); acquired=acquire_project(conn,args.project,args.task,args.run,args.candidate)
+            while not acquired and time.time()-started<wait:
+                time.sleep(min(30,max(1,wait-(time.time()-started))))
+                acquired=acquire_project(conn,args.project,args.task,args.run,args.candidate)
+            result={'acquired':acquired,'waited_seconds':int(time.time()-started)}
         elif args.action=='release-project':
             result={'released':release_project(conn,args.project,args.task,args.run)}
         elif args.action=='receive':

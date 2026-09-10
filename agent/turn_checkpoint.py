@@ -557,22 +557,30 @@ class TurnCheckpointStore:
         verification: Mapping[str, Any] | None = None,
         delivery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        state = copy.deepcopy(self.load(session_id))
-        state["revision"] = int(state.get("revision", 0)) + 1
-        state["phase"] = str(phase)
-        if next_action is not None:
-            state["next_action"] = _redacted_literal(next_action, limit=8_192)
-        if changed_paths is not None:
-            state["changed_paths"] = sorted({str(path) for path in changed_paths if path})
-        if artifacts is not None:
-            state["artifacts"] = sorted({str(path) for path in artifacts if path})
-        if blockers is not None:
-            state["blockers"] = [_redacted_literal(item, limit=8_192) for item in blockers]
-        if verification is not None:
-            state["verification"] = {**state.get("verification", {}), **dict(verification)}
-        if delivery is not None:
-            state["delivery"] = {**state.get("delivery", {}), **dict(delivery)}
-        return self._write(state)
+        # BLOCK_LESS_20260910: conflito de revisão significa que outro escritor do mesmo turno gravou antes;
+        # reler e reaplicar a transição em vez de estourar (virava bloqueio de card no worker).
+        for _attempt in range(3):
+            state = copy.deepcopy(self.load(session_id))
+            state["revision"] = int(state.get("revision", 0)) + 1
+            state["phase"] = str(phase)
+            if next_action is not None:
+                state["next_action"] = _redacted_literal(next_action, limit=8_192)
+            if changed_paths is not None:
+                state["changed_paths"] = sorted({str(path) for path in changed_paths if path})
+            if artifacts is not None:
+                state["artifacts"] = sorted({str(path) for path in artifacts if path})
+            if blockers is not None:
+                state["blockers"] = [_redacted_literal(item, limit=8_192) for item in blockers]
+            if verification is not None:
+                state["verification"] = {**state.get("verification", {}), **dict(verification)}
+            if delivery is not None:
+                state["delivery"] = {**state.get("delivery", {}), **dict(delivery)}
+            try:
+                return self._write(state)
+            except CheckpointConflictError:
+                if _attempt == 2:
+                    raise
+        raise CheckpointConflictError("checkpoint transition lost the revision race three times")
 
     def prepare_compaction(
         self,
