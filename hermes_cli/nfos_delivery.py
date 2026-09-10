@@ -451,6 +451,9 @@ def record_precheck(conn, task_id, run_id, payload):
         return record
 
 
+SPEC_SIZE_BUDGET = {'P': 2700, 'M': 7200, 'G': 14400}  # BLOCK_LESS9_20260910: P 45 min, M 2 h, G 4 h (SOUL v3 seção 8)
+
+
 def save_spec(conn, task_id, run_id, spec, *, author, evidence):
     if 'delivery_destination' in spec:
         from hermes_cli.nfos_destination import validate
@@ -472,6 +475,12 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
             _pc=(json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') or {}
             if _pc.get('instruction_revision')!=task.instruction_revision:
                 raise WorkflowError('Production precheck missing: run `precheck --input precheck.json` (checked=[{target,method,result}] read in production/HML/PRs, verdict=already_delivered|partial|not_delivered) before saving a spec')
+            if str(spec.get('size') or '').strip().upper() not in SPEC_SIZE_BUDGET:  # BLOCK_LESS9_20260910
+                raise WorkflowError('Spec needs size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class')
+        _size=str(spec.get('size') or '').strip().upper()  # BLOCK_LESS9_20260910: quem escreve a spec define o orçamento
+        if _size in SPEC_SIZE_BUDGET:
+            conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?',(SPEC_SIZE_BUDGET[_size],task_id))
+            _event(conn,task_id,run_id,'nfos_spec_size',{'size':_size,'max_runtime_seconds':SPEC_SIZE_BUDGET[_size]})
         if spec.get('delivery_type')!=task.delivery_type:
             # The project default is provisional until TL has analyzed the
             # request. An audit must not inherit a Git delivery requirement.
@@ -1610,7 +1619,7 @@ def main():
                         '0. Before any spec or implementation, check production (and HML/staging) and the existing PRs/commits for this request. If it is already delivered, save a short report (criteria PASS with the readback as evidence) and call kanban_complete. If partially delivered, scope only the delta. Never re-implement delivered work. Record it with `precheck --input precheck.json` (checked=[{target,method,result}], verdict=already_delivered|partial|not_delivered); save-spec refuses a new spec without it.',
                         '1. Deliver first, in the requested environment, as fast as possible; verification comes after delivery.',
                         '2. Block as little as possible. Never block on a transient error. kanban_block only with a concrete question to a named human (needs_input) or a precise missing environment item (capability).',
-                        '3. Principal validation is OFF: do not ask spec_review or final_review, nor review for report/operation cards; they resolve automatically. Write the spec yourself (save-spec --author worker). After the work, save-report then kanban_complete.',
+                        '3. Principal validation is OFF: do not ask spec_review or final_review, nor review for report/operation cards; they resolve automatically. Write the spec yourself (save-spec --author worker) with size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class. After the work, save-report then kanban_complete.',  # BLOCK_LESS9_20260910
                         '4. Ask the Principal only when a decision changes the outcome. Slot occupied: acquire-project --wait 900. Next step: follow the saved spec.',
                         '5. Credentials for production, HML and databases are in the project vault listed under credentials in this output. Use them; never ask a human for something that is already there.',  # BLOCK_LESS6_20260910
                     ]
