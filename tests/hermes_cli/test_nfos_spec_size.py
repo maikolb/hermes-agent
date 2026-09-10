@@ -22,7 +22,7 @@ def _started(conn):
     rid = delivery.receive_request(conn,
         source={"platform": "telegram", "chat_id": "-10001", "thread_id": "8", "message_id": "7"},
         text="Aumentar a conta do tenant.",
-        project={"board": "pilot", "profile": "default", "delivery_type": "operation"},
+        project={"board": "pilot", "profile": "default", "delivery_type": "report"},
         attachments=[])
     request = delivery.reserve_request(conn, capacity=2)
     task = delivery.bootstrap_card(conn, rid, request["claim_token"], pid=os.getpid())
@@ -32,7 +32,7 @@ def _started(conn):
 
 
 def _spec(conn, task, **extra):
-    spec = {"goal": "Plano scale", "criteria": [{"id": "C1", "text": "plan=scale"}], "steps": ["Atualizar"], "delivery_type": "operation"}
+    spec = {"goal": "Plano scale", "criteria": [{"id": "C1", "text": "plan=scale"}], "steps": ["Atualizar"], "delivery_type": "report"}
     spec.update(extra)
     return delivery.save_spec(conn, task.id, task.current_run_id, spec, author="worker", evidence={"source": "worker"})
 
