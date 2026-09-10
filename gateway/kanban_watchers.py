@@ -164,6 +164,21 @@ _PROGRESS_RE = re.compile(r"^\s*\[\s*etapa\s*(\d)\s*/\s*7\s*([^\]]*)\]\s*(.*)$",
 _PROGRESS_CRIT_RE = re.compile(r"(?im)^\s*(?:crit[ée]rio(?:\s+de\s+aceite)?|pronto\s+quando)\s*[:\-]\s*(.+?)\s*$")
 
 
+def _sub_chat_type(sub, platform_str):
+    """chat_type efetivo de uma assinatura para o wake (DM_NEG_CHAT_20260910).
+    Telegram: chat_id negativo é grupo/supergrupo, nunca DM. Assinaturas gravadas com o default
+    'dm' de add_notify_sub mandavam o wake para uma sessão ':dm:' paralela no mesmo tópico."""
+    ct = str(sub.get("chat_type") or "").strip()
+    if not ct:
+        meta = sub.get("delivery_metadata")
+        if isinstance(meta, dict):
+            ct = str(meta.get("chat_type") or "").strip()
+    chat_id = str(sub.get("chat_id") or "")
+    if str(platform_str or "").lower() == "telegram" and chat_id.startswith("-") and ct in ("", "dm"):
+        return "group"
+    return ct or "group"
+
+
 def _progress_budget(max_runtime):
     """(tool budget, classe) a partir de max_runtime_seconds: P<=2700, M<=7200, G acima."""
     try:
@@ -3527,14 +3542,7 @@ class GatewayKanbanWatchersMixin:
                             # handle_message() get_or_create_session's the
                             # target, so a mismatch only ever degrades to a
                             # fresh session, never an exception.
-                            _chat_type = str(sub.get("chat_type") or "").strip()
-                            if not _chat_type:
-                                _delivery_meta = sub.get("delivery_metadata")
-                                if isinstance(_delivery_meta, dict):
-                                    _chat_type = str(
-                                        _delivery_meta.get("chat_type") or ""
-                                    ).strip()
-                            _chat_type = _chat_type or "group"
+                            _chat_type = _sub_chat_type(sub, platform_str)  # DM_NEG_CHAT_20260910
                             _source = SessionSource(
                                 platform=plat,
                                 chat_id=sub["chat_id"],
