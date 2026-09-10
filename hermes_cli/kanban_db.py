@@ -12113,6 +12113,57 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     return streak
 
 
+_GATEWAY_PROCESS_START: Optional[float] = None
+
+
+def _gateway_process_start() -> Optional[float]:
+    """Início (relógio do SO) do processo que roda o dispatcher, cacheado por processo."""
+    global _GATEWAY_PROCESS_START
+    if _GATEWAY_PROCESS_START is None:
+        try:
+            _GATEWAY_PROCESS_START = _process_start_time(os.getpid())
+        except Exception:
+            _GATEWAY_PROCESS_START = None
+    return _GATEWAY_PROCESS_START
+
+
+def _interrupted_by_gateway_restart(row, kind: str, gateway_started) -> bool:
+    """INTERRUPTED_20260910 (ordem do Maikol): worker que morreu junto com o gateway (restart, queda,
+    boot depois de falta de luz; KillMode=control-group) não é crash do worker. Critério: pid fora do
+    registro de reap deste processo (kind unknown) ou morto por sinal, e processo do worker iniciado
+    antes do processo atual do dispatcher."""
+    if kind not in ("unknown", "signaled") or gateway_started is None:
+        return False
+    try:
+        ws = row["worker_started_at"] if "worker_started_at" in row.keys() else None
+    except Exception:
+        ws = None
+    if ws is None:
+        return False
+    try:
+        return float(ws) < float(gateway_started) - 1.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _resume_first(conn: sqlite3.Connection, rows: list) -> list:
+    """INTERRUPTED_20260910: cards interrompidos por restart do gateway (evento interrupted mais novo
+    que o último claimed) voltam antes dos demais na fila; ordem original preservada entre iguais."""
+    try:
+        resume = {
+            r[0] for r in conn.execute(
+                "SELECT i.task_id FROM task_events i WHERE i.kind = 'interrupted' "
+                "AND i.id > COALESCE((SELECT MAX(c.id) FROM task_events c "
+                "WHERE c.task_id = i.task_id AND c.kind = 'claimed'), 0)"
+            )
+        }
+    except Exception:
+        return rows
+    if not resume:
+        return rows
+    return sorted(rows, key=lambda r: 0 if r["id"] in resume else 1)
+
+
 def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
@@ -12143,6 +12194,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """
     crashed: list[str] = []
     rate_limited: list[str] = []
+    interrupted_ids: list[str] = []  # INTERRUPTED_20260910
+    _gw_start = _gateway_process_start()  # INTERRUPTED_20260910
     # Per-crash details collected inside the main txn, used after it
     # closes to run ``_record_task_failure`` (which needs its own
     # write_txn so can't nest). ``protocol_violation`` flags the
@@ -12156,7 +12209,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     exited_hook_payloads: list[dict] = []
     with write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, claim_lock, started_at, assignee "
+            "SELECT id, worker_pid, claim_lock, started_at, assignee, worker_started_at "
             "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
@@ -12179,6 +12232,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
 
             pid = int(row["worker_pid"])
             kind, code = _classify_worker_exit(pid)
+            interrupted = _interrupted_by_gateway_restart(row, kind, _gw_start)  # INTERRUPTED_20260910
             rate_limited_exit = False
             if kind == "clean_exit":
                 # Worker subprocess returned 0 but its task is still
@@ -12237,6 +12291,14 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     error_text = f"pid {pid} not alive"
                 event_kind = "crashed"
                 event_payload = {"pid": pid, "claimer": row["claim_lock"]}
+                if interrupted:  # INTERRUPTED_20260910
+                    event_kind = "interrupted"
+                    error_text = (
+                        f"pid {pid} died with the gateway (interrupted; resumed "
+                        "without counting a failure)"
+                    )
+                    event_payload["worker_started_at"] = row["worker_started_at"]
+                    event_payload["gateway_started_at"] = _gw_start
                 if code is not None and kind != "unknown":
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
@@ -12254,7 +12316,10 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # Rate-limited requeues are a clean release, not a crash —
                 # record the run outcome as ``rate_limited`` so the board
                 # history doesn't show a phantom crash for a quota wall.
-                _run_outcome = "rate_limited" if rate_limited_exit else "crashed"
+                _run_outcome = (
+                    "rate_limited" if rate_limited_exit
+                    else ("reclaimed" if interrupted else "crashed")  # INTERRUPTED_20260910
+                )
                 run_id = _end_run(
                     conn, row["id"],
                     outcome=_run_outcome, status=_run_outcome,
@@ -12287,6 +12352,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         (error_text[:500], row["id"]),
                     )
                     rate_limited.append(row["id"])
+                elif interrupted:  # INTERRUPTED_20260910: sem falha, sem breaker, sem wake
+                    interrupted_ids.append(row["id"])
                 else:
                     if protocol_violation:
                         # Stamp the failure error now: a below-budget
@@ -12396,6 +12463,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # Same side-channel for rate-limited requeues — these did NOT count a
     # failure and are NOT crashes, so they stay out of the ``crashed`` return.
     detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
+    detect_crashed_workers._last_interrupted = interrupted_ids  # type: ignore[attr-defined]  # INTERRUPTED_20260910
     # Worker-lifecycle observer (RFC #58548): exit events are tick-derived
     # from this reclaim pass — fired only now, after the main reclaim txn
     # AND the breaker accounting above have committed, so subscribers always
@@ -13706,21 +13774,21 @@ def _dispatch_once_locked(
                                             "reserved": reserved_count, "limit": delivery_capacity})
         spawn_budget = available if spawn_budget is None else min(spawn_budget, available)
 
-    ready_rows = conn.execute(
+    ready_rows = _resume_first(conn, conn.execute(  # INTERRUPTED_20260910
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'ready' AND task_role = 'work' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
-    ).fetchall()
+    ).fetchall())
     # Review rows are enumerated up front (not after the ready loop) so the
     # budget split below can see whether review work exists at all.
     review_rows = []
     if review_dispatch_enabled():
-        review_rows = conn.execute(
+        review_rows = _resume_first(conn, conn.execute(  # INTERRUPTED_20260910
             "SELECT id, assignee FROM tasks "
             "WHERE status = 'review' AND task_role = 'work' AND claim_lock IS NULL "
             "AND id NOT IN (SELECT task_id FROM nfos_workflows) "
             "ORDER BY priority DESC, created_at ASC"
-        ).fetchall()
+        ).fetchall())
     # Review-lane reservation (OOF-30 review finding): the ready loop runs
     # first and used to consume the ENTIRE shared budget, so a sustained
     # ready backlog permanently starved autonomous reviews — completed work
