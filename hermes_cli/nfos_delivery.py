@@ -1662,6 +1662,21 @@ def _run_process_alive(conn, task_id, run_id):
     return expected is None or _kb()._process_identity_matches(pid,expected)
 
 
+def _urgent_preempts_slot(conn, task_id, current):
+    """SLOT_PREEMPT_20260910 (ordem do Maikol): card urgente (priority >= URGENT_PRIORITY) toma o slot de um dono vivo
+    que não tem publicação em voo (nenhum efeito unknown em homolog/merge/deploy/staging_*) e que não é urgente."""
+    try:
+        mine=conn.execute('SELECT priority FROM tasks WHERE id=?',(task_id,)).fetchone()
+        theirs=conn.execute('SELECT priority FROM tasks WHERE id=?',(current['task_id'],)).fetchone()
+        if not mine or int(mine[0] or 0)<URGENT_PRIORITY or (theirs and int(theirs[0] or 0)>=URGENT_PRIORITY):
+            return False
+        inflight=conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('homolog','merge','deploy','staging_pr','staging_merge')",
+                              (current['task_id'],)).fetchone()
+        return inflight is None
+    except Exception:
+        return False
+
+
 def acquire_project(conn, project, task_id, run_id, candidate):
     with _kb().write_txn(conn):
         _owned(conn,task_id,run_id)
@@ -1672,7 +1687,18 @@ def acquire_project(conn, project, task_id, run_id, candidate):
             previous=conn.execute('SELECT ended_at FROM task_runs WHERE id=? AND task_id=?',
                                   (current['run_id'],current['task_id'])).fetchone()
             if not previous or not previous['ended_at'] or _run_process_alive(conn,current['task_id'],current['run_id']):
-                return False
+                if not _urgent_preempts_slot(conn,task_id,current):  # SLOT_PREEMPT_20260910
+                    return False
+                conn.execute('DELETE FROM nfos_project_delivery WHERE project=?',(project,))
+                _event(conn,current['task_id'],current['run_id'],'nfos_project_delivery_preempted',
+                       {'project':project,'by_task':task_id,'by_run':run_id,'candidate':current['candidate']})
+                _kb().add_comment(conn,current['task_id'],'nfos-runtime',
+                    '[slot] slot de publicação do projeto '+str(project)+' tomado pelo card urgente '+task_id+
+                    ' (priority >= 100); este card não tinha publicação em voo. Na homologação, readquira com acquire-project --wait 900.')
+                conn.execute('INSERT INTO nfos_project_delivery(project,task_id,run_id,candidate,acquired_at) VALUES(?,?,?,?,?)',
+                             (project,task_id,run_id,candidate,int(time.time())))
+                _event(conn,task_id,run_id,'nfos_project_delivery_acquired',{'project':project,'candidate':candidate,'preempted':current['task_id']})
+                return True
             unknown=conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('homolog','merge','deploy','staging_pr','staging_merge')",
                                  (current['task_id'],)).fetchone()
             # The replacement run may reconcile its own exact candidate.
