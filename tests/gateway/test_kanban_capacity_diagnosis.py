@@ -21,3 +21,8 @@ def test_capacity_only_is_true_only_when_every_board_waited_for_a_slot():
     assert kw._capacity_only([("a", capped), ("b", SimpleNamespace(spawned=[("t", "p", "w")]))]) is False
     assert kw._capacity_only([("a", SimpleNamespace(skipped_unassigned=["t_x"]))]) is False
     assert kw._capacity_only([]) is False
+
+
+def test_workspace_lease_counts_as_waiting_not_stuck():
+    leased = SimpleNamespace(skipped_workspace_leased=[("t_a", "t_b", "/w")], spawned=[])
+    assert kw._capacity_only([("dovcrm", leased)]) is True

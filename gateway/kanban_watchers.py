@@ -350,7 +350,7 @@ def _capacity_only(results) -> bool:
             continue
         if getattr(res, "spawned", None):
             return False
-        if getattr(res, "skipped_capacity", None):
+        if getattr(res, "skipped_capacity", None) or getattr(res, "skipped_workspace_leased", None):
             seen = True
         elif (getattr(res, "skipped_unassigned", None) or getattr(res, "rate_limited", None)
               or getattr(res, "respawn_guarded", None) or getattr(res, "skipped_locked", False)):
@@ -3458,6 +3458,11 @@ class GatewayKanbanWatchersMixin:
                             _synth += "\n\n" + t(
                                 "gateway.kanban.wake.guidance"
                             )
+                            # WAKE_SILENCE_20260910 (ordem do Maikol): a regra de silêncio vai no próprio wake
+                            _synth += ("\n\nRegra do grupo: este turno foi acordado por notificação de kanban. "
+                                       "Resolva pelas ferramentas (decide, kanban_comment, kanban_block) e termine SEM texto. "
+                                       "Escreva no grupo apenas se for Entregue (card fechado) ou uma pergunta que um humano precisa responder. "
+                                       "Nada de narrar decisão, confirmar bloqueio ou responder a alerta repetido.")
                             if "nfos_principal_requested" in _wake_kinds:
                                 from hermes_cli.nfos_runtime import workflow_command
                                 _synth += (f"\nNFOS: consulte `{workflow_command()} pending` "
@@ -4778,6 +4783,17 @@ class GatewayKanbanWatchersMixin:
                     continue
                 bits: list[str] = []
                 bits.extend(_capacity_bits(res))
+                leased = getattr(res, "skipped_workspace_leased", None) or []
+                if leased:
+                    bits.append(f"workspace_leased={len(leased)}")
+                conflicts = getattr(res, "workspace_lease_conflicts", None) or []
+                if conflicts:
+                    bits.append(f"lease_conflicts={len(conflicts)}")
+                nonspawnable = getattr(res, "skipped_nonspawnable", None) or []
+                if nonspawnable:
+                    bits.append(f"nonspawnable={len(nonspawnable)}")
+                if getattr(res, "memory_pressure", None):
+                    bits.append(f"memory_pressure={res.memory_pressure}")
                 if getattr(res, "skipped_locked", False):
                     bits.append("tick lock held elsewhere")
                 guarded = getattr(res, "respawn_guarded", None) or []
