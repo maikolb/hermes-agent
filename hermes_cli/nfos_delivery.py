@@ -1395,6 +1395,37 @@ def completion_evidence_check(conn, task_id):
         return None
 
 
+def _credentials_hint(db_path):
+    """BLOCK_LESS6_20260910: cofre do projeto do board (nomes de arquivos e de chaves, nunca valores)."""
+    try:
+        home=os.environ.get('HERMES_HOME') or ''
+        vault=Path(home)/'secrets' if home else None
+        if not vault or not vault.is_dir():
+            return None
+        slug=Path(db_path).resolve().parent.name
+        keys={slug, slug.split('--')[-1], slug.split('-')[0]}
+        files=[]
+        for entry in sorted(vault.iterdir()):
+            if not any(entry.name.startswith(k) for k in keys if k):
+                continue
+            paths=[entry] if entry.is_file() else sorted(p for p in entry.rglob('*') if p.is_file())
+            for p in paths[:40]:
+                item={'path':str(p)}
+                if p.suffix=='.env':
+                    names=[]
+                    for line in p.read_text(encoding='utf-8',errors='replace').splitlines():
+                        if '=' in line and not line.lstrip().startswith('#'):
+                            names.append(line.split('=',1)[0].strip())
+                    item['keys']=sorted(set(names))
+                files.append(item)
+        if not files:
+            return {'vault':str(vault),'files':[],'note':'Nenhum arquivo deste projeto no cofre. Se a tarefa exige credencial, bloqueie com pergunta ao owner indicando o caminho onde ela deve ser colocada.'}
+        return {'vault':str(vault),'files':files,
+                'how':'Carregue um .env dentro do seu comando: set -a; . <arquivo>; set +a. Arquivos .json são estados de sessão/acessos: leia e use. Nunca cole valores em cards, relatórios, commits ou chat.'}
+    except Exception:
+        return None
+
+
 def completion_ready(conn, task_id, *, evidence_check=None):
     wf=get_workflow(conn,task_id)
     if wf is None:
@@ -1545,9 +1576,11 @@ def main():
                         '2. Block as little as possible. Never block on a transient error. kanban_block only with a concrete question to a named human (needs_input) or a precise missing environment item (capability).',
                         '3. Principal validation is OFF: do not ask spec_review or final_review, nor review for report/operation cards; they resolve automatically. Write the spec yourself (save-spec --author worker). After the work, save-report then kanban_complete.',
                         '4. Ask the Principal only when a decision changes the outcome. Slot occupied: acquire-project --wait 900. Next step: follow the saved spec.',
+                        '5. Credentials for production, HML and databases are in the project vault listed under credentials in this output. Use them; never ask a human for something that is already there.',  # BLOCK_LESS6_20260910
                     ]
             except Exception:
                 pass
+            result['credentials']=_credentials_hint(args.db)  # BLOCK_LESS6_20260910
             if result['workflow']:
                 result['request']=get_request(conn,result['workflow']['request_id'])
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_tool_calls'").fetchone():
