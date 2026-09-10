@@ -2367,7 +2367,13 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 expected_run_id=_worker_run_id_for(tid),
             ):
                 failed.append(tid)
-                print(f"cannot block {tid}", file=sys.stderr)
+                _refused = conn.execute(  # NO_PARK_20260910
+                    "SELECT payload FROM task_events WHERE task_id=? AND kind='block_refused' ORDER BY id DESC LIMIT 1", (tid,)
+                ).fetchone()
+                if _refused:
+                    print(f"cannot block {tid}: {json.loads(_refused[0]).get('why', '')}", file=sys.stderr)
+                else:
+                    print(f"cannot block {tid}", file=sys.stderr)
             else:
                 # Report where the task actually landed — dependency blocks go
                 # to todo, and a tripped unblock-loop breaker routes to triage.

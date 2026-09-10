@@ -8440,6 +8440,33 @@ def edit_completed_task_result(
     return True
 
 
+_NO_PARK_HUMAN_RX = re.compile(r"maikol|japa|jhonatan|pablo|cliente|solicitante|owner|dono|autor", re.I)  # NO_PARK_20260910
+
+
+def _no_park_reason(conn, task_id, kind, reason):
+    """NO_PARK_20260910 (owner premises of 10/09): with principal validation off, an NFOS card only lands in
+    ``blocked`` as a question to a named human. Kinds needs_input/capability/None need a '?' and the recipient in
+    the reason; a technical pause is refused so the caller finishes the delivery or asks. transient/dependency keep
+    their meaning. Returns the refusal text, or None when the block is allowed."""
+    if kind in ("transient", "dependency"):
+        return None
+    try:
+        from hermes_cli.nfos_delivery import _owner_mode, get_workflow
+        if not _owner_mode() or not get_workflow(conn, task_id):
+            return None
+    except Exception:
+        return None
+    text = str(reason or "")
+    if "?" in text and _NO_PARK_HUMAN_RX.search(text):
+        return None
+    return (
+        "Owner mode: a block is a question to a named human. The reason must contain the question (with '?') and "
+        "the recipient (Maikol, Japa, Jhonatan, Pablo, cliente...). A technical pause is not a block: continue the "
+        "delivery for the requested environment (rebase, resolve conflicts, merge, deploy, readback) and call "
+        "kanban_complete, or ask that question."
+    )
+
+
 def block_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -8490,6 +8517,12 @@ def block_task(
                 ask_principal(conn,task_id,current.current_run_id,kind='impediment',
                     question=reason or 'Diagnose why this task cannot advance',context={'requested_block_kind':kind})
                 return True
+    _park = _no_park_reason(conn, task_id, kind, reason)  # NO_PARK_20260910
+    if _park:
+        _log.warning("kanban block refused for %s: %s", task_id, _park)
+        with write_txn(conn):
+            _append_event(conn, task_id, "block_refused", {"kind": kind, "why": _park, "requested_reason": str(reason or "")[:400]})
+        return False
     recurrences = 0
     with write_txn(conn):
         cur_row = conn.execute(
