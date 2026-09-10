@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import faulthandler
 import json
+import functools
 import logging
 import os
 import sys
@@ -454,10 +455,21 @@ async def loop_heartbeat_forever(
     # Immediate first write so monitors see a fresh file as soon as the
     # gateway is running, not after the first interval.
     write_loop_heartbeat(start_time=start_time, home=home)
+    # HEARTBEAT_OFFLOOP_20260910: a escrita periódica (temp + fsync + rename) sai do loop. Em 10/09/2026 o fsync
+    # travou o loop sob disco saturado, o watchdog externo contou 3 sondas perdidas e derrubou o
+    # gateway (e todos os workers, KillMode=control-group). Falha na escrita não derruba a tarefa.
+    _loop = asyncio.get_running_loop()
     while True:
         if should_continue is not None and not should_continue():
             return
         await asyncio.sleep(interval)
         if should_continue is not None and not should_continue():
             return
-        write_loop_heartbeat(start_time=start_time, home=home)
+        try:
+            await _loop.run_in_executor(
+                None, functools.partial(write_loop_heartbeat, start_time=start_time, home=home)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Loop heartbeat write failed", exc_info=True)
