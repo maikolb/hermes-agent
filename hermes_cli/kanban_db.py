@@ -12167,10 +12167,13 @@ def _urgent_burst_slots(conn: sqlite3.Connection) -> int:
     priority >= URGENT_PRIORITY e nenhum urgente rodando. Quando o urgente sobe, a vaga some e o board
     volta ao seu teto normal conforme os outros workers terminam."""
     try:
-        waiting = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status IN ('ready', 'review') AND task_role = 'work' "
+        rows = conn.execute(
+            "SELECT id FROM tasks WHERE status IN ('ready', 'review') AND task_role = 'work' "
             "AND claim_lock IS NULL AND priority >= ?", (URGENT_PRIORITY,),
-        ).fetchone()[0]
+        ).fetchall()
+        # URGENT2_20260910: urgente com decisão aberta não é despachável (OPEN_DECISION_SKIP); não gera vaga
+        _open = globals().get("_nfos_decision_open")
+        waiting = [r[0] for r in rows if not (_open and _open(conn, r[0]))]
         if not waiting:
             return 0
         running = conn.execute(
