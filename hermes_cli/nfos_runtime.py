@@ -398,7 +398,7 @@ def workflow_command():
     return _script_command(delivery.__file__)
 
 
-def _premises_prefix():
+def _premises_prefix():  # BLOCK_LESS7_20260910
     """BLOCK_LESS_20260910: premissas do owner (10/09/2026) no topo das instruções do worker, quando a validação
     do principal está desligada no perfil."""
     try:
@@ -409,7 +409,7 @@ def _premises_prefix():
         pass
     return (
         'OWNER PREMISES (10/09/2026). They override any conflicting sentence below.\n'
-        '0. Before any spec or implementation, check production (and HML/staging) and the existing PRs/commits for this request. If it is already delivered, save a short report (criteria PASS with the readback as evidence) and call kanban_complete. If partially delivered, scope only the delta. Never re-implement delivered work.\n'  # BLOCK_LESS3_20260910
+        '0. Before any spec or implementation, check production (and HML/staging) and the existing PRs/commits for this request. If it is already delivered, save a short report (criteria PASS with the readback as evidence) and call kanban_complete. If partially delivered, scope only the delta. Never re-implement delivered work. Record it with `precheck --input precheck.json` (checked=[{target,method,result}], verdict=already_delivered|partial|not_delivered); save-spec refuses a new spec without it.\n'  # BLOCK_LESS3_20260910
         '1. Deliver first, in the requested environment, as fast as possible; verification comes after delivery.\n'
         '2. Block as little as possible. Never block on a transient error (rate limit, stale checkpoint, locked DB, flaky network): retry with backoff.\n'
         '3. Principal validation is OFF: never ask spec_review or final_review. Write the spec yourself (`save-spec --author worker`, evidence {"source":"worker"}); call Claude TL only for an ambiguous or large request. After the work, `save-report` and then kanban_complete directly.\n'

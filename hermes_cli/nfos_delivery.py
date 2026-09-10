@@ -425,6 +425,32 @@ def _require_current_instruction_spec(conn, task_id):
         raise WorkflowError('Card instructions changed; read them and persist the updated spec before continuing delivery')
 
 
+def record_precheck(conn, task_id, run_id, payload):
+    """BLOCK_LESS7_20260910: registro do que foi lido em produção/HML/PRs antes de qualquer spec ou implementação."""
+    checked=payload.get('checked') if isinstance(payload,dict) else None
+    verdict=str((payload or {}).get('verdict') or '').strip()
+    if (not isinstance(checked,list) or not checked or any(not isinstance(c,dict) or not str(c.get('target') or '').strip()
+            or not str(c.get('result') or '').strip() for c in checked)):
+        raise WorkflowError('precheck needs checked=[{target,method,result}] with what was actually read in production, HML or PRs')
+    if verdict not in {'already_delivered','partial','not_delivered'}:
+        raise WorkflowError('precheck verdict must be already_delivered, partial or not_delivered')
+    with _kb().write_txn(conn):
+        task=_owned(conn,task_id,run_id)
+        wf=get_workflow(conn,task_id)
+        if wf is None:
+            raise WorkflowError('Unknown NFOS card')
+        state=json.loads(wf['state_json'] or '{}')
+        record={'checked':checked,'verdict':verdict,'delta':str(payload.get('delta') or ''),
+                'instruction_revision':task.instruction_revision,'run_id':run_id,'recorded_at':int(time.time())}
+        state['production_precheck']=record
+        nxt={'already_delivered':'Already delivered: save a short report (criteria PASS with the readback as evidence) and call kanban_complete; do not re-implement',
+             'partial':'Partially delivered: write the spec for the delta only, then implement',
+             'not_delivered':'Not delivered: write the spec and implement'}[verdict]
+        conn.execute('UPDATE nfos_workflows SET state_json=?,next_action=?,updated_at=? WHERE task_id=?',(_json(state),nxt,int(time.time()),task_id))
+        _event(conn,task_id,run_id,'nfos_precheck',record)
+        return record
+
+
 def save_spec(conn, task_id, run_id, spec, *, author, evidence):
     if 'delivery_destination' in spec:
         from hermes_cli.nfos_destination import validate
@@ -441,6 +467,11 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
     with _kb().write_txn(conn):
         task=_owned(conn,task_id,run_id)
         wf=get_workflow(conn,task_id)
+        from hermes_cli.nfos_principal_review import settings as _settings
+        if _settings().get('principal_validation') is False and not wf['spec_revision']:  # BLOCK_LESS7_20260910: modo das premissas
+            _pc=(json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') or {}
+            if _pc.get('instruction_revision')!=task.instruction_revision:
+                raise WorkflowError('Production precheck missing: run `precheck --input precheck.json` (checked=[{target,method,result}] read in production/HML/PRs, verdict=already_delivered|partial|not_delivered) before saving a spec')
         if spec.get('delivery_type')!=task.delivery_type:
             # The project default is provisional until TL has analyzed the
             # request. An audit must not inherit a Git delivery requirement.
@@ -1537,7 +1568,7 @@ def main():
     import argparse
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['show','cancel','save-spec','save-report','progress','ask','decide',
+    parser.add_argument('action',choices=['show','precheck','cancel','save-spec','save-report','progress','ask','decide',
         'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','acquire-project','release-project','receive','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
@@ -1571,7 +1602,7 @@ def main():
                 from hermes_cli.nfos_principal_review import required as _req
                 if not _req(conn,args.task):
                     result['owner_premises']=[
-                        '0. Before any spec or implementation, check production (and HML/staging) and the existing PRs/commits for this request. If it is already delivered, save a short report (criteria PASS with the readback as evidence) and call kanban_complete. If partially delivered, scope only the delta. Never re-implement delivered work.',
+                        '0. Before any spec or implementation, check production (and HML/staging) and the existing PRs/commits for this request. If it is already delivered, save a short report (criteria PASS with the readback as evidence) and call kanban_complete. If partially delivered, scope only the delta. Never re-implement delivered work. Record it with `precheck --input precheck.json` (checked=[{target,method,result}], verdict=already_delivered|partial|not_delivered); save-spec refuses a new spec without it.',
                         '1. Deliver first, in the requested environment, as fast as possible; verification comes after delivery.',
                         '2. Block as little as possible. Never block on a transient error. kanban_block only with a concrete question to a named human (needs_input) or a precise missing environment item (capability).',
                         '3. Principal validation is OFF: do not ask spec_review or final_review, nor review for report/operation cards; they resolve automatically. Write the spec yourself (save-spec --author worker). After the work, save-report then kanban_complete.',
@@ -1583,9 +1614,12 @@ def main():
             result['credentials']=_credentials_hint(args.db)  # BLOCK_LESS6_20260910
             if result['workflow']:
                 result['request']=get_request(conn,result['workflow']['request_id'])
+                result['production_precheck']=(json.loads(result['workflow']['state_json'] or '{}') or {}).get('production_precheck')  # BLOCK_LESS7_20260910
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_tool_calls'").fetchone():
                 from hermes_cli.nfos_tool import read_calls
                 result['native_calls']=read_calls(conn,args.task)
+        elif args.action=='precheck':  # BLOCK_LESS7_20260910
+            result={'precheck':record_precheck(conn,args.task,args.run,payload)}
         elif args.action=='cancel':
             from hermes_cli.kanban_cancellation import cancel_task
             cancel_task(conn,args.task,metadata=payload,
