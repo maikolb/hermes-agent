@@ -941,7 +941,7 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"To proceed, either: (1) provide explicit acceptance "
                     f"evidence in your summary matching the task's criteria, "
                     f"or (2) create continuation tasks with parents=[{tid}] "
-                    f"and keep this task alive."
+                    f"and keep this task alive." + _judge_owner_hint()  # NO_PARK_20260910
                 )
 
             # AOF enforcement (spec: real, not textual): a worker
@@ -1067,6 +1067,21 @@ def _handle_complete(args: dict, **kw) -> str:
         return tool_error(f"kanban_complete: {e}")
 
 
+def _judge_owner_hint():
+    """NO_PARK_20260910: after a judge refusal in owner mode the way out is to finish or to ask, never to pause."""
+    try:
+        from hermes_cli.nfos_delivery import _owner_mode
+        if not _owner_mode():
+            return ""
+    except Exception:
+        return ""
+    return (
+        " Owner mode: the delivery is incomplete for the requested environment. Finish it (rebase, resolve conflicts, "
+        "merge, deploy, production readback), save the report and call kanban_complete again; or block with a concrete "
+        "question to a named human. Do not pause and do not park the card."
+    )
+
+
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
     delegated_err = _reject_delegated_child_mutation("kanban_block")
@@ -1126,6 +1141,14 @@ def _handle_block(args: dict, **kw) -> str:
                 expected_run_id=_worker_run_id(tid),
             )
             if not ok:
+                _refused = conn.execute(  # NO_PARK_20260910
+                    "SELECT payload FROM task_events WHERE task_id=? AND kind='block_refused' ORDER BY id DESC LIMIT 1", (tid,)
+                ).fetchone()
+                if _refused:
+                    try:
+                        return tool_error("kanban_block refused: " + str(json.loads(_refused[0]).get("why") or ""))
+                    except Exception:
+                        return tool_error("kanban_block refused: a block is a question to a named human")
                 return tool_error(
                     f"could not block {tid} (unknown id or not in "
                     f"running/ready)"
