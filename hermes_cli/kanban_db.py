@@ -12190,7 +12190,7 @@ def _resume_first(conn: sqlite3.Connection, rows: list) -> list:
     try:
         resume = {
             r[0] for r in conn.execute(
-                "SELECT i.task_id FROM task_events i WHERE i.kind = 'interrupted' "
+                "SELECT i.task_id FROM task_events i WHERE i.kind IN ('interrupted', 'budget_continued') "  # RESUME_BUDGET_20260910
                 "AND i.id > COALESCE((SELECT MAX(c.id) FROM task_events c "
                 "WHERE c.task_id = i.task_id AND c.kind = 'claimed'), 0)"
             )
