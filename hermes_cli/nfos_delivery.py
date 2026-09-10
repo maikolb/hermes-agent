@@ -669,6 +669,8 @@ _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principa
      'CONTINUE (automático): trate o lease retido com `repair-workspace`/`reconcile` e siga no mesmo card.'),
     (r'next authorized action|next step|pr[oó]xim[oa] (passo|a[cç][aã]o)|what should .{0,30} do',
      'CONTINUE (automático): siga a próxima etapa da spec salva. O principal não decide passo a passo.'),
+    (r'reavaliar o impedimento registrado|retomar o mesmo card se resolv|impediment registered in the history',  # BLOCK_LESS2_20260910
+     'CONTINUE (automático): o histórico de impedimentos foi tratado na triagem de 10/09. Retome o mesmo card do estado salvo e entregue; se algo só um humano pode fornecer, bloqueie com a pergunta e o destinatário no motivo.'),
     (r'rate.?limit|\b429\b|usage limit|quota|\bcota\b',
      'CONTINUE (automático): rate limit é transitório. Aguarde com backoff (60 s, 120 s, 300 s) e repita; não bloqueie o card.'),
 ]
@@ -692,6 +694,16 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
         raise WorkflowError('A decision needs its kind and concrete question')
     with _kb().write_txn(conn,allow_nested=True):
         _owned(conn,task_id,run_id)
+        if kind in {'spec_review','final_review'}:  # BLOCK_LESS2_20260910: validação desligada no perfil = pergunta sem efeito
+            from hermes_cli.nfos_principal_review import required
+            if not required(conn,task_id):
+                decision_id='dec_'+uuid.uuid4().hex[:20]; now=int(time.time())
+                revision=get_workflow(conn,task_id)['spec_revision']
+                auto='CONTINUE (automático, premissa do owner 10/09): validação do principal desligada no perfil; não peça '+kind+'. Siga: implemente, salve o relatório e chame kanban_complete.'
+                conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                             (decision_id,task_id,run_id,kind,question,_json(dict(context)),revision,now,'resolved','continue',auto,'Principal',now))
+                _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'question':question,'answer':auto})
+                return decision_id
         if kind=='review':
             _require_current_instruction_spec(conn,task_id)
         context=dict(context)
@@ -1347,8 +1359,10 @@ def completion_evidence_check(conn, task_id):
         if (metadata.get('schema_version')!=1 or metadata.get('report_sha256')!=digest
                 or metadata.get('spec_revision')!=spec['revision']):
             return None
+        from hermes_cli.nfos_principal_review import required
+        strict=required(conn,task_id)  # BLOCK_LESS2_20260910: com validação desligada, todos os critérios PASS no relatório basta
         proved=set()
-        for check in metadata.get('artifact_checks',[]):
+        for check in (metadata.get('artifact_checks',[]) if strict else []):
             if (check.get('task_id')!=task_id or check.get('run_id')!=report['run_id']
                     or check.get('spec_revision')!=spec['revision']):
                 return None
@@ -1359,7 +1373,7 @@ def completion_evidence_check(conn, task_id):
                 proved.update(check.get('criteria',[]))
             elif check.get('status')!='external_unchecked':
                 return None
-        if any(row['status']!='PASS' or criterion not in proved for criterion,row in results.items()):
+        if any(row['status']!='PASS' or (strict and criterion not in proved) for criterion,row in results.items()):  # BLOCK_LESS2_20260910
             return None
         return {'report_id':report['id'],'report_revision':report['revision'],
                 'report_sha256':digest,'spec_revision':spec['revision'],
