@@ -12413,6 +12413,106 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     return crashed
 
 
+_BUDGET_PROGRESS_KINDS = (
+    "nfos_progress", "commented", "nfos_report_saved", "nfos_spec_saved",
+    "nfos_effect_requested", "nfos_effect_reconciled", "nfos_principal_requested",
+    "nfos_homologation_bound",
+)
+
+
+def _budget_continuation_cap() -> int:
+    """kanban.max_budget_continuations (padrão 3; 0 desliga a continuação)."""
+    try:
+        from hermes_cli.config import load_config
+        kanban = (load_config() or {}).get("kanban") or {}
+        return max(0, int(kanban.get("max_budget_continuations", 3)))
+    except Exception:
+        return 3
+
+
+def _budget_continuation(
+    conn: sqlite3.Connection,
+    task_id: str,
+    error: str,
+    *,
+    outcome: str,
+    release_claim: bool,
+    end_run: bool,
+    event_payload_extra: Optional[dict] = None,
+) -> bool:
+    """BUDGET_CONTINUE_20260910 (ordem do Maikol): run que esgotou o orçamento (iterações ou
+    max_runtime) com progresso persistido volta para a fila sem contar falha nem acordar o
+    principal. Antes, duas exaustões seguidas disparavam gave_up, o principal desbloqueava em
+    ~2 min e nascia outro run: 14 runs num card em 10/09. Teto de continuações por janela
+    (desde o último unblocked/gave_up/completed/created); acima dele, ou sem progresso no run,
+    devolve False e o chamador segue o caminho normal do breaker. True = tratado aqui."""
+    if outcome != "timed_out":
+        return False
+    cap = _budget_continuation_cap()
+    if cap <= 0:
+        return False
+    row = conn.execute(
+        "SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    run_id = row["current_run_id"]
+    if run_id is None:
+        # caminho do enforce_max_runtime: o run já foi fechado antes desta chamada
+        last = conn.execute(
+            "SELECT id FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,),
+        ).fetchone()
+        run_id = last["id"] if last else None
+    if run_id is None:
+        return False
+    marks = ",".join("?" for _ in _BUDGET_PROGRESS_KINDS)
+    progress = conn.execute(
+        f"SELECT COUNT(*) FROM task_events WHERE task_id = ? AND run_id = ? AND kind IN ({marks})",
+        (task_id, int(run_id), *_BUDGET_PROGRESS_KINDS),
+    ).fetchone()[0]
+    if not progress:
+        return False
+    since = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id = ? "
+        "AND kind IN ('unblocked', 'gave_up', 'completed', 'created')",
+        (task_id,),
+    ).fetchone()[0]
+    used = conn.execute(
+        "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'budget_continued' AND id > ?",
+        (task_id, int(since or 0)),
+    ).fetchone()[0]
+    if used >= cap:
+        return False
+    with write_txn(conn):
+        if release_claim:
+            retry_status = _retry_status_for_run(conn, task_id, row["current_run_id"])
+            conn.execute(
+                "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, "
+                "worker_pid = NULL, last_failure_error = ? "
+                "WHERE id = ? AND status IN ('running', 'ready', 'review')",
+                (retry_status, error[:500], task_id),
+            )
+        else:
+            retry_status = "review" if row["status"] == "review" else "ready"
+        ended = None
+        if end_run:
+            ended = _end_run(
+                conn, task_id, outcome="timed_out", status="timed_out", error=error[:500],
+                metadata={"budget_continuation": used + 1, "cap": cap, "retry_status": retry_status},
+            )
+        payload = {
+            "continuation": used + 1, "cap": cap, "trigger_outcome": outcome,
+            "retry_status": retry_status, "error": error[:500],
+        }
+        if event_payload_extra:
+            payload.update(event_payload_extra)
+        _append_event(
+            conn, task_id, "budget_continued", payload,
+            run_id=ended if ended is not None else int(run_id),
+        )
+    return True
+
+
 def _record_task_failure(
     conn: sqlite3.Connection,
     task_id: str,
@@ -12468,6 +12568,11 @@ def _record_task_failure(
     ``max_retries`` override against the violation streak itself. The
     failure is still counted into ``consecutive_failures``.
     """
+    if _budget_continuation(  # BUDGET_CONTINUE_20260910
+        conn, task_id, error, outcome=outcome, release_claim=release_claim,
+        end_run=end_run, event_payload_extra=event_payload_extra,
+    ):
+        return False
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     blocked = False
