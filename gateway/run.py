@@ -4997,6 +4997,26 @@ import weakref as _weakref
 _gateway_runner_ref: _weakref.ref = lambda: None
 
 
+def _wake_narration_to_suppress(inbound_text, response):
+    """WAKE_SILENCE_MECH_20260910 (ordem do Maikol): em turno acordado por wake de kanban, só "Entregue" ou uma pergunta a
+    humano vão ao grupo. Qualquer outro texto final é tratado como silêncio intencional: fica no histórico da
+    sessão e não é entregue ao chat."""
+    try:
+        if not isinstance(inbound_text, str) or not inbound_text.lstrip().startswith("[kanban]"):
+            return False
+        text = (response or "").strip()
+        if not text:
+            return False
+        first = text.splitlines()[0].strip().lstrip("*#>_ ").lower()
+        if first.startswith(("entregue", "pergunta", "[entregue]", "[pergunta]")):
+            return False
+        if "?" in text[:400]:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _normalize_empty_agent_response(
     agent_result: dict,
     response: str,
@@ -22457,6 +22477,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             except Exception:
                 _intentional_silence = False
+            if not _intentional_silence and _wake_narration_to_suppress(getattr(event, "text", None), response):  # WAKE_SILENCE_MECH_20260910
+                logger.info(
+                    "kanban wake: narração suprimida (%d chars) em %s/%s",
+                    len(response or ""), getattr(source, "chat_id", "?"), getattr(source, "thread_id", "?"),
+                )
+                _intentional_silence = True
 
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to

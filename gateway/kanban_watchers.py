@@ -3475,8 +3475,8 @@ class GatewayKanbanWatchersMixin:
                             )
                             # WAKE_SILENCE_20260910 (ordem do Maikol): a regra de silêncio vai no próprio wake
                             _synth += ("\n\nRegra do grupo: este turno foi acordado por notificação de kanban. "
-                                       "Resolva pelas ferramentas (decide, kanban_comment, kanban_block) e termine SEM texto. "
-                                       "Escreva no grupo apenas se for Entregue (card fechado) ou uma pergunta que um humano precisa responder. "
+                                       "Resolva pelas ferramentas (decide, kanban_comment, kanban_block) e termine a resposta com exatamente [SILENT]. "  # WAKE_SILENCE_MECH_20260910
+                                       "Escreva no grupo apenas se for Entregue (card fechado; comece com Entregue) ou uma pergunta que um humano precisa responder (comece com PERGUNTA para <nome>); qualquer outro texto é descartado pelo gateway. "
                                        "Nada de narrar decisão, confirmar bloqueio ou responder a alerta repetido.")
                             if "nfos_principal_requested" in _wake_kinds:
                                 from hermes_cli.nfos_runtime import workflow_command
