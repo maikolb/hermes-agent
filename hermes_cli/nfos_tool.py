@@ -86,7 +86,20 @@ def init_schema(conn):
 def _transaction(conn):
     if conn.in_transaction:
         raise ToolExecutionError('Tool execution needs a separate transaction')
-    conn.execute('BEGIN IMMEDIATE')
+    delay = 0.5
+    for attempt in range(4):  # BLOCK_LESS5_20260910: journal travado é transitório; espera em vez de falhar a entrega
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            break
+        except sqlite3.OperationalError as exc:
+            text = str(exc).lower()
+            if 'locked' not in text and 'busy' not in text:
+                raise
+            if attempt == 3:
+                raise ToolExecutionError('Kanban journal locked for too long (transient): retry the same call') from exc
+            print(json.dumps({'warning': f'kanban journal locked; retry {attempt + 1}/3 in {delay:g}s'}), file=sys.stderr, flush=True)
+            time.sleep(delay)
+            delay = min(delay * 4, 30)
     try:
         yield
         conn.commit()
@@ -546,8 +559,34 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
             last_identity_refresh = 0
             stopped_reason = None
             timed_out = False
+            pend_stream, pend_data, pend_since = None, bytearray(), 0.0  # BLOCK_LESS5_20260910: saída em lotes (0,5 s ou 32 KiB)
+
+            def flush(stream, data):
+                nonlocal sequence, stored_bytes, spill_fh, spilled_bytes
+                sequence += 1
+                if stored_bytes + len(data) <= chunk_cap:
+                    stored_bytes += len(data)
+                    with _transaction(conn):
+                        conn.execute('INSERT INTO nfos_tool_chunks(call_id,seq,stream,content,created_at) VALUES(?,?,?,?,?)',
+                                     (call_id, sequence, stream, data, time.time()))
+                        _event(conn, get_call(conn, call_id), 'nfos_tool_chunk', seq=sequence, stream=stream, bytes=len(data))
+                else:
+                    # patch 10/09/2026: acima do teto a saída vai para arquivo; o banco recebe um marcador único
+                    if spill_fh is None:
+                        spill_file = _spill_path(db_path, task_id, call_id)
+                        spill_fh = open(spill_file, 'ab')
+                        marker = f'[nfos: saída acima de {chunk_cap} bytes; o restante está em {spill_file}]'.encode()
+                        with _transaction(conn):
+                            conn.execute('INSERT INTO nfos_tool_chunks(call_id,seq,stream,content,created_at) VALUES(?,?,?,?,?)',
+                                         (call_id, sequence, 'stderr', marker, time.time()))
+                            _event(conn, get_call(conn, call_id), 'nfos_tool_chunk_truncated', seq=sequence, limit=chunk_cap, spill=str(spill_file))
+                    spill_fh.write(data)
+                    spilled_bytes += len(data)
+
             while len(eof) < 2 or process.poll() is None:
                 now = time.monotonic()
+                if pend_stream is not None and now - pend_since >= 0.5:
+                    flush(pend_stream, bytes(pend_data)); pend_stream, pend_data = None, bytearray()
                 if now - last_identity_refresh >= 1:
                     row = get_call(conn, call_id)
                     descendants = _descendants(row)
@@ -574,25 +613,13 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
                 if data is None:
                     eof.add(stream)
                     continue
-                sequence += 1
-                if stored_bytes + len(data) <= chunk_cap:
-                    stored_bytes += len(data)
-                    with _transaction(conn):
-                        conn.execute('INSERT INTO nfos_tool_chunks(call_id,seq,stream,content,created_at) VALUES(?,?,?,?,?)',
-                                     (call_id, sequence, stream, data, time.time()))
-                        _event(conn, get_call(conn, call_id), 'nfos_tool_chunk', seq=sequence, stream=stream, bytes=len(data))
-                else:
-                    # patch 10/09/2026: acima do teto a saída vai para arquivo; o banco recebe um marcador único
-                    if spill_fh is None:
-                        spill_file = _spill_path(db_path, task_id, call_id)
-                        spill_fh = open(spill_file, 'ab')
-                        marker = f'[nfos: saída acima de {chunk_cap} bytes; o restante está em {spill_file}]'.encode()
-                        with _transaction(conn):
-                            conn.execute('INSERT INTO nfos_tool_chunks(call_id,seq,stream,content,created_at) VALUES(?,?,?,?,?)',
-                                         (call_id, sequence, 'stderr', marker, time.time()))
-                            _event(conn, get_call(conn, call_id), 'nfos_tool_chunk_truncated', seq=sequence, limit=chunk_cap, spill=str(spill_file))
-                    spill_fh.write(data)
-                    spilled_bytes += len(data)
+                if pend_stream is not None and (pend_stream != stream or len(pend_data) >= 32768):  # BLOCK_LESS5_20260910
+                    flush(pend_stream, bytes(pend_data)); pend_stream, pend_data = None, bytearray()
+                if pend_stream is None:
+                    pend_stream, pend_since = stream, time.monotonic()
+                pend_data += data
+            if pend_stream is not None:  # BLOCK_LESS5_20260910: último lote
+                flush(pend_stream, bytes(pend_data)); pend_stream, pend_data = None, bytearray()
             if spill_fh is not None:
                 spill_fh.close()
             returncode = process.wait()
