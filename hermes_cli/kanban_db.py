@@ -11664,6 +11664,19 @@ def heartbeat_worker(
     return True
 
 
+def _nfos_decision_open(conn, task_id):
+    """OPEN_DECISION_SKIP_20260910: True se o card NFOS tem pergunta aberta ao principal (pending) ou a humano (human).
+    Um card assim não é relançado: o principal responde e o tick decide (despacho ou bloqueio)."""
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_decisions'").fetchone():
+            return False
+        return conn.execute(
+            "SELECT 1 FROM nfos_decisions WHERE task_id = ? AND status IN ('pending', 'human') LIMIT 1", (task_id,)
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
 def _apply_project_max_runtime_default(conn, delivery_project, task_id):
     """MAX_RUNTIME_DEFAULT_20260910 (ordem do Maikol): card sem orçamento (max_runtime_seconds NULL) herda o
     max_runtime_seconds do projeto NFOS do board antes do claim, para que enforce_max_runtime e a
@@ -14021,6 +14034,9 @@ def _dispatch_once_locked(
                 )
             )
             continue
+        if _nfos_decision_open(conn, row["id"]):  # OPEN_DECISION_SKIP_20260910
+            logger.debug("kanban dispatcher: %s aguarda decisão aberta (pending/human); não relançado", row["id"])
+            continue
         _apply_project_max_runtime_default(conn, delivery_project, row["id"])  # MAX_RUNTIME_DEFAULT_20260910
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
@@ -14182,6 +14198,9 @@ def _dispatch_once_locked(
                     str(workspace.resolve(strict=False)),
                 )
             )
+            continue
+        if _nfos_decision_open(conn, row["id"]):  # OPEN_DECISION_SKIP_20260910
+            logger.debug("kanban dispatcher: %s aguarda decisão aberta (pending/human); não relançado", row["id"])
             continue
         _apply_project_max_runtime_default(conn, delivery_project, row["id"])  # MAX_RUNTIME_DEFAULT_20260910
         claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)

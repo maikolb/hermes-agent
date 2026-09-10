@@ -1085,9 +1085,9 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             _kb().unblock_task(conn,row['task_id'])
             if _kb().get_task(conn,row['task_id']).status=='review':
                 _kb().reopen_review_task(conn,row['task_id'])
-    if action=='human':  # HUMAN_BLOCK_NOW_20260910: pergunta a humano bloqueia o card na hora, seja qual for o run
+    if action=='human':  # HUMAN_BLOCK_NOW_20260910 / HUMAN_BLOCK_NOW2_20260910: bloqueia na hora só se não há worker vivo neste run
         _t=_kb().get_task(conn,row['task_id'])
-        if _t and _t.status in {'running','ready'}:
+        if _t and (_t.status=='ready' or (_t.status=='running' and not _run_process_alive(conn,_t.id,_t.current_run_id))):
             _kb().block_task(conn,_t.id,reason=answer,kind='needs_input',
                              expected_run_id=_t.current_run_id if _t.status=='running' else None)
 
