@@ -704,7 +704,17 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
                              (decision_id,task_id,run_id,kind,question,_json(dict(context)),revision,now,'resolved','continue',auto,'Principal',now))
                 _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'question':question,'answer':auto})
                 return decision_id
-        if kind=='review':
+        if kind=='review':  # BLOCK_LESS3_20260910: relatório/operação não tem publicação a aprovar
+            from hermes_cli.nfos_principal_review import required
+            _t=_kb().get_task(conn,task_id)
+            if _t and _t.delivery_type in {'report','operation'} and not required(conn,task_id):
+                decision_id='dec_'+uuid.uuid4().hex[:20]; now=int(time.time())
+                revision=get_workflow(conn,task_id)['spec_revision']
+                auto='CONTINUE (automático, premissa do owner 10/09): entrega de relatório/operação não passa por revisão de publicação. Salve o relatório final e chame kanban_complete.'
+                conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                             (decision_id,task_id,run_id,kind,question,_json(dict(context)),revision,now,'resolved','continue',auto,'Principal',now))
+                _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'question':question,'answer':auto})
+                return decision_id
             _require_current_instruction_spec(conn,task_id)
         context=dict(context)
         if kind in {'spec_review','final_review'}:
@@ -1520,6 +1530,18 @@ def main():
                 'report':_artifact(conn,args.task,'report'),
                 'decisions':[dict(r) for r in conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? ORDER BY created_at',(args.task,))],
                 'effects':[dict(r) for r in conn.execute('SELECT * FROM nfos_effects WHERE task_id=?',(args.task,))]}
+            try:  # BLOCK_LESS3_20260910: premissas do owner na primeira chamada de todo worker
+                from hermes_cli.nfos_principal_review import required as _req
+                if not _req(conn,args.task):
+                    result['owner_premises']=[
+                        '0. Before any spec or implementation, check production (and HML/staging) and the existing PRs/commits for this request. If it is already delivered, save a short report (criteria PASS with the readback as evidence) and call kanban_complete. If partially delivered, scope only the delta. Never re-implement delivered work.',
+                        '1. Deliver first, in the requested environment, as fast as possible; verification comes after delivery.',
+                        '2. Block as little as possible. Never block on a transient error. kanban_block only with a concrete question to a named human (needs_input) or a precise missing environment item (capability).',
+                        '3. Principal validation is OFF: do not ask spec_review or final_review, nor review for report/operation cards; they resolve automatically. Write the spec yourself (save-spec --author worker). After the work, save-report then kanban_complete.',
+                        '4. Ask the Principal only when a decision changes the outcome. Slot occupied: acquire-project --wait 900. Next step: follow the saved spec.',
+                    ]
+            except Exception:
+                pass
             if result['workflow']:
                 result['request']=get_request(conn,result['workflow']['request_id'])
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_tool_calls'").fetchone():
