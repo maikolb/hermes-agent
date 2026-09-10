@@ -19,7 +19,7 @@ def _db(tmp_path):
 
 def test_transaction_waits_for_a_transient_lock(tmp_path):
     path = _db(tmp_path)
-    holder = sqlite3.connect(str(path), timeout=0.05)
+    holder = sqlite3.connect(str(path), timeout=0.05, check_same_thread=False)
     holder.execute("BEGIN IMMEDIATE")
     holder.execute("INSERT INTO t VALUES (1)")
     threading.Timer(1.2, holder.commit).start()
