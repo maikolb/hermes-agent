@@ -710,9 +710,10 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
             if _t and _t.delivery_type in {'report','operation'} and not required(conn,task_id):
                 decision_id='dec_'+uuid.uuid4().hex[:20]; now=int(time.time())
                 revision=get_workflow(conn,task_id)['spec_revision']
-                auto='CONTINUE (automático, premissa do owner 10/09): entrega de relatório/operação não passa por revisão de publicação. Salve o relatório final e chame kanban_complete.'
+                auto='APPROVE (automático, premissa do owner 10/09): entrega de relatório/operação não passa por revisão de publicação. Chame kanban_complete.'
+                _ctx=dict(context); _ctx['review_identity']=_review_identity(conn,task_id)  # BLOCK_LESS4_20260910
                 conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                             (decision_id,task_id,run_id,kind,question,_json(dict(context)),revision,now,'resolved','continue',auto,'Principal',now))
+                             (decision_id,task_id,run_id,kind,question,_json(_ctx),revision,now,'resolved','approve',auto,'Principal',now))
                 _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'question':question,'answer':auto})
                 return decision_id
             _require_current_instruction_spec(conn,task_id)
@@ -1363,7 +1364,9 @@ def completion_evidence_check(conn, task_id):
     try:
         content=json.loads(report['content']); metadata=json.loads(report['evidence'])
         results=_report_results(spec,content)
-        if any(row['status']!='PASS' for row in results.values()):
+        from hermes_cli.nfos_principal_review import required
+        strict=required(conn,task_id)  # BLOCK_LESS4_20260910: sem validação, NOT_RUN não impede; FAIL impede
+        if any((row['status']!='PASS') if strict else (row['status']=='FAIL') for row in results.values()):
             return None
         digest=hashlib.sha256(report['content'].encode()).hexdigest()
         if (metadata.get('schema_version')!=1 or metadata.get('report_sha256')!=digest
@@ -1383,7 +1386,7 @@ def completion_evidence_check(conn, task_id):
                 proved.update(check.get('criteria',[]))
             elif check.get('status')!='external_unchecked':
                 return None
-        if any(row['status']!='PASS' or (strict and criterion not in proved) for criterion,row in results.items()):  # BLOCK_LESS2_20260910
+        if any(((row['status']!='PASS') if strict else (row['status']=='FAIL')) or (strict and criterion not in proved) for criterion,row in results.items()):  # BLOCK_LESS2/BLOCK_LESS4_20260910
             return None
         return {'report_id':report['id'],'report_revision':report['revision'],
                 'report_sha256':digest,'spec_revision':spec['revision'],
@@ -1415,6 +1418,9 @@ def completion_ready(conn, task_id, *, evidence_check=None):
             'spec_revision':wf['spec_revision'],
             'evidence_sha256':hashlib.sha256(report['evidence'].encode()).hexdigest()}:
         return False
+    from hermes_cli.nfos_principal_review import required as _required
+    if not _required(conn,task_id):  # BLOCK_LESS4_20260910: validação desligada = relatório coerente fecha qualquer tipo de card
+        return True
     try:
         if not _approved(conn,task_id,wf['spec_revision']):
             return False
