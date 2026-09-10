@@ -6380,10 +6380,16 @@ def _validate_worktree_ownership(
     actual_common = _loose_path_identity(_git_common_dir(worktree))
     actual_git_dir = _loose_path_identity(_git_dir(worktree))
     actual_branch = _git_current_branch(worktree)
+    # SEAL_BRANCH_20260910: o worker pode trocar de branch dentro do próprio worktree (ex.: branch de produção do
+    # card); a identidade do worktree vinculado é git_common_dir + git_dir. Branch aceito se for o de
+    # criação ou se o nome contiver o id do card.
+    _branch_ok = actual_branch == branch or (
+        bool(actual_branch) and task_id in str(actual_branch)
+    )
     if (
         actual_common != common_dir
         or actual_git_dir != git_dir
-        or actual_branch != branch
+        or not _branch_ok
     ):
         return False, None, "owned linked worktree no longer matches creation receipt"
     return True, payload, ""
