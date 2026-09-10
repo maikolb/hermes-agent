@@ -155,6 +155,194 @@ def _resolve_auto_decompose_settings(
     return enabled, per_tick
 
 
+# ---- Barrinha de progresso no chat (patch 10/09/2026, ordem do Maikol) ----
+# O worker grava no card, a cada etapa, uma linha `[etapa N/7 <nome>] feito | prova: ... | próximo: ...`.
+# O notificador manda `Recebido` no primeiro claim (essa mensagem vira a barra), edita a barra no lugar
+# a cada etapa e fecha a barra no completed. Kinds intermediários (claimed, status, review...) ficam mudos.
+_PROGRESS_STAGES = ("ler", "reproduzir", "mudar", "testar", "PR", "merge/deploy", "readback")
+_PROGRESS_RE = re.compile(r"^\s*\[\s*etapa\s*(\d)\s*/\s*7\s*([^\]]*)\]\s*(.*)$", re.S | re.I)
+_PROGRESS_CRIT_RE = re.compile(r"(?im)^\s*(?:crit[ée]rio(?:\s+de\s+aceite)?|pronto\s+quando)\s*[:\-]\s*(.+?)\s*$")
+
+
+def _progress_budget(max_runtime):
+    """(tool budget, classe) a partir de max_runtime_seconds: P<=2700, M<=7200, G acima."""
+    try:
+        mr = int(max_runtime or 0)
+    except (TypeError, ValueError):
+        mr = 0
+    if mr <= 0:
+        return 250, "-"
+    if mr <= 2700:
+        return 80, "P"
+    if mr <= 7200:
+        return 250, "M"
+    return 500, "G"
+
+
+def _progress_parse(body):
+    """Linha de etapa -> (n, nome, próximo) ou None."""
+    m = _PROGRESS_RE.match(str(body or ""))
+    if not m:
+        return None
+    n = int(m.group(1))
+    if n < 1 or n > 7:
+        return None
+    name = (m.group(2) or "").strip() or _PROGRESS_STAGES[n - 1]
+    rest = m.group(3) or ""
+    nxt = ""
+    mm = re.search(r"pr[óo]ximo\s*:\s*(.+)$", rest, re.S | re.I)
+    if mm:
+        nxt = mm.group(1).strip().splitlines()[0][:80]
+    return n, name[:24], nxt
+
+
+def _progress_render(task_id, n, name, minutes, tools, budget, cls, nxt="", done=False):
+    if done:
+        head = "▰▰▰▰▰▰▰ 7/7 entregue"
+    else:
+        head = "▰" * n + "▱" * (7 - n) + f" {n}/7 {name}"
+    parts = [head, str(task_id), f"{int(minutes)} min", f"{int(tools)}/{int(budget)} tools"]
+    if cls and cls != "-":
+        parts.append(f"classe {cls}")
+    line = " · ".join(parts)
+    if nxt and not done:
+        line += f"\npróximo: {nxt}"
+    return line
+
+
+def _progress_recebido(task_id, title, cls, body):
+    text = f"Recebido · {task_id} · {str(title or '')[:120]}"
+    if cls and cls != "-":
+        text += f" · classe {cls}"
+    m = _PROGRESS_CRIT_RE.search(str(body or ""))
+    if m:
+        text += f"\npronto quando: {m.group(1)[:160]}"
+    return text
+
+
+def _progress_state(board, task_id):
+    """Lê do kanban.db do board: (etapa mais recente|None, minutos do run, tools do run, orçamento, classe, título, corpo, nº de runs)."""
+    from hermes_cli import kanban_db as _kb
+    with _kb.connect_closing(board=board) as conn:
+        task = _kb.get_task(conn, task_id)
+        run = conn.execute(
+            "SELECT id, started_at FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1", (task_id,)
+        ).fetchone()
+        n_runs = conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (task_id,)).fetchone()[0]
+        tools = 0
+        minutes = 0
+        if run is not None:
+            try:
+                tools = conn.execute(
+                    "SELECT count(*) FROM nfos_tool_calls WHERE task_id=? AND run_id=?", (task_id, run["id"])
+                ).fetchone()[0]
+            except Exception:
+                tools = 0
+            if run["started_at"]:
+                minutes = max(0, int((time.time() - float(run["started_at"])) / 60))
+        latest = None
+        for row in conn.execute(
+            "SELECT body FROM task_comments WHERE task_id=? ORDER BY id DESC LIMIT 40", (task_id,)
+        ):
+            parsed = _progress_parse(row["body"])
+            if parsed:
+                latest = parsed
+                break
+        budget, cls = _progress_budget(getattr(task, "max_runtime_seconds", None))
+        return (latest, minutes, tools, budget, cls,
+                getattr(task, "title", "") or "", getattr(task, "body", "") or "", int(n_runs or 0))
+
+
+def _progress_meta_get(board, sub):
+    from hermes_cli import kanban_db as _kb
+    with _kb.connect_closing(board=board) as conn:
+        row = conn.execute(
+            "SELECT delivery_metadata FROM kanban_notify_subs WHERE task_id=? AND platform=? AND chat_id=? AND COALESCE(thread_id,'')=?",
+            (sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or ""),
+        ).fetchone()
+    if not row or not row[0]:
+        return {}
+    try:
+        return dict(json.loads(row[0]) or {})
+    except Exception:
+        return {}
+
+
+def _progress_meta_set(board, sub, **fields):
+    from hermes_cli import kanban_db as _kb
+    meta = _progress_meta_get(board, sub)
+    meta.update({k: v for k, v in fields.items() if v is not None})
+    with _kb.connect_closing(board=board) as conn:
+        with _kb.write_txn(conn):
+            conn.execute(
+                "UPDATE kanban_notify_subs SET delivery_metadata=? WHERE task_id=? AND platform=? AND chat_id=? AND COALESCE(thread_id,'')=?",
+                (json.dumps(meta, sort_keys=True, separators=(",", ":")),
+                 sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or ""),
+            )
+
+
+async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
+    """Trata claimed/commented/nfos_progress/completed para a barrinha. Devolve True quando o evento
+    foi consumido (não gera mensagem passiva). Qualquer falha devolve False e o fluxo original segue."""
+    if kind not in ("claimed", "commented", "nfos_progress", "completed"):
+        return False
+    if (sub.get("platform") or "").lower() != "telegram":
+        return False
+    board = board or ""
+    task_id = sub["task_id"]
+    latest, minutes, tools, budget, cls, title, body, n_runs = await asyncio.to_thread(_progress_state, board, task_id)
+    meta = await asyncio.to_thread(_progress_meta_get, board, sub)
+    msg_id = meta.get("progress_message_id")
+    if kind == "claimed":
+        if n_runs > 1 or msg_id:
+            return True  # reclaim/redispatch: silêncio
+        text = _progress_recebido(task_id, title, cls, body)
+        res = await adapter.send(sub["chat_id"], text, metadata=metadata)
+        mid = getattr(res, "message_id", None)
+        if getattr(res, "success", False) and mid:
+            await asyncio.to_thread(_progress_meta_set, board, sub, progress_message_id=str(mid))
+        return True
+    if kind in ("commented", "nfos_progress"):
+        if not latest:
+            return True  # comentário sem linha de etapa: nada a mostrar no grupo
+        n, name, nxt = latest
+        text = _progress_render(task_id, n, name, minutes, tools, budget, cls, nxt)
+        if msg_id and hasattr(adapter, "edit_message"):
+            res = await adapter.edit_message(sub["chat_id"], str(msg_id), text, metadata=metadata)
+            if getattr(res, "success", False):
+                return True
+        res = await adapter.send(sub["chat_id"], text, metadata=metadata)
+        mid = getattr(res, "message_id", None)
+        if getattr(res, "success", False) and mid:
+            await asyncio.to_thread(_progress_meta_set, board, sub, progress_message_id=str(mid))
+        return True
+    if kind == "completed":
+        if msg_id and hasattr(adapter, "edit_message"):
+            text = _progress_render(task_id, 7, "entregue", minutes, tools, budget, cls, done=True)
+            try:
+                await adapter.edit_message(sub["chat_id"], str(msg_id), text, metadata=metadata)
+            except Exception:
+                pass
+        return False  # o closeout (Entregue) segue pelo caminho normal do completed
+    return False
+
+
+
+def _notify_kind_allowed(kind, load_config):
+    """`kanban.notify_kinds` lista os kinds que geram mensagem passiva no chat. Ausente ou vazio = todos
+    (comportamento original). `completed` e `blocked` passam sempre, porque alimentam o wake com resumo."""
+    if kind in ("completed", "blocked"):
+        return True
+    try:
+        kcfg = (load_config() or {}).get("kanban") or {}
+        kinds = kcfg.get("notify_kinds")
+        if isinstance(kinds, (list, tuple)) and kinds:
+            return str(kind) in {str(k).strip() for k in kinds if str(k).strip()}
+    except Exception:
+        return True
+    return True
+
+
 def _resolve_agent_wake_on_events(load_config: Callable[[], Any]) -> bool:
     """Return whether Kanban lifecycle events may synthesize agent turns.
 
@@ -2401,6 +2589,7 @@ class GatewayKanbanWatchersMixin:
         NOTIFY_KINDS = (
             "claimed", "completed", "blocked", "gave_up", "status",
             "block_loop_detected", "review_requested", "nfos_principal_requested",
+            "commented", "nfos_progress",
         )
         # Focus accounting consumes worker-run boundaries too, but these
         # internal retry/recovery events must never become chat messages.
@@ -2924,6 +3113,15 @@ class GatewayKanbanWatchersMixin:
                     text_delivery_failed = False
                     for ev in d["events"]:
                         kind = ev.kind
+                        try:
+                            _pb_handled = await _kanban_progress_bar(kind, sub, board_slug, adapter, metadata)
+                        except Exception as _pb_err:
+                            logger.debug("kanban progress bar: %s", _pb_err)
+                            _pb_handled = False
+                        if _pb_handled:
+                            continue
+                        if not _notify_kind_allowed(kind, _load_config):
+                            continue  # kanban.notify_kinds: modo quieto no chat
                         expected_states = {
                             "claimed": {"running"}, "completed": {"done", "archived"},
                             "blocked": {"blocked"}, "block_loop_detected": {"blocked"},
