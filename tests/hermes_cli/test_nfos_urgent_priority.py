@@ -44,7 +44,7 @@ def test_same_reference_attaches_instead_of_new_card(board):
         r = _req(conn, rid)
         assert r["status"] == "attached" and r["task_id"] == task.id
         assert d.reserve_request(conn, capacity=2) is None
-        assert _task(conn, task.id)["priority"] == 0
+        assert _task(conn, task.id)["priority"] == 10  # HUMAN_PRIORITY_20260910: nasce com 10, reenvio não escala
         body = conn.execute("SELECT body FROM task_comments WHERE task_id=? ORDER BY id DESC LIMIT 1", (task.id,)).fetchone()[0]
         assert body.startswith("[reenvio]")
 
