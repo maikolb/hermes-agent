@@ -11005,6 +11005,10 @@ class DispatchResult:
     board. This is the steady-state signal that a single-writer guard is
     actively preventing two dispatchers from racing on ``kanban.db``."""
     memory_pressure: Optional[str] = None
+    skipped_capacity: list[dict] = field(default_factory=list)
+    """Patch 10/09/2026: por que este tick não gerou spawn quando o motivo foi capacidade.
+    Cada item: {reason: max_spawn|max_in_progress|workers, running, limit, reserved?}. Não é falha:
+    a fila espera vaga. O notificador imprime isto no diagnóstico em vez de 'stuck'."""
     """System memory pressure observed at spawn time when the memory guard
     restricted this tick (OOF-30/OOF-77): ``"critical"`` — no new workers
     were spawned this tick; ``"elevated"`` — at most one new worker was
@@ -11090,6 +11094,44 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     except Exception:
         pass
     return ("unknown", None)
+
+
+_CHUNK_PRUNE_LAST: dict[str, float] = {}
+
+
+def _tool_chunk_retention_seconds() -> int:
+    """kanban.nfos.tool_chunk_retention_hours (padrão 24 h; mínimo 1 h)."""
+    try:
+        from hermes_cli.config import load_config
+        nfos = ((load_config() or {}).get("kanban") or {}).get("nfos") or {}
+        hours = float(nfos.get("tool_chunk_retention_hours", 24) or 24)
+    except Exception:
+        hours = 24.0
+    return max(3600, int(hours * 3600))
+
+
+def _prune_tool_chunks(conn) -> int:
+    """Patch 10/09/2026: retenção dos nfos_tool_chunks aplicada pelo dispatcher, no máximo uma vez por
+    hora por banco. Em 09/09 um único worker gravou 233 MB de chunks numa hora; sem retenção o kanban.db
+    do dovcrm passou de 340 MB. Qualquer falha aqui é silenciosa: o tick não pode parar por causa disto."""
+    try:
+        db = str(conn.execute("PRAGMA database_list").fetchone()[2] or "")
+        now = time.time()
+        if now - _CHUNK_PRUNE_LAST.get(db, 0.0) < 3600:
+            return 0
+        _CHUNK_PRUNE_LAST[db] = now
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_tool_chunks'"
+        ).fetchone():
+            return 0
+        with write_txn(conn):
+            cur = conn.execute(
+                "DELETE FROM nfos_tool_chunks WHERE created_at < ?",
+                (now - _tool_chunk_retention_seconds(),),
+            )
+        return int(cur.rowcount or 0)
+    except Exception:
+        return 0
 
 
 def reap_worker_zombies() -> "list[int]":
@@ -13398,6 +13440,7 @@ def _dispatch_once_locked(
     if not dry_run:
         from hermes_cli.nfos_runtime import reconcile_runtime
         reconcile_runtime(conn)
+        _prune_tool_chunks(conn)
         # An archive can commit immediately before process termination (or
         # termination can fail transiently).  The archived row retains the
         # exact PID/claim until a later tick proves the worker exited, so a
@@ -13471,6 +13514,7 @@ def _dispatch_once_locked(
     # budget so the total number of new workers stays bounded.
     if max_spawn is not None:
         if running_count >= max_spawn:
+            result.skipped_capacity.append({"reason": "max_spawn", "running": running_count, "limit": max_spawn})
             return result
         spawn_budget = max_spawn - running_count
 
@@ -13487,6 +13531,7 @@ def _dispatch_once_locked(
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board)
         if total_running >= max_in_progress:
+            result.skipped_capacity.append({"reason": "max_in_progress", "running": total_running, "limit": max_in_progress})
             return result
         remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:
@@ -13531,6 +13576,9 @@ def _dispatch_once_locked(
         reserved_count = int(conn.execute(
             "SELECT count(*) FROM nfos_requests WHERE status='starting'").fetchone()[0])
         available = max(0, delivery_capacity - count_running_tasks(conn) - reserved_count)
+        if available <= 0:
+            result.skipped_capacity.append({"reason": "workers", "running": count_running_tasks(conn),
+                                            "reserved": reserved_count, "limit": delivery_capacity})
         spawn_budget = available if spawn_budget is None else min(spawn_budget, available)
 
     ready_rows = conn.execute(

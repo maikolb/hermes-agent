@@ -328,6 +328,36 @@ async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
 
 
 
+def _capacity_bits(res) -> list:
+    """Patch 10/09/2026: texto de capacidade a partir de DispatchResult.skipped_capacity."""
+    items = getattr(res, "skipped_capacity", None) or []
+    out = []
+    for item in items:
+        try:
+            reason = item.get("reason"); running = item.get("running"); limit = item.get("limit")
+            extra = f" (+{item['reserved']} reservados)" if item.get("reserved") else ""
+            out.append(f"capacity: {reason} {running}/{limit}{extra}")
+        except Exception:
+            continue
+    return out
+
+
+def _capacity_only(results) -> bool:
+    """True quando todo board que respondeu neste tick parou por capacidade e nenhum spawnou."""
+    seen = False
+    for _slug, res in (results or []):
+        if res is None:
+            continue
+        if getattr(res, "spawned", None):
+            return False
+        if getattr(res, "skipped_capacity", None):
+            seen = True
+        elif (getattr(res, "skipped_unassigned", None) or getattr(res, "rate_limited", None)
+              or getattr(res, "respawn_guarded", None) or getattr(res, "skipped_locked", False)):
+            return False
+    return seen
+
+
 def _notify_kind_allowed(kind, load_config):
     """`kanban.notify_kinds` lista os kinds que geram mensagem passiva no chat. Ausente ou vazio = todos
     (comportamento original). `completed` e `blocked` passam sempre, porque alimentam o wake com resumo."""
@@ -4747,6 +4777,7 @@ class GatewayKanbanWatchersMixin:
                 if res is None:
                     continue
                 bits: list[str] = []
+                bits.extend(_capacity_bits(res))
                 if getattr(res, "skipped_locked", False):
                     bits.append("tick lock held elsewhere")
                 guarded = getattr(res, "respawn_guarded", None) or []
@@ -4992,13 +5023,21 @@ class GatewayKanbanWatchersMixin:
                         # Measured diagnosis instead of the old three-guess
                         # text (29/08 incident: every guess was wrong and
                         # the real reason was discarded with the results).
-                        logger.warning(
-                            "kanban dispatcher stuck: ready queue non-empty "
-                            "for %d consecutive ticks but 0 workers spawned. "
-                            "Last tick diagnosis — %s",
-                            bad_ticks,
-                            _tick_diagnosis(results),
-                        )
+                        if _capacity_only(results):
+                            # patch 10/09/2026: fila esperando vaga não é travamento
+                            logger.info(
+                                "kanban dispatcher: fila pronta aguardando vaga ha %d ticks (%s)",
+                                bad_ticks,
+                                _tick_diagnosis(results),
+                            )
+                        else:
+                            logger.warning(
+                                "kanban dispatcher stuck: ready queue non-empty "
+                                "for %d consecutive ticks but 0 workers spawned. "
+                                "Last tick diagnosis — %s",
+                                bad_ticks,
+                                _tick_diagnosis(results),
+                            )
                         last_warn_at = now
             except asyncio.CancelledError:
                 logger.debug("kanban dispatcher: cancelled")
