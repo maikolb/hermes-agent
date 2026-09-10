@@ -14066,6 +14066,7 @@ def _dispatch_once_locked(
             )
             continue
         if _nfos_decision_open(conn, row["id"]):  # OPEN_DECISION_SKIP_20260910
+            _release_workspace_lease(workspace_lease)  # LEASE_RELEASE_20260910: sem liberar, o lease ficava em nome do gateway e o card nunca mais era reclamado
             logger.debug("kanban dispatcher: %s aguarda decisão aberta (pending/human); não relançado", row["id"])
             continue
         _apply_project_max_runtime_default(conn, delivery_project, row["id"])  # MAX_RUNTIME_DEFAULT_20260910
@@ -14231,6 +14232,7 @@ def _dispatch_once_locked(
             )
             continue
         if _nfos_decision_open(conn, row["id"]):  # OPEN_DECISION_SKIP_20260910
+            _release_workspace_lease(workspace_lease)  # LEASE_RELEASE_20260910: sem liberar, o lease ficava em nome do gateway e o card nunca mais era reclamado
             logger.debug("kanban dispatcher: %s aguarda decisão aberta (pending/human); não relançado", row["id"])
             continue
         _apply_project_max_runtime_default(conn, delivery_project, row["id"])  # MAX_RUNTIME_DEFAULT_20260910
