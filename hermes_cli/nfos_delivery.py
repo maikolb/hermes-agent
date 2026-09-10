@@ -945,8 +945,7 @@ def reconcile_human_answers(conn):
         # Apply the Principal's persisted decision even when the model ignores
         # it or waits on a newer question. Closing the run enables the existing
         # process-tree reconciler; waiting for the live worker first deadlocks.
-        if task.status=='running' and task.current_run_id!=row['run_id']:
-            continue
+        # HUMAN_BLOCK_NOW_20260910: a pergunta a humano é do card; um respawn (run novo) não a apaga.
         if task.status in {'running','ready'}:
             _kb().block_task(conn,task.id,reason=row['answer'],kind='needs_input',
                              expected_run_id=task.current_run_id if task.status=='running' else None)
@@ -1086,6 +1085,11 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             _kb().unblock_task(conn,row['task_id'])
             if _kb().get_task(conn,row['task_id']).status=='review':
                 _kb().reopen_review_task(conn,row['task_id'])
+    if action=='human':  # HUMAN_BLOCK_NOW_20260910: pergunta a humano bloqueia o card na hora, seja qual for o run
+        _t=_kb().get_task(conn,row['task_id'])
+        if _t and _t.status in {'running','ready'}:
+            _kb().block_task(conn,_t.id,reason=answer,kind='needs_input',
+                             expected_run_id=_t.current_run_id if _t.status=='running' else None)
 
 
 def reconsider_decision(conn, decision_id, *, action, reason, answer, author='Principal'):
