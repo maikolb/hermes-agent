@@ -1,4 +1,5 @@
-"""HUMAN_BLOCK_NOW_20260910: a decisão human do principal bloqueia o card na hora, e um respawn não a apaga."""
+"""HUMAN_BLOCK_NOW_20260910: a decisão human bloqueia o card na hora quando o worker do run já saiu; com worker
+vivo o próprio worker bloqueia (contrato existente). OPEN_DECISION_SKIP: card com pergunta aberta não é relançado."""
 import os
 
 import pytest
@@ -29,25 +30,37 @@ def _started(conn):
     return delivery.bootstrap_card(conn, rid, request["claim_token"], pid=os.getpid())
 
 
-def test_human_decision_blocks_the_card_immediately(board):
+def _worker_gone_card_requeued(conn, task):
+    """O que o detector de crash faz quando o worker sai com pergunta aberta: run encerrado, card de volta a ready."""
+    conn.execute("UPDATE tasks SET status='ready', worker_pid=NULL, claim_lock=NULL WHERE id=?", (task.id,))
+    conn.commit()
+
+
+def test_human_decision_blocks_the_card_at_once_when_the_worker_is_gone(board):
     with kb.connect_closing() as conn:
         task = _started(conn)
         decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind="impediment",
                                           question="Qual cargo exato está afetado no admin?", context={})
+        _worker_gone_card_requeued(conn, task)
         delivery.resolve_decision(conn, decision, action="human", answer="PERGUNTA para Maikol: qual cargo exato está afetado?", author="Principal")
         t = kb.get_task(conn, task.id)
         assert t.status == "blocked"
         assert t.block_kind == "needs_input"
 
 
-def test_reconcile_blocks_even_when_the_run_changed(board):
+def test_live_worker_keeps_the_contract_and_blocks_itself(board):
     with kb.connect_closing() as conn:
         task = _started(conn)
         decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind="impediment",
                                           question="Qual cargo exato está afetado no admin?", context={})
-        # simula a decisão pertencendo a um run antigo e o card correndo de novo
-        conn.execute("UPDATE nfos_decisions SET status='human', action='human', answer='PERGUNTA para Maikol: qual cargo?', author='Principal', run_id=run_id-1 WHERE id=?", (decision,))
-        conn.commit()
+        delivery.resolve_decision(conn, decision, action="human", answer="PERGUNTA para Maikol: qual cargo?", author="Principal")
         assert kb.get_task(conn, task.id).status == "running"
-        delivery.reconcile_human_answers(conn)
-        assert kb.get_task(conn, task.id).status == "blocked"
+        assert kb.block_task(conn, task.id, reason="PERGUNTA para Maikol: qual cargo?", kind="needs_input", expected_run_id=task.current_run_id)
+
+
+def test_open_decision_is_seen_by_the_dispatcher_guard(board):
+    with kb.connect_closing() as conn:
+        task = _started(conn)
+        assert not kb._nfos_decision_open(conn, task.id)
+        delivery.ask_principal(conn, task.id, task.current_run_id, kind="impediment", question="Falta o print do caso?", context={})
+        assert kb._nfos_decision_open(conn, task.id)
