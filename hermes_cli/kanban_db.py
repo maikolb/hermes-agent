@@ -12999,7 +12999,17 @@ def check_respawn_guard(
             # re-trap the task.
             return None
         ended_at = latest_run["ended_at"]
-        if ended_at is not None and (now - int(ended_at)) < rl_cooldown:
+        # QUOTA_BACKOFF_20260910 (ordem do Maikol): a espera dobra a cada saída consecutiva por cota nas últimas 3 h
+        # (teto 1 h). Com espera fixa, um card deu 9 spawns em 80 min, 4 min de contexto cada, todos na parede.
+        try:
+            _streak = int(conn.execute(
+                "SELECT COUNT(*) FROM task_runs WHERE task_id = ? AND outcome = 'rate_limited' AND ended_at >= ?",
+                (task_id, now - 3 * 3600),
+            ).fetchone()[0] or 1)
+        except sqlite3.Error:
+            _streak = 1
+        _effective = min(3600, int(rl_cooldown) * (2 ** max(0, _streak - 1)))
+        if ended_at is not None and (now - int(ended_at)) < _effective:
             return "rate_limit_cooldown"
         # Cooldown elapsed — allow the respawn. Return early so the
         # blocker_auth check below doesn't catch the rate-limit text we
