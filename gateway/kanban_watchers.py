@@ -374,8 +374,9 @@ def _capacity_only(results) -> bool:
 
 
 def _notify_kind_allowed(kind, load_config):
-    """`kanban.notify_kinds` lista os kinds que geram mensagem passiva no chat. Ausente ou vazio = todos
-    (comportamento original). `completed` e `blocked` passam sempre, porque alimentam o wake com resumo."""
+    """Patch local 10/09/2026 (Maikol, modo quieto): `kanban.notify_kinds` lista os kinds que geram
+    mensagem passiva no chat. Ausente ou vazio = todos (comportamento original). `completed` e
+    `blocked` passam sempre, porque alimentam o wake com resumo do worker."""
     if kind in ("completed", "blocked"):
         return True
     try:
@@ -1273,6 +1274,17 @@ class GatewayKanbanWatchersMixin:
         owner_resolver=getattr(self,'_adapter_profile_for_source',None)
         owner=owner_resolver(source) if callable(owner_resolver) else identity['profile']
         identity['transport_profile']=str(owner or self._active_profile_name() or 'default')
+        # NFOS closeout provenance: preserve the platform's original clock.
+        raw = getattr(event, 'raw_message', None)
+        raw_id = raw.get('message_id') if isinstance(raw, dict) else getattr(raw, 'message_id', None)
+        raw_date = raw.get('date') if isinstance(raw, dict) else getattr(raw, 'date', None)
+        if raw_date is not None and str(raw_id) == identity['message_id']:
+            from datetime import datetime, timezone
+            if isinstance(raw_date, (int, float)):
+                raw_date = datetime.fromtimestamp(raw_date, timezone.utc)
+            if isinstance(raw_date, datetime) and raw_date.tzinfo is not None:
+                identity['original_requested_at'] = raw_date.isoformat()
+                identity['timestamp_source'] = 'telegram.Message.date'
         def prepare():
             path=kb.kanban_db_path(board=board)
             attachments=preserve_attachments(media,list(getattr(event,'media_types',[]) or []),
@@ -3166,7 +3178,7 @@ class GatewayKanbanWatchersMixin:
                         if _pb_handled:
                             continue
                         if not _notify_kind_allowed(kind, _load_config):
-                            continue  # kanban.notify_kinds: modo quieto no chat
+                            continue  # patch local 10/09/2026: modo quieto (kanban.notify_kinds)
                         expected_states = {
                             "claimed": {"running"}, "completed": {"done", "archived"},
                             "blocked": {"blocked"}, "block_loop_detected": {"blocked"},
