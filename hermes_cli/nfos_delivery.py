@@ -620,6 +620,8 @@ def _validate_probe(cid, probe):
     unknown = sorted(set(expect) - _PROBE_EXPECT_KEYS)  # PROBE_EXPECT_KEYS_20260911: chave desconhecida não avalia nada
     if unknown:
         raise WorkflowError(f'Criterion {cid}: probe.expect keys {unknown} are not evaluated; use row, scalar, op+value, set_equals, contains_all, not_matches, count_between, equals (with json_path on the probe) or status')
+    if probe.get('phase') not in (None, 'before', 'after'):  # PROBE_PHASE_20260911
+        raise WorkflowError(f'Criterion {cid}: probe.phase is before (baseline record) or after (result); default after')
     if set(expect) <= {'status'}:  # PROBE_STRICT_EXPECT_20260911: status sozinho não prova conteúdo
         raise WorkflowError(f'Criterion {cid}: probe.expect with status alone does not prove the requested result; add equals with json_path, set_equals, contains_all or not_matches on the content the user consumes')
     kind = probe['kind']
@@ -1003,8 +1005,10 @@ def _expect_rank(probe):
 
 
 def _optional_criteria(spec_row):
+    """Critérios que não barram o fechamento: optional (com motivo) e sondas phase=before (linha de base).  # PROBE_PHASE_20260911"""
     try:
-        return {c.get('id') for c in (json.loads(spec_row['content']).get('criteria') or []) if c.get('optional')}
+        return {c.get('id') for c in (json.loads(spec_row['content']).get('criteria') or [])
+                if c.get('optional') or (isinstance(c.get('probe'), dict) and c['probe'].get('phase') == 'before')}
     except Exception:
         return set()
 
@@ -1017,6 +1021,9 @@ def _spec_result_criteria_checks(conn, task_id, spec):
     for crit in spec.get('criteria') or []:
         if crit.get('probe') is not None or crit.get('mandatory'):
             _validate_probe(crit.get('id'), crit.get('probe'))
+        if crit.get('mandatory') and isinstance(crit.get('probe'), dict) and crit['probe'].get('phase') == 'before':  # PROBE_PHASE_20260911
+            raise WorkflowError(f"Criterion {crit.get('id')}: a phase=before probe records the baseline and is not an acceptance criterion; "
+                                'declare the requested result as a separate mandatory criterion with an after probe')
         if crit.get('optional'):  # CLOSURE_RECOVERY_20260911
             if crit.get('mandatory') or not str(crit.get('optional_reason') or '').strip():
                 raise WorkflowError(f"Criterion {crit.get('id')}: optional needs optional_reason and cannot be mandatory")
