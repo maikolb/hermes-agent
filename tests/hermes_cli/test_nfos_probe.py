@@ -100,6 +100,16 @@ def test_spec_requires_mandatory_probe_when_precheck_measured(board):
         assert delivery.save_spec(conn, task.id, task.current_run_id, _spec(), author="worker", evidence={"source": "worker"}) == 1
 
 
+def test_verbose_precheck_method_counts_as_measured(board):
+    # MEASURED_PRECHECK_20260911: "authenticated Playwright readback https://admin..." e "curl -L" são reprodução medida.
+    with kb.connect_closing() as conn:
+        task = _card(conn, 11, method="authenticated Playwright readback https://admin.example/notice-uploads/9cc4 at 16:49Z")
+        with pytest.raises(delivery.WorkflowError, match="mandatory=true"):
+            delivery.save_spec(conn, task.id, task.current_run_id, _spec(mandatory=False), author="worker", evidence={"source": "worker"})
+        task2 = _card(conn, 12, method="leitura do card e do histórico do pai")
+        assert delivery.save_spec(conn, task2.id, task2.current_run_id, _spec(mandatory=False), author="worker", evidence={"source": "worker"}) == 1
+
+
 def test_probe_validation_rejects_mutation_and_weak_expectation(board):
     with kb.connect_closing() as conn:
         task = _card(conn, 2)
@@ -107,6 +117,8 @@ def test_probe_validation_rejects_mutation_and_weak_expectation(board):
             delivery.save_spec(conn, task.id, task.current_run_id, _spec(probe=_probe(query="delete from exam_disciplines")), author="worker", evidence={"source": "worker"})
         with pytest.raises(delivery.WorkflowError, match="expect"):
             delivery.save_spec(conn, task.id, task.current_run_id, _spec(probe={"kind": "sql", "query": "select 1", "expect": {}}), author="worker", evidence={"source": "worker"})
+        with pytest.raises(delivery.WorkflowError, match="not evaluated"):  # PROBE_EXPECT_KEYS_20260911
+            delivery.save_spec(conn, task.id, task.current_run_id, _spec(probe={"kind": "http", "url": "https://admin.example/api/health", "expect": {"json": {"ok": True}, "status": 200}}), author="worker", evidence={"source": "worker"})
         with pytest.raises(delivery.WorkflowError, match="status alone"):  # PROBE_STRICT_EXPECT_20260911
             delivery.save_spec(conn, task.id, task.current_run_id, _spec(probe={"kind": "http", "url": "https://admin.example/api/x", "expect": {"status": 200}}), author="worker", evidence={"source": "worker"})
 

@@ -617,6 +617,9 @@ def _validate_probe(cid, probe):
     if not isinstance(expect, dict) or not (set(expect) & _PROBE_EXPECT_KEYS):
         raise WorkflowError(f'Criterion {cid}: probe.expect must state the requested result (row, scalar, op+value, set_equals, '
                             'contains_all, not_matches, count_between, equals or status); a count alone rarely proves content')
+    unknown = sorted(set(expect) - _PROBE_EXPECT_KEYS)  # PROBE_EXPECT_KEYS_20260911: chave desconhecida não avalia nada
+    if unknown:
+        raise WorkflowError(f'Criterion {cid}: probe.expect keys {unknown} are not evaluated; use row, scalar, op+value, set_equals, contains_all, not_matches, count_between, equals (with json_path on the probe) or status')
     if set(expect) <= {'status'}:  # PROBE_STRICT_EXPECT_20260911: status sozinho não prova conteúdo
         raise WorkflowError(f'Criterion {cid}: probe.expect with status alone does not prove the requested result; add equals with json_path, set_equals, contains_all or not_matches on the content the user consumes')
     kind = probe['kind']
@@ -913,6 +916,9 @@ def _check_probe_corrections(previous, spec):
                                 '[{id, reason, evidence:[...]}] in the new spec revision; the earlier measurement stays in history')
 
 
+_MEASURED_RX = re.compile(r'(sql|https?://|\bhttp\b|curl|\bget\b|readback|\bapi\b|query|\bselect\b|playwright|browser|psql|postgres|\bdb\b|banco|\brota\b|route|endpoint|tabela|\btable\b|snapshot|admin\.|/api/|wget|fetch)', re.I)  # MEASURED_PRECHECK_20260911
+
+
 def _spec_result_criteria_checks(conn, task_id, spec):
     """Owner mode: valida sondas e exige critério obrigatório quando a reprodução foi medida."""
     for crit in spec.get('criteria') or []:
@@ -922,7 +928,8 @@ def _spec_result_criteria_checks(conn, task_id, spec):
     wf = get_workflow(conn, task_id)
     precheck = (json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') if wf else None
     precheck = precheck or {}
-    measured = any(str(c.get('method') or '').strip().lower() in {'sql', 'http', 'header', 'api', 'query'} for c in (precheck.get('checked') or []) if isinstance(c, dict))
+    measured = any(_MEASURED_RX.search(' '.join(str(c.get(k) or '') for k in ('method', 'target', 'result')))  # MEASURED_PRECHECK_20260911
+                   for c in (precheck.get('checked') or []) if isinstance(c, dict))
     if (spec.get('delivery_type') in {'code', 'operation'} and precheck.get('verdict') in {'partial', 'not_delivered'} and measured
             and not any(c.get('mandatory') for c in spec.get('criteria') or [])):
         raise WorkflowError('The precheck measured the complaint (method sql/http): declare at least one criterion with mandatory=true and a '
