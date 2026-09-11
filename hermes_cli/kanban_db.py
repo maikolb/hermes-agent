@@ -131,7 +131,7 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 # ``BLOCK_RECURRENCE_LIMIT``) escalates them to ``triage`` if a cron keeps
 # unblocking them only to have the worker re-block for the same reason.
 # ``None`` = legacy/un-typed block (treated as a generic human blocker).
-VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
+VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient", "awaiting_principal"}  # CLOSURE_RECOVERY_20260911
 
 # After a task has been blocked, unblocked, and re-blocked this many times for
 # the same (truly-blocked) reason, the unblock-loop breaker stops trusting the
@@ -7304,7 +7304,21 @@ def complete_task(
                     ),
                 )
                 return False
-            if delivery is not None and bool(delivery["required"]):
+            _contract_waived = False  # CLOSURE_RECOVERY_20260911: required sem policy/request/receipt = não inicializado, não adulterado
+            if (delivery is not None and bool(delivery["required"]) and delivery["policy_json"] is None
+                    and delivery["request_json"] is None and delivery["receipt_json"] is None):
+                _contract_waived = _nfos_delivery_recorded(conn, task_id)
+                _append_event(conn, task_id, "delivery_contract_uninitialized",
+                              {"waived": _contract_waived, "reason": "required without sealed policy (board without configured Git policy or reclassified card); "
+                               + ("publication recorded by nfos_effects" if _contract_waived else "no confirmed NFOS publication effect")},
+                              run_id=(int(prior["current_run_id"]) if prior and prior["current_run_id"] is not None else None))
+                if not _contract_waived:
+                    _append_event(conn, task_id, "completion_blocked_delivery",
+                                  {"reason": "Git delivery contract not initialized and no confirmed NFOS publication effect (pr, merge, deploy, homolog) recorded",
+                                   "code": "delivery_contract_uninitialized"},
+                                  run_id=(int(prior["current_run_id"]) if prior and prior["current_run_id"] is not None else None))
+                    return False
+            if delivery is not None and bool(delivery["required"]) and not _contract_waived:
                 try:
                     policy = json.loads(str(delivery["policy_json"] or ""))
                     request = json.loads(str(delivery["request_json"] or ""))
@@ -7334,7 +7348,7 @@ def complete_task(
                         ),
                     )
                     return False
-            if delivery is not None and bool(delivery["required"]) and (
+            if delivery is not None and bool(delivery["required"]) and not _contract_waived and (  # CLOSURE_RECOVERY_20260911
                 delivery["candidate_digest"] is None
                 or delivery["receipt_json"] is None
                 or delivery["verified_at"] is None
@@ -7351,7 +7365,7 @@ def complete_task(
                     ),
                 )
                 return False
-            if delivery is not None and bool(delivery["required"]):
+            if delivery is not None and bool(delivery["required"]) and not _contract_waived:  # CLOSURE_RECOVERY_20260911
                 from hermes_cli.git_delivery import (
                     validate_persisted_git_delivery_receipt,
                 )
@@ -7419,7 +7433,7 @@ def complete_task(
             )
         if cur.rowcount != 1:
             return False
-        if delivery is not None and bool(delivery["required"]):
+        if delivery is not None and bool(delivery["required"]) and not _contract_waived:  # CLOSURE_RECOVERY_20260911: sem recibo não há obrigação de limpeza selada
             owner_pid = (
                 int(prior["worker_pid"])
                 if prior and prior["worker_pid"] is not None
@@ -8561,7 +8575,7 @@ def _no_park_reason(conn, task_id, kind, reason):
     ``blocked`` as a question to a named human. Kinds needs_input/capability/None need a '?' and the recipient in
     the reason; a technical pause is refused so the caller finishes the delivery or asks. transient/dependency keep
     their meaning. Returns the refusal text, or None when the block is allowed."""
-    if kind in ("transient", "dependency"):
+    if kind in ("transient", "dependency", "awaiting_principal"):  # CLOSURE_RECOVERY_20260911: estado visível do runtime, responsável no motivo
         return None
     try:
         from hermes_cli.nfos_delivery import _owner_mode, get_workflow
@@ -11856,6 +11870,52 @@ def _nfos_pending_decision(conn, task_id, run_id):
         return None
 
 
+def _nfos_delivery_recorded(conn, task_id):
+    """CLOSURE_RECOVERY_20260911: em modo registro, publicação registrada nos efeitos NFOS (pr, merge, deploy, homolog confirmados)."""
+    try:
+        from hermes_cli.nfos_delivery import _owner_mode, get_workflow
+        if not _owner_mode() or not get_workflow(conn, task_id):
+            return False
+        return conn.execute(
+            "SELECT 1 FROM nfos_effects WHERE task_id=? AND status='confirmed' AND operation IN ('pr','merge','deploy','homolog') LIMIT 1",
+            (task_id,),
+        ).fetchone() is not None
+    except Exception:
+        return False
+
+
+def _nfos_refused_in_run(conn, row):
+    """CLOSURE_RECOVERY_20260911: o run atual teve fechamento recusado (critério obrigatório ou contrato); a saída limpa é deliberada."""
+    try:
+        started = row["worker_started_at"] if "worker_started_at" in row.keys() else None
+        if started is None:
+            started = row["started_at"] if "started_at" in row.keys() else None
+        if started is None:
+            return False
+        return conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND created_at>=? AND kind IN ('nfos_completion_refused','completion_blocked_delivery') LIMIT 1",
+            (row["id"], int(started)),
+        ).fetchone() is not None
+    except Exception:
+        return False
+
+
+def _nfos_refused_streak(conn, task_id):
+    """CLOSURE_RECOVERY_20260911: runs anteriores consecutivos encerrados como refused_exit (o run corrente, ainda running, não conta)."""
+    try:
+        n = 0
+        for r in conn.execute("SELECT status FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 6", (task_id,)).fetchall():
+            st = str(r[0] or "")
+            if st == "running":
+                continue
+            if st != "refused_exit":
+                break
+            n += 1
+        return n
+    except Exception:
+        return 0
+
+
 def _nfos_open_decision(conn, task_id):
     """IMPEDIMENT_RACE_20260911: the card's open decision (human first, then pending) as a dict, or None."""
     try:
@@ -12490,6 +12550,10 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             rate_limited_exit = False
             awaiting_decision = False  # IMPEDIMENT_RACE_20260911
             open_decision = _nfos_open_decision(conn, row["id"]) if kind == "clean_exit" else None
+            refused_exit = bool(kind == "clean_exit" and not open_decision and _nfos_refused_in_run(conn, row))  # CLOSURE_RECOVERY_20260911
+            refused_streak = _nfos_refused_streak(conn, row["id"]) if refused_exit else 0
+            refused_escalated = bool(refused_exit and refused_streak >= 2)  # terceira saída seguida após recusa: violação limitada, não loop
+            refused_exit = refused_exit and not refused_escalated
             if kind == "clean_exit" and open_decision:
                 # IMPEDIMENT_RACE_20260911: the worker left with its question open (pending with the
                 # Principal, or answered 'human'). That is the contract, not a protocol violation: the
@@ -12509,6 +12573,25 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     "decision_id": open_decision["id"],
                     "decision_status": open_decision["status"],
                 }
+            elif kind == "clean_exit" and refused_escalated:  # CLOSURE_RECOVERY_20260911
+                protocol_violation = True
+                error_text = (
+                    f"pid {pid} exited after a refused completion for the {refused_streak + 1}th consecutive run "
+                    "without closing the card. Counted as a protocol violation (bounded). Continue in this card: "
+                    "measure and fix the pending requirement, or save the report with partial_delivery=true and "
+                    "continuation=<open child of this card>, then call kanban_complete."
+                )
+                event_kind = "protocol_violation"
+                event_payload = {"pid": pid, "claimer": row["claim_lock"], "exit_code": code, "protocol_violation": True,
+                                 "refused_streak": refused_streak + 1}
+            elif kind == "clean_exit" and refused_exit:  # CLOSURE_RECOVERY_20260911
+                protocol_violation = False
+                error_text = (
+                    f"pid {pid} exited after a refused completion (result criteria or delivery contract pending); "
+                    "requeued without counting a failure. Continue in this card: measure, fix, report."
+                )
+                event_kind = "refused_exit"
+                event_payload = {"pid": pid, "claimer": row["claim_lock"], "exit_code": code}
             elif kind == "clean_exit":
                 # Worker subprocess returned 0 but its task is still
                 # ``running`` in the DB — it exited without calling
@@ -12593,6 +12676,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # history doesn't show a phantom crash for a quota wall.
                 _run_outcome = (
                     "awaiting_decision" if awaiting_decision  # IMPEDIMENT_RACE_20260911
+                    else "refused_exit" if refused_exit  # CLOSURE_RECOVERY_20260911
                     else "rate_limited" if rate_limited_exit
                     else ("reclaimed" if interrupted else "crashed")  # INTERRUPTED_20260910
                 )
@@ -12632,7 +12716,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         (error_text[:500], row["id"]),
                     )
                     rate_limited.append(row["id"])
-                elif interrupted:  # INTERRUPTED_20260910: sem falha, sem breaker, sem wake
+                elif interrupted or refused_exit:  # INTERRUPTED_20260910, CLOSURE_RECOVERY_20260911: sem falha, sem breaker, sem wake
                     interrupted_ids.append(row["id"])
                 else:
                     if protocol_violation:
@@ -14464,6 +14548,11 @@ def _dispatch_once_locked(
             )
             continue
         if _nfos_decision_open(conn, row["id"]):  # OPEN_DECISION_SKIP_20260910
+            try:  # CLOSURE_RECOVERY_20260911: auto-continue por classe, lembretes ao Principal, estado visível
+                from hermes_cli.nfos_delivery import nudge_open_decisions
+                nudge_open_decisions(conn, row["id"])
+            except Exception:
+                pass
             _release_workspace_lease(workspace_lease)  # LEASE_RELEASE_20260910: sem liberar, o lease ficava em nome do gateway e o card nunca mais era reclamado
             _log.debug("kanban dispatcher: %s aguarda decisão aberta (pending/human); não relançado", row["id"])  # LOGGER_NAME_20260910
             continue
@@ -14644,6 +14733,11 @@ def _dispatch_once_locked(
             )
             continue
         if _nfos_decision_open(conn, row["id"]):  # OPEN_DECISION_SKIP_20260910
+            try:  # CLOSURE_RECOVERY_20260911: auto-continue por classe, lembretes ao Principal, estado visível
+                from hermes_cli.nfos_delivery import nudge_open_decisions
+                nudge_open_decisions(conn, row["id"])
+            except Exception:
+                pass
             _release_workspace_lease(workspace_lease)  # LEASE_RELEASE_20260910: sem liberar, o lease ficava em nome do gateway e o card nunca mais era reclamado
             _log.debug("kanban dispatcher: %s aguarda decisão aberta (pending/human); não relançado", row["id"])  # LOGGER_NAME_20260910
             continue
