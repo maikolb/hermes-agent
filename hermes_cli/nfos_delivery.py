@@ -617,6 +617,8 @@ def _validate_probe(cid, probe):
     if not isinstance(expect, dict) or not (set(expect) & _PROBE_EXPECT_KEYS):
         raise WorkflowError(f'Criterion {cid}: probe.expect must state the requested result (row, scalar, op+value, set_equals, '
                             'contains_all, not_matches, count_between, equals or status); a count alone rarely proves content')
+    if set(expect) <= {'status'}:  # PROBE_STRICT_EXPECT_20260911: status sozinho não prova conteúdo
+        raise WorkflowError(f'Criterion {cid}: probe.expect with status alone does not prove the requested result; add equals with json_path, set_equals, contains_all or not_matches on the content the user consumes')
     kind = probe['kind']
     if kind == 'sql':
         query = str(probe.get('query') or '').strip()

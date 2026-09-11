@@ -107,6 +107,8 @@ def test_probe_validation_rejects_mutation_and_weak_expectation(board):
             delivery.save_spec(conn, task.id, task.current_run_id, _spec(probe=_probe(query="delete from exam_disciplines")), author="worker", evidence={"source": "worker"})
         with pytest.raises(delivery.WorkflowError, match="expect"):
             delivery.save_spec(conn, task.id, task.current_run_id, _spec(probe={"kind": "sql", "query": "select 1", "expect": {}}), author="worker", evidence={"source": "worker"})
+        with pytest.raises(delivery.WorkflowError, match="status alone"):  # PROBE_STRICT_EXPECT_20260911
+            delivery.save_spec(conn, task.id, task.current_run_id, _spec(probe={"kind": "http", "url": "https://admin.example/api/x", "expect": {"status": 200}}), author="worker", evidence={"source": "worker"})
 
 
 def test_declared_pass_is_replaced_by_the_measurement(board):
