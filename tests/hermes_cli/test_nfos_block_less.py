@@ -53,8 +53,8 @@ def test_worker_prompt_starts_with_premises_when_validation_is_off(monkeypatch):
     monkeypatch.setattr(review, "settings", lambda: {"principal_validation": False})
     text = runtime.worker_instructions()
     assert text.startswith("OWNER PREMISES")
-    assert "never ask spec_review or final_review" in text
-    assert "acquire-project --wait 900" in text
+    assert "no Principal decisions on code" in text  # RECORD_MODE_20260911
+    assert "Budgets are real" in text
 
 
 def test_worker_prompt_has_no_premises_when_validation_is_on(monkeypatch):

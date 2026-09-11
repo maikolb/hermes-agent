@@ -1490,6 +1490,60 @@ def _project_owned(conn,task_id,run_id,candidate):
         raise WorkflowError('Acquire the project publication slot for this candidate first')
 
 
+def _conducted_effect_checks(conn, task, task_id, run_id, operation, target, candidate, scope, staging):
+    """Checagens de condução (identidade, revisão, ordem, preparação, slot). Só fora do owner mode; RECORD_MODE_20260911."""
+    from hermes_cli.nfos_destination import review_only
+    preparation=None
+    _fast=bool(review_only(scope) and _owner_mode())  # CODE_FAST_ROUTE_20260910: rota de produção sem homologação
+    if review_only(scope) and operation not in ({'pr','merge','deploy'} if _fast else {'pr'}):
+        raise WorkflowError('Production route: only pr, merge and deploy effects; no homolog or staging' if _fast
+                            else 'The approved delivery destination ends at the review PR; homolog, merge and deploy are outside it')
+    if scope and operation=='deploy' and not _fast and (scope['verification_operation']!='deploy' or target!=scope['target']):
+        raise WorkflowError('Deploy is outside the approved delivery destination; do not promote beyond the requested environment')
+    if scope and operation==scope['verification_operation'] and target!=scope['target']:
+        raise WorkflowError('Use the exact delivery destination from the approved spec')
+    wf=get_workflow(conn,task_id);state=json.loads(wf['state_json'])
+    if not wf['spec_revision']:
+        raise WorkflowError('Persist the spec before changing an environment')
+    _require_current_instruction_spec(conn,task_id)
+    if operation in {'merge','deploy'} and not _approved(conn,task_id,wf['spec_revision']):
+        raise WorkflowError('Principal review of this candidate is pending')
+    if _fast and operation=='merge' and not _pr_green(conn,task_id,state.get('candidate_sha')):  # CODE_FAST_ROUTE_20260910
+        raise WorkflowError('Merge needs the review PR reconciled with ci_status success for the accepted candidate')
+    if staging:
+        from hermes_cli import nfos_preparation
+        preparation=nfos_preparation.authorized(conn,task_id,target,candidate)
+        if operation=='staging_merge':
+            nfos_preparation.confirmed_pr(conn,task_id,candidate,target)
+    if review_only(scope):
+        # A review-PR phase has no homologated candidate by definition:
+        # the accepted local candidate is what the PR and CI verify.
+        delivery_candidate=state.get('candidate_sha')
+        if not delivery_candidate:
+            raise WorkflowError('Record the accepted local candidate before opening its review PR')
+    else:
+        delivery_candidate=candidate if staging or operation=='homolog' or (operation=='pr' and _owner_mode()) else _delivery_candidate(conn,task_id,state)  # RELEASE_FLOW_20260911
+    if staging or operation=='homolog' or not _owner_mode():  # SLOT_HML_ONLY_20260911: slot só para staging/HML; produção não serializa
+        _project_owned(conn,task_id,run_id,delivery_candidate)
+    expected=candidate if operation=='homolog' else (state.get('integrated_sha') if operation=='deploy' else delivery_candidate)
+    if candidate!=expected:
+        raise WorkflowError('Use the confirmed integrated candidate' if operation=='deploy'
+                            else 'Use the accepted local candidate' if review_only(scope) else 'Use the homologated candidate')
+    if operation=='deploy' and not _confirmed(conn,task_id,'merge',delivery_candidate):
+        raise WorkflowError('Confirm the integrated merge before deploy')
+    return preparation
+
+
+def _record_mode_effect_checks(conn, task_id, candidate):
+    """RECORD_MODE_20260911: registro, não condução. Spec vigente e SHA exato; o recibo vem no reconcile."""
+    wf=get_workflow(conn,task_id)
+    if not wf['spec_revision']:
+        raise WorkflowError('Persist the spec before changing an environment')
+    _require_current_instruction_spec(conn,task_id)
+    if not re.fullmatch(r'[0-9a-f]{7,64}', str(candidate or '')):
+        raise WorkflowError('candidate must be the exact commit SHA being published (hex)')
+    return None
+
 def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
     if operation not in {'homolog','pr','merge','deploy','staging_pr','staging_merge'} or not target or not candidate:
         raise WorkflowError('External effect needs operation, destination and exact candidate')
@@ -1510,43 +1564,10 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             scope=destination(conn,task_id)
             if operation in {'merge','deploy'} and _project_delivery_environment(conn,task_id)=='hml' and not _express_production_order(task.body):  # DELIVERY_ENV_20260911
                 raise WorkflowError('This project delivers in HML: staging PR, HML deploy and HML readback close the card. Production (merge or deploy on main) only with the owner express order in the card body')
-            _fast=bool(review_only(scope) and _owner_mode())  # CODE_FAST_ROUTE_20260910: rota de produção sem homologação
-            if review_only(scope) and operation not in ({'pr','merge','deploy'} if _fast else {'pr'}):
-                raise WorkflowError('Production route: only pr, merge and deploy effects; no homolog or staging' if _fast
-                                    else 'The approved delivery destination ends at the review PR; homolog, merge and deploy are outside it')
-            if scope and operation=='deploy' and not _fast and (scope['verification_operation']!='deploy' or target!=scope['target']):
-                raise WorkflowError('Deploy is outside the approved delivery destination; do not promote beyond the requested environment')
-            if scope and operation==scope['verification_operation'] and target!=scope['target']:
-                raise WorkflowError('Use the exact delivery destination from the approved spec')
-            wf=get_workflow(conn,task_id);state=json.loads(wf['state_json'])
-            if not wf['spec_revision']:
-                raise WorkflowError('Persist the spec before changing an environment')
-            _require_current_instruction_spec(conn,task_id)
-            if operation in {'merge','deploy'} and not _approved(conn,task_id,wf['spec_revision']):
-                raise WorkflowError('Principal review of this candidate is pending')
-            if _fast and operation=='merge' and not _pr_green(conn,task_id,state.get('candidate_sha')):  # CODE_FAST_ROUTE_20260910
-                raise WorkflowError('Merge needs the review PR reconciled with ci_status success for the accepted candidate')
-            if staging:
-                from hermes_cli import nfos_preparation
-                preparation=nfos_preparation.authorized(conn,task_id,target,candidate)
-                if operation=='staging_merge':
-                    nfos_preparation.confirmed_pr(conn,task_id,candidate,target)
-            if review_only(scope):
-                # A review-PR phase has no homologated candidate by definition:
-                # the accepted local candidate is what the PR and CI verify.
-                delivery_candidate=state.get('candidate_sha')
-                if not delivery_candidate:
-                    raise WorkflowError('Record the accepted local candidate before opening its review PR')
+            if _owner_mode():  # RECORD_MODE_20260911: o runtime registra a publicação (task, run, operação, alvo, SHA) e não conduz
+                preparation=_record_mode_effect_checks(conn,task_id,candidate)
             else:
-                delivery_candidate=candidate if staging or operation=='homolog' or (operation=='pr' and _owner_mode()) else _delivery_candidate(conn,task_id,state)  # RELEASE_FLOW_20260911
-            if staging or operation=='homolog' or not _owner_mode():  # SLOT_HML_ONLY_20260911: slot só para staging/HML; produção não serializa
-                _project_owned(conn,task_id,run_id,delivery_candidate)
-            expected=candidate if operation=='homolog' else (state.get('integrated_sha') if operation=='deploy' else delivery_candidate)
-            if candidate!=expected:
-                raise WorkflowError('Use the confirmed integrated candidate' if operation=='deploy'
-                                    else 'Use the accepted local candidate' if review_only(scope) else 'Use the homologated candidate')
-            if operation=='deploy' and not _confirmed(conn,task_id,'merge',delivery_candidate):
-                raise WorkflowError('Confirm the integrated merge before deploy')
+                preparation=_conducted_effect_checks(conn,task,task_id,run_id,operation,target,candidate,scope,staging)
         key=hashlib.sha256(_json([task_id,operation,target,candidate]).encode()).hexdigest()
         existing=_row(conn,'nfos_effects','id',key)
         if existing:
@@ -1803,6 +1824,13 @@ def acquire_project(conn, project, task_id, run_id, candidate):
     with _kb().write_txn(conn):
         _owned(conn,task_id,run_id)
         current=_row(conn,'nfos_project_delivery','project',project)
+        if _owner_mode():  # RECORD_MODE_20260911: o slot registra quem publica, não trava
+            if current and (current['task_id'],current['run_id'])!=(task_id,run_id):
+                _event(conn,current['task_id'],current['run_id'],'nfos_project_delivery_shared',{'project':project,'with_task':task_id,'with_run':run_id})
+            conn.execute('INSERT OR REPLACE INTO nfos_project_delivery(project,task_id,run_id,candidate,acquired_at) VALUES(?,?,?,?,?)',
+                         (project,task_id,run_id,candidate,int(time.time())))
+            _event(conn,task_id,run_id,'nfos_project_delivery_acquired',{'project':project,'candidate':candidate,'record_only':True})
+            return True
         if current:
             if (current['task_id'],current['run_id'],current['candidate'])==(task_id,run_id,candidate):
                 return True
@@ -1839,7 +1867,8 @@ def acquire_project(conn, project, task_id, run_id, candidate):
 
 def release_project(conn, project, task_id, run_id):
     with _kb().write_txn(conn):
-        if conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('homolog','merge','deploy','staging_pr','staging_merge')",(task_id,)).fetchone():
+        if not _owner_mode() and conn.execute(  # RECORD_MODE_20260911
+"SELECT 1 FROM nfos_effects WHERE task_id=? AND status='unknown' AND operation IN ('homolog','merge','deploy','staging_pr','staging_merge')",(task_id,)).fetchone():
             raise WorkflowError('Read the unresolved homologation/merge/deploy destination before releasing publication')
         changed=conn.execute('DELETE FROM nfos_project_delivery WHERE project=? AND task_id=? AND run_id=?',
                              (project,task_id,run_id)).rowcount
@@ -1886,18 +1915,8 @@ def main():
             try:  # BLOCK_LESS3_20260910: premissas do owner na primeira chamada de todo worker
                 from hermes_cli.nfos_principal_review import required as _req
                 if not _req(conn,args.task):
-                    result['owner_premises']=[
-                        '0. For a code request: before any spec or implementation, check production (and HML/staging) and the existing PRs/commits for this request. For an operation or report request: read only the current state of the production target (no HML, no repository, no PR search) and record it in the precheck (OPERATION_FAST2_20260910). If it is already delivered, save a short report (criteria PASS with the readback as evidence) and call kanban_complete. If partially delivered, scope only the delta. Never re-implement delivered work. Record it with `precheck --input precheck.json` (checked=[{target,method,result}], verdict=already_delivered|partial|not_delivered); save-spec refuses a new spec without it.',
-                        '1. Deliver first, in the requested environment, as fast as possible; verification comes after delivery.',
-                        '2. Block as little as possible. Never block on a transient error. kanban_block only with a concrete question to a named human (needs_input) or a precise missing environment item (capability).',
-                        '3. Principal validation is OFF: do not ask spec_review or final_review, nor review for report/operation cards; they resolve automatically. Write the spec yourself (save-spec --author worker) with size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class. After the work, save-report then kanban_complete.',  # BLOCK_LESS9_20260910
-                        '4. Ask the Principal only when a decision changes the outcome. Slot occupied: acquire-project --wait 900. Next step: follow the saved spec.',
-                        '5. Credentials for production, HML and databases are in the project vault listed under credentials in this output. Use them; never ask a human for something that is already there.',  # BLOCK_LESS6_20260910
-                        '7. Code card of any size: the route follows the project delivery_environment shown in this output (gold standard of the original HPF). production with a staging pipeline: branch from main, PR to the staging branch, CI green, merge, automatic preview deploy, short readback, then PR to main, CI green, merge, automatic production deploy, production readback, report, kanban_complete. hml: PR to the staging branch, CI green, merge, HML deploy, HML readback, report, kanban_complete; delivered in HML is delivered, and production (merge/deploy on main) only when the card body carries the owner order. dev or test: deliver to that environment, read it back, report, kanban_complete. No Principal decisions on code and no separate acceptance: CI is the gate; a rebased candidate with a green PR needs no new homologation. Priority 100 (urgent) adds no steps. G: split into up to 3 P/M cards first.',  # DELIVERY_ENV_20260911
-                        '6. operation = administrative change on a system already in production without touching the repository; the spec needs operation.target, operation.mutation and no_code_reason; homolog/pr/merge/deploy effects are refused on it, so never classify as operation to skip the code path (reclassify with delivery_type code if a repository change is needed). operation and report cards skip HML/repository/PR reconciliation and progress steps 5 and 6.',  # OPERATION_FAST_20260910
-                        '8. A judge refusal on kanban_complete means the delivery is incomplete for the requested environment, never a reason to pause: finish it (rebase, resolve conflicts, merge, deploy, production readback) and call kanban_complete again with that evidence, or block with a concrete question to a named human. HML-only is not a scope unless the card body says so; there is no separate production acceptance while principal validation is off.',  # JUDGE_REFUSAL_20260910
-                        "9. A repository pre-push or pre-commit hook that fails for a local reason (missing dependencies, missing DATABASE_URL or other env, missing git identity, build tooling absent in a temporary clone) is not a gate: push with --no-verify at once; the PR's CI is the gate. Spend at most one attempt on a local hook. Never install a project locally just to satisfy a hook.",  # RELEASE_FLOW_20260911
-                    ]
+                    from hermes_cli.nfos_runtime import owner_premises as _op  # RECORD_MODE_20260911
+                    result['owner_premises']=_op()
             except Exception:
                 pass
             result['credentials']=_credentials_hint(args.db)  # BLOCK_LESS6_20260910
