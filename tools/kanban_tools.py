@@ -430,9 +430,42 @@ def _delivery_environment_note():
         return ""
 
 
+def _owner_mode_active() -> bool:
+    """RECORD_MODE_20260911: validação do principal desligada no perfil (modo registro)."""
+    try:
+        from hermes_cli.nfos_delivery import _owner_mode
+        return bool(_owner_mode())
+    except Exception:
+        return False
+
+
+def _stamp_delivery_record(conn, tid: str, metadata):
+    """RECORD_MODE_20260911: o fechamento grava ambiente do projeto e efeitos confirmados; a Vigília deriva "entregue em X" só disso."""
+    try:
+        if not _owner_mode_active():
+            return metadata
+        from hermes_cli.kanban_db import get_current_board
+        from hermes_cli.nfos_runtime import project_config, delivery_route
+        route = delivery_route(project_config(get_current_board()) or {})
+        effects = []
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_effects'").fetchone():
+            for row in conn.execute("SELECT operation, target, candidate, status FROM nfos_effects WHERE task_id=? ORDER BY updated_at", (tid,)):
+                effects.append({"operation": row[0], "target": row[1], "candidate": str(row[2] or "")[:12], "status": row[3]})
+        env = route["environment"]
+        proof = {"production": ("deploy", "merge"), "hml": ("homolog",), "dev": ("pr", "deploy", "merge"), "test": ("homolog", "deploy", "pr")}.get(env, ("deploy",))
+        verified = any(e["status"] == "confirmed" and e["operation"] in proof for e in effects)
+        metadata = dict(metadata or {})
+        metadata["nfos_delivery"] = {"environment": env, "effects": effects, "verified": verified}
+        return metadata
+    except Exception:
+        return metadata
+
+
 def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
     """Return a rejection reason when a goal-mode terminal handoff is premature."""
     if not task or not task.goal_mode or not _goal_judge_available():
+        return None
+    if _owner_mode_active():  # RECORD_MODE_20260911: sem juiz de modelo; o fechamento é o relatório coerente com readback
         return None
     verdict = "done"
     reason = ""
@@ -941,6 +974,7 @@ def _handle_complete(args: dict, **kw) -> str:
             # Only enforce when a judge is actually reachable — see
             # _goal_judge_available for why an unavailable judge fails open.
             task = kb.get_task(conn, tid)
+            metadata = _stamp_delivery_record(conn, tid, metadata)  # RECORD_MODE_20260911
             from hermes_cli.kanban_cancellation import requested
             if requested(metadata):
                 kb.complete_task(conn,tid,result=result,summary=summary,metadata=metadata,

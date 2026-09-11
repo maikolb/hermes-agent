@@ -60,10 +60,11 @@ def test_stale_slot_holder_is_preempted_in_owner_mode(board):
         row = conn.execute("SELECT task_id FROM nfos_project_delivery WHERE project='pilot'").fetchone()
         assert row["task_id"] == other.id
         kinds = [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id=?", (holder.id,))]
-        assert "nfos_project_delivery_preempted" in kinds
+        # RECORD_MODE_20260911: em owner mode o slot é registro (evento shared); fora dele vale a preempção por dono parado.
+        assert "nfos_project_delivery_shared" in kinds or "nfos_project_delivery_preempted" in kinds
 
 
-def test_active_slot_holder_keeps_the_slot(board):
+def test_active_slot_holder_keeps_the_slot_outside_owner_mode(board, monkeypatch):
     with kb.connect_closing() as conn:
         holder = _card(conn, board, 3)
         other = _card(conn, board, 4)
@@ -74,4 +75,6 @@ def test_active_slot_holder_keeps_the_slot(board):
                      "VALUES(?,?,?,?,?,?,?,?,?,?)", ("8" * 64, holder.id, holder.current_run_id, "staging_pr", REPO + "/tree/staging",
                                                      "a" * 40, "unknown", None, now - 60, now - 60))
         conn.commit()
+    monkeypatch.setattr(review, "settings", lambda: {})
+    with kb.connect_closing() as conn:
         assert delivery.acquire_project(conn, "pilot", other.id, other.current_run_id, "b" * 40) is False

@@ -1,4 +1,4 @@
-"""SLOT_HML_ONLY_20260911: em owner mode o slot de publicação do projeto só vale para staging/HML; pr, merge e deploy não esperam."""
+"""SLOT_HML_ONLY_20260911 + RECORD_MODE_20260911: em owner mode nenhum efeito espera o slot de publicação; fora do owner mode o slot continua."""
 import json
 import os
 import time
@@ -62,11 +62,12 @@ def test_production_pr_needs_no_publication_slot_in_owner_mode(board):
         assert effect["execute"] is True
 
 
-def test_hml_publication_still_takes_the_slot(board):
+def test_hml_publication_is_recorded_without_the_slot_in_owner_mode(board):
+    # RECORD_MODE_20260911: em owner mode o slot é registro, não trava; o efeito homolog é registrado direto.
     with kb.connect_closing() as conn:
         task = _card(conn, board, HML_ROUTE)
-        with pytest.raises(delivery.WorkflowError, match="publication slot"):
-            delivery.begin_effect(conn, task.id, task.current_run_id, operation="homolog", target=HML, candidate=SHA)
+        effect = delivery.begin_effect(conn, task.id, task.current_run_id, operation="homolog", target=HML, candidate=SHA)
+        assert effect["execute"] is True
 
 
 def test_slot_still_required_outside_owner_mode(board, monkeypatch):

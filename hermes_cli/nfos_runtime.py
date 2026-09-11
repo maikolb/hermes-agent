@@ -422,29 +422,29 @@ def workflow_command():
     return _script_command(delivery.__file__)
 
 
-def _premises_prefix():  # BLOCK_LESS7_20260910
-    """BLOCK_LESS_20260910: premissas do owner (10/09/2026) no topo das instruções do worker, quando a validação
-    do principal está desligada no perfil."""
+def owner_premises():  # RECORD_MODE_20260911
+    """Premissas do owner (10/09) em modo registro (11/09): uma lista só, usada pelo show e pelo prefixo do worker."""
+    return [
+        '0. Before any spec or implementation: read production, HML/staging and the existing PRs/commits for this request and record it with `precheck`. Already delivered: save a short report and call kanban_complete.',
+        '1. Deliver first, in the project delivery_environment shown in this output, following its route; verification is the readback after delivery. No separate acceptance, no staging homologation decisions, no Principal decisions on code: CI is the gate. Priority 100 (urgent) adds no steps.',
+        '2. Records the owner reads, keep them exact: the spec with goal, verifiable criteria and size P/M/G (it sets the run budget); every publication effect (pr, staging_pr, staging_merge, homolog, merge, deploy) with the exact commit SHA and its readback receipt (`effect` then `reconcile`); the final report with each criterion PASS/FAIL and evidence artifacts; a partial delivery marked partial_delivery with blockers and follow_ups.',
+        '3. Never block on a transient error or a local tool problem. Rate limit: back off (60 s, 120 s, 300 s) and retry. A local pre-push or pre-commit hook failing for a local reason (dependencies, DATABASE_URL, git identity): push with --no-verify, CI is the gate. A judge refusal on kanban_complete: finish the delivery or fix the report, never pause.',
+        '4. kanban_block only with a concrete question to a named human (Maikol, Japa, Jhonatan, Pablo, cliente) that the vault and the card cannot answer; the vault is listed under credentials in this output. Ask the Principal (`ask`) only when a decision changes the outcome; slots, next steps, readbacks and leases are yours to resolve.',
+        '5. Report and operation cards close with the saved report: no PR, no deploy. operation = administrative change on a system already in production (its spec needs operation.target, operation.mutation and no_code_reason). A code card that turns out to be a report is reclassified in the spec.',
+        '6. Budgets are real and unchanged: size sets the run budget; time and iteration limits per run stay; a continuation resumes from the checkpoint and counts toward the card total.',
+    ]
+
+
+def _premises_prefix():  # BLOCK_LESS7_20260910, RECORD_MODE_20260911
+    """Premissas do owner no topo das instruções do worker, quando a validação do principal está desligada no perfil."""
     try:
         from hermes_cli.nfos_principal_review import settings
         if settings().get('principal_validation') is True:
             return ''
     except Exception:
         pass
-    return (
-        'OWNER PREMISES (10/09/2026). They override any conflicting sentence below.\n'
-        '0. For a code request: before any spec or implementation, check production (and HML/staging) and the existing PRs/commits for this request. For an operation or report request: read only the current state of the production target (no HML, no repository, no PR search). If it is already delivered, save a short report (criteria PASS with the readback as evidence) and call kanban_complete. If partially delivered, scope only the delta. Never re-implement delivered work. Record it with `precheck --input precheck.json` (checked=[{target,method,result}], verdict=already_delivered|partial|not_delivered); save-spec refuses a new spec without it.\n'  # BLOCK_LESS3_20260910
-        '1. Deliver first, in the requested environment, as fast as possible; verification comes after delivery.\n'
-        '2. Block as little as possible. Never block on a transient error (rate limit, stale checkpoint, locked DB, flaky network): retry with backoff.\n'
-        '3. Principal validation is OFF: never ask spec_review or final_review. Write the spec yourself (`save-spec --author worker`, evidence {"source":"worker"}); call Claude TL only for an ambiguous or large request. Give the spec a size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class. After the work, `save-report` and then kanban_complete directly.\n'  # BLOCK_LESS9_20260910
-        '4. Ask the Principal only when a decision changes the outcome. HML slot occupied: `acquire-project --wait 900` and repeat. Next step: follow the saved spec. Inconsistent readback: `reconcile` and continue.\n'
-        '5. kanban_block only when a named human must provide something concrete (kind=needs_input, the question in the reason) or the environment lacks something specific (kind=capability, say exactly what is missing). Never as a parking place; a technical pause is not a block.\n'
-        '6. Report or operation delivery closes with the saved report: no PR, no deploy. A card born as code that turns out to be a report is reclassified in the spec (delivery_type report).\n'
-        '8. Code card of any size: the route follows the project delivery_environment shown in this output (gold standard of the original HPF). production with a staging pipeline: branch from main, PR to the staging branch, CI green, merge, automatic preview deploy, short readback, then PR to main, CI green, merge, automatic production deploy, production readback, report, kanban_complete. hml: PR to the staging branch, CI green, merge, HML deploy, HML readback, report, kanban_complete; delivered in HML is delivered, and production (merge/deploy on main) only when the card body carries the owner order. dev or test: deliver to that environment, read it back, report, kanban_complete. No Principal decisions on code and no separate acceptance: CI is the gate; a rebased candidate with a green PR needs no new homologation. Priority 100 (urgent) adds no steps. G: split into up to 3 P/M cards first.\n'  # DELIVERY_ENV_20260911
-        '7. operation = an administrative change on a system already in production without touching the repository (plan, tenant, config, data, credentials, infrastructure state). Its spec needs operation.target, operation.mutation and no_code_reason, and the runtime refuses homolog/pr/merge/deploy effects on it, so never classify as operation to skip the code path: if any step edits the repository, builds, deploys or opens a PR, the card is code (reclassify with a spec delivery_type code). operation and report cards skip progress steps 5 (PR) and 6 (merge/deploy) without commenting them: after [etapa 4/7 testar] write [etapa 7/7 readback].\n\n'  # OPERATION_FAST_20260910
-        '9. A judge refusal on kanban_complete means the delivery is incomplete for the requested environment, never a reason to pause: finish it (rebase, resolve conflicts, merge, deploy, production readback) and call kanban_complete again with that evidence, or block with a concrete question to a named human. HML-only is not a scope unless the card body says so; there is no separate production acceptance while principal validation is off.\n'  # JUDGE_REFUSAL_20260910
-        "10. A repository pre-push or pre-commit hook that fails for a local reason (missing dependencies, missing DATABASE_URL or other env, missing git identity, build tooling absent in a temporary clone) is not a gate: push with --no-verify at once; the PR's CI is the gate. Spend at most one attempt on a local hook. Never install a project locally just to satisfy a hook.\n"  # RELEASE_FLOW_20260911
-    )
+    return ('OWNER PREMISES (10/09/2026, record mode since 11/09). They override any conflicting sentence below.\n'
+            + '\n'.join(owner_premises()) + '\n')
 
 
 def worker_instructions():
