@@ -21030,12 +21030,24 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
             except Exception:
                 pass
 
+    def _pending_decision() -> "str | None":
+        # IMPEDIMENT_RACE_20260911: a question of this run still pending with the Principal.
+        c = _kb.connect()
+        try:
+            return _kb._nfos_pending_decision(c, task_id, worker_run_id)
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+
     _run_loop(
         task_id=task_id,
         goal_text=goal_text,
         run_turn=_run_turn,
         task_status_fn=_task_status,
         block_fn=_block,
+        pending_decision_fn=_pending_decision,
         max_turns=max_turns,
         first_response=first_response or "",
         log=lambda m: logger.info("%s", m),

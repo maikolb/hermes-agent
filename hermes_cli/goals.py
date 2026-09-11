@@ -2164,6 +2164,20 @@ KANBAN_GOAL_FINALIZE_TEMPLATE = (
     "blocks completion, call kanban_block with the reason instead."
 )
 
+# IMPEDIMENT_RACE_20260911: the worker's question is with the Principal. One turn to wait for
+# the answer inside the run; still pending after that, the run ends as ``awaiting_decision``
+# and the dispatcher holds the card until the Principal answers (no nudge, no block, no retry).
+KANBAN_GOAL_AWAIT_DECISION_TEMPLATE = (
+    "[Your question is with the Principal — decision {decision_id} is still pending]\n"
+    "The card is NOT blocked: kanban_block on an NFOS card files an impediment for the "
+    "Principal instead. Do not call kanban_block or kanban_complete again for the same "
+    "question. Wait for the answer inside this turn with the workflow CLI: "
+    "`wait --decision {decision_id} --timeout 300`. If it answers continue or changes, "
+    "follow it and keep working. If it answers human, call kanban_block once with that "
+    "exact question and recipient. If it is still pending when the wait returns, stop "
+    "without calling anything: the card is held until the Principal answers."
+)
+
 
 def run_kanban_goal_loop(
     *,
@@ -2175,6 +2189,7 @@ def run_kanban_goal_loop(
     max_turns: int = DEFAULT_MAX_TURNS,
     first_response: str = "",
     log=None,
+    pending_decision_fn=None,
 ) -> Dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
 
@@ -2202,7 +2217,10 @@ def run_kanban_goal_loop(
     Returns a decision dict: ``{"outcome", "turns_used", "reason"}`` where
     outcome is one of ``"completed_by_worker"``, ``"review_requested_by_worker"``,
     ``"changes_requested_by_reviewer"``, ``"blocked_budget"``,
-    ``"blocked_by_worker"``, or ``"stopped"``.
+    ``"blocked_by_worker"``, ``"awaiting_decision"`` (IMPEDIMENT_RACE_20260911: a
+    decision of this run is still pending with the Principal; ``pending_decision_fn``
+    injects that check and the loop waits one turn, then stops without blocking), or
+    ``"stopped"``.
     """
 
     def _log(msg: str) -> None:
@@ -2220,6 +2238,7 @@ def run_kanban_goal_loop(
     # The first turn already consumed one unit of budget.
     turns_used = 1
     nudged_to_finalize = False
+    waited_decision_id = None  # IMPEDIMENT_RACE_20260911
 
     while True:
         # Did the worker terminate the task itself this turn?
@@ -2248,6 +2267,29 @@ def run_kanban_goal_loop(
             # Reclaimed / archived / unexpected — let the dispatcher own it.
             _log(f"kanban goal loop: task {task_id} status={status!r}; stopping")
             return {"outcome": "stopped", "turns_used": turns_used, "reason": f"status={status}"}
+
+        # IMPEDIMENT_RACE_20260911: a question of this run is with the Principal. Judging
+        # the reply now only produces nudges and duplicate impediments; wait one turn for
+        # the answer, then stop and let the dispatcher hold the card until it arrives.
+        pending_decision = None
+        if pending_decision_fn is not None:
+            try:
+                pending_decision = pending_decision_fn()
+            except Exception as exc:
+                _log(f"kanban goal loop: pending decision check failed ({exc})")
+                pending_decision = None
+        if pending_decision:
+            if pending_decision == waited_decision_id or turns_used >= max_turns:
+                _log(f"kanban goal loop: task {task_id} awaiting Principal decision {pending_decision}; stopping without a block")
+                return {"outcome": "awaiting_decision", "turns_used": turns_used, "reason": f"decision {pending_decision} pending"}
+            waited_decision_id = pending_decision
+            try:
+                last_response = run_turn(KANBAN_GOAL_AWAIT_DECISION_TEMPLATE.format(decision_id=pending_decision)) or ""
+            except Exception as exc:
+                _log(f"kanban goal loop: run_turn failed ({exc}); stopping")
+                return {"outcome": "stopped", "turns_used": turns_used, "reason": f"run_turn error: {type(exc).__name__}"}
+            turns_used += 1
+            continue
 
         # Still open — judge whether the latest response satisfies the card.
         # The kanban worker loop has no wait-barrier concept (workers finish

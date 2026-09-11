@@ -2380,7 +2380,14 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 landed = kb.get_task(conn, tid)
                 where = landed.status if landed else "blocked"
                 suffix = f": {reason}" if reason else ""
-                if where == "todo":
+                if where == "running":  # IMPEDIMENT_RACE_20260911
+                    _pending = kb._nfos_pending_decision(conn, tid, _worker_run_id_for(tid))
+                    print(
+                        f"{tid} NOT blocked: impediment {_pending or '?'} filed for the Principal; "
+                        f"wait for the answer (`wait --decision {_pending or '<id>'} --timeout 300`), "
+                        "do not call block again for the same question"
+                    )
+                elif where == "todo":
                     print(f"{tid} → todo (dependency wait){suffix}")
                 elif where == "triage":
                     print(
