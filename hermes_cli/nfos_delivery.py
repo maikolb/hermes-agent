@@ -712,10 +712,50 @@ def _run_sql_probe(dsn, query):
     return [list(r) for r in rows]
 
 
-def _run_http_probe(probe, env):
+def _host_of(url):
+    from urllib.parse import urlsplit
+    return (urlsplit(str(url or '')).hostname or '').lower()
+
+
+def _host_allowed(host, patterns):
+    """PROBE_BYPASS_SCOPE_20260911: host exato ou padrão '*sufixo' da lista probe_hosts do projeto."""
+    for pattern in patterns or []:
+        pattern = str(pattern or '').strip().lower()
+        if not pattern:
+            continue
+        if pattern.startswith('*'):
+            suffix = pattern.lstrip('*')
+            if suffix and host.endswith(suffix) and host != suffix.lstrip('.'):
+                return True
+        elif host == pattern:
+            return True
+    return False
+
+
+def _bypass_for(url, env, hosts):
+    """PROBE_BYPASS_SCOPE_20260911: segredo de automação da Vercel só em https e só para hosts autorizados do projeto; sem lista, nunca."""
+    secret = env.get('VERCEL_AUTOMATION_BYPASS_SECRET') or env.get('VERCEL_PROTECTION_BYPASS')
+    if not secret or not str(url or '').lower().startswith('https://'):
+        return None
+    return secret if _host_allowed(_host_of(url), hosts) else None
+
+
+def _probe_redirect_handler():
+    import urllib.request
+
+    class _ProbeRedirectHandler(urllib.request.HTTPRedirectHandler):
+        """PROBE_BYPASS_SCOPE_20260911: redirecionamento para outro host não é seguido; os headers do cofre ficam no destino."""
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if _host_of(newurl) != _host_of(req.full_url):
+                return None
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+    return _ProbeRedirectHandler()
+
+
+def _run_http_probe(probe, env, hosts=None):
     import urllib.request, urllib.error
     headers = {}
-    bypass = env.get('VERCEL_AUTOMATION_BYPASS_SECRET') or env.get('VERCEL_PROTECTION_BYPASS')  # PROBE_HARDENING_20260911
+    bypass = _bypass_for(probe.get('url'), env, hosts)  # PROBE_BYPASS_SCOPE_20260911
     if bypass:
         headers['x-vercel-protection-bypass'] = bypass
     for key, value in (probe.get('headers') or {}).items():
@@ -723,8 +763,9 @@ def _run_http_probe(probe, env):
         headers[str(key)] = env.get(value[5:], '') if value.startswith('$env:') else value
     method = 'HEAD' if probe['kind'] == 'header' else 'GET'
     req = urllib.request.Request(probe['url'], headers=headers, method=method)
+    opener = urllib.request.build_opener(_probe_redirect_handler())
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with opener.open(req, timeout=15) as resp:
             status, hdrs = resp.status, dict(resp.headers)
             body = resp.read(200000) if method == 'GET' else b''
     except urllib.error.HTTPError as exc:
@@ -788,9 +829,15 @@ def _execute_probe(conn, task_id, probe):
                 return 'INDETERMINADO', None, 'probe_env of the project has no PROBE_DATABASE_URL/DATABASE_URL (config kanban.delivery.projects.<slug>.probe_env)'
             observed = {'rows': _json_safe(_run_sql_probe(dsn, str(probe['query']).strip().rstrip(';')))}
         else:
-            observed = _run_http_probe(probe, env)
-            if observed.get('mitigated') or (observed.get('status') == 429 and (probe.get('expect') or {}).get('status') != 429):  # PROBE_HARDENING_20260911
-                return 'INDETERMINADO', observed, f"edge protection challenged the probe ({observed.get('mitigated') or 'HTTP 429'}); configure the automation bypass in the project vault or use the QA session"
+            _key, _cfg = _probe_project(conn, task_id)
+            observed = _run_http_probe(probe, env, hosts=(_cfg or {}).get('probe_hosts'))  # PROBE_BYPASS_SCOPE_20260911
+            _status = observed.get('status'); _exp_status = (probe.get('expect') or {}).get('status')
+            if observed.get('mitigated'):
+                return 'INDETERMINADO', observed, f"edge protection challenged the probe ({observed['mitigated']}); the app was not measured. Use the QA session or the project automation bypass (config probe_hosts)"
+            if _status == 429 and _exp_status != 429:
+                return 'INDETERMINADO', observed, 'HTTP 429 without challenge evidence: possible application rate limit or a defect; back off and retry, and if it persists investigate the limit itself instead of assuming a Vercel challenge'
+            if _status is not None and 300 <= _status < 400 and _exp_status != _status:
+                return 'INDETERMINADO', observed, f"HTTP {_status} redirect to another host was not followed (vault headers stay on the destination); measure the final destination directly"
             if observed.get('status') in (401, 403) and 'status' not in (probe.get('expect') or {}):
                 return 'INDETERMINADO', observed, f"HTTP {observed['status']}: access to the consumer surface was refused"
     except WorkflowError as exc:

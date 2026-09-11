@@ -214,10 +214,43 @@ def test_edge_challenge_is_indeterminate_not_fail(board, monkeypatch):
     # PROBE_HARDENING_20260911: desafio da Vercel (x-vercel-mitigated / 429) não é resultado funcional.
     with kb.connect_closing() as conn:
         task = _card(conn, 13, spec=_spec(probe={"kind": "http", "url": "https://app.example/api/x", "expect": {"contains_all": ["ok"]}}))
-        monkeypatch.setattr(delivery, "_run_http_probe", lambda probe, env: {"status": 429, "mitigated": "x-vercel-mitigated=challenge", "value": ""})
+        monkeypatch.setattr(delivery, "_run_http_probe", lambda probe, env, **kw: {"status": 429, "mitigated": "x-vercel-mitigated=challenge", "value": ""})
         res = delivery.run_probes(conn, task.id, task.current_run_id, criterion="C1")
         assert res[0]["state"] == "INDETERMINADO" and "edge protection" in res[0]["error"]
         assert delivery.mandatory_pending(conn, task.id)[0]["status"] == "NOT_RUN"
+
+
+def test_plain_429_is_not_called_edge_protection(board, monkeypatch):
+    # PROBE_BYPASS_SCOPE_20260911: 429 sem evidência de desafio é rate limit possível ou defeito, não proteção de borda.
+    with kb.connect_closing() as conn:
+        task = _card(conn, 14, spec=_spec(probe={"kind": "http", "url": "https://app.example/api/x", "expect": {"contains_all": ["ok"]}}))
+        monkeypatch.setattr(delivery, "_run_http_probe", lambda probe, env, **kw: {"status": 429, "mitigated": None, "value": ""})
+        res = delivery.run_probes(conn, task.id, task.current_run_id, criterion="C1")
+        assert res[0]["state"] == "INDETERMINADO" and "without challenge evidence" in res[0]["error"] and "edge protection challenged" not in res[0]["error"]
+        monkeypatch.setattr(delivery, "_run_http_probe", lambda probe, env, **kw: {"status": 307, "mitigated": None, "value": ""})
+        res = delivery.run_probes(conn, task.id, task.current_run_id, criterion="C1")
+        assert res[0]["state"] == "INDETERMINADO" and "redirect" in res[0]["error"]
+
+
+def test_bypass_secret_only_https_and_allowed_hosts():
+    env = {"VERCEL_AUTOMATION_BYPASS_SECRET": "s3cret"}
+    hosts = ["app.concursaai.com", "*-woen.vercel.app"]
+    assert delivery._bypass_for("https://app.concursaai.com/api/x", env, hosts) == "s3cret"
+    assert delivery._bypass_for("https://adminconcursaai-abc-woen.vercel.app/", env, hosts) == "s3cret"
+    assert delivery._bypass_for("http://app.concursaai.com/api/x", env, hosts) is None  # sem TLS
+    assert delivery._bypass_for("https://evil.example/api/x", env, hosts) is None  # host fora da lista
+    assert delivery._bypass_for("https://app.concursaai.com.evil.example/", env, hosts) is None  # sufixo enganoso
+    assert delivery._bypass_for("https://app.concursaai.com/", env, None) is None  # sem lista, nunca
+    assert delivery._bypass_for("https://app.concursaai.com/", {}, hosts) is None  # sem segredo
+
+
+def test_cross_host_redirect_is_refused():
+    import urllib.request
+    handler = delivery._probe_redirect_handler()
+    req = urllib.request.Request("https://app.concursaai.com/a", headers={"x-vercel-protection-bypass": "s3cret"}, method="GET")
+    assert handler.redirect_request(req, None, 302, "Found", {}, "https://evil.example/b") is None
+    same = handler.redirect_request(req, None, 302, "Found", {}, "https://app.concursaai.com/login")
+    assert same is not None and same.full_url == "https://app.concursaai.com/login"
 
 
 def test_cancellation_by_owner_still_closes(board):
