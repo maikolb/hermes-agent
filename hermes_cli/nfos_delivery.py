@@ -853,6 +853,36 @@ def _auto_continue_answer(kind, question):
     return None
 
 
+_CODE_ROUTE_PREPARATION = ('CONTINUE (automático, premissa do owner 10/09): preparação aceita sem revisão do principal. Rota de produção: '
+                           'PR em main com CI verde, revisão automática, merge, deploy, readback em produção. Staging/HML só se o corpo do card pedir.')  # CODE_FAST_ROUTE_20260910
+
+
+def _pr_green(conn, task_id, candidate):
+    """CODE_FAST_ROUTE_20260910: efeito pr confirmado com ci_status success para o candidato, ou None."""
+    row = _confirmed(conn, task_id, 'pr', candidate) if candidate else None
+    if not row:
+        return None
+    try:
+        ev = json.loads(row['evidence'] or '{}')
+    except Exception:
+        return None
+    return ev if isinstance(ev, dict) and ev.get('ci_status') == 'success' else None
+
+
+def _code_route_review(conn, task_id):
+    """CODE_FAST_ROUTE_20260910 (premissa do owner 10/09): revisão de card de código é mecânica: PR reconciliado com CI verde aprova."""
+    state = json.loads(get_workflow(conn, task_id)['state_json'] or '{}')
+    candidate = state.get('candidate_sha')
+    ev = _pr_green(conn, task_id, candidate)
+    if ev:
+        return 'approve', ('APPROVE (automático, premissa do owner 10/09): PR ' + str(ev.get('pull_request') or '') + ' com CI verde para o candidato '
+                           + str(candidate)[:12] + '. Faça o merge (gh pr merge --merge) registrando o efeito merge e reconciliando o SHA integrado, '
+                           'aguarde o deploy automático (efeito deploy + readback de produção), salve o relatório e chame kanban_complete.')
+    return 'continue', ('CONTINUE (automático, premissa do owner 10/09): a revisão é mecânica e exige o efeito pr reconciliado com ci_status success '
+                        'para o candidato atual (' + str(candidate)[:12] + '). Abra ou atualize o PR em main, registre `effect --operation pr` e `reconcile` '
+                        'com o readback do CI; se o CI falhar, corrija e repita; depois peça review de novo. Sem homologação em staging.')
+
+
 def ask_principal(conn, task_id, run_id, *, kind, question, context):
     if kind not in {'review','spec_review','final_review','impediment','additional_tasks','homologation','preparation'} or not question.strip():
         raise WorkflowError('A decision needs its kind and concrete question')
@@ -880,6 +910,17 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
                 _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'question':question,'answer':auto})
                 return decision_id
             _require_current_instruction_spec(conn,task_id)
+            if _t and _t.delivery_type=='code' and _owner_mode():  # CODE_FAST_ROUTE_20260910: revisão mecânica (PR com CI verde)
+                _action,_auto=_code_route_review(conn,task_id)
+                decision_id='dec_'+uuid.uuid4().hex[:20]; now=int(time.time())
+                revision=get_workflow(conn,task_id)['spec_revision']
+                _ctx=dict(context)
+                if _action=='approve':
+                    _ctx['review_identity']=_review_identity(conn,task_id)
+                conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                             (decision_id,task_id,run_id,kind,question,_json(_ctx),revision,now,'resolved',_action,_auto,'Principal',now))
+                _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'question':question,'answer':_auto})
+                return decision_id
         context=dict(context)
         if kind in {'spec_review','final_review'}:
             from hermes_cli.nfos_principal_review import identity
@@ -891,6 +932,20 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
             if (latest and latest['status']=='pending'
                     and json.loads(latest['context']).get('acceptance_identity')==context['acceptance_identity']):
                 return latest['id']
+        if kind=='preparation' and _owner_mode():  # CODE_FAST_ROUTE_20260910: preparação sem decisão do principal
+            _t=_kb().get_task(conn,task_id)
+            if _t and _t.delivery_type=='code':
+                from hermes_cli import nfos_preparation as _prep
+                try:
+                    context['preparation_identity']=_prep.identity(conn,task_id,context.get('preparation'))
+                except Exception:
+                    context['preparation_identity']=None
+                decision_id='dec_'+uuid.uuid4().hex[:20]; now=int(time.time())
+                revision=get_workflow(conn,task_id)['spec_revision']
+                conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                             (decision_id,task_id,run_id,kind,question,_json(context),revision,now,'resolved','continue',_CODE_ROUTE_PREPARATION,'Principal',now))
+                _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'question':question,'answer':_CODE_ROUTE_PREPARATION})
+                return decision_id
         if kind=='preparation':
             from hermes_cli import nfos_preparation
             context['preparation_identity']=nfos_preparation.identity(conn,task_id,context.get('preparation'))
@@ -1412,9 +1467,11 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         if task.delivery_type=='code':
             from hermes_cli.nfos_destination import destination, review_only
             scope=destination(conn,task_id)
-            if review_only(scope) and operation!='pr':
-                raise WorkflowError('The approved delivery destination ends at the review PR; homolog, merge and deploy are outside it')
-            if scope and operation=='deploy' and (scope['verification_operation']!='deploy' or target!=scope['target']):
+            _fast=bool(review_only(scope) and _owner_mode())  # CODE_FAST_ROUTE_20260910: rota de produção sem homologação
+            if review_only(scope) and operation not in ({'pr','merge','deploy'} if _fast else {'pr'}):
+                raise WorkflowError('Production route: only pr, merge and deploy effects; no homolog or staging' if _fast
+                                    else 'The approved delivery destination ends at the review PR; homolog, merge and deploy are outside it')
+            if scope and operation=='deploy' and not _fast and (scope['verification_operation']!='deploy' or target!=scope['target']):
                 raise WorkflowError('Deploy is outside the approved delivery destination; do not promote beyond the requested environment')
             if scope and operation==scope['verification_operation'] and target!=scope['target']:
                 raise WorkflowError('Use the exact delivery destination from the approved spec')
@@ -1424,6 +1481,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             _require_current_instruction_spec(conn,task_id)
             if operation in {'merge','deploy'} and not _approved(conn,task_id,wf['spec_revision']):
                 raise WorkflowError('Principal review of this candidate is pending')
+            if _fast and operation=='merge' and not _pr_green(conn,task_id,state.get('candidate_sha')):  # CODE_FAST_ROUTE_20260910
+                raise WorkflowError('Merge needs the review PR reconciled with ci_status success for the accepted candidate')
             if staging:
                 from hermes_cli import nfos_preparation
                 preparation=nfos_preparation.authorized(conn,task_id,target,candidate)
@@ -1769,7 +1828,7 @@ def main():
                         '3. Principal validation is OFF: do not ask spec_review or final_review, nor review for report/operation cards; they resolve automatically. Write the spec yourself (save-spec --author worker) with size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class. After the work, save-report then kanban_complete.',  # BLOCK_LESS9_20260910
                         '4. Ask the Principal only when a decision changes the outcome. Slot occupied: acquire-project --wait 900. Next step: follow the saved spec.',
                         '5. Credentials for production, HML and databases are in the project vault listed under credentials in this output. Use them; never ask a human for something that is already there.',  # BLOCK_LESS6_20260910
-                        '7. Code card with size P (small fix): no mandatory failing test first (add tests only when cheap), no staging or HML homologation. Set delivery_destination environment=pr (review PR with CI on the exact candidate; target = the repository URL), branch from main, open the PR, wait for green CI, ask kind=review once; on approve merge the PR yourself (gh pr merge --merge), wait for the automatic deploy, read production back, save the report with that readback and call kanban_complete. Sizes M and G keep the staging homologation.',  # SMALL_CODE_FAST_20260910
+                        '7. Code card of any size (P, M or G): production route unless the card body asks for HML/staging. delivery_destination: environment=pr, target=the repository URL, verification_operation=pr. Branch from main, implement (tests only when cheap; no mandatory failing test first), open the PR to main, record effect pr and reconcile it with the CI readback until ci_status is success, ask kind=review (answered automatically: approve on green CI), merge it yourself (gh pr merge --merge; effect merge + reconcile with the integrated SHA), wait for the automatic deploy (effect deploy + reconcile with the production readback), save the report and call kanban_complete. No staging homologation, no separate production acceptance. Priority 100 (urgent) never homologates. G: split into up to 3 P/M cards first.',  # CODE_FAST_ROUTE_20260910
                         '6. operation = administrative change on a system already in production without touching the repository; the spec needs operation.target, operation.mutation and no_code_reason; homolog/pr/merge/deploy effects are refused on it, so never classify as operation to skip the code path (reclassify with delivery_type code if a repository change is needed). operation and report cards skip HML/repository/PR reconciliation and progress steps 5 and 6.',  # OPERATION_FAST_20260910
                         '8. A judge refusal on kanban_complete means the delivery is incomplete for the requested environment, never a reason to pause: finish it (rebase, resolve conflicts, merge, deploy, production readback) and call kanban_complete again with that evidence, or block with a concrete question to a named human. HML-only is not a scope unless the card body says so; there is no separate production acceptance while principal validation is off.',  # JUDGE_REFUSAL_20260910
                     ]
