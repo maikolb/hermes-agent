@@ -12772,6 +12772,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
 
 _BUDGET_PROGRESS_KINDS = (
     "nfos_progress", "commented", "nfos_report_saved", "nfos_spec_saved",
+    "nfos_probe", "nfos_completion_refused",  # RESULT_PROBE_20260911
     "nfos_effect_requested", "nfos_effect_reconciled", "nfos_principal_requested",
     "nfos_homologation_bound",
 )

@@ -1084,6 +1084,17 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
             if not ok:
+                try:  # RESULT_PROBE_20260911: critério obrigatório sem PASS devolve a nota de debug; o card continua neste run
+                    from hermes_cli import nfos_delivery as _dp
+                    _note = _dp.completion_refusal_note(conn, tid)
+                except Exception:
+                    _note = None
+                if _note:
+                    try:
+                        _dp.record_completion_refusal(conn, tid, _note)
+                    except Exception:
+                        pass
+                    return tool_error("kanban_complete refused: " + _note)
                 if delivery is not None and delivery["required"]:
                     blocked = conn.execute(
                         "SELECT payload FROM task_events WHERE task_id = ? "
