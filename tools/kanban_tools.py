@@ -1117,6 +1117,14 @@ def _handle_complete(args: dict, **kw) -> str:
                         if code and reason
                         else "."
                     )
+                    if code == "delivery_contract_uninitialized":  # CLOSURE_RECOVERY_20260911
+                        return tool_error(
+                            "kanban_complete refused: the Git delivery contract of this card was never initialized "
+                            "(board without a configured Git policy, or card reclassified to code), so there is no sealed receipt to "
+                            "restore. Publish through the NFOS route and record it: `effect --operation pr|merge|deploy --target <url> "
+                            "--candidate <sha>` then `reconcile` with the destination readback; once a publication effect is confirmed, "
+                            "call kanban_complete again. Do not create another card and do not ask the Principal about this contract."
+                        )
                     return tool_error(
                         "kanban_complete blocked by the sealed Git delivery "
                         f"gate{detail} The card remains retryable; restore the "

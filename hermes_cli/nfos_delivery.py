@@ -961,24 +961,52 @@ def _apply_measurements_to_report(conn, task_id, spec, report):
 
 
 def _check_probe_corrections(previous, spec):
-    """Sonda de critério obrigatório muda só com probe_corrections [{id, reason, evidence}] (histórico na revisão da spec)."""
+    """CLOSURE_RECOVERY_20260911: a revisão nova não remove critério, não tira mandatory, não adiciona optional a critério existente e não
+    enfraquece a sonda; mudança de sonda de obrigatório exige probe_corrections [{id, reason, evidence}] (histórico na revisão)."""
     if not previous:
         return
     try:
         old = {c.get('id'): c for c in (json.loads(previous['content']).get('criteria') or [])}
     except Exception:
         return
+    new = {c.get('id'): c for c in (spec.get('criteria') or [])}
+    missing = [cid for cid in old if cid not in new]
+    if missing:
+        raise WorkflowError(f'Criteria {missing} cannot disappear from the spec: keep them and close them with evidence')
     corrections = {c.get('id'): c for c in (spec.get('probe_corrections') or []) if isinstance(c, dict)}
-    for crit in spec.get('criteria') or []:
-        cid = crit.get('id'); before = old.get(cid) or {}
+    for cid, before in old.items():
+        crit = new[cid]
+        if before.get('mandatory') and not crit.get('mandatory'):
+            raise WorkflowError(f'Criterion {cid} is mandatory and stays mandatory; a wrong probe is corrected with probe_corrections, not by dropping the obligation')
+        if crit.get('optional') and not before.get('optional'):
+            raise WorkflowError(f'Criterion {cid} cannot become optional in a later revision; optional is declared in the first revision with optional_reason')
         if not before.get('mandatory') or not before.get('probe'):
             continue
-        if _json(before.get('probe')) == _json(crit.get('probe')) and bool(crit.get('mandatory')) == bool(before.get('mandatory')):
+        if _json(before.get('probe')) == _json(crit.get('probe')):
             continue
         corr = corrections.get(cid)
         if not corr or not str(corr.get('reason') or '').strip() or not corr.get('evidence'):
-            raise WorkflowError(f'Criterion {cid}: changing or dropping the probe of a mandatory criterion needs probe_corrections '
+            raise WorkflowError(f'Criterion {cid}: changing the probe of a mandatory criterion needs probe_corrections '
                                 '[{id, reason, evidence:[...]}] in the new spec revision; the earlier measurement stays in history')
+        if _expect_rank(crit.get('probe')) < _expect_rank(before.get('probe')):
+            raise WorkflowError(f'Criterion {cid}: the corrected probe is weaker than the previous one (an expectation on content cannot become a count or a status)')
+
+
+_EXPECT_RANK = {'status': 1, 'count_between': 2, 'op': 2, 'value': 2, 'row': 3, 'scalar': 3, 'set_equals': 3, 'contains_all': 3, 'not_matches': 3, 'equals': 3}
+
+
+def _expect_rank(probe):
+    exp = (probe or {}).get('expect') if isinstance(probe, dict) else None
+    if not isinstance(exp, dict):
+        return 0
+    return max([_EXPECT_RANK.get(str(k), 0) for k in exp] or [0])
+
+
+def _optional_criteria(spec_row):
+    try:
+        return {c.get('id') for c in (json.loads(spec_row['content']).get('criteria') or []) if c.get('optional')}
+    except Exception:
+        return set()
 
 
 _MEASURED_RX = re.compile(r'(sql|https?://|\bhttp\b|curl|\bget\b|readback|\bapi\b|query|\bselect\b|playwright|browser|psql|postgres|\bdb\b|banco|\brota\b|route|endpoint|tabela|\btable\b|snapshot|admin\.|/api/|wget|fetch)', re.I)  # MEASURED_PRECHECK_20260911
@@ -989,6 +1017,9 @@ def _spec_result_criteria_checks(conn, task_id, spec):
     for crit in spec.get('criteria') or []:
         if crit.get('probe') is not None or crit.get('mandatory'):
             _validate_probe(crit.get('id'), crit.get('probe'))
+        if crit.get('optional'):  # CLOSURE_RECOVERY_20260911
+            if crit.get('mandatory') or not str(crit.get('optional_reason') or '').strip():
+                raise WorkflowError(f"Criterion {crit.get('id')}: optional needs optional_reason and cannot be mandatory")
     _check_probe_corrections(get_spec(conn, task_id), spec)
     wf = get_workflow(conn, task_id)
     precheck = (json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') if wf else None
@@ -1009,7 +1040,16 @@ def completion_refusal_note(conn, task_id):
     if not spec or get_workflow(conn, task_id) is None:
         return None
     pending = mandatory_pending(conn, task_id, spec)
-    if not pending:
+    unmet = []  # CLOSURE_RECOVERY_20260911: requisitos não opcionais sem PASS no último relatório, sem continuação válida
+    report = _artifact(conn, task_id, 'report')
+    if report:
+        try:
+            content = json.loads(report['content']); opt = _optional_criteria(spec); pend_ids = {e['criterion'] for e in pending}
+            if str(content.get('disposition') or '') != 'cancelled_by_owner' and not _continuation_allows_partial(conn, task_id, content):
+                unmet = [c for c in (content.get('criteria') or []) if c.get('status') != 'PASS' and c.get('id') not in opt and c.get('id') not in pend_ids]
+        except Exception:
+            unmet = []
+    if not pending and not unmet:
         return None
     wf = get_workflow(conn, task_id); st = json.loads(wf['state_json'] or '{}') or {}
     mutation = _relevant_mutation(conn, task_id)
@@ -1017,6 +1057,10 @@ def completion_refusal_note(conn, task_id):
     for e in pending:
         ran = time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(e['ran_at'])) if e.get('ran_at') else 'não medido'
         lines.append(f"- {e['criterion']}: {e.get('text')}\n  esperado: {_json(e.get('expected'))[:400]}\n  observado: {_json(e.get('observed'))[:600]} ({e.get('state') or 'sem medição'}, {ran})\n  motivo: {e['why']}")
+    for c in unmet:  # CLOSURE_RECOVERY_20260911
+        lines.append(f"- {c.get('id')}: {c.get('status')} (requisito não opcional): {str(c.get('text') or c.get('note') or '')[:200]}\n  execute e meça, ou salve partial_delivery=true com continuation=<filho aberto deste card>; optional só na primeira revisão com optional_reason.")
+    if not pending and unmet:
+        lines[0] = 'Fechamento recusado: requisito não opcional sem PASS; o pedido não está resolvido.'
     if mutation:
         lines.append(f"Última mutação relevante: {mutation['operation']} {mutation['target']} em {time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(int(mutation['updated_at'])))}.")
     else:
@@ -1034,6 +1078,7 @@ def completion_refusal_note(conn, task_id):
 
 def record_completion_refusal(conn, task_id, note):
     pending = [e['criterion'] for e in mandatory_pending(conn, task_id)]
+    pending += [m.group(1) for m in re.finditer(r'^- ([A-Za-z0-9_-]+): (?:FAIL|NOT_RUN) \(requisito', note, re.M) if m.group(1) not in pending]  # CLOSURE_RECOVERY_20260911
     with _kb().write_txn(conn):
         task = _kb().get_task(conn, task_id)
         _event(conn, task_id, task.current_run_id if task else None, 'nfos_completion_refused', {'pending': pending, 'note': note[:1500]})
@@ -1231,6 +1276,111 @@ def worker_context(conn, task_id):
         return (case_context(conn, task_id) + lessons_context(conn, task_id))[:12000]
     except Exception:
         return ''
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# CLOSURE_RECOVERY_20260911: decisão pendente não fica escondida; revisão contrária vira retrabalho executável.
+DECISION_REMINDER_AFTER = 600
+DECISION_REMINDER_GAP = 900
+DECISION_MAX_REMINDERS = 3
+_MAINTENANCE_RX = re.compile(r'contrato git|git delivery|delivery_contract|policy_json|\bruntime\b|dispatcher|worktree|\blease\b|spawn|gate selado|tampered|mantenedor', re.I)
+
+
+def nudge_open_decisions(conn, task_id):
+    """Chamado pelo dispatcher para card com decisão pendente: auto-continue por classe, lembretes idempotentes ao Principal
+    (evento nfos_principal_requested, que o acorda) e, esgotados, estado visível awaiting_principal com responsável e retomada."""
+    rows = [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status='pending' ORDER BY created_at", (task_id,))]
+    out = []
+    now = int(time.time())
+    for row in rows:
+        try:
+            ctx = json.loads(row.get('context') or '{}') or {}
+        except Exception:
+            ctx = {}
+        if not isinstance(ctx, dict):
+            ctx = {}
+        age = now - int(row.get('created_at') or now)
+        if age < DECISION_REMINDER_AFTER:
+            continue
+        auto = _auto_continue_answer(row.get('kind'), row.get('question'))
+        if auto:
+            try:
+                resolve_decision(conn, row['id'], action='continue', answer=auto + f' (aplicado pelo runtime após {age // 60} min sem resposta do Principal)', author='Principal')
+                out.append((row['id'], 'auto_continue')); continue
+            except Exception:
+                pass
+        reminders = [int(x) for x in (ctx.get('reminders') or []) if str(x).isdigit()]
+        last = reminders[-1] if reminders else int(row.get('created_at') or now)
+        if len(reminders) < DECISION_MAX_REMINDERS:
+            if now - last >= DECISION_REMINDER_GAP or not reminders:
+                reminders.append(now); ctx['reminders'] = reminders
+                with _kb().write_txn(conn, allow_nested=True):
+                    conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(ctx), row['id']))
+                    _event(conn, task_id, row.get('run_id'), 'nfos_principal_requested', {'decision_id': row['id'], 'kind': row.get('kind'), 'question': row.get('question'), 'reminder': len(reminders), 'waiting_minutes': age // 60})
+                out.append((row['id'], f'reminder {len(reminders)}'))
+            continue
+        if ctx.get('stalled_at') or now - last < DECISION_REMINDER_GAP:
+            continue
+        ctx['stalled_at'] = now
+        maintenance = bool(_MAINTENANCE_RX.search(str(row.get('question') or '')))
+        reason = (f"Aguardando o Principal há {age // 60} min ({DECISION_MAX_REMINDERS} lembretes sem resposta). Pergunta: {str(row.get('question') or '')[:400]} "
+                  f"Responsável: {'manutenção do runtime (executor responsável)' if maintenance else 'Principal (sessão coordenadora)'}. "
+                  f"Retomada: `decide --decision {row['id']} --resolution continue|changes` na sessão coordenadora, ou resposta humana registrada no card (`resume`). "
+                  "O card sai deste estado sozinho quando a decisão for resolvida.")
+        with _kb().write_txn(conn, allow_nested=True):
+            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(ctx), row['id']))
+            conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (reason[:400], now, task_id))
+            _event(conn, task_id, row.get('run_id'), 'nfos_decision_stalled', {'decision_id': row['id'], 'maintenance': maintenance, 'reason': reason[:600]})
+        try:
+            _kb().block_task(conn, task_id, reason=reason, kind='awaiting_principal')
+        except Exception:
+            pass
+        out.append((row['id'], 'stalled'))
+    return out
+
+
+def sweep_awaiting_principal(conn):
+    """Card parado em awaiting_principal sem decisão pendente volta à fila sozinho."""
+    freed = []
+    try:
+        for r in conn.execute("SELECT id FROM tasks WHERE status='blocked' AND block_kind='awaiting_principal'").fetchall():
+            if not conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human') LIMIT 1", (r[0],)).fetchone():
+                if _kb().unblock_task(conn, r[0]):
+                    freed.append(r[0])
+    except Exception:
+        pass
+    return freed
+
+
+def request_rework(conn, task_id, *, criterion, reason, evidence, author, title=None):
+    """Revisão com evidência contrária (Principal ou auditor): registra o requisito que falhou e a evidência, e cria a
+    continuação formal do mesmo pedido (idempotente), preservando histórico e entregas válidas. O worker do card não usa."""
+    if os.environ.get('HERMES_KANBAN_TASK'):
+        raise WorkflowError('rework is requested by the Principal or the auditor, not by the worker of the card')
+    if not str(criterion or '').strip() or not str(reason or '').strip() or not evidence:
+        raise WorkflowError('rework needs criterion, reason and evidence')
+    task = _kb().get_task(conn, task_id)
+    if task is None:
+        raise WorkflowError('Unknown task')
+    text = ''
+    spec = get_spec(conn, task_id)
+    if spec:
+        for c in json.loads(spec['content']).get('criteria') or []:
+            if c.get('id') == criterion:
+                text = c.get('text') or ''
+    stamp = time.strftime('%Y-%m-%d %H:%MZ', time.gmtime())
+    body = (f"Retrabalho do pedido de {task_id} (revisão com evidência contrária, {author}, {stamp}).\n"
+            f"Requisito que falhou: {criterion}" + (f": {text}" if text else '') + f"\nMotivo: {reason}\nEvidência: " + '; '.join(str(e) for e in evidence) +
+            "\n\nO que fazer: reproduzir na superfície consumida, corrigir pela menor rota oficial preservando entregas válidas, declarar este requisito "
+            "como critério obrigatório com sonda que meça o conteúdo (não contagem), medir depois da mutação e fechar pela medição. "
+            "Não repetir PR, merge ou deploy já confirmados.")
+    with _kb().write_txn(conn):
+        _event(conn, task_id, None, 'nfos_rework_requested', {'criterion': criterion, 'reason': reason, 'evidence': list(evidence), 'author': author})
+    _kb().add_comment(conn, task_id, author, f"Retrabalho: o requisito {criterion} falhou na revisão. {reason}")
+    res = create_continuation(conn, task_id, title=title or f"Retrabalho {task_id}: {criterion}", body=body, requester=f'rework:{author}', allow_closed=True)
+    with _kb().write_txn(conn):
+        _event(conn, task_id, None, 'nfos_rework_continuation', {'child': res['task_id'], 'existing': res['existing'], 'criterion': criterion})
+    return dict(res, criterion=criterion)
 
 
 def lesson_command(conn, payload, *, author):
@@ -1673,6 +1823,8 @@ _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principa
      'CONTINUE (automático): siga a próxima etapa da spec salva. O principal não decide passo a passo.'),
     (r'reavaliar o impedimento registrado|retomar o mesmo card se resolv|impediment registered in the history',  # BLOCK_LESS2_20260910
      'CONTINUE (automático): o histórico de impedimentos foi tratado na triagem de 10/09. Retome o mesmo card do estado salvo e entregue; se algo só um humano pode fornecer, bloqueie com a pergunta e o destinatário no motivo.'),
+    (r'contrato git|git delivery|delivery_contract|policy_json|contract (not|nao|não) initiali|contrato .{0,20}(nao|não) inicializ',  # CLOSURE_RECOVERY_20260911
+     'CONTINUE (automático): contrato Git não inicializado é tratado no fechamento pelo registro NFOS (efeitos pr/merge/deploy/homolog confirmados); chame kanban_complete de novo e leia o motivo se recusar. Não é impedimento do mantenedor.'),
     (r'rate.?limit|\b429\b|usage limit|quota|\bcota\b',
      'CONTINUE (automático): rate limit é transitório. Aguarde com backoff (60 s, 120 s, 300 s) e repita; não bloqueie o card.'),
 ]
@@ -1954,6 +2106,7 @@ def reconcile_human_answers(conn):
     from hermes_cli.nfos_runtime import run_termination_pending
     """The same runtime tick retains human blocks and applies saved replies."""
     resumed=[]
+    sweep_awaiting_principal(conn)  # CLOSURE_RECOVERY_20260911
     rows=conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()
     for row in rows:
         task=_kb().get_task(conn,row['task_id'])
@@ -2510,7 +2663,9 @@ def completion_evidence_check(conn, task_id):
         content=json.loads(report['content']); metadata=json.loads(report['evidence'])
         results=_report_results(spec,content)
         strict=not _owner_mode()  # BLOCK_LESS4/BLOCK_LESS8_20260910: fora do owner mode a prova completa continua exigida
-        _fails=[c for c,row in results.items() if ((row['status']!='PASS') if strict else (row['status']=='FAIL'))]
+        _optional=_optional_criteria(spec)  # CLOSURE_RECOVERY_20260911
+        _cancelled=str(content.get('disposition') or '')=='cancelled_by_owner'
+        _fails=[c for c,row in results.items() if ((row['status']!='PASS') if strict else (row['status']!='PASS' and c not in _optional and not _cancelled))]
         _partial_ok=(not strict) and bool(_fails) and _continuation_allows_partial(conn,task_id,content)  # RECORD_CONTINUATION_20260911
         if not strict and str(content.get('disposition') or '')!='cancelled_by_owner' and mandatory_pending(conn,task_id,spec):  # RESULT_PROBE_20260911
             return None
@@ -2533,7 +2688,7 @@ def completion_evidence_check(conn, task_id):
                 proved.update(check.get('criteria',[]))
             elif check.get('status')!='external_unchecked':
                 return None
-        if any(((row['status']!='PASS') if strict else (row['status']=='FAIL' and not _partial_ok)) or (strict and criterion not in proved) for criterion,row in results.items()):  # BLOCK_LESS2/BLOCK_LESS4_20260910
+        if any(((row['status']!='PASS') if strict else (row['status']!='PASS' and criterion not in _optional and not _cancelled and not _partial_ok)) or (strict and criterion not in proved) for criterion,row in results.items()):  # BLOCK_LESS2/BLOCK_LESS4_20260910, CLOSURE_RECOVERY_20260911
             return None
         return {'report_id':report['id'],'report_revision':report['revision'],
                 'report_sha256':digest,'spec_revision':spec['revision'],
@@ -2735,7 +2890,7 @@ def main():
     import argparse
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['show','probe','lesson','precheck','cancel','save-spec','save-report','progress','ask','decide',
+    parser.add_argument('action',choices=['show','probe','lesson','rework','precheck','cancel','save-spec','save-report','progress','ask','decide',
         'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','acquire-project','release-project','receive','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
@@ -2811,6 +2966,8 @@ def main():
         elif args.action=='repair-card':
             from hermes_cli.nfos_workspace_repair import repair_card
             result=repair_card(conn,args.task,board=args.project,**payload)
+        elif args.action=='rework':  # CLOSURE_RECOVERY_20260911
+            result=request_rework(conn,args.task,criterion=payload.get('criterion'),reason=payload.get('reason'),evidence=payload.get('evidence') or [],author=payload.get('author') or 'Principal',title=payload.get('title'))
         elif args.action=='lesson':  # LEARNING_20260911
             result=lesson_command(conn,payload,author=(os.environ.get('HERMES_KANBAN_TASK') or 'Principal'))
         elif args.action=='probe':  # RESULT_PROBE_20260911
