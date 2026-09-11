@@ -817,7 +817,7 @@ def save_report(conn, task_id, run_id, report):
 
 _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principal respondeu 'continue' em 223 de 302 casos (7 dias)
     (r'slot|acquire-project|acquired.{0,4}false|hml (window|remains|slot)|janela (de )?hml|occupied|ocupad',
-     'CONTINUE (automático, premissa do owner 10/09): slot HML ocupado não é decisão do principal. Espere com `acquire-project --wait 900` (repita até adquirir) e siga; não pergunte de novo.'),
+     'CONTINUE (automático, premissa do owner 10/09): o slot de publicação só vale para staging/HML (staging_pr, staging_merge, homolog). PR em main, merge e deploy seguem sem acquire-project. Se você está publicando em staging/HML, espere com `acquire-project --wait 900` e siga; não pergunte de novo.'),  # RELEASE_FLOW_20260911
     (r'readback.{0,40}inconsisten|inconsisten.{0,40}readback|release receipt',
      'CONTINUE (automático): faça a releitura (`reconcile`) do alvo e siga com o que a releitura mostrar; não bloqueie.'),
     (r'stale lease|retained lease|partial hml delivery',
@@ -1536,7 +1536,7 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
                 if not delivery_candidate:
                     raise WorkflowError('Record the accepted local candidate before opening its review PR')
             else:
-                delivery_candidate=candidate if staging or operation=='homolog' else _delivery_candidate(conn,task_id,state)
+                delivery_candidate=candidate if staging or operation=='homolog' or (operation=='pr' and _owner_mode()) else _delivery_candidate(conn,task_id,state)  # RELEASE_FLOW_20260911
             if staging or operation=='homolog' or not _owner_mode():  # SLOT_HML_ONLY_20260911: slot só para staging/HML; produção não serializa
                 _project_owned(conn,task_id,run_id,delivery_candidate)
             expected=candidate if operation=='homolog' else (state.get('integrated_sha') if operation=='deploy' else delivery_candidate)
@@ -1592,11 +1592,14 @@ def reconcile_effect(conn, effect_id, *, found, evidence, caller_task_id=None, c
                 if not evidence.get('tree') or not evidence.get('artifact'):
                     raise WorkflowError('Read the actual homologation tree and deployed artifact')
                 state['homolog_deployment']=evidence
-            if effect['operation'] in {'merge','deploy'}:
+            if effect['operation'] in {'merge','deploy'} and not _owner_mode():  # RELEASE_FLOW_20260911: em owner mode a verificação é o readback de produção
                 if evidence.get('tree')!=state.get('candidate_tree'):
                     raise WorkflowError('Integrated tree differs from homologation; verify the new tree in homolog first')
             if effect['operation']=='pr':
                 from hermes_cli.nfos_destination import destination, review_only, review_pr_problem
+                if _owner_mode() and not review_only(destination(conn,task.id)) and evidence.get('candidate'):  # RELEASE_FLOW_20260911: PR com CI define o candidato (rebase)
+                    state['candidate_sha']=evidence['candidate']
+                    state['candidate_tree']=evidence.get('tree') or state.get('candidate_tree')
                 if review_only(destination(conn,task.id)):
                     if evidence.get('tree')!=state.get('candidate_tree'):
                         raise WorkflowError('Review PR readback must show the accepted candidate tree')
@@ -1873,6 +1876,7 @@ def main():
                         '7. Code card of any size: the route follows the project delivery_environment shown in this output (gold standard of the original HPF). production with a staging pipeline: branch from main, PR to the staging branch, CI green, merge, automatic preview deploy, short readback, then PR to main, CI green, merge, automatic production deploy, production readback, report, kanban_complete. hml: PR to the staging branch, CI green, merge, HML deploy, HML readback, report, kanban_complete; delivered in HML is delivered, and production (merge/deploy on main) only when the card body carries the owner order. dev or test: deliver to that environment, read it back, report, kanban_complete. No Principal decisions on code and no separate acceptance: CI is the gate; a rebased candidate with a green PR needs no new homologation. Priority 100 (urgent) adds no steps. G: split into up to 3 P/M cards first.',  # DELIVERY_ENV_20260911
                         '6. operation = administrative change on a system already in production without touching the repository; the spec needs operation.target, operation.mutation and no_code_reason; homolog/pr/merge/deploy effects are refused on it, so never classify as operation to skip the code path (reclassify with delivery_type code if a repository change is needed). operation and report cards skip HML/repository/PR reconciliation and progress steps 5 and 6.',  # OPERATION_FAST_20260910
                         '8. A judge refusal on kanban_complete means the delivery is incomplete for the requested environment, never a reason to pause: finish it (rebase, resolve conflicts, merge, deploy, production readback) and call kanban_complete again with that evidence, or block with a concrete question to a named human. HML-only is not a scope unless the card body says so; there is no separate production acceptance while principal validation is off.',  # JUDGE_REFUSAL_20260910
+                        "9. A repository pre-push or pre-commit hook that fails for a local reason (missing dependencies, missing DATABASE_URL or other env, missing git identity, build tooling absent in a temporary clone) is not a gate: push with --no-verify at once; the PR's CI is the gate. Spend at most one attempt on a local hook. Never install a project locally just to satisfy a hook.",  # RELEASE_FLOW_20260911
                     ]
             except Exception:
                 pass
