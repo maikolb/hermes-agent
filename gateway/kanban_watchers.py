@@ -4591,6 +4591,25 @@ class GatewayKanbanWatchersMixin:
                 default_assignee,
             )
 
+        # Read kanban.executor_profiles: the profiles this host spawns
+        # workers for. When set, a ready card whose assignee is not on the
+        # list (a retired profile whose directory survives, ``default``, a
+        # placeholder) is re-pointed to default_assignee instead of being
+        # skipped silently tick after tick. Empty (the schema default)
+        # keeps the upstream rule: any existing profile directory spawns.
+        raw_executor_profiles = kanban_cfg.get("executor_profiles") or []
+        if isinstance(raw_executor_profiles, str):
+            raw_executor_profiles = [raw_executor_profiles]
+        executor_profiles = [
+            str(name).strip() for name in raw_executor_profiles if str(name or "").strip()
+        ]
+        if executor_profiles:
+            logger.info(
+                "kanban dispatcher: executor_profiles=%s (ready tasks assigned "
+                "elsewhere are re-pointed to default_assignee or parked)",
+                executor_profiles,
+            )
+
         # Read kanban.max_in_progress_per_profile — per-profile concurrency
         # cap (#21582). When set, no single profile gets more than N
         # workers running at once, even if the global max_in_progress
@@ -4714,6 +4733,7 @@ class GatewayKanbanWatchersMixin:
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
                     reconcile_orphans=reconcile_orphans,
+                    executor_profiles=executor_profiles,
                 )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
@@ -4800,6 +4820,12 @@ class GatewayKanbanWatchersMixin:
                 nonspawnable = getattr(res, "skipped_nonspawnable", None) or []
                 if nonspawnable:
                     bits.append(f"nonspawnable={len(nonspawnable)}")
+                healed = getattr(res, "healed_assignee", None) or []
+                if healed:
+                    bits.append(f"assignee_healed={len(healed)}")
+                parked = getattr(res, "blocked_nonspawnable", None) or []
+                if parked:
+                    bits.append(f"assignee_blocked={len(parked)}")
                 if getattr(res, "memory_pressure", None):
                     bits.append(f"memory_pressure={res.memory_pressure}")
                 if getattr(res, "skipped_locked", False):
