@@ -1374,12 +1374,19 @@ def request_rework(conn, task_id, *, criterion, reason, evidence, author, title=
             "\n\nO que fazer: reproduzir na superfície consumida, corrigir pela menor rota oficial preservando entregas válidas, declarar este requisito "
             "como critério obrigatório com sonda que meça o conteúdo (não contagem), medir depois da mutação e fechar pela medição. "
             "Não repetir PR, merge ou deploy já confirmados.")
-    with _kb().write_txn(conn):
-        _event(conn, task_id, None, 'nfos_rework_requested', {'criterion': criterion, 'reason': reason, 'evidence': list(evidence), 'author': author})
-    _kb().add_comment(conn, task_id, author, f"Retrabalho: o requisito {criterion} falhou na revisão. {reason}")
     res = create_continuation(conn, task_id, title=title or f"Retrabalho {task_id}: {criterion}", body=body, requester=f'rework:{author}', allow_closed=True)
-    with _kb().write_txn(conn):
-        _event(conn, task_id, None, 'nfos_rework_continuation', {'child': res['task_id'], 'existing': res['existing'], 'criterion': criterion})
+    recorded = False  # REWORK_IDEMPOTENT_20260911: mesmo requisito e motivo já registrados (tentativa anterior sem filho) não se repetem
+    for ev in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_rework_requested' ORDER BY id DESC", (task_id,)).fetchall():
+        try:
+            p = json.loads(ev[0] or '{}') or {}
+        except Exception:
+            p = {}
+        if p.get('criterion') == criterion and p.get('reason') == reason:
+            recorded = True; break
+    if not res.get('existing') and not recorded:  # registro só quando o filho é novo; segunda chamada não duplica evento nem comentário
+        with _kb().write_txn(conn):
+            _event(conn, task_id, None, 'nfos_rework_requested', {'criterion': criterion, 'reason': reason, 'evidence': list(evidence), 'author': author, 'child': res['task_id']})
+        _kb().add_comment(conn, task_id, author, f"Retrabalho: o requisito {criterion} falhou na revisão. {reason} Continuação: {res['task_id']}.")
     return dict(res, criterion=criterion)
 
 
@@ -1718,10 +1725,11 @@ def create_continuation(conn, parent_id, *, title=None, body=None, requester='wo
         if existing:
             child = kb.get_task(conn, existing[0])
             return {'task_id': child.id, 'continuation_of': parent_id, 'priority': child.priority, 'status': child.status, 'existing': True}
+        _child_kind = 'scratch' if (parent.workspace_kind == 'scratch' and parent.delivery_type != 'code') else 'worktree'  # REWORK_IDEMPOTENT_20260911
         child_id = kb.create_task(conn, title=child_title, body=child_body, assignee=parent.assignee,
                                   created_by=f"continuation:{requester}",
-                                  workspace_kind=parent.workspace_kind if parent.workspace_kind == 'scratch' else 'worktree',
-                                  workspace_path=parent.workspace_path if parent.workspace_kind == 'scratch' else None,
+                                  workspace_kind=_child_kind,
+                                  workspace_path=parent.workspace_path if _child_kind == 'scratch' else None,
                                   tenant=parent.tenant, priority=max(int(parent.priority or 0), 0), parents=(),
                                   project_id=parent.project_id, delivery_type=parent.delivery_type,
                                   max_runtime_seconds=parent.max_runtime_seconds)
