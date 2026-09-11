@@ -415,6 +415,21 @@ def _goal_judge_available() -> bool:
     return client is not None and bool(model)
 
 
+def _delivery_environment_note():
+    """DELIVERY_ENV_20260911: o juiz de fechamento julga contra o ambiente de entrega do projeto, não contra produção por padrão."""
+    try:
+        from hermes_cli.kanban_db import get_current_board
+        from hermes_cli.nfos_runtime import project_config, delivery_route
+        cfg = project_config(get_current_board())
+        if not cfg:
+            return ""
+        route = delivery_route(cfg)
+        return ("\n\nDelivery environment for this project: " + route["environment"].upper() + ". Delivered and read back in "
+                + route["environment"].upper() + " is complete; environments beyond it are out of scope unless the card body orders them.")
+    except Exception:
+        return ""
+
+
 def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
     """Return a rejection reason when a goal-mode terminal handoff is premature."""
     if not task or not task.goal_mode or not _goal_judge_available():
@@ -423,7 +438,7 @@ def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
     reason = ""
     try:
         verdict, reason, _, _, _ = judge_goal(
-            goal=f"{task.title}\n\n{task.body or ''}".strip(),
+            goal=f"{task.title}\n\n{task.body or ''}".strip() + _delivery_environment_note(),  # DELIVERY_ENV_20260911
             last_response=evidence.strip(),
         )
     except Exception as judge_exc:
