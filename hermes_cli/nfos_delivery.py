@@ -330,7 +330,10 @@ def retry_coordinator_input(conn, receipt, *, error=None):
         if coordination.get('claim_token')!=receipt.get('claim_token') or coordination.get('wake_accepted'):
             return
         from agent.redact import redact_sensitive_text
-        delay=5 if error is None else min(300,5*2**min(int(coordination.get('attempts',1))-1,6))
+        attempts=int(coordination.get('attempts',1))
+        delay=60 if error is None else min(300,5*2**min(attempts-1,6))
+        if attempts>=3:
+            delay=max(delay,3600)  # patch local 10/09/2026 (Maikol): sem teto, a mesma mensagem era reinjetada a cada 5 s ate 16x por dia
         coordination.update(claim_until=0,next_attempt_at=time.time()+delay,
                             last_error=redact_sensitive_text(str(error),force=True,redact_url_credentials=True)[:500] if error else None)
         conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(payload),row['id']))
@@ -819,7 +822,7 @@ _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principa
     (r'pre-?push|pre-?commit|lefthook|husky|no-verify|build:local|DATABASE_URL|\bhooks?\b.{0,80}(fail|block|barr|falh|imped)|(fail|block|barr|falh|imped).{0,80}\bhooks?\b',  # HOOK_AUTO_20260911
      'CONTINUE (automático, premissa do owner 10/09): hook local de pre-push/pre-commit não é gate. Faça o push agora com --no-verify; o CI do PR é o gate. Não instale dependências nem configure ambiente só para satisfazer o hook; não reconcilie ambiente de build; não pergunte de novo.'),
     (r'slot|acquire-project|acquired.{0,4}false|hml (window|remains|slot)|janela (de )?hml|occupied|ocupad',
-     'CONTINUE (automático, premissa do owner 10/09): o slot de publicação só vale para staging/HML (staging_pr, staging_merge, homolog). PR em main, merge e deploy seguem sem acquire-project. Se você está publicando em staging/HML, espere com `acquire-project --wait 900` e siga; não pergunte de novo.'),  # RELEASE_FLOW_20260911
+     'CONTINUE (automático, premissa do owner 10/09): em modo registro não há slot de publicação; `acquire-project` só registra quem publica. Siga a rota do projeto mostrada no show; não pergunte de novo.'),  # RELEASE_FLOW_20260911, RECORD_MODE_TEXT_20260911
     (r'readback.{0,40}inconsisten|inconsisten.{0,40}readback|release receipt',
      'CONTINUE (automático): faça a releitura (`reconcile`) do alvo e siga com o que a releitura mostrar; não bloqueie.'),
     (r'stale lease|retained lease|partial hml delivery',
@@ -855,8 +858,8 @@ def _auto_continue_answer(kind, question):
     return None
 
 
-_CODE_ROUTE_PREPARATION = ('CONTINUE (automático, premissa do owner 10/09): preparação aceita sem revisão do principal. Rota de produção: '
-                           'PR em main com CI verde, revisão automática, merge, deploy, readback em produção. Staging/HML só se o corpo do card pedir.')  # CODE_FAST_ROUTE_20260910
+_CODE_ROUTE_PREPARATION = ('CONTINUE (automático, premissa do owner 10/09): preparação registrada, sem revisão do principal. '
+                           'Siga a rota do projeto mostrada no show (delivery_environment): staging quando o projeto tem esteira, HML, dev ou test; CI é o gate.')  # CODE_FAST_ROUTE_20260910, RECORD_MODE_TEXT_20260911
 
 
 def _pr_green(conn, task_id, candidate):
@@ -881,8 +884,8 @@ def _code_route_review(conn, task_id):
                            + str(candidate)[:12] + '. Faça o merge (gh pr merge --merge) registrando o efeito merge e reconciliando o SHA integrado, '
                            'aguarde o deploy automático (efeito deploy + readback de produção), salve o relatório e chame kanban_complete.')
     return 'continue', ('CONTINUE (automático, premissa do owner 10/09): a revisão é mecânica e exige o efeito pr reconciliado com ci_status success '
-                        'para o candidato atual (' + str(candidate)[:12] + '). Abra ou atualize o PR em main, registre `effect --operation pr` e `reconcile` '
-                        'com o readback do CI; se o CI falhar, corrija e repita; depois peça review de novo. Sem homologação em staging.')
+                        'para o candidato atual (' + str(candidate)[:12] + '). Abra ou atualize o PR da rota do projeto (show: delivery_environment), registre `effect --operation pr` e `reconcile` '
+                        'com o readback do CI; se o CI falhar, corrija e repita; depois peça review de novo.')  # RECORD_MODE_TEXT_20260911
 
 
 def ask_principal(conn, task_id, run_id, *, kind, question, context):

@@ -56,7 +56,7 @@ def _card(conn, tmp_path):
 
 def test_slot_answer_sends_production_effects_ahead():
     answer = delivery._auto_continue_answer("impediment", "The canonical staging slot is occupied by another task")
-    assert "PR em main, merge e deploy seguem sem acquire-project" in answer
+    assert "só registra quem publica" in answer  # RECORD_MODE_TEXT_20260911: resposta neutra quanto à rota
 
 
 def test_green_pr_rebinds_the_candidate_and_merge_needs_no_homologated_tree(board):
