@@ -8514,6 +8514,17 @@ def block_task(
             human = conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND run_id=? AND status='human'",
                 (task_id,current.current_run_id)).fetchone()
             if not human and kind != 'dependency':
+                # IMPEDIMENT_RACE_20260911: one open question per run. A second kanban_block in the
+                # same run (judge nudge, rephrased reason) does not file another impediment; the
+                # answer is the same: wait for the pending decision.
+                pending = _nfos_pending_decision(conn, task_id, current.current_run_id)
+                if pending:
+                    with write_txn(conn, allow_nested=True):
+                        _append_event(conn, task_id, "nfos_impediment_repeated",
+                                      {"decision_id": pending, "requested_block_kind": kind,
+                                       "requested_reason": str(reason or "")[:400]},
+                                      run_id=current.current_run_id)
+                    return True
                 ask_principal(conn,task_id,current.current_run_id,kind='impediment',
                     question=reason or 'Diagnose why this task cannot advance',context={'requested_block_kind':kind})
                 return True
@@ -11703,6 +11714,39 @@ def heartbeat_worker(
     return True
 
 
+def _nfos_pending_decision(conn, task_id, run_id):
+    """IMPEDIMENT_RACE_20260911: id of the decision of this run still pending with the Principal, or None."""
+    if run_id is None:
+        return None
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_decisions'").fetchone():
+            return None
+        row = conn.execute(
+            "SELECT id FROM nfos_decisions WHERE task_id = ? AND run_id = ? AND status = 'pending' "
+            "ORDER BY rowid DESC LIMIT 1", (task_id, int(run_id)),
+        ).fetchone()
+        return str(row["id"]) if row else None
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def _nfos_open_decision(conn, task_id):
+    """IMPEDIMENT_RACE_20260911: the card's open decision (human first, then pending) as a dict, or None."""
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_decisions'").fetchone():
+            return None
+        row = conn.execute(
+            "SELECT id, status, answer, question FROM nfos_decisions WHERE task_id = ? "
+            "AND status IN ('pending', 'human') ORDER BY CASE status WHEN 'human' THEN 0 ELSE 1 END, rowid DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {"id": row["id"], "status": row["status"], "answer": row["answer"], "question": row["question"]}
+    except sqlite3.Error:
+        return None
+
+
 def _nfos_decision_open(conn, task_id):
     """OPEN_DECISION_SKIP_20260910: True se o card NFOS tem pergunta aberta ao principal (pending) ou a humano (human).
     Um card assim não é relançado: o principal responde e o tick decide (despacho ou bloqueio)."""
@@ -12277,6 +12321,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     crashed: list[str] = []
     rate_limited: list[str] = []
     interrupted_ids: list[str] = []  # INTERRUPTED_20260910
+    awaiting_ids: list[str] = []  # IMPEDIMENT_RACE_20260911
+    human_blocks: list[tuple[str, str]] = []  # IMPEDIMENT_RACE_20260911: (task_id, question) to block after the txn
     _gw_start = _gateway_process_start()  # INTERRUPTED_20260910
     # Per-crash details collected inside the main txn, used after it
     # closes to run ``_record_task_failure`` (which needs its own
@@ -12316,7 +12362,28 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             kind, code = _classify_worker_exit(pid)
             interrupted = _interrupted_by_gateway_restart(row, kind, _gw_start)  # INTERRUPTED_20260910
             rate_limited_exit = False
-            if kind == "clean_exit":
+            awaiting_decision = False  # IMPEDIMENT_RACE_20260911
+            open_decision = _nfos_open_decision(conn, row["id"]) if kind == "clean_exit" else None
+            if kind == "clean_exit" and open_decision:
+                # IMPEDIMENT_RACE_20260911: the worker left with its question open (pending with the
+                # Principal, or answered 'human'). That is the contract, not a protocol violation: the
+                # card goes back to its source phase without a failure; OPEN_DECISION_SKIP holds it
+                # until the answer (continue/changes relaunch it; human blocks it below).
+                protocol_violation = False
+                awaiting_decision = True
+                error_text = (
+                    f"pid {pid} exited with decision {open_decision['id']} open "
+                    f"({open_decision['status']}) — held for the answer, not counted as a failure"
+                )
+                event_kind = "awaiting_decision"
+                event_payload = {
+                    "pid": pid,
+                    "claimer": row["claim_lock"],
+                    "exit_code": code,
+                    "decision_id": open_decision["id"],
+                    "decision_status": open_decision["status"],
+                }
+            elif kind == "clean_exit":
                 # Worker subprocess returned 0 but its task is still
                 # ``running`` in the DB — it exited without calling
                 # ``kanban_complete`` / ``kanban_block``. Overwhelmingly the
@@ -12399,7 +12466,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # record the run outcome as ``rate_limited`` so the board
                 # history doesn't show a phantom crash for a quota wall.
                 _run_outcome = (
-                    "rate_limited" if rate_limited_exit
+                    "awaiting_decision" if awaiting_decision  # IMPEDIMENT_RACE_20260911
+                    else "rate_limited" if rate_limited_exit
                     else ("reclaimed" if interrupted else "crashed")  # INTERRUPTED_20260910
                 )
                 run_id = _end_run(
@@ -12423,7 +12491,11 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     "outcome": _run_outcome,
                     "retry_status": retry_status,
                 })
-                if rate_limited_exit:
+                if awaiting_decision:  # IMPEDIMENT_RACE_20260911: no failure, no breaker, no retry storm
+                    awaiting_ids.append(row["id"])
+                    if open_decision and open_decision["status"] == "human":
+                        human_blocks.append((row["id"], str(open_decision["answer"] or open_decision["question"] or "")))
+                elif rate_limited_exit:
                     # Stamp the failure-error column so ``check_respawn_guard``
                     # recognizes this as a quota blocker and defers the
                     # respawn until the window clears — WITHOUT touching
@@ -12546,6 +12618,15 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # failure and are NOT crashes, so they stay out of the ``crashed`` return.
     detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
     detect_crashed_workers._last_interrupted = interrupted_ids  # type: ignore[attr-defined]  # INTERRUPTED_20260910
+    # IMPEDIMENT_RACE_20260911: a 'human' answer with the worker gone blocks the card now, with that
+    # question (same rule as HUMAN_BLOCK_NOW2 in resolve_decision, for the exit that happens later).
+    for _tid, _question in human_blocks:
+        try:
+            if not block_task(conn, _tid, reason=_question, kind="needs_input"):
+                _log.warning("awaiting_decision: human block refused for %s", _tid)
+        except Exception as exc:
+            _log.warning("awaiting_decision: human block failed for %s: %s", _tid, exc)
+    detect_crashed_workers._last_awaiting_decision = awaiting_ids  # type: ignore[attr-defined]  # IMPEDIMENT_RACE_20260911
     # Worker-lifecycle observer (RFC #58548): exit events are tick-derived
     # from this reclaim pass — fired only now, after the main reclaim txn
     # AND the breaker accounting above have committed, so subscribers always

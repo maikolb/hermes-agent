@@ -1172,6 +1172,26 @@ def _handle_block(args: dict, **kw) -> str:
             # Tell the worker where the task actually landed so it doesn't
             # assume it's sitting in 'blocked' when routing sent it elsewhere.
             landed = kb.get_task(conn, tid)
+            if landed and landed.status == "running":
+                # IMPEDIMENT_RACE_20260911: an NFOS card did not block; its question went to
+                # the Principal. Say so, and say what to do, instead of implying 'blocked'.
+                pending = kb._nfos_pending_decision(conn, tid, run.id if run else None)
+                if pending:
+                    return _ok(
+                        task_id=tid,
+                        run_id=run.id if run else None,
+                        status="running",
+                        blocked=False,
+                        decision_id=pending,
+                        note=(
+                            f"NOT blocked: this NFOS card filed impediment {pending} for the Principal "
+                            "instead. Do not call kanban_block again for the same question. Wait for the "
+                            f"answer with the workflow CLI `wait --decision {pending} --timeout 300`: on "
+                            "continue/changes keep working; on human, call kanban_block once with that exact "
+                            "question and recipient; if still pending, stop without calling anything (the "
+                            "card is held until the Principal answers)."
+                        ),
+                    )
             return _ok(
                 task_id=tid,
                 run_id=run.id if run else None,
