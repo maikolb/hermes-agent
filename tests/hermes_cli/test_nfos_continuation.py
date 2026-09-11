@@ -110,3 +110,45 @@ def test_worker_protocol_mentions_continuation(monkeypatch):
     monkeypatch.setattr(review, "settings", lambda: {"principal_validation": False})
     text = runtime.worker_instructions()
     assert "continuation_of" in text and "never rewrite FAIL as NOT_RUN" in text
+
+
+def test_tool_creates_continuation_without_assignee(board, monkeypatch):
+    # RECORD_CONTINUATION_FIX_20260911: continuation_of e o primeiro caminho do kanban_create, antes de exigir assignee.
+    with kb.connect_closing() as conn:
+        parent = _card(conn, board, 5)
+        conn.execute("UPDATE tasks SET priority=100 WHERE id=?", (parent.id,)); conn.commit()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", parent.id)
+    from tools import kanban_tools as kt
+    out = kt._handle_create({"continuation_of": parent.id, "title": "Reparar o dado"})
+    assert "assignee is required" not in out and '"ok": true' in out
+    res = json.loads(out)
+    with kb.connect_closing() as conn:
+        child = kb.get_task(conn, res["task_id"])
+        assert child.priority == 100 and child.assignee == parent.assignee
+    schema = json.dumps(kt.TOOL_SCHEMAS if hasattr(kt, "TOOL_SCHEMAS") else "")
+    assert "continuation_of" in open(kt.__file__, encoding="utf-8").read()
+
+
+def test_concurrent_continuations_yield_one_child(board):
+    import threading
+    with kb.connect_closing() as conn:
+        parent = _card(conn, board, 6)
+    results = []
+    errors = []
+
+    def worker():
+        try:
+            with kb.connect_closing() as c:
+                for _ in range(3):
+                    results.append(delivery.create_continuation(c, parent.id, requester="t")["task_id"])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=worker) for _ in range(3)]
+    [th.start() for th in threads]
+    [th.join() for th in threads]
+    assert not errors, errors
+    assert len(set(results)) == 1, set(results)
+    with kb.connect_closing() as conn:
+        assert conn.execute("SELECT count(*) FROM nfos_continuations WHERE parent_id=?", (parent.id,)).fetchone()[0] == 1
+
