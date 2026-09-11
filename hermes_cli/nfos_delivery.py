@@ -1475,7 +1475,7 @@ def _unmet_criteria_text(conn, task_id):
     return text
 
 
-def create_continuation(conn, parent_id, *, title=None, body=None, requester='worker'):
+def create_continuation(conn, parent_id, *, title=None, body=None, requester='worker', allow_closed=False):  # CONTINUATION_CLOSED_PARENT_20260911
     """RECORD_CONTINUATION_20260911: continuação executável do mesmo pedido. Sem `parents` (sem dependência circular); herda prioridade,
     executor, tipo, projeto, tenant e workspace scratch; recebe os critérios não atendidos e as evidências do pai; idempotente
     (um filho aberto por pai); pai bloqueado com pergunta a humano gera filho bloqueado com a mesma pergunta."""
@@ -1483,8 +1483,8 @@ def create_continuation(conn, parent_id, *, title=None, body=None, requester='wo
     parent = kb.get_task(conn, parent_id)
     if not parent:
         raise WorkflowError('Unknown parent card for continuation')
-    if parent.status in {'done', 'archived'} and not continuation_links(conn, parent_id)['children']:
-        raise WorkflowError('A continuation is created before the parent closes')
+    if parent.status in {'done', 'archived'} and not continuation_links(conn, parent_id)['children'] and not allow_closed:  # CONTINUATION_CLOSED_PARENT_20260911
+        raise WorkflowError('A continuation is created before the parent closes; a closed card continues only by the owner order (allow_closed)')
     _ensure_continuations(conn)
     unmet = _unmet_criteria_text(conn, parent_id)
     child_title = (title or f"Continuação: {parent.title}")[:200]

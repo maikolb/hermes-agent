@@ -129,6 +129,21 @@ def test_tool_creates_continuation_without_assignee(board, monkeypatch):
     assert "continuation_of" in open(kt.__file__, encoding="utf-8").read()
 
 
+def test_closed_parent_continues_only_by_owner_order(board):
+    # CONTINUATION_CLOSED_PARENT_20260911: card fechado só continua com allow_closed (ordem do dono); herda prioridade.
+    with kb.connect_closing() as conn:
+        parent = _card(conn, board, 7)
+        conn.execute("UPDATE tasks SET priority=100, status='done', completed_at=?, worker_pid=NULL, claim_lock=NULL, current_run_id=NULL WHERE id=?", (int(time.time()), parent.id)); conn.commit()
+        with pytest.raises(delivery.WorkflowError, match="allow_closed"):
+            delivery.create_continuation(conn, parent.id, requester="worker")
+        res = delivery.create_continuation(conn, parent.id, title="Reparar o dado", body="O pedido continua errado em produção.", requester="owner", allow_closed=True)
+        child = kb.get_task(conn, res["task_id"])
+        assert child.status == "ready" and child.priority == 100 and res["existing"] is False
+        assert "continua errado" in (child.body or "") and delivery.continuation_links(conn, parent.id)["children"] == [child.id]
+        again = delivery.create_continuation(conn, parent.id, requester="owner", allow_closed=True)
+        assert again["task_id"] == child.id and again["existing"] is True
+
+
 def test_concurrent_continuations_yield_one_child(board):
     import threading
     with kb.connect_closing() as conn:
