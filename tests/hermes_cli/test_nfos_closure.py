@@ -143,9 +143,20 @@ def test_rework_creates_formal_continuation_idempotently(board, monkeypatch):
         assert child.status == "ready" and "registro 3fa80d2b" in (child.body or "") and "critério obrigatório" in (child.body or "")
         again = delivery.request_rework(conn, task.id, criterion="C1", reason="idem", evidence=["e"], author="auditor")
         assert again["task_id"] == child.id and again["existing"] is True
+        assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_rework_requested'", (task.id,)).fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM task_comments WHERE task_id=?", (task.id,)).fetchone()[0] == 1
         monkeypatch.setenv("HERMES_KANBAN_TASK", task.id)
         with pytest.raises(delivery.WorkflowError, match="not by the worker"):
             delivery.request_rework(conn, task.id, criterion="C1", reason="x", evidence=["e"], author="worker")
+
+
+def test_rework_of_code_card_on_scratch_workspace_gets_worktree_child(board):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 8)
+        conn.execute("UPDATE tasks SET status='done', completed_at=?, worker_pid=NULL, claim_lock=NULL, current_run_id=NULL, delivery_type='code', workspace_kind='scratch', workspace_path='/tmp/x' WHERE id=?", (int(time.time()), task.id)); conn.commit()
+        res = delivery.request_rework(conn, task.id, criterion="C1", reason="sonda sem cobertura", evidence=["registro ainda errado"], author="auditor")
+        child = kb.get_task(conn, res["task_id"])
+        assert child.delivery_type == "code" and child.workspace_kind == "worktree" and child.workspace_path is None
 
 
 def test_uninitialized_contract_and_refused_exit_helpers(board):
