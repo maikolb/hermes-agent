@@ -1537,7 +1537,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
                     raise WorkflowError('Record the accepted local candidate before opening its review PR')
             else:
                 delivery_candidate=candidate if staging or operation=='homolog' else _delivery_candidate(conn,task_id,state)
-            _project_owned(conn,task_id,run_id,delivery_candidate)
+            if staging or operation=='homolog' or not _owner_mode():  # SLOT_HML_ONLY_20260911: slot só para staging/HML; produção não serializa
+                _project_owned(conn,task_id,run_id,delivery_candidate)
             expected=candidate if operation=='homolog' else (state.get('integrated_sha') if operation=='deploy' else delivery_candidate)
             if candidate!=expected:
                 raise WorkflowError('Use the confirmed integrated candidate' if operation=='deploy'
