@@ -15094,6 +15094,10 @@ def _default_spawn(
                     question='Validate the retained spec before this worker continues execution',context={})
             from hermes_cli.nfos_runtime import worker_instructions
             prompt += "\n\n" + worker_instructions()
+            try:  # LEARNING_20260911: contexto do caso e lições do projeto entram na montagem do prompt, sem etapa do worker
+                prompt += delivery.worker_context(delivery_conn, task.id)
+            except Exception:
+                pass
     env = dict(os.environ)
     # The dispatcher is detached from every conversation. Its worker must never
     # inherit routing mirrored by a previous gateway turn, even before the first

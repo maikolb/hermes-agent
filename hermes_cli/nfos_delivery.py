@@ -805,6 +805,8 @@ def run_probes(conn, task_id, run_id, *, criterion=None, all_=False):
             prev = _artifact(conn, task_id, f'probe:{cid}'); revision = (prev['revision'] if prev else 0) + 1
             conn.execute('INSERT INTO nfos_artifacts(task_id,run_id,kind,revision,content,author,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)',
                          (task_id, run_id, f'probe:{cid}', revision, _json(record), 'runtime', _json({'kind': probe['kind']}), record['ran_at']))
+            if state == 'PASS' and prev:  # LEARNING_20260911: FAIL -> PASS vira hipótese com a mudança registrada
+                _capture_hypothesis(conn, task_id, run_id, spec, crit, prev, record, revision)
             wf = get_workflow(conn, task_id)
             if wf is not None:
                 st = json.loads(wf['state_json'] or '{}') or {}
@@ -963,6 +965,215 @@ def record_completion_refusal(conn, task_id, note):
         _event(conn, task_id, task.current_run_id if task else None, 'nfos_completion_refused', {'pending': pending, 'note': note[:1500]})
         conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',
                      ('Completion refused: mandatory criteria without PASS measurement (' + ', '.join(pending) + '). Continue in this card: hypothesis, one change, effect, probe, report.', int(time.time()), task_id))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# LEARNING_20260911: tentativas capturadas, aprendizado aplicável recuperado na montagem do contexto, promoção criteriosa.
+def _lessons_table(conn):
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_lessons'").fetchone())
+
+
+def _ensure_lessons(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS nfos_lessons(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, criterion TEXT,
+        kind TEXT NOT NULL CHECK(kind IN ('hypothesis','proven','retired')),
+        component TEXT, operation TEXT, condition TEXT, text TEXT NOT NULL, evidence TEXT, "limit" TEXT, author TEXT,
+        created_at INTEGER NOT NULL, promoted_at INTEGER, promoted_by TEXT, promotion_reason TEXT, superseded_by INTEGER)""")
+
+
+def _probe_component(probe):
+    """Tabelas (sql) ou caminho (http/header) tocados pela sonda: chave de aplicabilidade das lições."""
+    if not isinstance(probe, dict):
+        return None
+    if probe.get('kind') == 'sql':
+        found = re.findall(r'\b(?:from|join)\s+([A-Za-z_][\w.]*)', str(probe.get('query') or ''), re.I)
+        return ','.join(sorted({x.lower() for x in found})) or None
+    match = re.match(r'https?://[^/]+(/[^?#]*)', str(probe.get('url') or ''))
+    return (match.group(1) if match else str(probe.get('url') or ''))[:120] or None
+
+
+def record_lesson(conn, *, kind, text, task_id=None, criterion=None, component=None, operation=None, condition=None,
+                  evidence=None, limit=None, author='runtime'):
+    if kind not in {'hypothesis', 'proven'}:
+        raise WorkflowError('lesson kind must be hypothesis or proven')
+    if not str(text or '').strip():
+        raise WorkflowError('lesson needs text')
+    if kind == 'proven' and (not evidence or not str(condition or '').strip()):
+        raise WorkflowError('a proven lesson needs the condition where it applies and evidence')
+    with _kb().write_txn(conn):
+        _ensure_lessons(conn)
+        cur = conn.execute('INSERT INTO nfos_lessons(task_id,criterion,kind,component,operation,condition,text,evidence,"limit",author,created_at) '
+                           'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                           (task_id, criterion, kind, component, operation, condition, str(text).strip(), _json(list(evidence or [])), limit, author, int(time.time())))
+        lesson_id = cur.lastrowid
+        if task_id:
+            _event(conn, task_id, None, 'nfos_lesson_recorded', {'lesson_id': lesson_id, 'kind': kind, 'component': component})
+        return lesson_id
+
+
+def promote_lesson(conn, lesson_id, *, reason, evidence, author):
+    if not str(reason or '').strip() or not evidence:
+        raise WorkflowError('promotion needs the reason and the evidence that sustains the conclusion')
+    with _kb().write_txn(conn):
+        _ensure_lessons(conn)
+        row = conn.execute('SELECT * FROM nfos_lessons WHERE id=?', (int(lesson_id),)).fetchone()
+        if not row:
+            raise WorkflowError('Unknown lesson')
+        merged = list(json.loads(row['evidence'] or '[]')) + [e for e in evidence if e not in json.loads(row['evidence'] or '[]')]
+        conn.execute("UPDATE nfos_lessons SET kind='proven',promoted_at=?,promoted_by=?,promotion_reason=?,evidence=? WHERE id=?",
+                     (int(time.time()), author, str(reason).strip(), _json(merged), int(lesson_id)))
+
+
+def retire_lesson(conn, lesson_id, *, reason, author):
+    if not str(reason or '').strip():
+        raise WorkflowError('retiring a lesson needs the reason')
+    with _kb().write_txn(conn):
+        _ensure_lessons(conn)
+        if not conn.execute('SELECT 1 FROM nfos_lessons WHERE id=?', (int(lesson_id),)).fetchone():
+            raise WorkflowError('Unknown lesson')
+        conn.execute("UPDATE nfos_lessons SET kind='retired',promoted_at=?,promoted_by=?,promotion_reason=? WHERE id=?",
+                     (int(time.time()), author, str(reason).strip(), int(lesson_id)))
+
+
+def list_lessons(conn, *, include_retired=False):
+    if not _lessons_table(conn):
+        return []
+    rows = conn.execute('SELECT * FROM nfos_lessons ORDER BY id DESC LIMIT 200').fetchall()
+    return [dict(r) for r in rows if include_retired or r['kind'] != 'retired']
+
+
+def _capture_hypothesis(conn, task_id, run_id, spec, crit, previous, record, revision):
+    """Dentro da transação da medição: FAIL -> PASS na mesma revisão vira hipótese com o que mudou no meio."""
+    try:
+        before = json.loads(previous['content'])
+    except Exception:
+        return
+    if before.get('state') != 'FAIL' or before.get('spec_revision') != spec['revision']:
+        return
+    wf = get_workflow(conn, task_id); st = json.loads(wf['state_json'] or '{}') if wf else {}
+    tried = [a for a in (st.get('attempts') or []) if (a.get('hypothesis') or a.get('change')) and int(a.get('at') or 0) >= int(before.get('ran_at') or 0)]
+    last = tried[-1] if tried else {}
+    mutation = record.get('mutation') or {}
+    text = (f"{crit['id']} ({str(crit.get('text') or '')[:120]}): antes {_json(before.get('observed'))[:200]}; "
+            f"depois de '{str(last.get('change') or 'mudança não registrada')[:200]}' "
+            f"(hipótese: '{str(last.get('hypothesis') or 'não registrada')[:200]}')"
+            + (f" via {mutation.get('operation')} em {str(mutation.get('target') or '')[:80]}" if mutation else '')
+            + ", a medição passou.")
+    _ensure_lessons(conn)
+    goal = ''
+    try:
+        goal = str(json.loads(spec['content']).get('goal') or '')[:200]
+    except Exception:
+        pass
+    cur = conn.execute('INSERT INTO nfos_lessons(task_id,criterion,kind,component,operation,condition,text,evidence,"limit",author,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                       (task_id, crit['id'], 'hypothesis', _probe_component(crit.get('probe')), mutation.get('operation'), goal, text,
+                        _json([f"probe:{crit['id']} r{previous['revision']}", f"probe:{crit['id']} r{revision}"] + ([mutation.get('id')] if mutation.get('id') else [])),
+                        'Uma passagem FAIL para PASS não prova a causa; confirmar em outro caso antes de promover.', 'runtime', int(time.time())))
+    _event(conn, task_id, run_id, 'nfos_lesson_recorded', {'lesson_id': cur.lastrowid, 'kind': 'hypothesis', 'criterion': crit['id']})
+
+
+def case_context(conn, task_id):
+    """Mesmo pedido: medições, tentativas, próxima ação e nota de debug, para toda retomada."""
+    wf = get_workflow(conn, task_id)
+    if not wf:
+        return ''
+    st = json.loads(wf['state_json'] or '{}') or {}
+    parts = []
+    measurements = st.get('measurements') or {}
+    if measurements:
+        parts.append('Measurements so far: ' + '; '.join(
+            f"{cid}={m.get('state')} ({time.strftime('%d/%m %H:%MZ', time.gmtime(int(m.get('ran_at') or 0)))})" for cid, m in measurements.items()))
+    attempts = st.get('attempts') or []
+    if attempts:
+        lines = []
+        for a in attempts[-8:]:
+            when = time.strftime('%d/%m %H:%MZ', time.gmtime(int(a.get('at') or 0)))
+            if a.get('hypothesis') or a.get('change'):
+                lines.append(f"- {when}: hypothesis '{str(a.get('hypothesis') or '')[:160]}', change '{str(a.get('change') or '')[:160]}'")
+            else:
+                lines.append(f"- {when}: {a.get('criterion')} FAIL, observed {_json(a.get('observed'))[:160]}")
+        parts.append('Attempts already made on this request (do not repeat what failed):\n' + '\n'.join(lines))
+    if wf.get('next_action'):
+        parts.append('Recorded next action: ' + str(wf['next_action'])[:300])
+    note = completion_refusal_note(conn, task_id)
+    if note:
+        parts.append(note)
+    return ('\n\nCase context (this request):\n' + '\n'.join(parts)) if parts else ''
+
+
+def lessons_context(conn, task_id, limit=8):
+    """Entre pedidos do projeto: comprovadas como orientação sob a condição; hipóteses aplicáveis como hipóteses."""
+    if not _lessons_table(conn):
+        return ''
+    task = _kb().get_task(conn, task_id)
+    haystack = ' '.join(filter(None, [task.title if task else '', task.body if task else '']))
+    components = set()
+    spec = get_spec(conn, task_id)
+    if spec:
+        for crit in json.loads(spec['content']).get('criteria') or []:
+            comp = _probe_component(crit.get('probe'))
+            if comp:
+                components.update(comp.split(','))
+    wf = get_workflow(conn, task_id)
+    precheck = ((json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') if wf else None) or {}
+    for checked in precheck.get('checked') or []:
+        if isinstance(checked, dict):
+            haystack += ' ' + str(checked.get('target') or '')
+    hay = _norm_text(haystack); comps = {_norm_text(c) for c in components}
+
+    def applicable(row):
+        comp = _norm_text(row.get('component') or '')
+        if not comp:
+            return True
+        return any(part and (part in hay or part in comps) for part in comp.split(','))
+
+    rows = [dict(r) for r in conn.execute("SELECT * FROM nfos_lessons WHERE kind IN ('proven','hypothesis') AND superseded_by IS NULL ORDER BY id DESC LIMIT 200")]
+    proven = [r for r in rows if r['kind'] == 'proven' and applicable(r)]
+    proven += [r for r in rows if r['kind'] == 'proven' and r not in proven]
+    proven = proven[:limit]
+    hypotheses = [r for r in rows if r['kind'] == 'hypothesis' and applicable(r)][:limit]
+    if not proven and not hypotheses:
+        return ''
+
+    def fmt(r):
+        ev = ', '.join(str(e) for e in json.loads(r.get('evidence') or '[]'))[:200]
+        cond = f"when: {str(r.get('condition') or '')[:160]}; " if r.get('condition') else ''
+        lim = f"; limit: {str(r.get('limit') or '')[:160]}" if r.get('limit') else ''
+        return f"- [L{r['id']}] {cond}{str(r.get('text') or '')[:400]} (evidence: {ev or 'none'}{lim})"
+
+    out = ['\n\nProject lessons:']
+    if proven:
+        out.append('Proven (guidance when the condition holds):'); out += [fmt(r) for r in proven]
+    if hypotheses:
+        out.append('Hypotheses from earlier attempts (not proven: test, do not assume):'); out += [fmt(r) for r in hypotheses]
+    out.append('Record what you learn with `progress --hypothesis ... --change ...`; a FAIL followed by PASS after your change is captured '
+               'automatically as a hypothesis; promotion to proven needs reason and evidence (`lesson`).')
+    return '\n'.join(out)
+
+
+def worker_context(conn, task_id):
+    """Texto anexado ao prompt do worker no spawn e exposto no show."""
+    try:
+        return (case_context(conn, task_id) + lessons_context(conn, task_id))[:12000]
+    except Exception:
+        return ''
+
+
+def lesson_command(conn, payload, *, author):
+    op = str((payload or {}).get('op') or 'list')
+    if op == 'list':
+        return {'lessons': list_lessons(conn, include_retired=bool(payload.get('include_retired')))}
+    if op == 'add':
+        return {'lesson_id': record_lesson(conn, kind=payload.get('kind') or 'hypothesis', text=payload.get('text'), task_id=payload.get('task_id'),
+                                          criterion=payload.get('criterion'), component=payload.get('component'), operation=payload.get('operation'),
+                                          condition=payload.get('condition'), evidence=payload.get('evidence'), limit=payload.get('limit'), author=author)}
+    if op == 'promote':
+        promote_lesson(conn, payload.get('id'), reason=payload.get('reason'), evidence=payload.get('evidence') or [], author=author)
+        return {'promoted': payload.get('id')}
+    if op == 'retire':
+        retire_lesson(conn, payload.get('id'), reason=payload.get('reason'), author=author)
+        return {'retired': payload.get('id')}
+    raise WorkflowError('lesson op must be list, add, promote or retire')
 
 
 def save_spec(conn, task_id, run_id, spec, *, author, evidence):
@@ -2450,7 +2661,7 @@ def main():
     import argparse
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['show','probe','precheck','cancel','save-spec','save-report','progress','ask','decide',
+    parser.add_argument('action',choices=['show','probe','lesson','precheck','cancel','save-spec','save-report','progress','ask','decide',
         'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','acquire-project','release-project','receive','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
@@ -2498,6 +2709,7 @@ def main():
                 _st=(json.loads(result['workflow']['state_json'] or '{}') or {}) if result['workflow'] else {}
                 result['measurements']=_st.get('measurements'); result['attempts']=_st.get('attempts')
                 result['debug_note']=completion_refusal_note(conn,args.task)
+                result['learning']=worker_context(conn,args.task)  # LEARNING_20260911
             except Exception:
                 pass
             if result['workflow']:
@@ -2525,6 +2737,8 @@ def main():
         elif args.action=='repair-card':
             from hermes_cli.nfos_workspace_repair import repair_card
             result=repair_card(conn,args.task,board=args.project,**payload)
+        elif args.action=='lesson':  # LEARNING_20260911
+            result=lesson_command(conn,payload,author=(os.environ.get('HERMES_KANBAN_TASK') or 'Principal'))
         elif args.action=='probe':  # RESULT_PROBE_20260911
             result={'measurements':run_probes(conn,args.task,args.run,criterion=args.criterion,all_=bool(args.all))}
         elif args.action=='progress':
