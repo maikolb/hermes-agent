@@ -210,6 +210,16 @@ def test_attempts_appear_in_the_note(board):
         assert "appliesTo vazio nos grupos" in note and "Tentativas registradas: 1" in note
 
 
+def test_edge_challenge_is_indeterminate_not_fail(board, monkeypatch):
+    # PROBE_HARDENING_20260911: desafio da Vercel (x-vercel-mitigated / 429) não é resultado funcional.
+    with kb.connect_closing() as conn:
+        task = _card(conn, 13, spec=_spec(probe={"kind": "http", "url": "https://app.example/api/x", "expect": {"contains_all": ["ok"]}}))
+        monkeypatch.setattr(delivery, "_run_http_probe", lambda probe, env: {"status": 429, "mitigated": "x-vercel-mitigated=challenge", "value": ""})
+        res = delivery.run_probes(conn, task.id, task.current_run_id, criterion="C1")
+        assert res[0]["state"] == "INDETERMINADO" and "edge protection" in res[0]["error"]
+        assert delivery.mandatory_pending(conn, task.id)[0]["status"] == "NOT_RUN"
+
+
 def test_cancellation_by_owner_still_closes(board):
     with kb.connect_closing() as conn:
         task = _card(conn, 9, spec=_spec())
