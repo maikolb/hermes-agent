@@ -560,6 +560,411 @@ def record_precheck(conn, task_id, run_id, payload):
 SPEC_SIZE_BUDGET = {'P': 2700, 'M': 7200, 'G': 14400}  # BLOCK_LESS9_20260910: P 45 min, M 2 h, G 4 h (SOUL v3 seção 8)
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# RESULT_PROBE_20260911: critério obrigatório de resultado, medido no destino pela mesma sonda que reproduziu a reclamação.
+# PASS|FAIL|INDETERMINADO vêm da medição, não do relatório. FAIL devolve a nota de debug ao mesmo card.
+PROBE_KINDS = {'sql', 'http', 'header'}
+_PROBE_EXPECT_KEYS = {'row', 'scalar', 'op', 'value', 'set_equals', 'contains_all', 'not_matches', 'count_between', 'equals', 'status'}
+_RELEVANT_MUTATIONS = ('merge', 'deploy', 'homolog', 'repair')
+
+
+def _norm_text(value):
+    import unicodedata
+    text = unicodedata.normalize('NFKD', str(value if value is not None else ''))
+    text = ''.join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r'\s+', ' ', text).strip().casefold()
+
+
+def _probe_project(conn, task_id):
+    """(slug, config) do projeto do card; probe_env vem de kanban.delivery.projects.<slug>.probe_env."""
+    try:
+        wf = get_workflow(conn, task_id); request = get_request(conn, wf['request_id'])
+        project = json.loads(request['payload'])['project']
+        key = project.get('board') or project.get('project_id')
+        from hermes_cli.nfos_runtime import project_config
+        return key, (project_config(key) or {})
+    except Exception:
+        return None, {}
+
+
+def _probe_env_file(conn, task_id):
+    key, cfg = _probe_project(conn, task_id)
+    name = str(cfg.get('probe_env') or '').strip()
+    if not name or name.startswith('/') or '..' in name:
+        return None
+    home = os.environ.get('HERMES_HOME') or str(Path.home() / '.hermes')
+    path = Path(home) / 'secrets' / name
+    return path if path.is_file() else None
+
+
+def _env_values(path):
+    values = {}
+    for line in Path(path).read_text(encoding='utf-8', errors='replace').splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        if line.startswith('export '):
+            line = line[7:]
+        key, value = line.split('=', 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def _validate_probe(cid, probe):
+    if not isinstance(probe, dict) or probe.get('kind') not in PROBE_KINDS:
+        raise WorkflowError(f'Criterion {cid}: a mandatory criterion needs probe {{kind: sql|http|header, ..., expect}}')
+    expect = probe.get('expect')
+    if not isinstance(expect, dict) or not (set(expect) & _PROBE_EXPECT_KEYS):
+        raise WorkflowError(f'Criterion {cid}: probe.expect must state the requested result (row, scalar, op+value, set_equals, '
+                            'contains_all, not_matches, count_between, equals or status); a count alone rarely proves content')
+    kind = probe['kind']
+    if kind == 'sql':
+        query = str(probe.get('query') or '').strip()
+        if not re.match(r'(?is)^(select|with)\b', query) or ';' in query.rstrip(';'):
+            raise WorkflowError(f'Criterion {cid}: sql probe must be a single SELECT/WITH statement (read-only)')
+    else:
+        if not re.match(r'^https?://', str(probe.get('url') or '')):
+            raise WorkflowError(f'Criterion {cid}: {kind} probe needs an http(s) url')
+        if kind == 'header' and not str(probe.get('header') or '').strip():
+            raise WorkflowError(f'Criterion {cid}: header probe needs the header name')
+
+
+def _probe_expect_ok(expect, observed):
+    rows = observed.get('rows')
+    col = [r[0] if isinstance(r, (list, tuple)) and r else None for r in (rows or [])]
+    if 'status' in expect and observed.get('status') != expect['status']:
+        return False
+    if 'row' in expect:
+        return bool(rows) and list(rows[0]) == list(expect['row'])
+    if 'scalar' in expect:
+        return bool(rows) and rows[0][0] == expect['scalar']
+    if 'op' in expect:
+        if not rows:
+            return False
+        left, right = rows[0][0], expect.get('value')
+        try:
+            return {'==': left == right, '!=': left != right, '>=': left >= right, '<=': left <= right,
+                    '>': left > right, '<': left < right}.get(str(expect['op']), False)
+        except TypeError:
+            return False
+    forbidden = expect.get('not_matches')
+    if forbidden and any(re.search(forbidden, str(x or ''), re.I) for x in col):
+        return False
+    if 'set_equals' in expect:
+        return {_norm_text(x) for x in col} == {_norm_text(x) for x in expect['set_equals']}
+    if 'contains_all' in expect:
+        have = {_norm_text(x) for x in col}
+        return all(_norm_text(x) in have for x in expect['contains_all'])
+    if 'count_between' in expect:
+        low, high = expect['count_between']
+        return low <= len(rows or []) <= high
+    if 'equals' in expect:
+        return _norm_text(observed.get('value')) == _norm_text(expect['equals'])
+    return 'status' in expect or forbidden is not None
+
+
+def _json_safe(value):
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def _run_sql_probe(dsn, query):
+    if dsn.startswith('sqlite://'):
+        path = dsn[len('sqlite://'):]
+        conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+        try:
+            rows = conn.execute(query).fetchmany(200)
+        finally:
+            conn.close()
+        return [list(r) for r in rows]
+    try:
+        import psycopg2
+    except ImportError as exc:
+        raise WorkflowError('psycopg2 is not installed in this runtime (pip install psycopg2-binary in the release venv)') from exc
+    conn = psycopg2.connect(dsn, connect_timeout=15, options='-c default_transaction_read_only=on -c statement_timeout=15000')
+    try:
+        conn.set_session(readonly=True, autocommit=True)
+        cur = conn.cursor(); cur.execute(query); rows = cur.fetchmany(200)
+    finally:
+        conn.close()
+    return [list(r) for r in rows]
+
+
+def _run_http_probe(probe, env):
+    import urllib.request, urllib.error
+    headers = {}
+    for key, value in (probe.get('headers') or {}).items():
+        value = str(value)
+        headers[str(key)] = env.get(value[5:], '') if value.startswith('$env:') else value
+    method = 'HEAD' if probe['kind'] == 'header' else 'GET'
+    req = urllib.request.Request(probe['url'], headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            status, hdrs = resp.status, dict(resp.headers)
+            body = resp.read(200000) if method == 'GET' else b''
+    except urllib.error.HTTPError as exc:
+        status, hdrs = exc.code, dict(exc.headers or {})
+        body = exc.read(200000) if method == 'GET' else b''
+    if probe['kind'] == 'header':
+        name = str(probe['header']).lower()
+        return {'status': status, 'value': next((v for k, v in hdrs.items() if k.lower() == name), None)}
+    observed = {'status': status}
+    text = body.decode('utf-8', 'replace')
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+    if probe.get('json_path') and data is not None:
+        node = data
+        for part in [p for p in str(probe['json_path']).split('.') if p]:
+            if isinstance(node, list) and part.isdigit():
+                node = node[int(part)] if int(part) < len(node) else None
+            elif isinstance(node, dict):
+                node = node.get(part)
+            else:
+                node = None
+                break
+        observed['value'] = _json_safe(node)
+        if isinstance(node, list):
+            observed['rows'] = [[x.get(probe.get('name_key') or 'name') if isinstance(x, dict) else x] for x in node][:200]
+    else:
+        observed['value'] = text[:2000]
+    return observed
+
+
+def _last_candidate(conn, task_id):
+    row = conn.execute("SELECT candidate FROM nfos_effects WHERE task_id=? AND status='confirmed' AND operation IN ('homolog','deploy') "
+                       "ORDER BY updated_at DESC LIMIT 1", (task_id,)).fetchone()
+    return row[0] if row else None
+
+
+def _relevant_mutation(conn, task_id):
+    row = conn.execute("SELECT id,operation,target,updated_at FROM nfos_effects WHERE task_id=? AND status='confirmed' AND operation IN "
+                       "('merge','deploy','homolog','repair') ORDER BY updated_at DESC, rowid DESC LIMIT 1", (task_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def _same_mutation(recorded, current):
+    """A medição vale enquanto a última mutação relevante for a mesma vista na hora de medir (identidade, não relógio)."""
+    recorded = recorded or {}; current = current or {}
+    return recorded.get('id') == current.get('id') and recorded.get('updated_at') == current.get('updated_at')
+
+
+def _execute_probe(conn, task_id, probe):
+    """Fora de transação. Devolve (state, observed, error)."""
+    kind = probe['kind']
+    env_file = _probe_env_file(conn, task_id)
+    env = _env_values(env_file) if env_file else {}
+    try:
+        if kind == 'sql':
+            dsn = env.get('PROBE_DATABASE_URL') or env.get('DATABASE_URL')
+            if not dsn:
+                return 'INDETERMINADO', None, 'probe_env of the project has no PROBE_DATABASE_URL/DATABASE_URL (config kanban.delivery.projects.<slug>.probe_env)'
+            observed = {'rows': _json_safe(_run_sql_probe(dsn, str(probe['query']).strip().rstrip(';')))}
+        else:
+            observed = _run_http_probe(probe, env)
+            if observed.get('status') in (401, 403) and 'status' not in (probe.get('expect') or {}):
+                return 'INDETERMINADO', observed, f"HTTP {observed['status']}: access to the consumer surface was refused"
+    except WorkflowError as exc:
+        return 'INDETERMINADO', None, str(exc)
+    except Exception as exc:  # timeout, rede, sintaxe: medição indisponível, não defeito
+        return 'INDETERMINADO', None, f'{type(exc).__name__}: {str(exc).splitlines()[0][:160]}'
+    expect = dict(probe.get('expect') or {})
+    if expect.get('equals') == '$candidate':
+        expect['equals'] = _last_candidate(conn, task_id) or ''
+    return ('PASS' if _probe_expect_ok(expect, observed) else 'FAIL'), observed, None
+
+
+def run_probes(conn, task_id, run_id, *, criterion=None, all_=False):
+    if conn.in_transaction:
+        raise WorkflowError('probe runs outside a write transaction')
+    task = _owned(conn, task_id, run_id) if run_id else _kb().get_task(conn, task_id)
+    if task is None:
+        raise WorkflowError('Unknown task')
+    spec = get_spec(conn, task_id)
+    if not spec:
+        raise WorkflowError('Persist the spec before measuring')
+    criteria = json.loads(spec['content']).get('criteria') or []
+    targets = [c for c in criteria if isinstance(c.get('probe'), dict) and (all_ or c.get('id') == criterion)]
+    if not targets:
+        raise WorkflowError('No criterion with a probe matches; pass --criterion <id> or --all')
+    results = []
+    for crit in targets:
+        cid = crit['id']; probe = crit['probe']
+        state, observed, error = _execute_probe(conn, task_id, probe)
+        shown = {k: v for k, v in probe.items() if k != 'headers'}
+        record = {'criterion': cid, 'text': crit.get('text'), 'probe': shown, 'expected': probe.get('expect'),
+                  'observed': _json_safe(observed), 'state': state, 'error': error, 'ran_at': int(time.time()),
+                  'spec_revision': spec['revision'], 'run_id': run_id, 'mutation': _relevant_mutation(conn, task_id)}
+        with _kb().write_txn(conn):
+            prev = _artifact(conn, task_id, f'probe:{cid}'); revision = (prev['revision'] if prev else 0) + 1
+            conn.execute('INSERT INTO nfos_artifacts(task_id,run_id,kind,revision,content,author,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)',
+                         (task_id, run_id, f'probe:{cid}', revision, _json(record), 'runtime', _json({'kind': probe['kind']}), record['ran_at']))
+            wf = get_workflow(conn, task_id)
+            if wf is not None:
+                st = json.loads(wf['state_json'] or '{}') or {}
+                st.setdefault('measurements', {})[cid] = {'state': state, 'ran_at': record['ran_at'], 'revision': revision,
+                                                          'spec_revision': spec['revision'], 'error': error}
+                if state == 'FAIL':
+                    attempts = list(st.get('attempts') or [])
+                    attempts.append({'at': record['ran_at'], 'run_id': run_id, 'criterion': cid, 'observed': _json_safe(observed)})
+                    st['attempts'] = attempts[-30:]
+                conn.execute('UPDATE nfos_workflows SET state_json=?,updated_at=? WHERE task_id=?', (_json(st), int(time.time()), task_id))
+            _event(conn, task_id, run_id, 'nfos_probe', {'criterion': cid, 'state': state, 'revision': revision, 'error': error})
+        results.append({'criterion': cid, 'state': state, 'observed': record['observed'], 'expected': record['expected'],
+                        'error': error, 'revision': revision})
+    return results
+
+
+def _mandatory_effective(conn, task_id, spec):
+    """Status efetivo dos critérios obrigatórios pela última medição válida."""
+    criteria = json.loads(spec['content']).get('criteria') or []
+    mutation = _relevant_mutation(conn, task_id)
+    out = {}
+    for crit in criteria:
+        if not crit.get('mandatory'):
+            continue
+        cid = crit['id']
+        art = _artifact(conn, task_id, f'probe:{cid}')
+        info = {'criterion': cid, 'text': crit.get('text'), 'expected': (crit.get('probe') or {}).get('expect')}
+        if not art:
+            out[cid] = dict(info, status='NOT_RUN', why='measurement not executed (run `probe --criterion %s`)' % cid); continue
+        m = json.loads(art['content'])
+        info.update(observed=m.get('observed'), state=m.get('state'), ran_at=m.get('ran_at'), revision=art['revision'], error=m.get('error'))
+        if m.get('spec_revision') != spec['revision']:
+            out[cid] = dict(info, status='NOT_RUN', why='measurement belongs to an earlier spec revision; run the probe again')
+        elif not _same_mutation(m.get('mutation'), mutation):
+            out[cid] = dict(info, status='NOT_RUN', why="measurement predates the last relevant mutation (%s %s); run the probe again"
+                            % ((mutation or {}).get('operation'), (mutation or {}).get('target')))
+        elif m.get('state') == 'PASS':
+            out[cid] = dict(info, status='PASS', why='')
+        elif m.get('state') == 'FAIL':
+            out[cid] = dict(info, status='FAIL', why='measured result differs from the requested result')
+        else:
+            out[cid] = dict(info, status='NOT_RUN', why='measurement indeterminate: ' + str(m.get('error') or ''))
+    return out
+
+
+def mandatory_pending(conn, task_id, spec=None):
+    spec = spec or get_spec(conn, task_id)
+    if not spec:
+        return []
+    return [e for e in _mandatory_effective(conn, task_id, spec).values() if e['status'] != 'PASS']
+
+
+def _apply_measurements_to_report(conn, task_id, spec, report):
+    """Owner mode: status de critério obrigatório vem da medição; reclassificação não é aceita."""
+    effective = _mandatory_effective(conn, task_id, spec)
+    if not effective:
+        return
+    reclassified = {r.get('id') for r in (report.get('reclassified') or []) if isinstance(r, dict)}
+    artifacts = report.setdefault('artifacts', [])
+    measurements = {}
+    for row in report.get('criteria') or []:
+        cid = row.get('id')
+        if cid not in effective:
+            continue
+        if cid in reclassified:
+            raise WorkflowError(f'Criterion {cid} is mandatory: its status comes from the measurement, not from reclassification')
+        eff = effective[cid]
+        if row.get('status') != eff['status']:
+            row['declared_status'] = row.get('status')
+        row['status'] = eff['status']
+        row['measurement'] = {k: eff.get(k) for k in ('state', 'ran_at', 'revision', 'why', 'error')}
+        if eff['status'] == 'PASS':
+            aid = f'probe:{cid}'
+            if not any(isinstance(a, dict) and a.get('id') == aid for a in artifacts):
+                artifacts.append({'id': aid, 'path': f"kanban://nfos_artifacts/{aid}/r{eff.get('revision')}"})
+            refs = [r for r in _evidence_refs(row.get('evidence')) if r]
+            if aid not in refs:
+                refs.append(aid)
+            row['evidence'] = refs
+        measurements[cid] = {k: eff.get(k) for k in ('status', 'state', 'ran_at', 'revision', 'why', 'observed', 'expected')}
+    report['measurements'] = measurements
+
+
+def _check_probe_corrections(previous, spec):
+    """Sonda de critério obrigatório muda só com probe_corrections [{id, reason, evidence}] (histórico na revisão da spec)."""
+    if not previous:
+        return
+    try:
+        old = {c.get('id'): c for c in (json.loads(previous['content']).get('criteria') or [])}
+    except Exception:
+        return
+    corrections = {c.get('id'): c for c in (spec.get('probe_corrections') or []) if isinstance(c, dict)}
+    for crit in spec.get('criteria') or []:
+        cid = crit.get('id'); before = old.get(cid) or {}
+        if not before.get('mandatory') or not before.get('probe'):
+            continue
+        if _json(before.get('probe')) == _json(crit.get('probe')) and bool(crit.get('mandatory')) == bool(before.get('mandatory')):
+            continue
+        corr = corrections.get(cid)
+        if not corr or not str(corr.get('reason') or '').strip() or not corr.get('evidence'):
+            raise WorkflowError(f'Criterion {cid}: changing or dropping the probe of a mandatory criterion needs probe_corrections '
+                                '[{id, reason, evidence:[...]}] in the new spec revision; the earlier measurement stays in history')
+
+
+def _spec_result_criteria_checks(conn, task_id, spec):
+    """Owner mode: valida sondas e exige critério obrigatório quando a reprodução foi medida."""
+    for crit in spec.get('criteria') or []:
+        if crit.get('probe') is not None or crit.get('mandatory'):
+            _validate_probe(crit.get('id'), crit.get('probe'))
+    _check_probe_corrections(get_spec(conn, task_id), spec)
+    wf = get_workflow(conn, task_id)
+    precheck = (json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') if wf else None
+    precheck = precheck or {}
+    measured = any(str(c.get('method') or '').strip().lower() in {'sql', 'http', 'header', 'api', 'query'} for c in (precheck.get('checked') or []) if isinstance(c, dict))
+    if (spec.get('delivery_type') in {'code', 'operation'} and precheck.get('verdict') in {'partial', 'not_delivered'} and measured
+            and not any(c.get('mandatory') for c in spec.get('criteria') or [])):
+        raise WorkflowError('The precheck measured the complaint (method sql/http): declare at least one criterion with mandatory=true and a '
+                            'probe that measures the requested result on the surface the user consumes')
+
+
+def completion_refusal_note(conn, task_id):
+    """Nota de debug devolvida pelo kanban_complete quando um critério obrigatório não mediu PASS (owner mode)."""
+    if not _owner_mode():
+        return None
+    spec = get_spec(conn, task_id)
+    if not spec or get_workflow(conn, task_id) is None:
+        return None
+    pending = mandatory_pending(conn, task_id, spec)
+    if not pending:
+        return None
+    wf = get_workflow(conn, task_id); st = json.loads(wf['state_json'] or '{}') or {}
+    mutation = _relevant_mutation(conn, task_id)
+    lines = ['Fechamento recusado: critério obrigatório sem medição PASS; o pedido não está resolvido no destino.']
+    for e in pending:
+        ran = time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(e['ran_at'])) if e.get('ran_at') else 'não medido'
+        lines.append(f"- {e['criterion']}: {e.get('text')}\n  esperado: {_json(e.get('expected'))[:400]}\n  observado: {_json(e.get('observed'))[:600]} ({e.get('state') or 'sem medição'}, {ran})\n  motivo: {e['why']}")
+    if mutation:
+        lines.append(f"Última mutação relevante: {mutation['operation']} {mutation['target']} em {time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(int(mutation['updated_at'])))}.")
+    else:
+        lines.append('Nenhuma mutação relevante registrada ainda (deploy, homolog, merge ou effect --operation repair).')
+    attempts = [a for a in (st.get('attempts') or []) if a.get('hypothesis') or a.get('change')]
+    if attempts:
+        last = attempts[-1]
+        lines.append(f"Tentativas registradas: {len(attempts)}; última: hipótese '{str(last.get('hypothesis') or '')[:200]}', mudança '{str(last.get('change') or '')[:200]}'.")
+    lines.append('Continue neste card, mesma prioridade: (1) registre hipótese e mudança delimitada: `progress --stage implement --next "..." '
+                 '--hypothesis "..." --change "..."`; (2) aplique uma mudança e registre a mutação (`effect --operation repair|deploy|homolog ...` e '
+                 '`reconcile`); (3) `probe --criterion <id>`; (4) `save-report` e kanban_complete. Não reclassifique, não crie card, não repita efeito '
+                 'confirmado. Sonda errada: nova revisão da spec com probe_corrections [{id, reason, evidence}].')
+    return '\n'.join(lines)
+
+
+def record_completion_refusal(conn, task_id, note):
+    pending = [e['criterion'] for e in mandatory_pending(conn, task_id)]
+    with _kb().write_txn(conn):
+        task = _kb().get_task(conn, task_id)
+        _event(conn, task_id, task.current_run_id if task else None, 'nfos_completion_refused', {'pending': pending, 'note': note[:1500]})
+        conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',
+                     ('Completion refused: mandatory criteria without PASS measurement (' + ', '.join(pending) + '). Continue in this card: hypothesis, one change, effect, probe, report.', int(time.time()), task_id))
+
+
 def save_spec(conn, task_id, run_id, spec, *, author, evidence):
     if 'delivery_destination' in spec:
         from hermes_cli.nfos_destination import validate
@@ -573,6 +978,8 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
     ids=[c.get('id') for c in spec['criteria']]
     if not all(ids) or len(set(ids))!=len(ids) or any(not c.get('text') for c in spec['criteria']):
         raise WorkflowError('Each spec criterion needs a unique id and description')
+    if _owner_mode():  # RESULT_PROBE_20260911: sondas válidas; obrigatório quando a reprodução foi medida
+        _spec_result_criteria_checks(conn,task_id,spec)
     if author not in {'Claude TL','Codex','worker'} or not evidence:  # BLOCK_LESS_20260910: o worker pode autorar a própria spec
         raise WorkflowError('Record the actual TL/Codex/worker execution evidence')
     if author=='Codex' and not evidence.get('fallback_reason'):
@@ -951,6 +1358,8 @@ def save_report(conn, task_id, run_id, report):
     _require_current_instruction_spec(conn,task_id)
     report=json.loads(_json(report))
     _check_reclassification(conn,task_id,report)  # RECORD_CONTINUATION_20260911
+    if _owner_mode():  # RESULT_PROBE_20260911: critério obrigatório recebe o status da última medição válida
+        _apply_measurements_to_report(conn,task_id,spec,report)
     encoded=_json(report)
     checks=_report_artifact_checks(conn,task,spec,report)
     evidence={'spec_revision':spec['revision'],'report_sha256':hashlib.sha256(encoded.encode()).hexdigest(),
@@ -1696,7 +2105,7 @@ def _record_mode_effect_checks(conn, task_id, candidate):
     return None
 
 def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
-    if operation not in {'homolog','pr','merge','deploy','staging_pr','staging_merge'} or not target or not candidate:
+    if operation not in {'homolog','pr','merge','deploy','staging_pr','staging_merge','repair'} or not target or not candidate:  # RESULT_PROBE_20260911: repair = mutação de dado
         raise WorkflowError('External effect needs operation, destination and exact candidate')
     with _kb().write_txn(conn):
         task=_owned(conn,task_id,run_id)
@@ -1704,13 +2113,17 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             raise WorkflowError('Principal changed the primary task; persist a newer spec before external effects')
         from hermes_cli.nfos_principal_review import require_spec
         require_spec(conn,task_id)
-        if task.delivery_type in {'report','operation'}:  # OPERATION_FAST_20260910: card sem código não publica código
+        if operation=='repair':  # RESULT_PROBE_20260911: registro da mutação de dado (preimage como candidato); a sonda mede depois
+            if not get_workflow(conn,task_id)['spec_revision']:
+                raise WorkflowError('Persist the spec before changing production data')
+            _require_current_instruction_spec(conn,task_id)
+        if task.delivery_type in {'report','operation'} and operation!='repair':  # OPERATION_FAST_20260910: card sem código não publica código
             raise WorkflowError('A report/operation card publishes no code: homolog, pr, merge, deploy and staging effects are refused. If the request needs a repository change, save a spec with delivery_type code (allowed from a worktree workspace) and do the repository/HML/PR reconciliation first.')
         staging=operation in {'staging_pr','staging_merge'}
         preparation=None
         if staging and task.delivery_type!='code':
             raise WorkflowError('Staging preparation applies only to code delivery')
-        if task.delivery_type=='code':
+        if task.delivery_type=='code' and operation!='repair':
             from hermes_cli.nfos_destination import destination, review_only
             scope=destination(conn,task_id)
             if operation in {'merge','deploy'} and _project_delivery_environment(conn,task_id)=='hml' and not _express_production_order(task.body):  # DELIVERY_ENV_20260911
@@ -1814,6 +2227,8 @@ def completion_evidence_check(conn, task_id):
         strict=not _owner_mode()  # BLOCK_LESS4/BLOCK_LESS8_20260910: fora do owner mode a prova completa continua exigida
         _fails=[c for c,row in results.items() if ((row['status']!='PASS') if strict else (row['status']=='FAIL'))]
         _partial_ok=(not strict) and bool(_fails) and _continuation_allows_partial(conn,task_id,content)  # RECORD_CONTINUATION_20260911
+        if not strict and str(content.get('disposition') or '')!='cancelled_by_owner' and mandatory_pending(conn,task_id,spec):  # RESULT_PROBE_20260911
+            return None
         if _fails and not _partial_ok:
             return None
         digest=hashlib.sha256(report['content'].encode()).hexdigest()
@@ -2035,7 +2450,7 @@ def main():
     import argparse
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['show','precheck','cancel','save-spec','save-report','progress','ask','decide',
+    parser.add_argument('action',choices=['show','probe','precheck','cancel','save-spec','save-report','progress','ask','decide',
         'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','acquire-project','release-project','receive','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
@@ -2049,7 +2464,11 @@ def main():
     parser.add_argument('--decision')
     parser.add_argument('--timeout',type=float,default=300,help='Maximum wait duration; pending is not failure')
     parser.add_argument('--resolution',choices=['continue','approve','changes','human'])
-    parser.add_argument('--operation',choices=['homolog','pr','merge','deploy','staging_pr','staging_merge'])
+    parser.add_argument('--operation',choices=['homolog','pr','merge','deploy','staging_pr','staging_merge','repair'])  # RESULT_PROBE_20260911
+    parser.add_argument('--criterion',help='Criterion id to measure (probe)')  # RESULT_PROBE_20260911
+    parser.add_argument('--all',action='store_true',help='Measure every criterion that has a probe')  # RESULT_PROBE_20260911
+    parser.add_argument('--hypothesis',default='',help='progress: hypothesis for the next attempt')  # RESULT_PROBE_20260911
+    parser.add_argument('--change',default='',help='progress: bounded change of the next attempt')  # RESULT_PROBE_20260911
     parser.add_argument('--target')
     parser.add_argument('--candidate')
     parser.add_argument('--wait',type=int,default=0,help='Seconds to keep trying the project slot (max 900); BLOCK_LESS_20260910')
@@ -2075,6 +2494,12 @@ def main():
             result['credentials']=_credentials_hint(args.db)  # BLOCK_LESS6_20260910
             result['delivery_environment']=_delivery_environment_for_db(args.db)  # DELIVERY_ENV_20260911
             result['continuation']=continuation_links(conn,args.task)  # RECORD_CONTINUATION_20260911
+            try:  # RESULT_PROBE_20260911: medições, tentativas e nota de debug
+                _st=(json.loads(result['workflow']['state_json'] or '{}') or {}) if result['workflow'] else {}
+                result['measurements']=_st.get('measurements'); result['attempts']=_st.get('attempts')
+                result['debug_note']=completion_refusal_note(conn,args.task)
+            except Exception:
+                pass
             if result['workflow']:
                 result['request']=get_request(conn,result['workflow']['request_id'])
                 result['production_precheck']=(json.loads(result['workflow']['state_json'] or '{}') or {}).get('production_precheck')  # BLOCK_LESS7_20260910
@@ -2100,7 +2525,13 @@ def main():
         elif args.action=='repair-card':
             from hermes_cli.nfos_workspace_repair import repair_card
             result=repair_card(conn,args.task,board=args.project,**payload)
+        elif args.action=='probe':  # RESULT_PROBE_20260911
+            result={'measurements':run_probes(conn,args.task,args.run,criterion=args.criterion,all_=bool(args.all))}
         elif args.action=='progress':
+            if args.hypothesis or args.change:  # RESULT_PROBE_20260911: tentativa registrada no card
+                _wf=get_workflow(conn,args.task); _st=(json.loads(_wf['state_json'] or '{}') or {}) if _wf else {}
+                _att=list(_st.get('attempts') or []); _att.append({'at':int(time.time()),'run_id':args.run,'hypothesis':args.hypothesis,'change':args.change})
+                payload=dict(payload,attempts=_att[-30:])
             advance(conn,args.task,args.run,args.stage,next_action=args.next_action,state=payload);result={'saved':True}
         elif args.action=='ask':
             context={k:v for k,v in payload.items() if k not in {'question','context'}}
