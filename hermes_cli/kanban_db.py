@@ -385,6 +385,8 @@ def _fire_dispatch_tick_hook(
             result.skipped_per_profile_capped,
             result.skipped_unassigned,
             result.skipped_nonspawnable,
+            result.healed_assignee,
+            result.blocked_nonspawnable,
         )):
             outcome = "idle"
         invoke_hook(
@@ -3740,16 +3742,103 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _configured_executor_profiles(
+    executor_profiles: Optional[Iterable[str]] = None,
+) -> Optional[frozenset[str]]:
+    """Return the host's executor allowlist (canonical names) or ``None``.
+
+    ``kanban.executor_profiles`` lists the profiles this host spawns workers
+    for. Absent or empty means "no allowlist": every existing profile
+    directory counts as an executor (upstream behaviour). Pass the value
+    already loaded from config as ``executor_profiles`` to skip the config
+    read; ``None`` reads ``kanban.executor_profiles`` from the current
+    context's config.
+    """
+    raw: Any = executor_profiles
+    if raw is None:
+        try:
+            from hermes_cli.config import load_config
+
+            raw = (load_config().get("kanban") or {}).get("executor_profiles")
+        except Exception:
+            return None
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        raw = [raw]
+    names: set[str] = set()
+    try:
+        for item in raw:
+            text = str(item or "").strip()
+            if text:
+                names.add(_canonical_assignee(text) or "")
+    except TypeError:
+        return None
+    names.discard("")
+    return frozenset(names) or None
+
+
+def _assignee_is_executor(
+    assignee: Optional[str],
+    *,
+    executor_profiles: Optional[Iterable[str]] = None,
+    profile_exists=None,
+) -> bool:
+    """True when ``assignee`` names a profile this host can spawn a worker for.
+
+    With ``kanban.executor_profiles`` set the name must be on the list: a
+    retired profile whose directory survives, ``default`` (which always
+    "exists") or a placeholder such as ``unassigned`` are not executors.
+    Without the list an existing profile directory is enough, as upstream.
+    ``profile_exists`` lets the dispatcher pass the function it already
+    imported; ``None`` resolves :func:`hermes_cli.profiles.profile_exists`
+    and, when that module is not importable, trusts the name (also upstream).
+    """
+    candidate = (assignee or "").strip()
+    if not candidate:
+        return False
+    try:
+        canon = _canonical_assignee(candidate) or ""
+    except Exception:
+        return False
+    allowlist = _configured_executor_profiles(executor_profiles)
+    if allowlist is not None and canon not in allowlist:
+        return False
+    if profile_exists is None:
+        try:
+            from hermes_cli.profiles import profile_exists as _pe
+        except Exception:
+            return True
+        profile_exists = _pe
+    try:
+        return bool(profile_exists(canon))
+    except Exception:
+        return False
+
+
 def _resolve_executable_assignee(assignee: Optional[str]) -> str:
-    """Require an explicit executor or the current context's configured default."""
+    """Require an explicit executor or the current context's configured default.
+
+    Resolution order: an empty assignee or the ``unassigned`` placeholder
+    takes ``kanban.default_assignee``; with ``kanban.executor_profiles`` set,
+    a name outside the list also falls back to the default executor, so a
+    card routed to a retired or non-executor profile is re-pointed instead
+    of parking; anything that still does not name a profile of this host is
+    refused.
+    """
     from hermes_cli.profiles import profile_exists, validate_profile_name
 
-    candidate = (assignee or "").strip()
-    if not candidate or candidate.casefold() == "unassigned":
+    try:
         from hermes_cli.config import load_config
 
         kanban_config = load_config().get("kanban") or {}
-        candidate = (kanban_config.get("default_assignee") or "").strip()
+    except Exception:
+        kanban_config = {}
+    default_assignee = (kanban_config.get("default_assignee") or "").strip()
+
+    candidate = (assignee or "").strip()
+    if not candidate or candidate.casefold() == "unassigned":
+        candidate = default_assignee
     if not candidate:
         raise ValueError(
             "Executable task requires an assignee. Choose an existing profile "
@@ -3757,6 +3846,19 @@ def _resolve_executable_assignee(assignee: Optional[str]) -> str:
         )
     candidate = _canonical_assignee(candidate)
     validate_profile_name(candidate)
+    allowlist = _configured_executor_profiles(
+        kanban_config.get("executor_profiles") or ()
+    )
+    if allowlist is not None and candidate not in allowlist:
+        fallback = _canonical_assignee(default_assignee) if default_assignee else None
+        if fallback and fallback in allowlist:
+            candidate = fallback
+        else:
+            raise ValueError(
+                f"Assignee profile {candidate!r} is not an executor on this host "
+                "(kanban.executor_profiles). Choose a listed profile or set "
+                "kanban.default_assignee to one of them."
+            )
     if not profile_exists(candidate):
         raise ValueError(
             f"Assignee profile {candidate!r} does not exist. Choose an existing "
@@ -3770,12 +3872,23 @@ def _ensure_ready_assignee(conn: sqlite3.Connection, task_id: str) -> None:
     row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         return
-    assignee = _resolve_executable_assignee(row["assignee"])
+    original = (row["assignee"] or "").strip()
+    assignee = _resolve_executable_assignee(original)
     if assignee != row["assignee"]:
         conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (assignee, task_id))
-        _append_event(conn, task_id, "assigned", {
+        payload: dict[str, Any] = {
             "assignee": assignee, "source": "kanban.default_assignee",
-        })
+        }
+        if (
+            original
+            and original.casefold() != "unassigned"
+            and _canonical_assignee(original) != assignee
+        ):
+            # The row named a profile that is not an executor here; the
+            # allowlist re-pointed it. Keep the old value for the audit trail.
+            payload["source"] = "kanban.executor_profiles"
+            payload["previous"] = original
+        _append_event(conn, task_id, "assigned", payload)
 
 
 def _canonical_delivery_document(value: Mapping[str, Any]) -> tuple[str, str]:
@@ -11013,6 +11126,19 @@ class DispatchResult:
     operator-actionable failure. Tracked separately so health telemetry
     can distinguish "real stuck" (nothing spawned but spawnable work
     available) from "correctly idle" (nothing spawnable in the queue)."""
+    healed_assignee: list[tuple[str, str, str]] = field(default_factory=list)
+    """Ready/review tasks whose assignee named something this host cannot
+    spawn for (a retired profile whose directory survives, ``default``, a
+    literal placeholder) and were re-pointed to ``kanban.default_assignee``
+    this tick before spawning, as ``(task_id, previous_assignee, assignee)``.
+    The row is updated and an ``assigned`` event with
+    ``source="dispatcher.heal"`` records the previous value, so a card never
+    parks on an executor that does not exist here."""
+    blocked_nonspawnable: list[tuple[str, str]] = field(default_factory=list)
+    """Ready tasks moved to ``blocked`` this tick because their assignee is
+    outside ``kanban.executor_profiles`` and no ``kanban.default_assignee``
+    could absorb them, as ``(task_id, assignee)``. Operator-actionable: the
+    card carries a comment naming the assignee to fix."""
     skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
     """Tasks deferred this tick because their assignee is already at
     ``kanban.max_in_progress_per_profile`` (#21582). Each entry is
@@ -13668,6 +13794,110 @@ def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
         return "unknown"
 
 
+def _heal_nonspawnable_assignee(
+    conn: sqlite3.Connection,
+    task_id: str,
+    assignee: str,
+    *,
+    default_assignee: Optional[str],
+    allowlisted: bool,
+    dry_run: bool,
+    result: "DispatchResult",
+    lane: str,
+) -> Optional[str]:
+    """Re-point, park or skip a dispatchable row whose assignee no host executor matches.
+
+    Returns the assignee to spawn with, or ``None`` when the row is skipped
+    this tick. Outcomes, in order:
+
+    * ``default_assignee`` resolves to an executor: the row is updated and an
+      ``assigned`` event (``source="dispatcher.heal"``, ``previous``) records
+      the old value; the caller dispatches in the same tick.
+    * no usable default but ``kanban.executor_profiles`` is set: the
+      operator declared the executors, so the assignee is a mistake nobody
+      will pull by hand. Ready rows go to ``blocked`` with a comment naming
+      the assignee (review rows cannot be blocked and fall through to the
+      skip bucket).
+    * neither: upstream behaviour, ``skipped_nonspawnable`` (a control-plane
+      lane pulled by a terminal via ``claim_task``), no row mutation.
+
+    Dry runs never write; they report what a real tick would do.
+    """
+    if default_assignee:
+        if not dry_run:
+            try:
+                with write_txn(conn):
+                    cur = conn.execute(
+                        "UPDATE tasks SET assignee = ? WHERE id = ? AND assignee = ?",
+                        (default_assignee, task_id, assignee),
+                    )
+                    if cur.rowcount == 1:
+                        _append_event(
+                            conn, task_id, "assigned",
+                            {
+                                "assignee": default_assignee,
+                                "source": "dispatcher.heal",
+                                "previous": assignee,
+                                "lane": lane,
+                            },
+                        )
+                        rewritten = True
+                    else:
+                        rewritten = False
+            except Exception:
+                _log.debug(
+                    "kanban dispatch: failed to re-point assignee %r of %s to %r",
+                    assignee, task_id, default_assignee, exc_info=True,
+                )
+                rewritten = False
+            if not rewritten:
+                # The row changed under us (a human reassign in the same
+                # tick); leave it for the next tick instead of racing.
+                result.skipped_nonspawnable.append(task_id)
+                return None
+        _log.info(
+            "kanban dispatcher: assignee %r of %s is not an executor on this host; "
+            "re-pointed to kanban.default_assignee=%r%s",
+            assignee, task_id, default_assignee, " (dry-run)" if dry_run else "",
+        )
+        result.healed_assignee.append((task_id, assignee, default_assignee))
+        return default_assignee
+    if allowlisted and lane == "ready":
+        reason = (
+            f"Operador: o assignee {assignee!r} deste card não é executor neste host "
+            "(kanban.executor_profiles) e não há kanban.default_assignee para "
+            "absorvê-lo. Para qual executor reatribuir?"
+        )
+        if not dry_run:
+            parked = False
+            try:
+                parked = bool(block_task(conn, task_id, reason=reason, kind="needs_input"))
+                if parked:
+                    add_comment(conn, task_id, "dispatcher", reason)
+            except Exception:
+                _log.debug(
+                    "kanban dispatch: failed to block %s over assignee %r",
+                    task_id, assignee, exc_info=True,
+                )
+            if not parked:
+                _log.warning(
+                    "kanban dispatcher: %s keeps assignee %r, which is not an "
+                    "executor on this host, and could not be blocked; skipping",
+                    task_id, assignee,
+                )
+                result.skipped_nonspawnable.append(task_id)
+                return None
+        _log.warning(
+            "kanban dispatcher: %s parked in blocked: assignee %r is not an "
+            "executor on this host and no kanban.default_assignee is set%s",
+            task_id, assignee, " (dry-run)" if dry_run else "",
+        )
+        result.blocked_nonspawnable.append((task_id, assignee))
+        return None
+    result.skipped_nonspawnable.append(task_id)
+    return None
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -13682,6 +13912,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    executor_profiles: Optional[Iterable[str]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -13717,6 +13948,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            executor_profiles=executor_profiles,
         )
         _fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
         return result
@@ -13737,6 +13969,7 @@ def dispatch_once(
                 default_assignee=default_assignee,
                 max_in_progress_per_profile=max_in_progress_per_profile,
                 reconcile_orphans=reconcile_orphans,
+                executor_profiles=executor_profiles,
             )
             # Still under the dispatch lock: run the periodic PASSIVE WAL
             # checkpoint (see _maybe_checkpoint_wal; the -wal file size is
@@ -13764,6 +13997,7 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    executor_profiles: Optional[Iterable[str]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -14027,6 +14261,24 @@ def _dispatch_once_locked(
             # bucket it as nonspawnable if the profile genuinely isn't
             # there, with the existing diagnostic.
             _default_assignee_resolved = True
+    # Executor allowlist (kanban.executor_profiles): when set, only the
+    # listed profiles are spawnable here, whatever directories exist on
+    # disk. The default executor must itself be on the list, otherwise the
+    # heal below would re-point cards to something this host cannot run.
+    _executor_allowlist = _configured_executor_profiles(executor_profiles)
+    if (
+        _default_assignee
+        and _default_assignee_resolved
+        and _executor_allowlist is not None
+        and (_canonical_assignee(_default_assignee) or "") not in _executor_allowlist
+    ):
+        _log.warning(
+            "kanban dispatcher: default_assignee=%r is not in "
+            "kanban.executor_profiles=%s; unassigned and non-executor rows "
+            "will not be re-pointed to it",
+            _default_assignee, sorted(_executor_allowlist),
+        )
+        _default_assignee_resolved = False
     for row in ready_rows:
         if ready_budget is not None and spawned >= ready_budget:
             break
@@ -14088,15 +14340,30 @@ def _dispatch_once_locked(
             from hermes_cli.profiles import profile_exists  # local import: avoids cycle
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row_assignee):
-            # Bucket separately from skipped_unassigned: the operator
-            # cannot fix this by assigning a profile (the assignee IS the
-            # intended owner — a terminal lane). Health telemetry uses
-            # this distinction to suppress spurious "stuck" warnings on
-            # multi-lane setups where the ready queue is steadily full
-            # of human-pulled work.
-            result.skipped_nonspawnable.append(row["id"])
-            continue
+        if not _assignee_is_executor(
+            row_assignee,
+            executor_profiles=_executor_allowlist or (),
+            profile_exists=profile_exists,
+        ):
+            # Not an executor of this host. With kanban.default_assignee
+            # the row is re-pointed and dispatched right now (an 'assigned'
+            # event keeps the previous value); with an allowlist but no
+            # default it parks in 'blocked' with a comment; with neither it
+            # stays in skipped_nonspawnable, the upstream terminal-lane
+            # case (the assignee IS the intended owner, pulled by a
+            # terminal through claim_task). Health telemetry uses that
+            # bucket to suppress spurious "stuck" warnings on multi-lane
+            # setups where the ready queue is steadily full of human-pulled
+            # work.
+            healed = _heal_nonspawnable_assignee(
+                conn, row["id"], row_assignee,
+                default_assignee=_default_assignee if _default_assignee_resolved else None,
+                allowlisted=_executor_allowlist is not None,
+                dry_run=dry_run, result=result, lane="ready",
+            )
+            if healed is None:
+                continue
+            row_assignee = healed
         # Per-profile concurrency cap (#21582): even if there's global
         # headroom, refuse to spawn for an assignee that's already at
         # its in-flight cap. Prevents one profile's local model / API
@@ -14296,14 +14563,28 @@ def _dispatch_once_locked(
             from hermes_cli.profiles import profile_exists
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row["assignee"]):
-            result.skipped_nonspawnable.append(row["id"])
-            continue
+        review_assignee = row["assignee"]
+        if not _assignee_is_executor(
+            review_assignee,
+            executor_profiles=_executor_allowlist or (),
+            profile_exists=profile_exists,
+        ):
+            # Same rule as the ready lane: re-point to default_assignee and
+            # dispatch now, or skip (review rows are never parked).
+            healed = _heal_nonspawnable_assignee(
+                conn, row["id"], review_assignee,
+                default_assignee=_default_assignee if _default_assignee_resolved else None,
+                allowlisted=_executor_allowlist is not None,
+                dry_run=dry_run, result=result, lane="review",
+            )
+            if healed is None:
+                continue
+            review_assignee = healed
         if _per_profile_cap is not None:
-            current = _per_profile_running.get(row["assignee"], 0)
+            current = _per_profile_running.get(review_assignee, 0)
             if current >= _per_profile_cap:
                 result.skipped_per_profile_capped.append(
-                    (row["id"], row["assignee"], current)
+                    (row["id"], review_assignee, current)
                 )
                 continue
         guard_reason = check_respawn_guard(conn, row["id"], lane="review")
@@ -14317,11 +14598,11 @@ def _dispatch_once_locked(
                     )
             continue
         if dry_run:
-            result.spawned.append((row["id"], row["assignee"], ""))
+            result.spawned.append((row["id"], review_assignee, ""))
             spawned += 1
             if _per_profile_cap is not None:
-                _per_profile_running[row["assignee"]] = (
-                    _per_profile_running.get(row["assignee"], 0) + 1
+                _per_profile_running[review_assignee] = (
+                    _per_profile_running.get(review_assignee, 0) + 1
                 )
             continue
         candidate = get_task(conn, row["id"])

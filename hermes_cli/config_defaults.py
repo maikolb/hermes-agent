@@ -2796,6 +2796,17 @@ DEFAULT_CONFIG = {
         # otherwise saturate one profile's local model / API quota /
         # browser pool while leaving other profiles idle.
         "max_in_progress_per_profile": None,
+        # Profiles this host spawns workers for. When the list is set, a
+        # task created or promoted with an assignee outside it resolves to
+        # default_assignee, and the dispatcher re-points a ready task
+        # assigned elsewhere (a retired profile whose directory survives,
+        # "default", a placeholder) to default_assignee on the same tick,
+        # with an 'assigned' event that keeps the previous value. Without
+        # default_assignee such a task is parked in 'blocked' with a
+        # comment. Empty (the default) keeps the upstream rule: any
+        # existing profile directory counts as an executor and tasks
+        # assigned to a non-profile lane are skipped as nonspawnable.
+        "executor_profiles": [],
         # When true, the kanban dispatcher auto-runs the decomposer on
         # tasks that land in Triage (every dispatcher tick). When false,
         # decomposition is manual via `hermes kanban decompose <id>` or

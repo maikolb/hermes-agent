@@ -2657,6 +2657,12 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         _cfg = load_config()
         _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
         default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
+        _raw_executors = _kanban_cfg.get("executor_profiles") or []
+        if isinstance(_raw_executors, str):
+            _raw_executors = [_raw_executors]
+        executor_profiles = [
+            str(name).strip() for name in _raw_executors if str(name or "").strip()
+        ]
 
         def _coerce_positive_int(value):
             if value is None:
@@ -2683,6 +2689,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
     except Exception:
         default_assignee = None
+        executor_profiles = None
         max_in_progress_per_profile = None
         max_in_progress = None
         max_spawn = getattr(args, "max", None)
@@ -2695,6 +2702,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            executor_profiles=executor_profiles,
         )
     if getattr(args, "json", False):
         print(json.dumps({
@@ -2715,6 +2723,14 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 for (tid, who, current) in res.skipped_per_profile_capped
             ],
             "auto_assigned_default": res.auto_assigned_default,
+            "healed_assignee": [
+                {"task_id": tid, "previous": prev, "assignee": who}
+                for (tid, prev, who) in res.healed_assignee
+            ],
+            "blocked_nonspawnable": [
+                {"task_id": tid, "assignee": who}
+                for (tid, who) in res.blocked_nonspawnable
+            ],
         }, indent=2))
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
@@ -2740,6 +2756,18 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             f"Auto-assigned to kanban.default_assignee={default_assignee!r}: "
             f"{', '.join(res.auto_assigned_default)}"
         )
+    if res.healed_assignee:
+        for tid, prev, who in res.healed_assignee:
+            print(
+                f"Re-pointed ({prev!r} is not an executor on this host): "
+                f"{tid}  ->  {who}"
+            )
+    if res.blocked_nonspawnable:
+        for tid, who in res.blocked_nonspawnable:
+            print(
+                f"Blocked ({who!r} is not an executor on this host and no "
+                f"kanban.default_assignee is set): {tid}"
+            )
     if res.skipped_unassigned:
         print(f"Skipped (unassigned): {', '.join(res.skipped_unassigned)}")
     if res.skipped_per_profile_capped:
