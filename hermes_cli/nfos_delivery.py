@@ -866,16 +866,16 @@ def create_continuation(conn, parent_id, *, title=None, body=None, requester='wo
     if parent.status in {'done', 'archived'} and not continuation_links(conn, parent_id)['children']:
         raise WorkflowError('A continuation is created before the parent closes')
     _ensure_continuations(conn)
-    existing = conn.execute("SELECT c.child_id FROM nfos_continuations c JOIN tasks t ON t.id=c.child_id WHERE c.parent_id=? AND t.status NOT IN ('done','archived') ORDER BY c.created_at DESC LIMIT 1", (parent_id,)).fetchone()
-    if existing:
-        child = kb.get_task(conn, existing[0])
-        return {'task_id': child.id, 'continuation_of': parent_id, 'priority': child.priority, 'status': child.status, 'existing': True}
     unmet = _unmet_criteria_text(conn, parent_id)
     child_title = (title or f"Continuação: {parent.title}")[:200]
     child_body = ((body or '').strip() + '\n\n' if body else '') + f"Continuação do card {parent_id} (mesmo pedido). Não repita entregas já confirmadas; leia o card de origem, seus efeitos e artefatos.\n" + unmet
     if parent.workspace_path:
         child_body += f"\nWorkspace de origem: {parent.workspace_path}" + (f" (branch {parent.branch_name})" if parent.branch_name else '')
-    with kb.write_txn(conn):
+    with kb.write_txn(conn):  # RECORD_CONTINUATION_FIX_20260911: checagem e criação na mesma transação de escrita (BEGIN IMMEDIATE serializa)
+        existing = conn.execute("SELECT c.child_id FROM nfos_continuations c JOIN tasks t ON t.id=c.child_id WHERE c.parent_id=? AND t.status NOT IN ('done','archived') ORDER BY c.created_at DESC LIMIT 1", (parent_id,)).fetchone()
+        if existing:
+            child = kb.get_task(conn, existing[0])
+            return {'task_id': child.id, 'continuation_of': parent_id, 'priority': child.priority, 'status': child.status, 'existing': True}
         child_id = kb.create_task(conn, title=child_title, body=child_body, assignee=parent.assignee,
                                   created_by=f"continuation:{requester}",
                                   workspace_kind=parent.workspace_kind if parent.workspace_kind == 'scratch' else 'worktree',

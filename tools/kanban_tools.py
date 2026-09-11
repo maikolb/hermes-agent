@@ -1732,6 +1732,21 @@ def _handle_create(args: dict, **kw) -> str:
     delegated_err = _reject_delegated_child_mutation("kanban_create")
     if delegated_err:
         return delegated_err
+    continuation_of = args.get("continuation_of")  # RECORD_CONTINUATION_FIX_20260911: antes de qualquer validação; herda executor e prioridade do pai
+    if continuation_of:
+        _ctitle = args.get("title")
+        try:
+            kb, conn = _connect(board=args.get("board"))
+            try:
+                from hermes_cli import nfos_delivery as _d
+                res = _d.create_continuation(conn, str(continuation_of), title=(str(_ctitle).strip() if _ctitle else None),
+                                             body=args.get("body"),
+                                             requester=os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_PROFILE") or "principal")
+            finally:
+                conn.close()
+            return _ok(**res)
+        except Exception as e:
+            return tool_error(f"kanban_create continuation_of: {e}")
     title = args.get("title")
     if not title or not str(title).strip():
         return tool_error("title is required")
@@ -1743,19 +1758,6 @@ def _handle_create(args: dict, **kw) -> str:
         )
     body = args.get("body")
     parents = args.get("parents") or []
-    continuation_of = args.get("continuation_of")  # RECORD_CONTINUATION_20260911
-    if continuation_of:
-        try:
-            kb, conn = _connect(board=args.get("board"))
-            try:
-                from hermes_cli import nfos_delivery as _d
-                res = _d.create_continuation(conn, str(continuation_of), title=(str(title).strip() if title else None), body=body,
-                                             requester=os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_PROFILE") or "principal")
-            finally:
-                conn.close()
-            return _ok(**res)
-        except Exception as e:
-            return tool_error(f"kanban_create continuation_of: {e}")
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
     # Stamp the originating session id when the agent loop runs under
     # ACP (which sets HERMES_SESSION_ID before invoking tools). NULL on
@@ -2728,6 +2730,15 @@ KANBAN_CREATE_SCHEMA = {
                     "Opening post: full spec, acceptance criteria, "
                     "links. The assigned worker reads this as part of "
                     "its context."
+                ),
+            },
+            "continuation_of": {  # RECORD_CONTINUATION_FIX_20260911
+                "type": "string",
+                "description": (
+                    "Id of an unfinished card of the SAME request that this new card continues. "
+                    "The child is born executable (no parents), inherits priority, executor, "
+                    "project and the unmet criteria with evidence; one open continuation per "
+                    "card (idempotent). Do not pass assignee, parents or priority with it."
                 ),
             },
             "parents": {
