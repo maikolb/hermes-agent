@@ -701,6 +701,12 @@ def _run_sql_probe(dsn, query):
         cur.execute('SET LOCAL statement_timeout = 15000')
         cur.execute(query); rows = cur.fetchmany(200)
         conn.rollback()
+    except Exception:
+        try:  # PROBE_HARDENING_20260911: nunca deixar transação aberta no backend do pooler
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
     return [list(r) for r in rows]
@@ -709,6 +715,9 @@ def _run_sql_probe(dsn, query):
 def _run_http_probe(probe, env):
     import urllib.request, urllib.error
     headers = {}
+    bypass = env.get('VERCEL_AUTOMATION_BYPASS_SECRET') or env.get('VERCEL_PROTECTION_BYPASS')  # PROBE_HARDENING_20260911
+    if bypass:
+        headers['x-vercel-protection-bypass'] = bypass
     for key, value in (probe.get('headers') or {}).items():
         value = str(value)
         headers[str(key)] = env.get(value[5:], '') if value.startswith('$env:') else value
@@ -721,10 +730,11 @@ def _run_http_probe(probe, env):
     except urllib.error.HTTPError as exc:
         status, hdrs = exc.code, dict(exc.headers or {})
         body = exc.read(200000) if method == 'GET' else b''
+    mitigated = next((f'{k}={v}' for k, v in hdrs.items() if k.lower() in ('x-vercel-mitigated', 'x-vercel-protection', 'cf-mitigated')), None)  # PROBE_HARDENING_20260911
     if probe['kind'] == 'header':
         name = str(probe['header']).lower()
-        return {'status': status, 'value': next((v for k, v in hdrs.items() if k.lower() == name), None)}
-    observed = {'status': status}
+        return {'status': status, 'value': next((v for k, v in hdrs.items() if k.lower() == name), None), 'mitigated': mitigated}
+    observed = {'status': status, 'mitigated': mitigated}
     text = body.decode('utf-8', 'replace')
     try:
         data = json.loads(text)
@@ -779,6 +789,8 @@ def _execute_probe(conn, task_id, probe):
             observed = {'rows': _json_safe(_run_sql_probe(dsn, str(probe['query']).strip().rstrip(';')))}
         else:
             observed = _run_http_probe(probe, env)
+            if observed.get('mitigated') or (observed.get('status') == 429 and (probe.get('expect') or {}).get('status') != 429):  # PROBE_HARDENING_20260911
+                return 'INDETERMINADO', observed, f"edge protection challenged the probe ({observed.get('mitigated') or 'HTTP 429'}); configure the automation bypass in the project vault or use the QA session"
             if observed.get('status') in (401, 403) and 'status' not in (probe.get('expect') or {}):
                 return 'INDETERMINADO', observed, f"HTTP {observed['status']}: access to the consumer surface was refused"
     except WorkflowError as exc:
