@@ -794,6 +794,153 @@ def _report_artifact_checks(conn, task, spec, report):
     return checks
 
 
+def _ensure_continuations(conn):  # RECORD_CONTINUATION_20260911
+    conn.execute('CREATE TABLE IF NOT EXISTS nfos_continuations(child_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, created_at INTEGER NOT NULL)')
+
+
+def continuation_links(conn, task_id):
+    """RECORD_CONTINUATION_20260911: {'of': pai ou None, 'children': [filhos]}."""
+    try:
+        _ensure_continuations(conn)
+        of = conn.execute('SELECT parent_id FROM nfos_continuations WHERE child_id=?', (task_id,)).fetchone()
+        children = [r[0] for r in conn.execute('SELECT child_id FROM nfos_continuations WHERE parent_id=? ORDER BY created_at', (task_id,))]
+        return {'of': of[0] if of else None, 'children': children}
+    except Exception:
+        return {'of': None, 'children': []}
+
+
+def continuation_chain(conn, task_id):
+    """RECORD_CONTINUATION_20260911: ids da cadeia (raiz até este card) para somar consumo."""
+    chain = [task_id]; seen = {task_id}
+    try:
+        _ensure_continuations(conn)
+        cur = task_id
+        for _ in range(50):
+            row = conn.execute('SELECT parent_id FROM nfos_continuations WHERE child_id=?', (cur,)).fetchone()
+            if not row or row[0] in seen:
+                break
+            chain.insert(0, row[0]); seen.add(row[0]); cur = row[0]
+    except Exception:
+        pass
+    return chain
+
+
+def chain_consumption(conn, task_id):
+    """RECORD_CONTINUATION_20260911: runs e minutos somados na cadeia de continuação."""
+    ids = continuation_chain(conn, task_id)
+    q = ','.join('?' * len(ids))
+    row = conn.execute(f"SELECT count(*), coalesce(sum(coalesce(ended_at, strftime('%s','now'))-started_at),0) FROM task_runs WHERE task_id IN ({q})", ids).fetchone()
+    return {'chain': ids, 'runs': int(row[0] or 0), 'minutes': int((row[1] or 0) // 60)}
+
+
+def _unmet_criteria_text(conn, task_id):
+    report = _artifact(conn, task_id, 'report')
+    if not report:
+        return 'Sem relatório salvo no card de origem.'
+    try:
+        content = json.loads(report['content'])
+    except Exception:
+        return 'Relatório de origem ilegível.'
+    lines = []
+    for c in content.get('criteria') or []:
+        if c.get('status') != 'PASS':
+            lines.append(f"- {c.get('id')}: {c.get('status')} (evidência: {', '.join(c.get('evidence') or []) or 'nenhuma'})")
+    arts = [f"{a.get('id')}: {a.get('path')}" for a in (content.get('artifacts') or [])]
+    blockers = content.get('blockers') or []
+    text = 'Critérios ainda não atendidos no card de origem (relatório r%s):\n' % report['revision'] + ('\n'.join(lines) or '- nenhum')
+    if blockers:
+        text += '\nBloqueios registrados: ' + _json(blockers)[:1500]
+    if arts:
+        text += '\nEvidências já existentes: ' + '; '.join(arts)[:2000]
+    return text
+
+
+def create_continuation(conn, parent_id, *, title=None, body=None, requester='worker'):
+    """RECORD_CONTINUATION_20260911: continuação executável do mesmo pedido. Sem `parents` (sem dependência circular); herda prioridade,
+    executor, tipo, projeto, tenant e workspace scratch; recebe os critérios não atendidos e as evidências do pai; idempotente
+    (um filho aberto por pai); pai bloqueado com pergunta a humano gera filho bloqueado com a mesma pergunta."""
+    kb = _kb()
+    parent = kb.get_task(conn, parent_id)
+    if not parent:
+        raise WorkflowError('Unknown parent card for continuation')
+    if parent.status in {'done', 'archived'} and not continuation_links(conn, parent_id)['children']:
+        raise WorkflowError('A continuation is created before the parent closes')
+    _ensure_continuations(conn)
+    existing = conn.execute("SELECT c.child_id FROM nfos_continuations c JOIN tasks t ON t.id=c.child_id WHERE c.parent_id=? AND t.status NOT IN ('done','archived') ORDER BY c.created_at DESC LIMIT 1", (parent_id,)).fetchone()
+    if existing:
+        child = kb.get_task(conn, existing[0])
+        return {'task_id': child.id, 'continuation_of': parent_id, 'priority': child.priority, 'status': child.status, 'existing': True}
+    unmet = _unmet_criteria_text(conn, parent_id)
+    child_title = (title or f"Continuação: {parent.title}")[:200]
+    child_body = ((body or '').strip() + '\n\n' if body else '') + f"Continuação do card {parent_id} (mesmo pedido). Não repita entregas já confirmadas; leia o card de origem, seus efeitos e artefatos.\n" + unmet
+    if parent.workspace_path:
+        child_body += f"\nWorkspace de origem: {parent.workspace_path}" + (f" (branch {parent.branch_name})" if parent.branch_name else '')
+    with kb.write_txn(conn):
+        child_id = kb.create_task(conn, title=child_title, body=child_body, assignee=parent.assignee,
+                                  created_by=f"continuation:{requester}",
+                                  workspace_kind=parent.workspace_kind if parent.workspace_kind == 'scratch' else 'worktree',
+                                  workspace_path=parent.workspace_path if parent.workspace_kind == 'scratch' else None,
+                                  tenant=parent.tenant, priority=max(int(parent.priority or 0), 0), parents=(),
+                                  project_id=parent.project_id, delivery_type=parent.delivery_type,
+                                  max_runtime_seconds=parent.max_runtime_seconds)
+        conn.execute('INSERT INTO nfos_continuations(child_id,parent_id,created_at) VALUES(?,?,?)', (child_id, parent_id, int(time.time())))
+        kb._append_event(conn, parent_id, 'nfos_continuation_created', {'child': child_id, 'by': requester, 'priority': max(int(parent.priority or 0), 0)})
+        kb._append_event(conn, child_id, 'nfos_continuation_of', {'parent': parent_id, 'by': requester})
+    if parent.status == 'blocked' and (parent.block_kind or 'needs_input') in ('needs_input', 'capability'):
+        ev = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' ORDER BY id DESC LIMIT 1", (parent_id,)).fetchone()
+        reason = ''
+        try:
+            reason = (json.loads(ev[0]).get('reason') or '') if ev else ''
+        except Exception:
+            reason = ''
+        if reason:
+            try:
+                kb.block_task(conn, child_id, reason=reason, kind='needs_input')
+            except Exception:
+                pass
+    child = kb.get_task(conn, child_id)
+    return {'task_id': child_id, 'continuation_of': parent_id, 'priority': child.priority, 'status': child.status, 'existing': False}
+
+
+def _continuation_allows_partial(conn, task_id, content):
+    """RECORD_CONTINUATION_20260911: FAIL só fecha (owner mode) com partial_delivery=true e continuation = filho aberto deste card."""
+    try:
+        if content.get('partial_delivery') is not True:
+            return False
+        child = str(content.get('continuation') or '')
+        if not child:
+            return False
+        _ensure_continuations(conn)
+        row = conn.execute("SELECT t.status FROM nfos_continuations c JOIN tasks t ON t.id=c.child_id WHERE c.child_id=? AND c.parent_id=?", (child, task_id)).fetchone()
+        return bool(row) and row[0] not in ('done', 'archived')
+    except Exception:
+        return False
+
+
+def _check_reclassification(conn, task_id, report):
+    """RECORD_CONTINUATION_20260911: critério FAIL na revisão anterior só muda com reclassified {id, previous:'FAIL', reason, evidence}."""
+    previous = _artifact(conn, task_id, 'report')
+    if not previous:
+        return
+    try:
+        prev = json.loads(previous['content'])
+    except Exception:
+        return
+    prev_fail = {c.get('id') for c in (prev.get('criteria') or []) if c.get('status') == 'FAIL'}
+    if not prev_fail:
+        return
+    artifacts = {a.get('id') for a in (report.get('artifacts') or [])} | {a.get('path') for a in (report.get('artifacts') or [])}
+    recl = {r.get('id'): r for r in (report.get('reclassified') or []) if isinstance(r, dict)}
+    for c in report.get('criteria') or []:
+        cid = c.get('id')
+        if cid in prev_fail and c.get('status') != 'FAIL':
+            r = recl.get(cid)
+            if not r or r.get('previous') != 'FAIL' or not str(r.get('reason') or '').strip() or not r.get('evidence') \
+                    or any(e not in artifacts for e in r.get('evidence')):
+                raise WorkflowError(f"Criterion {cid} was FAIL in report r{previous['revision']}: changing it needs reclassified "
+                                    "{id, previous:'FAIL', reason, evidence:[declared artifact]}; the earlier revision stays")
+
+
 def save_report(conn, task_id, run_id, report):
     if conn.in_transaction:
         raise WorkflowError('Report evidence must be read outside a write transaction')
@@ -803,6 +950,7 @@ def save_report(conn, task_id, run_id, report):
         raise WorkflowError('No persisted spec')
     _require_current_instruction_spec(conn,task_id)
     report=json.loads(_json(report))
+    _check_reclassification(conn,task_id,report)  # RECORD_CONTINUATION_20260911
     encoded=_json(report)
     checks=_report_artifact_checks(conn,task,spec,report)
     evidence={'spec_revision':spec['revision'],'report_sha256':hashlib.sha256(encoded.encode()).hexdigest(),
@@ -1664,7 +1812,9 @@ def completion_evidence_check(conn, task_id):
         content=json.loads(report['content']); metadata=json.loads(report['evidence'])
         results=_report_results(spec,content)
         strict=not _owner_mode()  # BLOCK_LESS4/BLOCK_LESS8_20260910: fora do owner mode a prova completa continua exigida
-        if any((row['status']!='PASS') if strict else (row['status']=='FAIL') for row in results.values()):
+        _fails=[c for c,row in results.items() if ((row['status']!='PASS') if strict else (row['status']=='FAIL'))]
+        _partial_ok=(not strict) and bool(_fails) and _continuation_allows_partial(conn,task_id,content)  # RECORD_CONTINUATION_20260911
+        if _fails and not _partial_ok:
             return None
         digest=hashlib.sha256(report['content'].encode()).hexdigest()
         if (metadata.get('schema_version')!=1 or metadata.get('report_sha256')!=digest
@@ -1683,7 +1833,7 @@ def completion_evidence_check(conn, task_id):
                 proved.update(check.get('criteria',[]))
             elif check.get('status')!='external_unchecked':
                 return None
-        if any(((row['status']!='PASS') if strict else (row['status']=='FAIL')) or (strict and criterion not in proved) for criterion,row in results.items()):  # BLOCK_LESS2/BLOCK_LESS4_20260910
+        if any(((row['status']!='PASS') if strict else (row['status']=='FAIL' and not _partial_ok)) or (strict and criterion not in proved) for criterion,row in results.items()):  # BLOCK_LESS2/BLOCK_LESS4_20260910
             return None
         return {'report_id':report['id'],'report_revision':report['revision'],
                 'report_sha256':digest,'spec_revision':spec['revision'],
@@ -1924,6 +2074,7 @@ def main():
                 pass
             result['credentials']=_credentials_hint(args.db)  # BLOCK_LESS6_20260910
             result['delivery_environment']=_delivery_environment_for_db(args.db)  # DELIVERY_ENV_20260911
+            result['continuation']=continuation_links(conn,args.task)  # RECORD_CONTINUATION_20260911
             if result['workflow']:
                 result['request']=get_request(conn,result['workflow']['request_id'])
                 result['production_precheck']=(json.loads(result['workflow']['state_json'] or '{}') or {}).get('production_precheck')  # BLOCK_LESS7_20260910
