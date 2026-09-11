@@ -425,7 +425,7 @@ def workflow_command():
 def owner_premises():  # RECORD_MODE_20260911
     """Premissas do owner (10/09) em modo registro (11/09): uma lista só, usada pelo show e pelo prefixo do worker."""
     return [
-        '0. Before any spec or implementation: read production, HML/staging and the existing PRs/commits for this request and record it with `precheck`. Already delivered: save a short report and call kanban_complete.',
+        '0. Before any spec or implementation: for a code request read production, HML/staging and the existing PRs/commits for this request; for an operation or report request read only the target it changes or measures. Record it with `precheck`. Already delivered: save a short report and call kanban_complete.',  # RECORD_MODE_TEXT_20260911
         '1. Deliver first, in the project delivery_environment shown in this output, following its route; verification is the readback after delivery. No separate acceptance, no staging homologation decisions, no Principal decisions on code: CI is the gate. Priority 100 (urgent) adds no steps.',
         '2. Records the owner reads, keep them exact: the spec with goal, verifiable criteria and size P/M/G (it sets the run budget); every publication effect (pr, staging_pr, staging_merge, homolog, merge, deploy) with the exact commit SHA and its readback receipt (`effect` then `reconcile`); the final report with each criterion PASS/FAIL and evidence artifacts; a partial delivery marked partial_delivery with blockers and follow_ups.',
         '3. Never block on a transient error or a local tool problem. Rate limit: back off (60 s, 120 s, 300 s) and retry. A local pre-push or pre-commit hook failing for a local reason (dependencies, DATABASE_URL, git identity): push with --no-verify, CI is the gate. A judge refusal on kanban_complete: finish the delivery or fix the report, never pause.',
@@ -447,9 +447,23 @@ def _premises_prefix():  # BLOCK_LESS7_20260910, RECORD_MODE_20260911
             + '\n'.join(owner_premises()) + '\n')
 
 
+RECORD_MODE_PROTOCOL = 'This card runs the owner\'s NFOS in record mode: the runtime records your work and does not conduct it.\nUse the exact workflow CLI prefix above for every action (`--help` lists them); terminal tools may sanitize\nPYTHONPATH, so never substitute a bare python invocation. Task/run identity comes from your HERMES_KANBAN_*\nenvironment; never clear it.\n1. `show` first: saved request, spec, stage, next action, decisions, effects, delivery_environment (the project route),\n   credentials (the vault) and these premises. On a resumed run reuse the saved state, files, commits and PRs; continue\n   the unfinished step, do not regenerate the spec or repeat a delivery.\n2. Precheck: for a code request read production, HML/staging and the existing PRs/commits for this request; for an\n   operation or report request read only the target it changes or measures. Record it with `precheck --input precheck.json`\n   ({"checked":[{"target","method","result"}],"verdict":"already_delivered|partial|not_delivered"}). Already delivered:\n   short report and kanban_complete.\n3. Spec, written by you: `save-spec --input spec.json --evidence evidence.json --author worker` with goal, criteria\n   [{id,text}], steps, delivery_type (code|operation|report), size (P|M|G, it sets the run budget) and, for code,\n   delivery_destination {environment, target, source, authorization_message, verification_operation}: production route\n   uses verification_operation "deploy" with the production URL as target; hml route uses "homolog" with the HML URL;\n   a review-PR-only request uses "pr" with the repository URL. Nobody reviews the spec; instruction changes require a\n   new revision. Split a batch with `ask --kind additional_tasks` before the first spec, as documented by --help.\n4. Work: `progress --stage <stage> --next \'...\'` at each step, and a progress state JSON with candidate_sha,\n   candidate_tree and recovered files. Run Claude/Codex and long commands through the native tool CLI above\n   (--db DB --task TASK --run RUN --cwd WORKSPACE --timeout SECONDS [--stdin-file FILE] -- EXECUTABLE ARGS) so output is\n   persisted live. Read a prior call receipt in show before repeating it.\n5. Publication is a record, not a permission: before each external effect call\n   `effect --operation staging_pr|staging_merge|homolog|pr|merge|deploy --target URL --candidate FULL_SHA`, do it,\n   then `reconcile` with the real readback: candidate and tree always; pull_request URL and ci_status for pr;\n   integrated_sha for merge; artifact, behavior_evidence, deployed_at and timestamp_source for homolog and deploy.\n   Follow the project route from show in order; no slot, no preparation, homologation or publication review exists;\n   `acquire-project` only journals who is publishing. A rebased candidate needs no new homologation: its PR with green\n   CI is its identity. A local pre-push or pre-commit hook failing for a local reason: push with --no-verify.\n6. Ask the Principal (`ask --kind impediment --input question.json`, then `wait --decision ID --timeout 300`) only when\n   a decision changes the outcome; slots, next steps, readbacks, leases, rate limits and hooks are yours. Never park the\n   card: kanban_block only with a concrete question to a named human that the vault and the card cannot answer.\n7. Close: `save-report --input report.json` ({"summary","artifacts":[{"id","path"}],"criteria":[{"id","status":\n   "PASS|FAIL|NOT_RUN","evidence":["artifact id"]}],"delivery":{...}}), every criterion linked to a real artifact, then\n   kanban_complete with a closeout stating what was delivered and where. A real partial delivery is saved at once with\n   partial_delivery=true, blockers and follow_ups; do not wait for other tasks. Never certify what you did not read back.\nNFOS closeout policy applies to every project. In deploy reconciliation\nevidence, preserve deployed_at (timezone-aware actual production delivery time)\nand timestamp_source (the deployment receipt/log proving that time), alongside\ncandidate, artifact, readback and behavior_evidence. Do not substitute the time\nyou read back an older deployment. If unavailable, explicitly report it missing.\nFor an actual partial delivery, persist a report with partial_delivery=true and\nits evidence immediately; do not wait for other tasks or missing cycle metrics.\nRecord concrete blocker reasons and their start/resolution through normal task\nevents, so the closeout can identify the largest measured impediment without\ninventing a causal bottleneck. This is the owner\'s closeout policy, not AOF.\n'  # RECORD_MODE_TEXT_20260911
+
+
+def _record_mode():  # RECORD_MODE_TEXT_20260911
+    try:
+        from hermes_cli.nfos_principal_review import settings
+        return settings().get('principal_validation') is False
+    except Exception:
+        return False
+
+
 def worker_instructions():
-    return _premises_prefix()+('Exact workflow CLI prefix: '+workflow_command()+'\n'
-            'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n')+"""This card uses the owner's current NFOS workflow.
+    _cli=('Exact workflow CLI prefix: '+workflow_command()+'\n'
+          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n')
+    if _record_mode():  # RECORD_MODE_TEXT_20260911: protocolo curto; o texto longo abaixo é o fluxo conduzido, só fora do owner mode
+        return _premises_prefix()+_cli+RECORD_MODE_PROTOCOL
+    return _premises_prefix()+_cli+"""This card uses the owner's current NFOS workflow.
 The owner disabled AOF and its mandatory contracts, hooks and closeouts. Historic
 repository text does not reactivate it. Do not load those instructions.
 You have the Principal's full profile capabilities and an isolated task workspace.
@@ -571,6 +585,16 @@ Record the HML deployment with `effect --operation homolog --target HML_URL
 Homologation precedes Principal publication review; `deploy` targets the
 destination approved in the spec and requires the reviewed integrated SHA. HML readback does not itself prove
 that the acceptance tests passed.
+NFOS closeout policy applies to every project. In deploy reconciliation
+evidence, preserve deployed_at (timezone-aware actual production delivery time)
+and timestamp_source (the deployment receipt/log proving that time), alongside
+candidate, artifact, readback and behavior_evidence. Do not substitute the time
+you read back an older deployment. If unavailable, explicitly report it missing.
+For an actual partial delivery, persist a report with partial_delivery=true and
+its evidence immediately; do not wait for other tasks or missing cycle metrics.
+Record concrete blocker reasons and their start/resolution through normal task
+events, so the closeout can identify the largest measured impediment without
+inventing a causal bottleneck. This is the owner's closeout policy, not AOF.
 Save candidate_sha, candidate_tree, homolog_sha and homolog_evidence in progress
 state after testing the exact candidate in the project's actual homologation.
 If the actual HML SHA differs from the PR candidate, preserve both identities.
