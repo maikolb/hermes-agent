@@ -1386,12 +1386,51 @@ def _accept_homologation(conn, decision):
            {'decision_id':decision['id'],'identity':identity,'evidence_checks':context['evidence_checks']})
 
 
+_PRODUCTION_ORDER_RX = re.compile(  # DELIVERY_ENV_20260911
+    r"(subir|sobe|suba|publicar|publique|liberar|libere|promover|promova|deploy|mesclar|mescle|merge|mergear|integrar|integre)"
+    r"\W{0,24}(em|para|pra|na|no|to|in|on)?\W{0,12}(produ[cç][aã]o|\bprd\b|production|\bmain\b)", re.I)
+
+
+def _express_production_order(text):
+    """DELIVERY_ENV_20260911: ordem expressa do owner para produção no corpo do card (imperativo + produção), não menção descritiva."""
+    return bool(_PRODUCTION_ORDER_RX.search(str(text or '')))
+
+
+def _project_delivery_environment(conn, task_id):
+    """DELIVERY_ENV_20260911: delivery_environment do projeto do card (config), padrão production."""
+    try:
+        wf = get_workflow(conn, task_id); request = get_request(conn, wf['request_id'])
+        project = json.loads(request['payload'])['project']
+        key = project.get('board') or project.get('project_id')
+        from hermes_cli.nfos_runtime import project_config
+        cfg = project_config(key) or {}
+        return str(cfg.get('delivery_environment') or 'production').strip().lower()
+    except Exception:
+        return 'production'
+
+
+def _delivery_environment_for_db(db_path):
+    """DELIVERY_ENV_20260911: ambiente e rota do projeto do board (para o show)."""
+    try:
+        from hermes_cli.nfos_runtime import project_config, delivery_route
+        slug = Path(str(db_path)).resolve().parent.name if db_path else None
+        cfg = project_config(slug) if slug else None
+        if not cfg:
+            from hermes_cli.kanban_db import get_current_board
+            cfg = project_config(get_current_board())
+        return delivery_route(cfg or {})
+    except Exception:
+        return None
+
+
 def _delivery_candidate(conn, task_id, state=None):
     wf=get_workflow(conn,task_id)
     state=json.loads(wf['state_json']) if state is None else state
     candidate=state.get('candidate_sha') or state.get('homolog_sha')
     if candidate==state.get('homolog_sha'):
         return candidate
+    if _owner_mode() and state.get('candidate_sha') and _pr_green(conn,task_id,state['candidate_sha']):  # DELIVERY_ENV_20260911: CI verde identifica o candidato
+        return state['candidate_sha']
     decision=get_decision(conn,state.get('homologation_decision'))
     context=json.loads(decision['context']) if decision else {}
     identity=context.get('homologation') or {}
@@ -1467,6 +1506,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         if task.delivery_type=='code':
             from hermes_cli.nfos_destination import destination, review_only
             scope=destination(conn,task_id)
+            if operation in {'merge','deploy'} and _project_delivery_environment(conn,task_id)=='hml' and not _express_production_order(task.body):  # DELIVERY_ENV_20260911
+                raise WorkflowError('This project delivers in HML: staging PR, HML deploy and HML readback close the card. Production (merge or deploy on main) only with the owner express order in the card body')
             _fast=bool(review_only(scope) and _owner_mode())  # CODE_FAST_ROUTE_20260910: rota de produção sem homologação
             if review_only(scope) and operation not in ({'pr','merge','deploy'} if _fast else {'pr'}):
                 raise WorkflowError('Production route: only pr, merge and deploy effects; no homolog or staging' if _fast
@@ -1828,13 +1869,14 @@ def main():
                         '3. Principal validation is OFF: do not ask spec_review or final_review, nor review for report/operation cards; they resolve automatically. Write the spec yourself (save-spec --author worker) with size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class. After the work, save-report then kanban_complete.',  # BLOCK_LESS9_20260910
                         '4. Ask the Principal only when a decision changes the outcome. Slot occupied: acquire-project --wait 900. Next step: follow the saved spec.',
                         '5. Credentials for production, HML and databases are in the project vault listed under credentials in this output. Use them; never ask a human for something that is already there.',  # BLOCK_LESS6_20260910
-                        '7. Code card of any size (P, M or G): production route unless the card body asks for HML/staging. delivery_destination: environment=pr, target=the repository URL, verification_operation=pr. Branch from main, implement (tests only when cheap; no mandatory failing test first), open the PR to main, record effect pr and reconcile it with the CI readback until ci_status is success, ask kind=review (answered automatically: approve on green CI), merge it yourself (gh pr merge --merge; effect merge + reconcile with the integrated SHA), wait for the automatic deploy (effect deploy + reconcile with the production readback), save the report and call kanban_complete. No staging homologation, no separate production acceptance. Priority 100 (urgent) never homologates. G: split into up to 3 P/M cards first.',  # CODE_FAST_ROUTE_20260910
+                        '7. Code card of any size: the route follows the project delivery_environment shown in this output (gold standard of the original HPF). production with a staging pipeline: branch from main, PR to the staging branch, CI green, merge, automatic preview deploy, short readback, then PR to main, CI green, merge, automatic production deploy, production readback, report, kanban_complete. hml: PR to the staging branch, CI green, merge, HML deploy, HML readback, report, kanban_complete; delivered in HML is delivered, and production (merge/deploy on main) only when the card body carries the owner order. dev or test: deliver to that environment, read it back, report, kanban_complete. No Principal decisions on code and no separate acceptance: CI is the gate; a rebased candidate with a green PR needs no new homologation. Priority 100 (urgent) adds no steps. G: split into up to 3 P/M cards first.',  # DELIVERY_ENV_20260911
                         '6. operation = administrative change on a system already in production without touching the repository; the spec needs operation.target, operation.mutation and no_code_reason; homolog/pr/merge/deploy effects are refused on it, so never classify as operation to skip the code path (reclassify with delivery_type code if a repository change is needed). operation and report cards skip HML/repository/PR reconciliation and progress steps 5 and 6.',  # OPERATION_FAST_20260910
                         '8. A judge refusal on kanban_complete means the delivery is incomplete for the requested environment, never a reason to pause: finish it (rebase, resolve conflicts, merge, deploy, production readback) and call kanban_complete again with that evidence, or block with a concrete question to a named human. HML-only is not a scope unless the card body says so; there is no separate production acceptance while principal validation is off.',  # JUDGE_REFUSAL_20260910
                     ]
             except Exception:
                 pass
             result['credentials']=_credentials_hint(args.db)  # BLOCK_LESS6_20260910
+            result['delivery_environment']=_delivery_environment_for_db(args.db)  # DELIVERY_ENV_20260911
             if result['workflow']:
                 result['request']=get_request(conn,result['workflow']['request_id'])
                 result['production_precheck']=(json.loads(result['workflow']['state_json'] or '{}') or {}).get('production_precheck')  # BLOCK_LESS7_20260910

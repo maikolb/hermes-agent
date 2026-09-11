@@ -27,6 +27,30 @@ def project_config(board, config=None):
     return dict(project,board=board) if isinstance(project,dict) and project.get('enabled') is True else None
 
 
+ROUTES = {  # DELIVERY_ENV_20260911
+    'production': ('Branch from main; PR to the staging branch {staging} (CI green); merge; automatic preview deploy; short readback; '
+                   'PR to main (CI green); merge; automatic production deploy; production readback; report; kanban_complete.'),
+    'production-direct': ('Branch from main; PR to main (CI green); merge; automatic production deploy; production readback; report; '
+                          'kanban_complete.'),
+    'hml': ('Branch from main; PR to the staging branch {staging} (CI green); merge; HML deploy; HML readback; report; kanban_complete. '
+            'Delivered in HML is delivered. Production (merge or deploy on main) only when the card body carries the owner order.'),
+    'dev': 'Deliver on the dev environment (branch and deploy the project uses); read it back; report; kanban_complete. No staging, no production.',
+    'test': 'Deliver on the TEST environment the project uses; read it back; report; kanban_complete. No production.',
+}
+
+
+def delivery_route(project):
+    """DELIVERY_ENV_20260911: ambiente de entrega padrão do projeto e a rota do card de código (config kanban.delivery.projects)."""
+    project = project or {}
+    env = str(project.get('delivery_environment') or 'production').strip().lower()
+    staging = str(project.get('staging_branch') or '').strip()
+    key = env
+    if env == 'production' and not staging:
+        key = 'production-direct'
+    route = ROUTES.get(key) or ROUTES['production-direct']
+    return {'environment': env, 'staging_branch': staging or None, 'route': route.format(staging=staging or 'staging')}
+
+
 def adopt_existing_tasks(conn, *, board, project):
     """Enroll idle retained work in the same dispatcher, without replaying it.
 
@@ -416,7 +440,7 @@ def _premises_prefix():  # BLOCK_LESS7_20260910
         '4. Ask the Principal only when a decision changes the outcome. HML slot occupied: `acquire-project --wait 900` and repeat. Next step: follow the saved spec. Inconsistent readback: `reconcile` and continue.\n'
         '5. kanban_block only when a named human must provide something concrete (kind=needs_input, the question in the reason) or the environment lacks something specific (kind=capability, say exactly what is missing). Never as a parking place; a technical pause is not a block.\n'
         '6. Report or operation delivery closes with the saved report: no PR, no deploy. A card born as code that turns out to be a report is reclassified in the spec (delivery_type report).\n'
-        '8. Code card of any size (P, M or G): production route unless the card body asks for HML/staging. delivery_destination: environment=pr, target=the repository URL, verification_operation=pr. Branch from main, implement (tests only when cheap; no mandatory failing test first), open the PR to main, record effect pr and reconcile it with the CI readback until ci_status is success, ask kind=review (answered automatically: approve on green CI), merge it yourself (gh pr merge --merge; effect merge + reconcile with the integrated SHA), wait for the automatic deploy (effect deploy + reconcile with the production readback), save the report and call kanban_complete. No staging homologation, no separate production acceptance. Priority 100 (urgent) never homologates. G: split into up to 3 P/M cards first.\n'  # CODE_FAST_ROUTE_20260910
+        '8. Code card of any size: the route follows the project delivery_environment shown in this output (gold standard of the original HPF). production with a staging pipeline: branch from main, PR to the staging branch, CI green, merge, automatic preview deploy, short readback, then PR to main, CI green, merge, automatic production deploy, production readback, report, kanban_complete. hml: PR to the staging branch, CI green, merge, HML deploy, HML readback, report, kanban_complete; delivered in HML is delivered, and production (merge/deploy on main) only when the card body carries the owner order. dev or test: deliver to that environment, read it back, report, kanban_complete. No Principal decisions on code and no separate acceptance: CI is the gate; a rebased candidate with a green PR needs no new homologation. Priority 100 (urgent) adds no steps. G: split into up to 3 P/M cards first.\n'  # DELIVERY_ENV_20260911
         '7. operation = an administrative change on a system already in production without touching the repository (plan, tenant, config, data, credentials, infrastructure state). Its spec needs operation.target, operation.mutation and no_code_reason, and the runtime refuses homolog/pr/merge/deploy effects on it, so never classify as operation to skip the code path: if any step edits the repository, builds, deploys or opens a PR, the card is code (reclassify with a spec delivery_type code). operation and report cards skip progress steps 5 (PR) and 6 (merge/deploy) without commenting them: after [etapa 4/7 testar] write [etapa 7/7 readback].\n\n'  # OPERATION_FAST_20260910
         '9. A judge refusal on kanban_complete means the delivery is incomplete for the requested environment, never a reason to pause: finish it (rebase, resolve conflicts, merge, deploy, production readback) and call kanban_complete again with that evidence, or block with a concrete question to a named human. HML-only is not a scope unless the card body says so; there is no separate production acceptance while principal validation is off.\n'  # JUDGE_REFUSAL_20260910
     )
