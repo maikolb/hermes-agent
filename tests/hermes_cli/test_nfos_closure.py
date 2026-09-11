@@ -186,3 +186,19 @@ def test_protocol_mentions_closing_rule(monkeypatch):
     monkeypatch.setattr(review, "settings", lambda: {"principal_validation": False})
     text = runtime.worker_instructions()
     assert "11. Closing rule" in text and "optional_reason" in text
+    assert "12. Baseline probes" in text and "phase=before" in text
+
+
+def test_before_probe_is_never_mandatory_and_never_blocks(board):
+    after = {"kind": "sql", "query": "select name from exam_disciplines", "expect": {"set_equals": NAMES}}
+    before = {"kind": "sql", "query": "select count(*) from exam_disciplines", "expect": {"scalar": 0}, "phase": "before"}
+    with kb.connect_closing() as conn:
+        with pytest.raises(delivery.WorkflowError, match="baseline"):
+            _card(conn, 9, method="sql", spec=_spec([{"id": "C0", "text": "estado antes", "mandatory": True, "probe": before}, {"id": "C1", "text": "7 disciplinas", "mandatory": True, "probe": after}]))
+        with pytest.raises(delivery.WorkflowError, match="probe.phase"):
+            _card(conn, 10, method="sql", spec=_spec([{"id": "C1", "text": "7 disciplinas", "mandatory": True, "probe": dict(after, phase="during")}]))
+        task = _card(conn, 11, method="sql", spec=_spec([{"id": "C0", "text": "estado antes", "probe": before}, {"id": "C1", "text": "7 disciplinas", "mandatory": True, "probe": after}]))
+        assert delivery.run_probes(conn, task.id, task.current_run_id, criterion="C1")[0]["state"] == "PASS"
+        delivery.save_report(conn, task.id, task.current_run_id, _report(board, {"C0": "FAIL", "C1": "PASS"}))
+        assert delivery.completion_evidence_check(conn, task.id) is not None
+        assert delivery.completion_refusal_note(conn, task.id) is None
