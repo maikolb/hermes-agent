@@ -456,6 +456,14 @@ def _stamp_delivery_record(conn, tid: str, metadata):
         verified = any(e["status"] == "confirmed" and e["operation"] in proof for e in effects)
         metadata = dict(metadata or {})
         metadata["nfos_delivery"] = {"environment": env, "effects": effects, "verified": verified}
+        try:  # RECORD_CONTINUATION_20260911: vínculo e consumo da cadeia de continuação
+            from hermes_cli import nfos_delivery as _d
+            links = _d.continuation_links(conn, tid)
+            metadata["nfos_delivery"]["continuation_of"] = links["of"]
+            metadata["nfos_delivery"]["continuations"] = links["children"]
+            metadata["nfos_delivery"]["chain"] = _d.chain_consumption(conn, tid)
+        except Exception:
+            pass
         return metadata
     except Exception:
         return metadata
@@ -1735,6 +1743,19 @@ def _handle_create(args: dict, **kw) -> str:
         )
     body = args.get("body")
     parents = args.get("parents") or []
+    continuation_of = args.get("continuation_of")  # RECORD_CONTINUATION_20260911
+    if continuation_of:
+        try:
+            kb, conn = _connect(board=args.get("board"))
+            try:
+                from hermes_cli import nfos_delivery as _d
+                res = _d.create_continuation(conn, str(continuation_of), title=(str(title).strip() if title else None), body=body,
+                                             requester=os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_PROFILE") or "principal")
+            finally:
+                conn.close()
+            return _ok(**res)
+        except Exception as e:
+            return tool_error(f"kanban_create continuation_of: {e}")
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
     # Stamp the originating session id when the agent loop runs under
     # ACP (which sets HERMES_SESSION_ID before invoking tools). NULL on
