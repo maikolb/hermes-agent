@@ -691,10 +691,16 @@ def _run_sql_probe(dsn, query):
         import psycopg2
     except ImportError as exc:
         raise WorkflowError('psycopg2 is not installed in this runtime (pip install psycopg2-binary in the release venv)') from exc
-    conn = psycopg2.connect(dsn, connect_timeout=15, options='-c default_transaction_read_only=on -c statement_timeout=15000')
+    # TX_READONLY_20260911: read-only e timeout só na transação (SET TRANSACTION / SET LOCAL), nunca na sessão: o pooler
+    # (Supavisor, modo transação) reaproveita o backend para a aplicação e um SET SESSION READ ONLY fica preso nele.
+    conn = psycopg2.connect(dsn, connect_timeout=15)
     try:
-        conn.set_session(readonly=True, autocommit=True)
-        cur = conn.cursor(); cur.execute(query); rows = cur.fetchmany(200)
+        conn.autocommit = False
+        cur = conn.cursor()
+        cur.execute('SET TRANSACTION READ ONLY')
+        cur.execute('SET LOCAL statement_timeout = 15000')
+        cur.execute(query); rows = cur.fetchmany(200)
+        conn.rollback()
     finally:
         conn.close()
     return [list(r) for r in rows]
