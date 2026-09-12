@@ -373,6 +373,14 @@ def _capacity_only(results) -> bool:
     return seen
 
 
+
+def _coalesce_notify_events(events):
+    """Keep model switches even when completion arrives in the same poll."""
+    notices = [str((event.payload or {}).get("message") or "")
+               for event in events[:-1] if event.kind == "model_fallback"]
+    return events[-1:], [notice for notice in notices if notice]
+
+
 def _notify_kind_allowed(kind, load_config):
     """Patch local 10/09/2026 (Maikol, modo quieto): `kanban.notify_kinds` lista os kinds que geram
     mensagem passiva no chat. Ausente ou vazio = todos (comportamento original). `completed` e
@@ -2646,7 +2654,7 @@ class GatewayKanbanWatchersMixin:
         NOTIFY_KINDS = (
             "claimed", "completed", "blocked", "gave_up", "status",
             "block_loop_detected", "review_requested", "nfos_principal_requested",
-            "commented", "nfos_progress",
+            "commented", "nfos_progress", "model_fallback",
         )
         # Focus accounting consumes worker-run boundaries too, but these
         # internal retry/recovery events must never become chat messages.
@@ -3075,7 +3083,7 @@ class GatewayKanbanWatchersMixin:
                                         ev for ev in notify_events
                                         if ev.kind != "claimed" or ev.id == first_claim_id
                                     ]
-                                    events = material_events[-1:]
+                                    events, sub["_model_fallback_notices"] = _coalesce_notify_events(material_events)
                                     if not events:
                                         acknowledge_skipped()
                                         continue
@@ -3184,7 +3192,7 @@ class GatewayKanbanWatchersMixin:
                             "blocked": {"blocked"}, "block_loop_detected": {"blocked"},
                             "review_requested": {"review"},
                         }
-                        if task and (task.task_role == "activity" or (
+                        if task and ((task.task_role == "activity" and kind != "model_fallback") or (
                             kind in expected_states and task.status not in expected_states[kind]
                         )):
                             continue
@@ -3256,6 +3264,9 @@ class GatewayKanbanWatchersMixin:
                             if ev.payload and ev.payload.get("status"):
                                 new_status = str(ev.payload["status"])
                             msg = f"🔄 {board_tag}{tag}Kanban {sub['task_id']} → {new_status}"
+                        elif kind == "model_fallback":
+                            msg = (f"🌙 {board_tag}Worker {sub['task_id']}: "
+                                   f"{str((ev.payload or {}).get('message') or '')}")
                         elif kind == "nfos_principal_requested":
                             decision_payload = ev.payload or {}
                             msg = (f"👀 {board_tag}Principal analisando {sub['task_id']}: "
@@ -3307,6 +3318,8 @@ class GatewayKanbanWatchersMixin:
                                     platform_str, "worker_rotation_trace_url", "",
                                 ),
                             )
+                        if sub.get("_model_fallback_notices"):
+                            msg = "\n".join(sub["_model_fallback_notices"]) + "\n" + msg
                         delivery_metadata = sub.get("delivery_metadata")
                         metadata: dict[str, Any] = (
                             dict(delivery_metadata)
