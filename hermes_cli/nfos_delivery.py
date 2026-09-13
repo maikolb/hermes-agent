@@ -128,12 +128,15 @@ def _event(conn, task_id, run_id, kind, payload):
 
 URGENT_PRIORITY = 100  # URGENT_20260910
 HUMAN_REQUEST_PRIORITY = 10  # HUMAN_PRIORITY_20260910
-_HUMAN_PLATFORMS = {'telegram', 'whatsapp', 'discord', 'slack', 'signal', 'email'}
+_HUMAN_PLATFORMS = {'telegram', 'whatsapp', 'discord', 'slack', 'signal', 'email', 'portal'}  # PORTAL_PRIORITY_20260912
 
 
 def _intake_priority(payload):
     """HUMAN_PRIORITY_20260910 (ordem do Maikol): pedido nascido de mensagem humana entra acima de backlog promovido
     (priority 0); card retido/adotado de sessão antiga fica em 0; urgente continua 100."""
+    _project = payload.get('project') if isinstance(payload.get('project'), dict) else {}  # PORTAL_PRIORITY_20260912: prioridade escolhida no formulário
+    if _project.get('priority') in (0, 10, 60, 100):
+        return int(_project['priority'])
     if payload.get('urgent'):
         return URGENT_PRIORITY
     src = payload.get('source') or {}
