@@ -368,6 +368,48 @@ _URL=re.compile(r'https?://([^\s/]+)(/\S*)?')
 REQUEST_TITLE_MAX=160
 
 
+_FORWARD_STAMP_RX = re.compile(r'\[\d{1,2}/\d{1,2}(?:/\d{2,4})?,?\s*\d{1,2}:\d{2}(?::\d{2})?\]\s*[^:\n]{0,60}?:\s*')  # CLIENT_CHAT_20260913
+_PHONE_RX = re.compile(r'(?<![\w/.-])(?:\+?55[\s.-]?)?\(?\d{2}\)?[\s.-]\d{4,5}[\s.-]?\d{4}(?![\w/.-])|(?<![\w/.-])\+55\s?\d{2}\s?\d{4,5}-?\d{4}(?![\w/.-])')
+_DEMANDA_RX = re.compile(r'^\s*(?:mais uma demanda|outra demanda|nova demanda|demanda|pedido)\s*:\s*', re.I)
+_URL_PUBLIC_RX = re.compile(r'https?://([^\s/?#]+)((?:/[^\s/?#]*){0,2})[^\s]*')
+
+
+def _strip_forward_noise(text):
+    """CLIENT_CHAT_20260913: tira prefixo de encaminhamento, carimbos [dd/mm, hh:mm] +telefone: e telefones; preserva o resto (datas,
+    versões, valores, protocolos sem separador de telefone)."""
+    s = str(text or '')
+    s = _DEMANDA_RX.sub('', s)
+    s = _FORWARD_STAMP_RX.sub('', s)
+    s = _PHONE_RX.sub('', s)
+    return s
+
+
+def public_request_title(text, limit=None):
+    """CLIENT_CHAT_20260913: título público de um pedido: sem atribuição, menção, carimbo, telefone; URL reduzida a domínio e até dois
+    segmentos de caminho (sem query); uma linha; idempotente; vazio quando não sobra nada."""
+    limit = limit or REQUEST_TITLE_MAX
+    lines = [line.strip() for line in str(text or '').splitlines()]
+    while lines and (not lines[0] or _ATTRIBUTION_LINE.match(lines[0])):
+        lines.pop(0)
+    s = ' '.join(line for line in lines if line)
+    s = _LEADING_MENTIONS.sub('', s)
+    s = _strip_forward_noise(s)
+
+    def _url(m):
+        host = m.group(1); path = m.group(2) or ''
+        parts = [p for p in path.split('/') if p]
+        parts = [p[:12] + '…' if len(p) > 16 else p for p in parts]
+        return host + ('/' + '/'.join(parts) if parts else '')
+    s = _URL_PUBLIC_RX.sub(_url, s)
+    s = ' '.join(s.split()).strip(' ,;:-·')
+    if not s:
+        return ''
+    if len(s) <= limit:
+        return s
+    cut = s.rfind(' ', 0, limit)
+    return s[:cut if cut > limit // 2 else limit - 1].rstrip(' ,;:-') + '…'
+
+
 def explicit_request_title(project):
     """PORTAL_TITLE_20260913: título curado declarado pelo intake (portal); uma linha, sem espaços dobrados, até REQUEST_TITLE_MAX."""
     title = project.get('title') if isinstance(project, dict) else None
@@ -394,6 +436,7 @@ def request_card_title(text, attachments=()):
     while lines and (not lines[0] or _ATTRIBUTION_LINE.match(lines[0])):
         lines.pop(0)
     excerpt=_LEADING_MENTIONS.sub('',' '.join(line for line in lines if line))
+    excerpt=' '.join(_strip_forward_noise(excerpt).split())  # CLIENT_CHAT_20260913: card do Telegram nasce sem carimbo nem telefone
     excerpt=_URL.sub(lambda m:m.group(1)+('/…' if (m.group(2) or '').strip('/') else ''),excerpt)
     excerpt=' '.join(excerpt.split())
     if not excerpt:

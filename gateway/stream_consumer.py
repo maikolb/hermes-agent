@@ -21,6 +21,7 @@ import logging
 import queue
 import secrets
 import threading
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -986,6 +987,9 @@ class GatewayStreamConsumer:
                     ):
                         await self._suppress_silence_marker()
                         return
+                    _stripped_tail = _strip_tail_silence_marker(self._accumulated)  # CLIENT_CHAT_20260913: "texto [SILENT]" no fim do stream
+                    if _stripped_tail != self._accumulated:
+                        self._accumulated = _stripped_tail
 
                 # Decide whether to flush an edit
                 now = time.monotonic()
@@ -2706,3 +2710,19 @@ class GatewayStreamConsumer:
         except Exception as e:
             logger.error("Stream send/edit error: %s", e)
             return False
+
+
+_TAIL_SILENCE_RX = re.compile(r"\s*(?:\[(?i:silent)\]|\bSILENT\b|\bNO_REPLY\b|\bNO REPLY\b)[.:;!,-]*\s*$")  # CLIENT_CHAT_20260913
+
+
+def _strip_tail_silence_marker(text):
+    """CLIENT_CHAT_20260913: marcador colado no fim do texto acumulado do stream não vai à tela."""
+    if not isinstance(text, str):
+        return text
+    out = text
+    for _ in range(3):
+        new = _TAIL_SILENCE_RX.sub("", out)
+        if new == out:
+            break
+        out = new
+    return out

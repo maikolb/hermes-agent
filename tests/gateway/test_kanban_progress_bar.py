@@ -17,15 +17,15 @@ def test_budget_classes():
 
 
 def test_render_bar_and_closeout():
-    text = kw._progress_render("t_10a026a6", 4, "testar", 38, 91, 250, "M", "abrir PR")
-    assert text.startswith("▰▰▰▰▱▱▱ 4/7 testar · t_10a026a6 · 38 min · 91/250 tools · classe M")
+    text = kw._progress_render("t_10a026a6", 4, "testar", 38, 91, 250, "M", "abrir PR", title="Filtro por revenue")
+    assert text.startswith("▰▰▰▰▱▱▱ 4/7 testar · Filtro por revenue · 38 min")  # CLIENT_CHAT_20260913: sem id, tools e classe
     assert text.endswith("próximo: abrir PR")
     assert kw._progress_render("t_x", 7, "entregue", 57, 64, 80, "P", done=True).startswith("▰▰▰▰▰▰▰ 7/7 entregue")
 
 
 def test_recebido_with_criterion():
     text = kw._progress_recebido("t_x", "Título", "M", "corpo\nCritério de aceite: filtro por revenue funciona\n")
-    assert text == "Recebido · t_x · Título · classe M\npronto quando: filtro por revenue funciona"
+    assert text == "Recebido: Título\nPronto quando: filtro por revenue funciona"  # CLIENT_CHAT_20260913
 
 
 def test_notify_kinds_filter():

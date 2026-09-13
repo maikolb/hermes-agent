@@ -5008,7 +5008,7 @@ def _wake_narration_to_suppress(inbound_text, response):
         if not text:
             return False
         first = text.splitlines()[0].strip().lstrip("*#>_ ").lower()
-        if first.startswith(("entregue", "pergunta", "[entregue]", "[pergunta]")):
+        if first.startswith(("entregue", "pergunta", "pronto", "parcial", "aviso", "[entregue]", "[pergunta]", "[pronto]", "[parcial]")):  # CLIENT_CHAT_20260913: desfechos do contrato do grupo
             return False
         if "?" in text[:400]:
             return False
@@ -22489,6 +22489,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # produce visible content after exhausting all retries (nudge,
             # prefill, empty-retry, fallback).  Sending the raw sentinel
             # looks like a bug; a short explanation is more helpful.
+            if not _intentional_silence and isinstance(response, str) and response.strip():  # CLIENT_CHAT_20260913: marcador nas bordas não vai ao chat
+                from gateway.response_filters import strip_silence_markers as _strip_markers
+                _cleaned = _strip_markers(response)
+                if _cleaned != response:
+                    logger.info("silence marker stripped from delivered response (%d -> %d chars)", len(response), len(_cleaned))
+                    response = _cleaned
+                    if not response.strip():
+                        _intentional_silence = True
             if response == "(empty)" and not _intentional_silence:
                 response = (
                     "⚠️ The model returned no response after processing tool "
@@ -32712,6 +32720,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                     except Exception:
                         _intentional_silence = False
+                    if not _intentional_silence and isinstance(first_response, str) and first_response.strip():  # CLIENT_CHAT_20260913
+                        from gateway.response_filters import strip_silence_markers as _strip_markers
+                        _cleaned_first = _strip_markers(first_response)
+                        if _cleaned_first != first_response:
+                            logger.info("silence marker stripped from queued follow-up (%d -> %d chars)", len(first_response), len(_cleaned_first))
+                            first_response = _cleaned_first
+                            if not first_response.strip():
+                                _intentional_silence = True
                     if _intentional_silence:
                         logger.info(
                             "Queued follow-up for session %s: suppressing intentional silence marker before continuing.",
