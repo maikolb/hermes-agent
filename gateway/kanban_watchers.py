@@ -211,27 +211,29 @@ def _progress_parse(body):
     return n, name[:24], nxt
 
 
-def _progress_render(task_id, n, name, minutes, tools, budget, cls, nxt="", done=False):
+def _progress_render(task_id, n, name, minutes, tools, budget, cls, nxt="", done=False, title="", outcome="entregue"):  # CLIENT_CHAT_20260913
+    from hermes_cli.nfos_delivery import public_request_title
     if done:
-        head = "▰▰▰▰▰▰▰ 7/7 entregue"
+        head = f"▰▰▰▰▰▰▰ 7/7 {outcome}"
     else:
         head = "▰" * n + "▱" * (7 - n) + f" {n}/7 {name}"
-    parts = [head, str(task_id), f"{int(minutes)} min", f"{int(tools)}/{int(budget)} tools"]
-    if cls and cls != "-":
-        parts.append(f"classe {cls}")
+    parts = [head]
+    short = public_request_title(title, limit=70) if title else ""
+    if short:
+        parts.append(short)
+    parts.append(f"{int(minutes)} min")
     line = " · ".join(parts)
     if nxt and not done:
         line += f"\npróximo: {nxt}"
     return line
 
 
-def _progress_recebido(task_id, title, cls, body):
-    text = f"Recebido · {task_id} · {str(title or '')[:120]}"
-    if cls and cls != "-":
-        text += f" · classe {cls}"
+def _progress_recebido(task_id, title, cls, body):  # CLIENT_CHAT_20260913: título público, sem id nem classe
+    from hermes_cli.nfos_delivery import public_request_title
+    text = f"Recebido: {public_request_title(title, limit=120) or 'pedido registrado'}"
     m = _PROGRESS_CRIT_RE.search(str(body or ""))
     if m:
-        text += f"\npronto quando: {m.group(1)[:160]}"
+        text += f"\nPronto quando: {m.group(1)[:160]}"
     return text
 
 
@@ -321,7 +323,7 @@ async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
         if not latest:
             return True  # comentário sem linha de etapa: nada a mostrar no grupo
         n, name, nxt = latest
-        text = _progress_render(task_id, n, name, minutes, tools, budget, cls, nxt)
+        text = _progress_render(task_id, n, name, minutes, tools, budget, cls, nxt, title=title)  # CLIENT_CHAT_20260913
         if msg_id and hasattr(adapter, "edit_message"):
             res = await adapter.edit_message(sub["chat_id"], str(msg_id), text, metadata=metadata)
             if getattr(res, "success", False):
@@ -333,7 +335,8 @@ async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
         return True
     if kind == "completed":
         if msg_id and hasattr(adapter, "edit_message"):
-            text = _progress_render(task_id, 7, "entregue", minutes, tools, budget, cls, done=True)
+            outcome = await asyncio.to_thread(_progress_outcome, board, task_id)  # CLIENT_CHAT_20260913
+            text = _progress_render(task_id, 7, outcome, minutes, tools, budget, cls, done=True, title=title, outcome=outcome)
             try:
                 await adapter.edit_message(sub["chat_id"], str(msg_id), text, metadata=metadata)
             except Exception:
@@ -371,6 +374,96 @@ def _capacity_only(results) -> bool:
               or getattr(res, "respawn_guarded", None) or getattr(res, "skipped_locked", False)):
             return False
     return seen
+
+
+def _coalesce_notify_events(events):
+    """Keep model switches even when completion arrives in the same poll."""
+    notices = [str((event.payload or {}).get("message") or "")
+               for event in events[:-1] if event.kind == "model_fallback"]
+    return events[-1:], [notice for notice in notices if notice]
+
+
+WAKE_GROUP_RULE = (  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913: instrução e filtro alinhados
+    "Regra do grupo: este turno foi acordado por notificação de kanban. "
+    "Resolva pelas ferramentas (decide, kanban_comment, kanban_block). "
+    "Se não houver nada a escrever no grupo, responda exatamente [SILENT] e nada mais. "
+    "Escreva no grupo apenas o desfecho do card (comece com Pronto, Parcial ou Entregue), uma pergunta que um humano precisa "
+    "responder (comece com PERGUNTA para <nome>) ou um aviso de impacto para o cliente (comece com Aviso); nesses casos NÃO "
+    "acrescente [SILENT]. Qualquer outro texto é descartado pelo gateway. "
+    "Nada de narrar decisão, confirmar bloqueio, mandar progresso em mensagem nova ou responder a alerta repetido."
+)
+
+_CLIENT_SILENT_KINDS = frozenset({  # CLIENT_CHAT_20260913: no chat do cliente nenhuma mensagem passiva do notificador
+    "completed", "blocked", "gave_up", "crashed", "timed_out", "model_fallback", "claimed", "status",
+    "nfos_principal_requested", "block_loop_detected", "review_requested",
+})
+
+
+def _client_source_for_board(board):
+    """CLIENT_CHAT_20260913: (source do projeto, é projeto de entrega). Board sem projeto de entrega = chat de operação."""
+    try:
+        from hermes_cli.nfos_runtime import project_config
+        project = project_config(str(board or ""))
+    except Exception:
+        logger.warning("kanban notifier: consulta do projeto do board %s falhou; publicação passiva suprimida por segurança", board, exc_info=True)
+        return None, True  # falha na consulta não é prova de chat operacional: fecha
+    if not isinstance(project, dict):
+        return None, False  # comprovadamente sem projeto de entrega: chat de operação
+    src = project.get("source")
+    if not isinstance(src, dict) or not str(src.get("chat_id") or "").strip():
+        return None, True
+    return src, True
+
+
+def _is_client_chat(board, sub):
+    """CLIENT_CHAT_20260913: assinatura igual ao source do projeto do card = chat do cliente. Projeto de entrega sem source válido fecha
+    (suprime) e registra diagnóstico; board sem projeto não é chat do cliente."""
+    src, delivery_project = _client_source_for_board(board)
+    if not delivery_project:
+        return False
+    if src is None:
+        logger.warning("kanban notifier: projeto do board %s sem source válido; publicação passiva suprimida por segurança", board)
+        return True
+    return (str(src.get("platform") or "").lower() == str(sub.get("platform") or "").lower()
+            and str(src.get("chat_id") or "") == str(sub.get("chat_id") or "")
+            and str(src.get("thread_id") or "") == str(sub.get("thread_id") or ""))
+
+
+def _record_client_suppression(board, task_id, kind, sub):
+    """CLIENT_CHAT_20260913: rastro no card do que NÃO foi publicado no chat do cliente."""
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.connect_closing(board=board) as conn:
+            with _kb.write_txn(conn):
+                _kb._append_event(conn, task_id, "client_publication_suppressed",
+                                  {"kind": kind, "platform": sub.get("platform"), "chat_id": sub.get("chat_id"), "thread_id": sub.get("thread_id")})
+    except Exception:
+        logger.debug("kanban notifier: client suppression event failed for %s", task_id, exc_info=True)
+
+
+def _progress_outcome(board, task_id):
+    """CLIENT_CHAT_20260913: fechamento da barra honesto. "entregue" só com relatório e critérios não opcionais todos PASS;
+    "parcial" com pendência ou entrega parcial; "encerrado" quando cancelado pelo dono; "concluído" (neutro) sem relatório
+    legível ou sem critérios: o card fechou, a entrega não foi comprovada pelo relatório."""
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.connect_closing(board=board) as conn:
+            row = conn.execute("SELECT content FROM nfos_artifacts WHERE task_id=? AND kind='report' ORDER BY revision DESC LIMIT 1", (task_id,)).fetchone()
+            if not row:
+                return "concluído"
+            content = json.loads(row["content"]) or {}
+            if not isinstance(content, dict):
+                return "concluído"
+            if str(content.get("disposition") or "") == "cancelled_by_owner":
+                return "encerrado"
+            partial = content.get("partial_delivery") is True or (isinstance(content.get("delivery"), dict) and content["delivery"].get("partial_delivery") is True)
+            criteria = [c for c in (content.get("criteria") or []) if isinstance(c, dict)]
+            if partial or any(c.get("status") != "PASS" and not c.get("optional") for c in criteria):
+                return "parcial"
+            return "entregue" if criteria else "concluído"
+    except Exception:
+        logger.debug("kanban progress bar: outcome of %s unreadable", task_id, exc_info=True)
+        return "concluído"
 
 
 def _notify_kind_allowed(kind, load_config):
@@ -2209,6 +2302,8 @@ class GatewayKanbanWatchersMixin:
             task = chosen["task"]
             sub = chosen["sub"]
             board = chosen.get("board") or ""
+            if _is_client_chat(board, sub):  # CLIENT_CHAT_20260913: sem bolha do worker no chat do cliente
+                continue
             try:
                 platform = _Platform(str(sub.get("platform") or "").lower())
             except ValueError:
@@ -2646,7 +2741,7 @@ class GatewayKanbanWatchersMixin:
         NOTIFY_KINDS = (
             "claimed", "completed", "blocked", "gave_up", "status",
             "block_loop_detected", "review_requested", "nfos_principal_requested",
-            "commented", "nfos_progress",
+            "commented", "nfos_progress", "model_fallback",
         )
         # Focus accounting consumes worker-run boundaries too, but these
         # internal retry/recovery events must never become chat messages.
@@ -3075,7 +3170,7 @@ class GatewayKanbanWatchersMixin:
                                         ev for ev in notify_events
                                         if ev.kind != "claimed" or ev.id == first_claim_id
                                     ]
-                                    events = material_events[-1:]
+                                    events, sub["_model_fallback_notices"] = _coalesce_notify_events(material_events)
                                     if not events:
                                         acknowledge_skipped()
                                         continue
@@ -3184,7 +3279,7 @@ class GatewayKanbanWatchersMixin:
                             "blocked": {"blocked"}, "block_loop_detected": {"blocked"},
                             "review_requested": {"review"},
                         }
-                        if task and (task.task_role == "activity" or (
+                        if task and ((task.task_role == "activity" and kind != "model_fallback") or (
                             kind in expected_states and task.status not in expected_states[kind]
                         )):
                             continue
@@ -3256,6 +3351,9 @@ class GatewayKanbanWatchersMixin:
                             if ev.payload and ev.payload.get("status"):
                                 new_status = str(ev.payload["status"])
                             msg = f"🔄 {board_tag}{tag}Kanban {sub['task_id']} → {new_status}"
+                        elif kind == "model_fallback":
+                            msg = (f"🌙 {board_tag}Worker {sub['task_id']}: "
+                                   f"{str((ev.payload or {}).get('message') or '')}")
                         elif kind == "nfos_principal_requested":
                             decision_payload = ev.payload or {}
                             msg = (f"👀 {board_tag}Principal analisando {sub['task_id']}: "
@@ -3307,6 +3405,11 @@ class GatewayKanbanWatchersMixin:
                                     platform_str, "worker_rotation_trace_url", "",
                                 ),
                             )
+                        _client_chat = kind in _CLIENT_SILENT_KINDS and _is_client_chat(board_slug, sub)  # CLIENT_CHAT_20260913
+                        if _client_chat:
+                            sub["_model_fallback_notices"] = []
+                        if sub.get("_model_fallback_notices"):
+                            msg = "\n".join(sub["_model_fallback_notices"]) + "\n" + msg
                         delivery_metadata = sub.get("delivery_metadata")
                         metadata: dict[str, Any] = (
                             dict(delivery_metadata)
@@ -3355,9 +3458,13 @@ class GatewayKanbanWatchersMixin:
                         if text_delivery_failed:
                             continue
                         try:
-                            _send_res = await adapter.send(
-                                sub["chat_id"], msg, metadata=metadata,
-                            )
+                            if _client_chat:  # CLIENT_CHAT_20260913: nada publicado no chat do cliente; recibo e wake seguem
+                                _send_res = None
+                                await asyncio.to_thread(_record_client_suppression, board_slug, sub["task_id"], kind, sub)
+                            else:
+                                _send_res = await adapter.send(
+                                    sub["chat_id"], msg, metadata=metadata,
+                                )
                             # A SendResult(success=False) without an exception
                             # (returned by push-capable adapters on a genuine
                             # transient failure) must count as a FAILED
@@ -3365,7 +3472,7 @@ class GatewayKanbanWatchersMixin:
                             # event is permanently lost. Adapters returning
                             # None (or anything non-SendResult shaped) keep
                             # the legacy "no exception == delivered" contract.
-                            if getattr(_send_res, "success", True) is False:
+                            if _send_res is not None and getattr(_send_res, "success", True) is False:  # CLIENT_CHAT_20260913
                                 raise RuntimeError(
                                     "adapter send() reported failure: "
                                     f"{getattr(_send_res, 'error', None) or 'unknown error'}"
@@ -3383,7 +3490,7 @@ class GatewayKanbanWatchersMixin:
                             # ``send_document`` / ``send_image_file`` uploads
                             # them. Only fires on the ``completed`` event so
                             # we never spam attachments on retries.
-                            if kind == "completed":
+                            if kind == "completed" and not _client_chat:  # CLIENT_CHAT_20260913
                                 try:
                                     await self._deliver_kanban_artifacts(
                                         adapter=adapter,
@@ -3486,10 +3593,7 @@ class GatewayKanbanWatchersMixin:
                                 "gateway.kanban.wake.guidance"
                             )
                             # WAKE_SILENCE_20260910 (ordem do Maikol): a regra de silêncio vai no próprio wake
-                            _synth += ("\n\nRegra do grupo: este turno foi acordado por notificação de kanban. "
-                                       "Resolva pelas ferramentas (decide, kanban_comment, kanban_block) e termine a resposta com exatamente [SILENT]. "  # WAKE_SILENCE_MECH_20260910
-                                       "Escreva no grupo apenas se for Entregue (card fechado; comece com Entregue) ou uma pergunta que um humano precisa responder (comece com PERGUNTA para <nome>); qualquer outro texto é descartado pelo gateway. "
-                                       "Nada de narrar decisão, confirmar bloqueio ou responder a alerta repetido.")
+                            _synth += "\n\n" + WAKE_GROUP_RULE  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913
                             if "nfos_principal_requested" in _wake_kinds:
                                 from hermes_cli.nfos_runtime import workflow_command
                                 _synth += (f"\nNFOS: consulte `{workflow_command()} pending` "

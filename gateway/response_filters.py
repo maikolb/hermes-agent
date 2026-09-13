@@ -7,6 +7,7 @@ conversation history.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import Any
 
@@ -109,6 +110,38 @@ def is_autonomous_silence_response(response: Any) -> bool:
     if stripped.upper().startswith("[SILENT]"):
         return True
     return False
+
+
+_EDGE_MARKER_HEAD_RX = re.compile(r"^\s*(?:\[(?i:silent)\]|\bSILENT\b|\bNO_REPLY\b|\bNO REPLY\b)[.:;!,-]*\s*")  # CLIENT_CHAT_20260913: marcador inteiro, pontuação só depois
+_EDGE_MARKER_TAIL_RX = re.compile(r"\s*(?:\[(?i:silent)\]|\bSILENT\b|\bNO_REPLY\b|\bNO REPLY\b)[.:;!,-]*\s*$")
+
+
+def _is_marker_line(line: str) -> bool:
+    return any(candidate in LIVE_GATEWAY_SILENT_MARKERS for candidate in _canonical_silence_candidates(line.strip()))
+
+
+def strip_silence_markers(text: Any) -> Any:
+    """CLIENT_CHAT_20260913: remove o marcador de silêncio das bordas de uma resposta que VAI ser entregue.
+
+    Só depois de :func:`is_intentional_silence_response` ter decidido que a resposta inteira não é silêncio.
+    Remove linhas de borda que são só o marcador e o marcador colado no começo da primeira linha ou no fim da
+    última (a forma "Entregue ... [SILENT]" que o wake induzia). Marcador no meio do texto é conteúdo e fica.
+    Resposta que vira vazia deve ser tratada como silêncio pelo chamador."""
+    if not isinstance(text, str) or not text.strip():
+        return text
+    lines = text.strip().splitlines()
+    while lines and _is_marker_line(lines[0]):
+        lines.pop(0)
+    while lines and _is_marker_line(lines[-1]):
+        lines.pop()
+    out = "\n".join(lines).strip()
+    for _ in range(3):
+        new = _EDGE_MARKER_TAIL_RX.sub("", out).strip()
+        new = _EDGE_MARKER_HEAD_RX.sub("", new).strip()
+        if new == out:
+            break
+        out = new
+    return out
 
 
 def is_intentional_silence_agent_result(agent_result: dict | None, response: Any) -> bool:

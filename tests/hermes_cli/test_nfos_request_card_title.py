@@ -18,8 +18,7 @@ IMAGE = [{'original': '/cache/original.jpg', 'mime_type': 'image/jpg', 'file_id'
 
 @pytest.mark.parametrize('text, attachments, expected', [
     (ATTRIBUTED, (), REQUEST),
-    (FORWARDED, (), 'outra demanda: [09/09, 15:25] +55 38 9152-9909: admin.concursaai.com/… '
-                    '[09/09, 15:25] +55 38 9152-9909: Guarda Municipal'),
+    (FORWARDED, (), 'admin.concursaai.com/… Guarda Municipal'),  # CLIENT_CHAT_20260913: sem carimbo, telefone nem prefixo
     ('[Maikol|996979567]\n@hermes_nexafactory_bot', IMAGE, 'Analyze attached request (image)'),
     ('', IMAGE, 'Analyze attached request (image)'),
     ('[Maikol|996979567]', (), 'Analyze attached request'),
