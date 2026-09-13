@@ -368,6 +368,20 @@ _URL=re.compile(r'https?://([^\s/]+)(/\S*)?')
 REQUEST_TITLE_MAX=160
 
 
+def explicit_request_title(project):
+    """PORTAL_TITLE_20260913: título curado declarado pelo intake (portal); uma linha, sem espaços dobrados, até REQUEST_TITLE_MAX."""
+    title = project.get('title') if isinstance(project, dict) else None
+    if not isinstance(title, str):
+        return None
+    title = ' '.join(title.split())
+    if not title:
+        return None
+    if len(title) > REQUEST_TITLE_MAX:
+        cut = title.rfind(' ', 0, REQUEST_TITLE_MAX)
+        title = title[:cut if cut > REQUEST_TITLE_MAX // 2 else REQUEST_TITLE_MAX - 1].rstrip(' ,;:-') + '…'
+    return title
+
+
 def request_card_title(text, attachments=()):
     """Title a request card with the request itself.
 
@@ -428,7 +442,7 @@ def bootstrap_card(conn, request_id, token, *, pid):
                  project.get('provider'),project.get('reasoning_effort'),task_id))
             conn.execute('UPDATE tasks SET priority=MAX(COALESCE(priority,0),?) WHERE id=?',(_intake_priority(payload),task_id))  # HUMAN_PRIORITY_20260910
         else:
-            task_id=kb.create_task(conn,title=request_card_title(original,payload.get('attachments') or ()),
+            task_id=kb.create_task(conn,title=explicit_request_title(project) or request_card_title(original,payload.get('attachments') or ()),  # PORTAL_TITLE_20260913
                 body=body,assignee=profile,created_by='worker:'+profile,
                 priority=_intake_priority(payload),  # HUMAN_PRIORITY_20260910
                 workspace_kind='worktree' if kind=='code' else 'scratch',
