@@ -2202,7 +2202,9 @@ def _destination_wait_answered(conn, task_id, reply, decision_id):
 def _human_answer_decisions(conn, task_id, reply):
     """Revisão 9: decisões às quais a resposta humana foi anexada (evento nfos_human_answer_received). Revisão 10: o evento tem de ter o
     mesmo texto e a mesma origem da resposta; a mesma mensagem de origem registrada antes para outro conjunto de perguntas (reentrega)
-    torna o vínculo ambíguo e devolve None."""
+    torna o vínculo ambíguo e devolve None. Revisão 12: sem message_id vale a origem e o instante do próprio resume (received_at, gravado
+    junto com o evento); a revisão 11 devolvia None, mas o resume genérico já tinha resolvido a pergunta e desbloqueado o card, então a
+    resposta repassada pela CLI era consumida sem chegar ao worker. Reentrega sem message_id não é detectável (residual do resume genérico)."""
     reply = reply if isinstance(reply, dict) else {}
     source = reply.get('source') if isinstance(reply.get('source'), dict) else {}
 
@@ -2210,24 +2212,27 @@ def _human_answer_decisions(conn, task_id, reply):
         src = src if isinstance(src, dict) else {}
         return tuple(str(src.get(k) or '') for k in ('platform', 'chat_id', 'thread_id', 'message_id'))
 
-    if not str(source.get('message_id') or '').strip():
-        return None  # revisão 11: sem message_id a reentrega não é detectável; falha fechada
     mine = origin_of(source)
+    received = reply.get('received_at')
     events = []
-    for (payload,) in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_human_answer_received' ORDER BY id",
-                                   (task_id,)).fetchall():
+    for payload, created_at in conn.execute("SELECT payload, created_at FROM task_events WHERE task_id=? AND kind='nfos_human_answer_received' "
+                                            "ORDER BY id", (task_id,)).fetchall():
         try:
             info = json.loads(payload or '{}') or {}
         except Exception:
             continue
         if isinstance(info, dict) and isinstance(info.get('decisions'), list):
-            events.append((info.get('answer'), origin_of(info.get('source')), sorted(d for d in info['decisions'] if isinstance(d, str))))
-    matching = [decisions for answer, origin, decisions in events if answer == reply.get('answer') and origin == mine]
+            events.append((info.get('answer'), origin_of(info.get('source')), sorted(d for d in info['decisions'] if isinstance(d, str)),
+                           int(created_at or 0)))
+    matching = [(decisions, at) for answer, origin, decisions, at in events if answer == reply.get('answer') and origin == mine]
+    if str(received or '').isdigit():  # revisão 12: o evento desta resposta é o do mesmo resume, gravado no instante de received_at
+        matching = [item for item in matching if abs(item[1] - int(received)) <= 5] or matching
     if not matching:
         return None
-    if source.get('message_id') and any(decisions != matching[-1] for _, origin, decisions in events if origin == mine):
+    decisions = matching[-1][0]
+    if source.get('message_id') and any(other != decisions for _, origin, other, _at in events if origin == mine):
         return None  # a mesma mensagem já foi anexada a outras perguntas
-    return matching[-1]
+    return decisions
 
 
 def _destination_wait_started(conn, task_id, target):
