@@ -1133,3 +1133,88 @@ def test_answer_to_another_question_does_not_end_the_wait(board, monkeypatch):
         assert delivery.resume_after_answer(conn, task.id, answer="O plano anual.", source={"platform": "telegram", "actor": "Jhonatan", "message_id": "4244"})
         assert delivery.get_workflow(conn, task.id)["next_action"] == reason
         assert "destination_wait" in _state(conn, task.id)
+
+
+# --- revisão 9 (rejulgamento 6e022b05) --------------------------------------------------------------------------------------------------
+
+def test_answer_attached_to_two_questions_does_not_close_the_escalation(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 65, spec=_spec(_http_probe()))
+        asked = _escalate(conn, task, monkeypatch)
+        delivery.resolve_decision(conn, asked, action="human", author="Principal",
+                                  answer="PERGUNTA para Jhonatan: o servidor do TEST foi desligado?")
+        conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES('dec_plano',?,?,?,?,?,?,?)",
+                     (task.id, task.current_run_id, "impediment", "Qual plano Hotmart conta como pago?", "{}", 1, int(time.time()) + 5))
+        conn.execute("UPDATE nfos_decisions SET status='human', action='human', author='Principal', answer=? WHERE id='dec_plano'",
+                     ("PERGUNTA para Jhonatan: qual plano Hotmart conta como pago?",))
+        conn.commit()
+        reason = delivery.get_workflow(conn, task.id)["next_action"]
+        assert delivery.resume_after_answer(conn, task.id, answer="O plano anual.", source={"platform": "telegram", "actor": "Jhonatan", "message_id": "4246"})
+        assert delivery.get_workflow(conn, task.id)["next_action"] == reason
+        assert "destination_wait" in _state(conn, task.id)
+        assert "Answer to the destination escalation" not in delivery.case_context(conn, task.id)
+
+
+def test_escalation_of_a_blocked_card_gets_reminders_and_a_visible_stall(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 66, spec=_spec(_http_probe()))
+        asked = _escalate(conn, task, monkeypatch)
+
+        def requested():
+            return conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'", (task.id,)).fetchone()[0]
+
+        conn.execute("UPDATE nfos_decisions SET created_at=? WHERE id=?", (int(time.time()) - delivery.DECISION_REMINDER_AFTER - 5, asked))
+        conn.commit()
+        before = requested()
+        delivery.sweep_destination_waits(conn)
+        assert requested() == before + 1  # lembrete ao Principal mesmo com o card bloqueado
+
+        stale = int(time.time()) - delivery.DECISION_REMINDER_AFTER - delivery.DECISION_REMINDER_GAP * (delivery.DECISION_MAX_REMINDERS + 1)
+        ctx = json.loads(delivery.get_decision(conn, asked)["context"])
+        ctx["reminders"] = [stale + delivery.DECISION_REMINDER_GAP * i for i in range(delivery.DECISION_MAX_REMINDERS)]
+        conn.execute("UPDATE nfos_decisions SET created_at=?, context=? WHERE id=?", (stale, json.dumps(ctx), asked))
+        conn.commit()
+        delivery.sweep_destination_waits(conn)
+        assert delivery.get_workflow(conn, task.id)["next_action"].startswith("Aguardando o Principal")
+        assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_decision_stalled'", (task.id,)).fetchone()[0] == 1
+        blocked = kb.get_task(conn, task.id)
+        assert blocked.status == "blocked" and blocked.block_kind == "transient" and "destination_wait" in _state(conn, task.id)
+
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(True))
+        _shift(conn, task.id, next_check_at=0)
+        delivery.sweep_destination_waits(conn)
+        _confirmed_up(conn, task.id)
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "back")]
+        assert delivery.get_workflow(conn, task.id)["next_action"].startswith(f"Destino {TARGET} voltou a responder")
+
+
+def test_legacy_link_needs_a_question_newer_than_the_wait(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 67, spec=_spec(_http_probe()))
+        asked = _escalate(conn, task, monkeypatch)
+        delivery.resolve_decision(conn, asked, action="human", author="Principal", answer="PERGUNTA para Jhonatan: o servidor do TEST foi desligado?")
+        st = _state(conn, task.id)
+        for key in ("escalation_decision", "escalated_at", "token"):
+            st["destination_wait"].pop(key, None)
+        st["destination_wait"]["since"] = int(time.time())  # espera legada recente, sem gatilho de escalada nesta varredura
+        conn.execute("UPDATE nfos_workflows SET state_json=? WHERE task_id=?", (json.dumps(st), task.id))
+        ctx = json.loads(delivery.get_decision(conn, asked)["context"])
+        ctx.pop("wait_id", None)
+        started = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind='nfos_destination_wait'", (task.id,)).fetchone()[0]
+        conn.execute("UPDATE nfos_decisions SET context=?, created_at=? WHERE id=?", (json.dumps(ctx), started - 3600, asked))
+        conn.commit()
+        reason = delivery.get_workflow(conn, task.id)["next_action"]
+        assert delivery.resume_after_answer(conn, task.id, answer="Religuei.", source={"platform": "telegram", "actor": "Jhonatan", "message_id": "4247"})
+        assert delivery.get_workflow(conn, task.id)["next_action"] == reason
+        assert "destination_wait" in _state(conn, task.id)
+
+
+def test_stall_note_of_a_long_destination_is_still_recognised(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 68)
+        target = "https://infotributos.example.com/" + "segmento/" * 40
+        note = ("Aguardando o Principal há 95 min (3 lembretes sem resposta). Pergunta: Destino " + target + " sem resposta há 400 min")[:400]
+        conn.execute("UPDATE nfos_workflows SET next_action=? WHERE task_id=?", (note, task.id))
+        conn.commit()
+        assert delivery._destination_next_action(conn, task.id, "Destino voltou.", wait={"target": target})
+        assert delivery.get_workflow(conn, task.id)["next_action"] == "Destino voltou."
