@@ -147,7 +147,6 @@ def _intake_priority(payload):
     return 0
 
 
-_URGENT_RE = re.compile(r"prioridade\s+m[áa]xima|\burgent[ei]\b|urg[êe]ncia|\basap\b|\bp0\b", re.I)
 _REF_RE = re.compile(r"https?://[^\s<>\"')\]]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
@@ -191,50 +190,84 @@ def _same_thread_request(conn, source, *, message_id=None, within=900, exclude=N
     return None, None
 
 
-def _urgent_intake(conn, request_id, source, text, reply_to_message_id, *, author):
-    """URGENT_20260910 (ordem do Maikol): pedido urgente ou repetição de referência de card aberto anexa ao card
-    existente (sem card novo) e, se urgente, sobe a prioridade e libera o card; devolve o que fez."""
-    urgent = bool(_URGENT_RE.search(text or ''))
-    refs = _references(text)
+def _urgency_doc(urgency):
+    """URGENCY_CONTEXT_20260914 (ordem do Maikol): urgência é o julgamento do Principal sobre o contexto da conversa, com o
+    motivo nas palavras de quem pediu; nenhuma palavra-chave decide sozinha."""
+    if urgency is None:
+        return None
+    reason = urgency.get('reason') if isinstance(urgency, dict) else None
+    if not isinstance(reason, str) or not reason.strip():
+        raise WorkflowError('urgency needs {"reason": "why this must come first, in the words of the requester"}')
+    return {'reason': reason.strip()[:500], 'by': 'Principal'}
+
+
+def escalate_urgent(conn, task_id, *, reason, author='Principal', request_id=None, how='principal', comment=True):
+    """URGENCY_CONTEXT_20260914: trabalho aberto que o Principal julgou urgente pelo contexto sobe para URGENT_PRIORITY
+    (frente da fila, vaga extra, slot de entrega) e sai de backlog ou de bloqueio por dependência ou capacidade; o motivo
+    fica no evento priority_escalated e no card."""
+    doc = _urgency_doc({'reason': reason})
+    with _kb().write_txn(conn, allow_nested=True):
+        trow = conn.execute("SELECT status, priority, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if trow is None:
+            raise WorkflowError('Unknown card for urgency')
+        if trow['status'] in ('done', 'archived'):
+            raise WorkflowError('A closed card does not take urgency; send the new work through receive with urgency')
+        conn.execute("UPDATE tasks SET priority = MAX(COALESCE(priority,0), ?) WHERE id = ?", (URGENT_PRIORITY, task_id))
+        if trow['status'] == 'backlog' or (trow['status'] == 'blocked' and (trow['block_kind'] or '') in ('dependency', 'capability', '')):
+            conn.execute("UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL WHERE id=? AND status IN ('backlog','blocked')", (task_id,))
+        if comment:
+            _kb().add_comment(conn, task_id, author, '[urgente] ' + doc['reason'])
+        _event(conn, task_id, None, 'priority_escalated', {'request_id': request_id, 'priority': URGENT_PRIORITY,
+               'previous_priority': int(trow['priority'] or 0), 'how': how, 'previous_status': trow['status'],
+               'reason': doc['reason'], 'by': author})
+    task = _kb().get_task(conn, task_id)
+    return {'task_id': task_id, 'priority': task.priority, 'status': task.status, 'reason': doc['reason']}
+
+
+def _urgent_intake(conn, request_id, source, text, reply_to_message_id, *, author, urgency=None):
+    """URGENT_20260910 e URGENCY_CONTEXT_20260914: resposta a pedido de card aberto ou repetição da sua referência anexa ao
+    card existente (sem card novo). A urgência vem só do julgamento do Principal (urgency com motivo), nunca de
+    palavra-chave, e sobe o card anexado. Devolve o que fez."""
+    urgent = urgency is not None
     target = None; how = None
-    if reply_to_message_id:
+    row = conn.execute("SELECT status, task_id FROM nfos_requests WHERE id = ?", (request_id,)).fetchone()
+    if row is not None and row['status'] == 'attached' and row['task_id']:
+        target = row['task_id']; how = 'attached_request'
+    if target is None and reply_to_message_id:
         r, p = _same_thread_request(conn, source, message_id=reply_to_message_id)
         if r is not None:
             target = r['task_id'] or _open_task_for_references(conn, _references(p.get('text') or '')); how = 'reply'
+    refs = _references(text)
     if target is None and refs:
         target = _open_task_for_references(conn, refs); how = 'same_reference'
-    if target is None and urgent and not refs:
-        r, p = _same_thread_request(conn, source, exclude=request_id)
-        if r is not None:
-            target = r['task_id'] or _open_task_for_references(conn, _references(p.get('text') or '')); how = 'previous_message'
     if target is None:
         return {'urgent': urgent}
-    trow = conn.execute("SELECT status, priority, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()
+    trow = conn.execute("SELECT status FROM tasks WHERE id = ?", (target,)).fetchone()
     if trow is None or trow['status'] in ('done', 'archived'):
         return {'urgent': urgent}
-    conn.execute("UPDATE nfos_requests SET status='attached', task_id=? WHERE id=? AND status IN ('pending','coordinating')", (target, request_id))
-    _kb().add_comment(conn, target, author, ('[prioridade máxima] ' if urgent else '[reenvio] ') + (text or '').strip()[:1500])
-    _event(conn, target, None, 'request_attached', {'request_id': request_id, 'how': how, 'urgent': urgent})
+    if how != 'attached_request':
+        conn.execute("UPDATE nfos_requests SET status='attached', task_id=? WHERE id=? AND status IN ('pending','coordinating')", (target, request_id))
+        _kb().add_comment(conn, target, author, ('[urgente] ' if urgent else '[reenvio] ') + (text or '').strip()[:1500])
+        _event(conn, target, None, 'request_attached', {'request_id': request_id, 'how': how, 'urgent': urgent})
     if urgent:
-        conn.execute("UPDATE tasks SET priority = MAX(COALESCE(priority,0), ?) WHERE id = ?", (URGENT_PRIORITY, target))
-        if trow['status'] == 'backlog' or (trow['status'] == 'blocked' and (trow['block_kind'] or '') in ('dependency', 'capability', '')):
-            conn.execute("UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL WHERE id=? AND status IN ('backlog','blocked')", (target,))
-        _event(conn, target, None, 'priority_escalated', {'request_id': request_id, 'priority': URGENT_PRIORITY, 'how': how, 'previous_status': trow['status']})
+        escalate_urgent(conn, target, reason=urgency['reason'], request_id=request_id, how=how, comment=how == 'attached_request')
     return {'urgent': urgent, 'attached_to': target, 'how': how}
 
 
 def receive_request(conn, *, source, text, project, attachments=(), part='0', origin=None,
-                    defer_to_principal=False, reply_to_message_id=None):
+                    defer_to_principal=False, reply_to_message_id=None, urgency=None):
     required=('platform','chat_id','thread_id','message_id')
     if any(not str(source.get(k) or '').strip() for k in required):
         raise WorkflowError('A request needs its original platform/chat/topic/message identity')
     if not text.strip() and not attachments:
         raise WorkflowError('A request needs text or attachments')
+    urgency=_urgency_doc(urgency)  # URGENCY_CONTEXT_20260914: só o julgamento do Principal marca urgência
     source_key=_json([str(source[k]) for k in required]+[str(part)])
     request_id='req_'+hashlib.sha256(source_key.encode()).hexdigest()[:24]
     payload={'source':source,'text':text,'project':project,'attachments':list(attachments)}
-    if _URGENT_RE.search(text or ''):  # URGENT_20260910
+    if urgency is not None:
         payload['urgent']=True
+        payload['urgency']=urgency
     if origin is not None:
         payload['origin']=origin
     if defer_to_principal:
@@ -243,11 +276,18 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
     with _kb().write_txn(conn,allow_nested=True):
         conn.execute('INSERT OR IGNORE INTO nfos_requests(id,source_key,payload,status,created_at) VALUES(?,?,?,?,?)',
                      (request_id,source_key,payload,'coordinating' if defer_to_principal else 'pending',int(time.time())))
-        try:  # URGENT_20260910: anexa a card aberto e/ou escala prioridade; nunca derruba o intake
+        if urgency is not None:  # URGENCY_CONTEXT_20260914: o original foi gravado antes do julgamento; só a marca de urgência muda
+            saved=json.loads(conn.execute('SELECT payload FROM nfos_requests WHERE id=?',(request_id,)).fetchone()[0])
+            if saved.get('urgency')!=urgency:
+                saved['urgent']=True
+                saved['urgency']=urgency
+                conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(saved),request_id))
+        try:  # URGENT_20260910: anexa a card aberto e escala a urgência julgada; sem urgência, nunca derruba o intake
             _author=(re.match(r'\s*\[([^|\]]+)\|', text or '') or [None, None])[1] or 'nfos-intake'
-            _urgent_intake(conn, request_id, source, text, reply_to_message_id, author=_author)
+            _urgent_intake(conn, request_id, source, text, reply_to_message_id, author=_author, urgency=urgency)
         except Exception:
-            pass
+            if urgency is not None:
+                raise
         if not defer_to_principal:
             # The Principal classifies the preserved message through the same
             # intake. Its original bytes/identity remain authoritative.
@@ -349,8 +389,18 @@ def reserve_request(conn, *, capacity):
         running=conn.execute("SELECT count(*) FROM tasks WHERE status='running' AND task_role='work'").fetchone()[0]
         starting=conn.execute("SELECT count(*) FROM nfos_requests WHERE status='starting'").fetchone()[0]
         if running+starting>=capacity:
-            return None
-        row=conn.execute("SELECT id FROM nfos_requests WHERE status='pending' ORDER BY created_at,id LIMIT 1").fetchone()
+            # URGENCY_CONTEXT_20260914: com o board cheio, o pedido que o Principal julgou urgente ganha uma vaga extra
+            # enquanto nenhum urgente roda ou inicia (a regra de _urgent_burst_slots para cards)
+            busy=conn.execute("SELECT count(*) FROM tasks WHERE status='running' AND task_role='work' AND priority>=?",
+                              (URGENT_PRIORITY,)).fetchone()[0]
+            busy+=conn.execute("SELECT count(*) FROM nfos_requests WHERE status='starting' AND json_extract(payload,'$.urgent') IS 1").fetchone()[0]
+            if busy:
+                return None
+            row=conn.execute("SELECT id FROM nfos_requests WHERE status='pending' AND json_extract(payload,'$.urgent') IS 1 "
+                             "ORDER BY created_at,id LIMIT 1").fetchone()
+        else:
+            row=conn.execute("SELECT id FROM nfos_requests WHERE status='pending' "
+                             "ORDER BY (json_extract(payload,'$.urgent') IS 1) DESC,created_at,id LIMIT 1").fetchone()  # URGENCY_CONTEXT_20260914: urgente primeiro
         if row is None:
             return None
         conn.execute("UPDATE nfos_requests SET status='starting',claim_token=?,claimed_at=? WHERE id=?",
@@ -3523,7 +3573,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','probe','probe-env','lesson','rework','precheck','cancel','save-spec','save-report','progress','ask','decide',
-        'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','acquire-project','release-project','receive','resume','wait','reconsider'])
+        'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','acquire-project','release-project','receive','urgent','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -3661,7 +3711,14 @@ def main():
             if os.environ.get('HERMES_KANBAN_TASK'):
                 raise WorkflowError('The Principal dispatches additional tasks; use ask --kind additional_tasks')
             result={'request_id':receive_request(conn,source=payload['source'],text=payload['text'],
-                project=payload['project'],attachments=payload.get('attachments',[]),part=payload.get('part','0'))}
+                project=payload['project'],attachments=payload.get('attachments',[]),part=payload.get('part','0'),
+                urgency=payload.get('urgency'))}  # URGENCY_CONTEXT_20260914
+        elif args.action=='urgent':  # URGENCY_CONTEXT_20260914: o Principal julgou pelo contexto que o card aberto ficou urgente
+            if os.environ.get('HERMES_KANBAN_TASK'):
+                raise WorkflowError('Urgency is the judgment of the Principal about the conversation; a worker records context in its card')
+            if not args.task:
+                raise WorkflowError('urgent needs --task: the open card this message made urgent')
+            result=escalate_urgent(conn,args.task,reason=payload.get('reason'),how='principal')
         print(_json(result))
 
 

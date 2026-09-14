@@ -1,4 +1,5 @@
-"""URGENT_20260910: urgent or repeated requests attach to the open card, escalate priority, and get a burst slot."""
+"""URGENT_20260910 e URGENCY_CONTEXT_20260914: repetição ou resposta anexa ao card aberto; a urgência é o julgamento do
+Principal sobre o contexto (nunca palavra-chave), sobe a prioridade e ganha vaga extra."""
 import os
 import time
 
@@ -49,7 +50,7 @@ def test_same_reference_attaches_instead_of_new_card(board):
         assert body.startswith("[reenvio]")
 
 
-def test_urgent_reply_escalates_the_existing_card(board):
+def test_keyword_reply_attaches_but_only_the_principal_escalates(board):
     project, task = board
     with kb.connect_closing() as conn:
         d.receive_request(conn, source=_source(2), text="[Maikol|9] " + URL, project=project)
@@ -57,19 +58,22 @@ def test_urgent_reply_escalates_the_existing_card(board):
                                 defer_to_principal=True, reply_to_message_id="2")
         r = _req(conn, rid)
         assert r["status"] == "attached" and r["task_id"] == task.id
+        assert _task(conn, task.id)["priority"] == 10  # URGENCY_CONTEXT_20260914: a palavra não sobe; o Principal julga
+        d.escalate_urgent(conn, task.id, reason="Maikol pediu prioridade máxima neste card")
         t = _task(conn, task.id)
         assert t["priority"] == 100 and t["status"] == "ready"
         kinds = [x[0] for x in conn.execute("SELECT kind FROM task_events WHERE task_id=? ORDER BY id", (task.id,))]
         assert "priority_escalated" in kinds and "request_attached" in kinds
 
 
-def test_urgent_without_reply_uses_previous_message_in_thread(board):
+def test_bare_urgent_word_waits_for_the_principal(board):
     project, task = board
     with kb.connect_closing() as conn:
         d.receive_request(conn, source=_source(2), text="[Maikol|9] " + URL, project=project)
-        rid = d.receive_request(conn, source=_source(3), text="[Maikol|9] urgente", project=project)
-        assert _req(conn, rid)["task_id"] == task.id
-        assert _task(conn, task.id)["priority"] == 100
+        rid = d.receive_request(conn, source=_source(3), text="[Maikol|9] urgente", project=project,
+                                defer_to_principal=True, reply_to_message_id="4")
+        assert _req(conn, rid)["status"] == "coordinating"  # URGENCY_CONTEXT_20260914: o Principal decide o que "urgente" quer dizer
+        assert _task(conn, task.id)["priority"] == 10
 
 
 def test_urgent_new_request_creates_card_with_priority_100(board):
@@ -77,9 +81,9 @@ def test_urgent_new_request_creates_card_with_priority_100(board):
     with kb.connect_closing() as conn:
         conn.execute("UPDATE tasks SET status='done' WHERE id=?", (task.id,))
         conn.commit()
-        time.sleep(0)
         rid = d.receive_request(conn, source={"platform": "telegram", "chat_id": "-100", "thread_id": "9", "message_id": "7"},
-                                text="[Maikol|9] prioridade máxima: subir o plano do tenant Y", project=project)
+                                text="[Maikol|9] subir o plano do tenant Y, o cliente vai cancelar amanhã", project=project,
+                                urgency={"reason": "Cliente vai cancelar amanhã"})
         assert _req(conn, rid)["status"] == "pending"
         req = d.reserve_request(conn, capacity=2)
         new = d.bootstrap_card(conn, rid, req["claim_token"], pid=os.getpid())

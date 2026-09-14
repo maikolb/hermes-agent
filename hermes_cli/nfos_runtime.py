@@ -655,6 +655,7 @@ functionality, not merely the presence of a screenshot file.
 def coordinator_intake_instructions(context, *, reply_to=None):
     """Preserved dispatch context, not a task classification or a task receipt."""
     command=workflow_command()+' receive --db '+shlex.quote(context['db_path'])+' --input request.json'
+    urgent_command=workflow_command()+' urgent --db '+shlex.quote(context['db_path'])+' --task CARD_ID --input urgency.json'  # URGENCY_CONTEXT_20260914
     return ("NFOS preserved-message coordination context. The original is persisted, but has not been dispatched to a worker.\n"
         "Decide its meaning as the Principal. If it requests independent work, including an audit or report, "
         "save the exact request JSON below to request.json and run the exact receive command. "
@@ -663,8 +664,16 @@ def coordinator_intake_instructions(context, *, reply_to=None):
         "do not call receive merely because this context exists. For resume, reuse this message's source identity. "
         "Do not reconstruct IDs, change project, drop original attachments, or ask for another business approval. "
         "After receive succeeds, report the returned request ID; its normal durable receipt uses the same intake.\n"
+        "Urgency is your judgment of the context, never a keyword match. Treat the message as urgent when the sender makes "
+        "clear, in any words, that it must come first: they call it urgent, a priority or very important, production is "
+        "broken or got worse after a delivery, a client or lead may cancel, money or a deadline is at stake, or the thread "
+        "shows the same problem coming back. For new work, add \"urgency\": {\"reason\": \"one sentence in the sender's words\"} "
+        "to request.json before running receive. When the message makes open work urgent (a push, follow-up or correction "
+        "on an existing card), coordinate that card as usual and run the urgency command with its card id and "
+        "{\"reason\": \"...\"} saved to urgency.json; do not create new work for it. The runtime moves the work to the "
+        "front, gives it a slot and records the reason; no approval is needed.\n"
         "Reply context: "+str(reply_to or 'not a reply')+"\n"
-        "Command: "+command+"\nRequest JSON:\n"+json.dumps(context['request'],ensure_ascii=False))
+        "Command: "+command+"\nUrgency command: "+urgent_command+"\nRequest JSON:\n"+json.dumps(context['request'],ensure_ascii=False))
 
 
 def principal_instructions():
@@ -697,6 +706,11 @@ New independent messages use the existing durable request intake. Messages that
 do not match the automatic fast path carry a persisted coordination context;
 when they request work, dispatch its exact payload through receive, rather than
 implementing it here. Status, corrections and human answers remain coordination.
+Judge urgency from the conversation, never from keywords: the sender makes clear
+it must come first (urgent, priority, production broken or worse after a delivery,
+a client or lead about to cancel, money or a deadline at stake). Mark new work with
+"urgency": {"reason": "..."} in request.json; raise open work with the same prefix
+and `urgent --db DB --task CARD --input urgency.json` (JSON with the reason).
 Additional
 tasks found by a worker arrive as kind=additional_tasks in your decision queue.
 Read primary_task, tasks and their source_ref against the original request and

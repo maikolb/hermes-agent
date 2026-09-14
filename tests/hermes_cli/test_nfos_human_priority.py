@@ -1,4 +1,5 @@
-"""HUMAN_PRIORITY_20260910: a card born from a human message outranks promoted backlog; urgent stays 100."""
+"""HUMAN_PRIORITY_20260910: a card born from a human message outranks promoted backlog; urgent (the Principal's judgment,
+URGENCY_CONTEXT_20260914) stays 100 and a keyword alone does not make it urgent."""
 import os
 
 from hermes_cli import kanban_db as kb
@@ -32,7 +33,14 @@ def test_human_request_gets_priority_10_and_urgent_100(tmp_path, monkeypatch):
         rid2 = d.receive_request(conn, source={"platform": "telegram", "chat_id": "-100", "thread_id": "4", "message_id": "2"},
                                  text="[Maikol|9] prioridade máxima: corrigir o edital Y", project=_project(tmp_path))
         t2 = _boot(conn, rid2)
-        assert _priority(conn, t2.id) == 100
+        assert _priority(conn, t2.id) == 10  # URGENCY_CONTEXT_20260914: a palavra sozinha não decide
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (t2.id,))
+        conn.commit()
+        rid3 = d.receive_request(conn, source={"platform": "telegram", "chat_id": "-100", "thread_id": "4", "message_id": "3"},
+                                 text="[Maikol|9] corrigir o edital Z antes da prova de amanhã", project=_project(tmp_path),
+                                 urgency={"reason": "A prova é amanhã"})
+        t3 = _boot(conn, rid3)
+        assert _priority(conn, t3.id) == 100
 
 
 def test_intake_priority_rules():
