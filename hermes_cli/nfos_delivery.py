@@ -2028,14 +2028,16 @@ def _escalate_destination_wait(conn, task, wf, wait, now):
                 wait.update(escalated_at=int(row[2] or now), escalation_decision=row[0])
                 _store_destination_wait(conn, task.id, wait)
                 return 'adopted'
+            if ctx.get('human_reply'):
+                continue  # revisão 11: resposta humana recebida fica para reconcile_human_answers aplicar, e conta como decisão aberta
             stale.append((row[0], ctx))
+        if len(open_rows) > len(stale):
+            return None  # revisão 11: com outra decisão aberta nada é retirado agora, e a varredura tenta de novo
         for stale_id, stale_ctx in stale:  # revisão 10: escalada aberta de outra espera do mesmo alvo sai; a pergunta é refeita para esta espera
             stale_ctx.update(superseded_reason='destination_wait_stale')
             conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=? AND status IN ('pending','human')",
                          (_json(stale_ctx), stale_id))
             _event(conn, task.id, None, 'nfos_destination_escalation_withdrawn', {'decision_id': stale_id, 'reason': 'destination_wait_stale'})
-        if len(open_rows) > len(stale):
-            return None
         decision_id = 'dec_' + uuid.uuid4().hex[:20]
         conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
                      (decision_id, task.id, run[0] if run else 0, 'impediment', question,
@@ -2208,6 +2210,8 @@ def _human_answer_decisions(conn, task_id, reply):
         src = src if isinstance(src, dict) else {}
         return tuple(str(src.get(k) or '') for k in ('platform', 'chat_id', 'thread_id', 'message_id'))
 
+    if not str(source.get('message_id') or '').strip():
+        return None  # revisão 11: sem message_id a reentrega não é detectável; falha fechada
     mine = origin_of(source)
     events = []
     for (payload,) in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_human_answer_received' ORDER BY id",
@@ -2324,15 +2328,16 @@ def _remind_destination_escalation(conn, task_id, wait, now):
             _destination_next_action(conn, task_id, note, wait=wait)
             return 'stalled'
         started = int(row['resolved_at'] or row['created_at'] or now)
-        last = reminders[-1] if reminders else started
+        human_reminders = [int(x) for x in (ctx.get('human_reminders') or []) if str(x).isdigit()]  # revisão 11: fase human conta à parte
+        last = max([started] + human_reminders)
         if now - last < DESTINATION_HUMAN_REMINDER_SECONDS:
             return None
-        reminders.append(now)
-        ctx['reminders'] = reminders
+        human_reminders.append(now)
+        ctx['human_reminders'] = human_reminders
         hours = (now - started) // 3600
         conn.execute('UPDATE nfos_decisions SET context=? WHERE id=? AND status=?', (_json(ctx), decision_id, 'human'))
         _event(conn, task_id, row['run_id'], 'nfos_principal_requested',
-               {'decision_id': decision_id, 'kind': row['kind'], 'reminder': len(reminders), 'waiting_hours': hours, 'awaiting': 'human_reply',
+               {'decision_id': decision_id, 'kind': row['kind'], 'reminder': len(human_reminders), 'waiting_hours': hours, 'awaiting': 'human_reply',
                 'question': (f"Sem resposta de quem opera o destino {target} há {hours} h (pergunta {decision_id}). O runtime segue conferindo a "
                              "cada 10 min. Não repita a pergunta no grupo; se o destino não voltar, feche como entrega parcial com continuação.")})
         _destination_next_action(conn, task_id, f"Aguardando resposta humana sobre o destino {target[:200]} há {hours} h (pergunta {decision_id}). "
@@ -2384,7 +2389,7 @@ def sweep_destination_waits(conn):
                         pass
                 if last_id is None or task.block_kind != 'transient' or last_id != wait.get('block_event_id'):  # revisão 3: sem evento não é dela
                     with _kb().write_txn(conn, allow_nested=True):  # revisão 4: bloqueio alheio; espera e escalada pendente saem juntas
-                        _withdraw_escalation(conn, task_id, wait, 'destination_wait_dropped', statuses=('pending',))
+                        _withdraw_escalation(conn, task_id, wait, 'destination_wait_dropped')  # revisão 11: human sem resposta também
                         _store_destination_wait(conn, task_id, None)
                         _destination_next_action(conn, task_id, f"Espera do destino {wait.get('target')} encerrada: o card tem outro bloqueio e o "
                                                  "destino não foi medido de novo.", wait=wait)  # revisão 7
@@ -2441,7 +2446,7 @@ def sweep_destination_waits(conn):
                 continue
             if wait:  # revisão 4: card que saiu do bloqueio (resposta humana, reconsideração, desbloqueio manual) encerra a espera
                 with _kb().write_txn(conn, allow_nested=True):
-                    _withdraw_escalation(conn, task_id, wait, 'destination_wait_dropped', statuses=('pending',))
+                    _withdraw_escalation(conn, task_id, wait, 'destination_wait_dropped')  # revisão 11: human sem resposta também
                     _store_destination_wait(conn, task_id, None)
                     _destination_next_action(conn, task_id, f"Espera do destino {wait.get('target')} encerrada sem a volta do destino: meça de novo "
                                              "no destino antes de concluir.", wait=wait)  # revisão 7
