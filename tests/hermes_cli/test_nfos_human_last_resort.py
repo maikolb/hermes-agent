@@ -706,7 +706,7 @@ def test_open_escalation_without_link_is_adopted_and_a_burned_one_is_retried(boa
         assert _state(conn, other.id)["destination_wait"]["escalation_decision"]
 
 
-def test_dropped_wait_withdraws_a_pending_escalation_but_keeps_a_question_already_sent(board, monkeypatch):
+def test_dropped_wait_withdraws_its_open_escalation_but_keeps_one_already_answered(board, monkeypatch):
     with kb.connect_closing() as conn:
         task = _card(conn, 37, spec=_spec(_http_probe()))
         decision_id = _escalate(conn, task, monkeypatch)
@@ -724,8 +724,21 @@ def test_dropped_wait_withdraws_a_pending_escalation_but_keeps_a_question_alread
         assert kb.unblock_task(conn, other.id)
         assert kb.block_task(conn, other.id, reason="Janela de manutenção do provedor em andamento", kind="transient")
         delivery.sweep_destination_waits(conn)
-        assert delivery.get_decision(conn, asked)["status"] == "human"
+        row = delivery.get_decision(conn, asked)  # revisão 11: pergunta mandada e sem resposta sai com a espera, senão ficaria sem lembrete
+        assert row["status"] == "superseded" and json.loads(row["context"])["superseded_reason"] == "destination_wait_dropped"
         assert "destination_wait" not in _state(conn, other.id)
+
+        third = _card(conn, 76, spec=_spec(_http_probe()))
+        answered = _escalate(conn, third, monkeypatch)
+        delivery.resolve_decision(conn, answered, action="human", author="Principal", answer="PERGUNTA para Jhonatan: o servidor do TEST foi desligado?")
+        ctx = json.loads(delivery.get_decision(conn, answered)["context"])
+        ctx["human_reply"] = {"answer": "Religuei.", "source": {"platform": "telegram", "message_id": "4250"}, "author": "Jhonatan"}
+        conn.execute("UPDATE nfos_decisions SET context=? WHERE id=?", (json.dumps(ctx), answered))
+        conn.commit()
+        assert kb.unblock_task(conn, third.id)
+        assert kb.block_task(conn, third.id, reason="Janela de manutenção do provedor em andamento", kind="transient")
+        delivery.sweep_destination_waits(conn)
+        assert delivery.get_decision(conn, answered)["status"] == "human"  # resposta recebida fica para o reconcile aplicar
 
 
 def test_principal_changes_on_the_escalation_releases_the_card_and_continue_keeps_waiting(board, monkeypatch):
@@ -1344,3 +1357,78 @@ def test_redelivered_message_already_used_for_another_question_does_not_close_th
         assert delivery.get_workflow(conn, task.id)["next_action"] == reason
         assert "destination_wait" in _state(conn, task.id)
         assert "Answer to the destination escalation" not in delivery.case_context(conn, task.id)
+
+
+# --- revisão 11 (rejulgamento 944ba7bf) -------------------------------------------------------------------------------------------------
+
+def test_card_back_in_the_queue_withdraws_an_unanswered_human_escalation(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 77, spec=_spec(_http_probe()))
+        asked = _escalate(conn, task, monkeypatch)
+        delivery.resolve_decision(conn, asked, action="human", author="Principal", answer="PERGUNTA para Jhonatan: o servidor do TEST foi desligado?")
+        assert kb.unblock_task(conn, task.id)
+        delivery.sweep_destination_waits(conn)
+        row = delivery.get_decision(conn, asked)
+        assert row["status"] == "superseded" and json.loads(row["context"])["superseded_reason"] == "destination_wait_dropped"
+        assert "destination_wait" not in _state(conn, task.id)
+
+
+def test_stale_escalation_with_a_received_answer_is_kept_for_the_reconcile(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 78, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+        started = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind='nfos_destination_wait'", (task.id,)).fetchone()[0]
+        ctx = {"destination_wait": True, "target": TARGET, "wait_id": "espera-antiga",
+               "human_reply": {"answer": "O IP mudou para 15.229.99.10.", "source": {"platform": "telegram", "message_id": "4251"}, "author": "Jhonatan"}}
+        conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES('dec_respondida',?,?,?,?,?,?,?)",
+                     (task.id, task.current_run_id, "impediment", "Destino sem resposta?", json.dumps(ctx), 1, started - 7200))
+        conn.execute("UPDATE nfos_decisions SET status='human', action='human', author='Principal', answer='PERGUNTA para Jhonatan: o TEST mudou?' WHERE id='dec_respondida'")
+        conn.commit()
+        _shift(conn, task.id, since=int(time.time()) - delivery.DESTINATION_ESCALATE_SECONDS - 60)
+        assert (task.id, "escalated") not in delivery.sweep_destination_waits(conn)
+        assert delivery.get_decision(conn, "dec_respondida")["status"] == "human"
+
+
+def test_stale_escalation_is_not_withdrawn_while_another_decision_is_open(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 79, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+        started = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind='nfos_destination_wait'", (task.id,)).fetchone()[0]
+        conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES('dec_velha',?,?,?,?,?,?,?)",
+                     (task.id, task.current_run_id, "impediment", "Destino sem resposta?", json.dumps({"destination_wait": True, "target": TARGET}), 1, started - 7200))
+        conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES('dec_outro',?,?,?,?,?,?,?)",
+                     (task.id, task.current_run_id, "impediment", "Outro assunto?", "{}", 1, int(time.time())))
+        conn.commit()
+        _shift(conn, task.id, since=int(time.time()) - delivery.DESTINATION_ESCALATE_SECONDS - 60)
+        assert (task.id, "escalated") not in delivery.sweep_destination_waits(conn)
+        assert delivery.get_decision(conn, "dec_velha")["status"] == "pending"
+
+
+def test_human_answer_without_a_message_id_does_not_close_the_escalation(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 80, spec=_spec(_http_probe()))
+        asked = _escalate(conn, task, monkeypatch)
+        delivery.resolve_decision(conn, asked, action="human", author="Principal", answer="PERGUNTA para Jhonatan: o servidor do TEST foi desligado?")
+        reason = delivery.get_workflow(conn, task.id)["next_action"]
+        assert delivery.resume_after_answer(conn, task.id, answer="Religuei.", source={"platform": "telegram", "actor": "Jhonatan"})
+        assert delivery.get_workflow(conn, task.id)["next_action"] == reason
+        assert "destination_wait" in _state(conn, task.id)
+        assert "Answer to the destination escalation" not in delivery.case_context(conn, task.id)
+
+
+def test_human_phase_reminder_counts_from_the_question_not_from_older_reminders(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 81, spec=_spec(_http_probe()))
+        asked = _escalate(conn, task, monkeypatch)
+        ctx = json.loads(delivery.get_decision(conn, asked)["context"])
+        ctx["reminders"] = [int(time.time()) - delivery.DESTINATION_HUMAN_REMINDER_SECONDS - 3600]  # lembrete antigo da fase pending
+        conn.execute("UPDATE nfos_decisions SET context=? WHERE id=?", (json.dumps(ctx), asked))
+        conn.commit()
+        delivery.resolve_decision(conn, asked, action="human", author="Principal", answer="PERGUNTA para Jhonatan: o servidor do TEST foi desligado?")
+        before = conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'", (task.id,)).fetchone()[0]
+        delivery.sweep_destination_waits(conn)
+        assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'", (task.id,)).fetchone()[0] == before
