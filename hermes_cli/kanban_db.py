@@ -7305,11 +7305,12 @@ def complete_task(
                 )
                 return False
             _contract_waived = False  # CLOSURE_RECOVERY_20260911: required sem policy/request/receipt = não inicializado, não adulterado
-            if (delivery is not None and bool(delivery["required"]) and delivery["policy_json"] is None
-                    and delivery["request_json"] is None and delivery["receipt_json"] is None):
+            if _delivery_contract_uninitialized(delivery, delivery_enrolled):  # REWORK_CONTRACT_20260914: sem política ou, em card NFOS, política intacta sem pedido nem recibo
                 _contract_waived = _nfos_delivery_recorded(conn, task_id)
                 _append_event(conn, task_id, "delivery_contract_uninitialized",
-                              {"waived": _contract_waived, "reason": "required without sealed policy (board without configured Git policy or reclassified card); "
+                              {"waived": _contract_waived, "reason": ("required without sealed policy (board without configured Git policy or reclassified card); "
+                                                                     if delivery["policy_json"] is None else
+                                                                     "sealed policy intact without request or receipt on an NFOS card (reclassified to code; the Git review lane never started); ")
                                + ("publication recorded by nfos_effects" if _contract_waived else "no confirmed NFOS publication effect")},
                               run_id=(int(prior["current_run_id"]) if prior and prior["current_run_id"] is not None else None))
                 if not _contract_waived:
@@ -11882,6 +11883,29 @@ def _nfos_delivery_recorded(conn, task_id):
         ).fetchone() is not None
     except Exception:
         return False
+
+
+def _delivery_contract_uninitialized(delivery, delivery_enrolled):
+    """REWORK_CONTRACT_20260914: obrigação Git ligada sem pedido nem recibo selados é contrato não inicializado, não adulterado. Vale sem
+    política (CLOSURE_RECOVERY_20260911) e, em card NFOS, com a política selada intacta (card em worktree reclassificado para código pelo
+    save_spec): o NFOS nunca grava o manifesto da fila de revisão. Política alterada, pedido ou recibo presentes seguem pela conferência
+    de adulteração."""
+    if delivery is None or not bool(delivery["required"]):
+        return False
+    if delivery["request_json"] is not None or delivery["receipt_json"] is not None:
+        return False
+    if delivery["policy_json"] is None:
+        return True
+    if not delivery_enrolled:
+        return False
+    try:
+        policy = json.loads(str(delivery["policy_json"]))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(policy, Mapping):
+        return False
+    _, fingerprint = _canonical_delivery_document(policy)
+    return fingerprint == delivery["policy_fingerprint"]
 
 
 def _nfos_refused_in_run(conn, row):
