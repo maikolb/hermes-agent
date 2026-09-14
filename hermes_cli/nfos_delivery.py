@@ -750,6 +750,50 @@ def _probe_env_sources(conn, task_id):
     return env, vault_names
 
 
+def _probe_session_cookie(conn, task_id, url):
+    """PROBE_SESSION_20260914 (ordem do Maikol, 14/09): a sonda http usa a sessão já guardada do projeto (probe_session no config:
+    o storage state do navegador que o mantenedor usa, como o do MCP concursa_admin). Só cookies válidos cujo domínio e caminho
+    cobrem a URL, secure só em https, e só para o destino ou probe_hosts. Devolve (cabeçalho Cookie ou None, nomes dos cookies);
+    o valor nunca vai para cofre, spec, relatório, evento ou log."""
+    from urllib.parse import urlsplit
+    _key, cfg = _probe_project(conn, task_id)
+    configured = str((cfg or {}).get('probe_session') or '').strip()
+    host = _host_of(url)
+    if not configured or not host or not _probe_in_scope(conn, task_id, host):
+        return None, []
+    path = Path(configured)
+    if not path.is_absolute():
+        if '..' in configured:
+            return None, []
+        path = Path(os.environ.get('HERMES_HOME') or str(Path.home() / '.hermes')) / 'secrets' / configured
+    try:
+        state = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None, []
+    parts = urlsplit(str(url or ''))
+    https = parts.scheme.lower() == 'https'
+    url_path = parts.path or '/'
+    now = time.time()
+    pairs, names = [], []
+    for cookie in (state.get('cookies') if isinstance(state, dict) else None) or []:
+        if not isinstance(cookie, dict) or not cookie.get('name'):
+            continue
+        domain = str(cookie.get('domain') or '').lstrip('.').lower()
+        if not domain or not (host == domain or host.endswith('.' + domain)):
+            continue
+        cookie_path = str(cookie.get('path') or '/')
+        if cookie_path != '/' and not (url_path == cookie_path or url_path.startswith(cookie_path.rstrip('/') + '/')):
+            continue
+        expires = cookie.get('expires')
+        if isinstance(expires, (int, float)) and 0 < expires <= now:
+            continue
+        if cookie.get('secure') and not https:
+            continue
+        pairs.append(f"{cookie['name']}={cookie.get('value', '')}")
+        names.append(str(cookie['name']))
+    return ('; '.join(pairs) if pairs else None), names
+
+
 def _resolve_host(host):
     """Endereços de um nome pelo DNS (separado para os testes trocarem)."""
     import socket
@@ -933,6 +977,9 @@ def _validate_probe(cid, probe):
         raise WorkflowError(f'Criterion {cid}: probe.expect keys {unknown} are not evaluated; use row, scalar, op+value, set_equals, contains_all, not_matches, count_between, equals (with json_path on the probe) or status')
     if probe.get('phase') not in (None, 'before', 'after'):  # PROBE_PHASE_20260911
         raise WorkflowError(f'Criterion {cid}: probe.phase is before (baseline record) or after (result); default after')
+    if probe.get('auth') not in (None, 'session', 'none'):  # PROBE_SESSION_20260914
+        raise WorkflowError(f'Criterion {cid}: probe.auth is session (default: the project session goes to the destination or probe_hosts) '
+                            'or none (measure anonymous access)')
     if set(expect) <= {'status'}:  # PROBE_STRICT_EXPECT_20260911: status sozinho não prova conteúdo
         raise WorkflowError(f'Criterion {cid}: probe.expect with status alone does not prove the requested result; add equals with json_path, set_equals, contains_all or not_matches on the content the user consumes')
     kind = probe['kind']
@@ -1156,6 +1203,12 @@ def _execute_probe(conn, task_id, probe):
                 return 'INDETERMINADO', None, (f'probe headers with $env: (vault credentials) are only sent to the delivery destination host or to '
                                                f'probe_hosts; {host} is neither. Measure the destination host')  # HUMAN_LAST_RESORT_20260914 revisão 2
             _key, _cfg = _probe_project(conn, task_id)
+            _session_names = []
+            if probe.get('auth') != 'none' and not any(str(k).lower() in ('cookie', 'authorization') for k in (probe.get('headers') or {})):
+                _cookie, _session_names = _probe_session_cookie(conn, task_id, probe.get('url'))  # PROBE_SESSION_20260914: sessão guardada do projeto
+                if _cookie:
+                    env = dict(env, NFOS_PROBE_SESSION_COOKIE=_cookie)
+                    probe = dict(probe, headers=dict(probe.get('headers') or {}, Cookie='$env:NFOS_PROBE_SESSION_COOKIE'))
             observed = _run_http_probe(probe, env, hosts=(_cfg or {}).get('probe_hosts'))  # PROBE_BYPASS_SCOPE_20260911
             _status = observed.get('status'); _exp_status = (probe.get('expect') or {}).get('status')
             if observed.get('mitigated'):
@@ -1164,8 +1217,12 @@ def _execute_probe(conn, task_id, probe):
                 return 'INDETERMINADO', observed, 'HTTP 429 without challenge evidence: possible application rate limit or a defect; back off and retry, and if it persists investigate the limit itself instead of assuming a Vercel challenge'
             if _status is not None and 300 <= _status < 400 and _exp_status != _status:
                 return 'INDETERMINADO', observed, f"HTTP {_status} redirect to another host was not followed (vault headers stay on the destination); measure the final destination directly"
-            if observed.get('status') in (401, 403) and 'status' not in (probe.get('expect') or {}):
-                return 'INDETERMINADO', observed, f"HTTP {observed['status']}: access to the consumer surface was refused"
+            if _status in (401, 403) and _exp_status not in (401, 403):  # PROBE_SESSION_20260914: acesso recusado não é defeito do produto
+                return 'INDETERMINADO', observed, (f"HTTP {_status}: access to the consumer surface was refused; the probe "
+                    + (f"sent the project session (probe_session cookies {', '.join(_session_names)}) and it was refused: renew that stored login"
+                       if _session_names else "carried no session or credential")
+                    + ". Measure with the project session (probe_session), a vault credential referenced as $env:NAME, or a sql probe "
+                    "for the data state; this is not a product FAIL and not a question for a human")
     except WorkflowError as exc:
         return 'INDETERMINADO', None, str(exc)
     except Exception as exc:  # timeout, rede, sintaxe: medição indisponível, não defeito
