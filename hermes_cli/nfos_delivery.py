@@ -2042,7 +2042,9 @@ def _discard_unparked_wait(conn, task_id, wait, reason, previous_action):
 def _orphan_destination_wait(conn, task):
     """Revisão 5: card bloqueado transient cujo último bloqueio tem o motivo 'Destino <alvo da spec> ' e ficou sem espera no estado (queda no
     meio de uma transição, ou estado deixado por revisão anterior) ganha a espera de volta a partir do evento, para nunca ficar parado sem
-    quem confira o destino."""
+    quem confira o destino. Revisão 6: since, medição e erro vêm do evento nfos_destination_wait desta espera (block_loop_detected recente não
+    zera o relógio da escalada), e a escalada do mesmo alvo criada depois dele, aberta ou resolvida, volta ao vínculo: changes já respondido
+    solta o card em vez de abrir outra pergunta."""
     if task.block_kind != 'transient':
         return None
     last = conn.execute("SELECT id, payload, created_at FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected') "
@@ -2059,8 +2061,42 @@ def _orphan_destination_wait(conn, task):
         return None
     if not target or not reason.startswith(f'Destino {target} '):
         return None
-    return {'target': target, 'since': int(last[2] or time.time()), 'checked_at': 0, 'next_check_at': 0, 'criterion': None, 'error': '',
+    wait = {'target': target, 'since': int(last[2] or time.time()), 'checked_at': 0, 'next_check_at': 0, 'criterion': None, 'error': '',
             'block_event_id': last[0], 'recovered': True}
+    started = int(last[2] or 0)
+    for payload, created_at in conn.execute("SELECT payload, created_at FROM task_events WHERE task_id=? AND kind='nfos_destination_wait' AND id<? "
+                                            "ORDER BY id DESC", (task.id, last[0])).fetchall():
+        try:
+            info = json.loads(payload or '{}') or {}
+        except Exception:
+            continue
+        if isinstance(info, dict) and info.get('target') == target:
+            wait.update(since=int(info.get('since') or created_at or wait['since']), criterion=info.get('criterion'),
+                        error=str(info.get('error') or '')[:200])
+            started = int(created_at or started)
+            break
+    for decision_id, context, created_at in conn.execute("SELECT id, context, created_at FROM nfos_decisions WHERE task_id=? AND "
+                                                         "status IN ('pending','human','resolved') AND created_at>=? ORDER BY created_at DESC, id DESC",
+                                                         (task.id, started)).fetchall():
+        try:
+            ctx = json.loads(context or '{}') or {}
+        except Exception:
+            continue
+        if isinstance(ctx, dict) and ctx.get('destination_wait') and ctx.get('target') == target:
+            wait.update(escalated_at=int(created_at or 0), escalation_decision=decision_id)
+            break
+    return wait
+
+
+def _destination_next_action(conn, task_id, text, stale_prefix=None):
+    """Revisão 6: o next_action do card, que o worker lê no contexto do caso, acompanha a espera. Com stale_prefix só troca se o atual ainda
+    é o motivo da espera; sem ele grava sempre (resposta do Principal)."""
+    with _kb().write_txn(conn, allow_nested=True):
+        wf = get_workflow(conn, task_id)
+        if not wf or (stale_prefix is not None and not str(wf['next_action'] or '').startswith(stale_prefix)):
+            return False
+        conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (text[:400], int(time.time()), task_id))
+    return True
 
 
 def sweep_destination_waits(conn):
@@ -2089,14 +2125,13 @@ def sweep_destination_waits(conn):
             state = json.loads(wf['state_json'] or '{}') or {}
             wait = state.get('destination_wait') if isinstance(state.get('destination_wait'), dict) else None
             if task.status == 'blocked':
-                recovered = False
                 if not wait:  # revisão 5: bloqueio "Destino <alvo>" sem espera ganha a espera de volta
                     wait = _orphan_destination_wait(conn, task)
                     if not wait:
                         continue
-                    recovered = True
+                    _store_destination_wait(conn, task_id, wait)  # revisão 6: grava antes de relatar
                     changed.append((task_id, 'recovered'))
-                original = '' if recovered else _json(wait)
+                original = _json(wait)
                 last = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected') "
                                     "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()  # recorrência do mesmo tipo grava block_loop_detected
                 last_id = last[0] if last else None
@@ -2117,6 +2152,7 @@ def sweep_destination_waits(conn):
                         released = _kb().unblock_task(conn, task_id)
                         if released:
                             _store_destination_wait(conn, task_id, None)
+                            _destination_next_action(conn, task_id, f"Principal (changes, {escalation['id']}): {escalation['answer'] or ''}")  # revisão 6
                             _event(conn, task_id, None, 'nfos_destination_wait_released',
                                    {'target': wait.get('target'), 'decision_id': escalation['id'], 'action': 'changes'})
                     if released:
@@ -2143,6 +2179,9 @@ def sweep_destination_waits(conn):
                         if back:
                             _withdraw_escalation(conn, task_id, wait, 'destination_back')
                             _store_destination_wait(conn, task_id, None)
+                            _destination_next_action(conn, task_id, f"Destino {wait.get('target')} voltou a responder em "  # revisão 6: sai o motivo velho
+                                                     f"{time.strftime('%d/%m %H:%MZ', time.gmtime(now))}: meça de novo no destino e siga a entrega.",
+                                                     stale_prefix=f"Destino {wait.get('target')} sem resposta")
                             _event(conn, task_id, None, 'nfos_destination_back', {'target': wait.get('target'), 'since': wait.get('since')})
                     if back:
                         changed.append((task_id, 'back'))
@@ -2184,7 +2223,7 @@ def sweep_destination_waits(conn):
                       'O runtime confere a cada 10 min e devolve este card à fila quando o destino voltar; depois de 1 h sem resposta, o Principal '
                       'procura quem opera o destino.')
             wait = {'target': target, 'since': since, 'checked_at': now, 'next_check_at': now + DESTINATION_RECHECK_SECONDS,
-                    'criterion': criterion, 'error': error[:200]}
+                    'criterion': criterion, 'error': error[:200], 'token': uuid.uuid4().hex[:12]}  # revisão 6: token da varredura
             with _kb().write_txn(conn, allow_nested=True):  # revisão 4: a espera nasce antes do bloqueio; queda entre os dois é adotada pelo alvo
                 current = get_workflow(conn, task_id)
                 previous_action = current['next_action']
