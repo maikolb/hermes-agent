@@ -31,6 +31,8 @@ def test_question_to_the_requester_goes_out_and_the_rest_stays_on_the_card(clien
         "- PERGUNTA para Maikol: pode configurar?",
         "1. PERGUNTA para Maikol: pode configurar?",
         "2) **PERGUNTA para Maikol**: pode configurar?",
+        "1 - PERGUNTA para Maikol: pode configurar?",
+        "3: PERGUNTA ao Maikol: pode configurar?",
         "❓ PERGUNTA ao Maikol: pode configurar?",
         "PERGUNTA para Fulano: quem é?",
         "Pronto: validade registrada.\nPERGUNTA para Maikol: posso fechar?",

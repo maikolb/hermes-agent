@@ -578,6 +578,8 @@ def test_leading_markers_do_not_hide_who_is_asked():
     assert delivery._human_is_maintenance("- PERGUNTA para Maikol: credencial da sonda?")
     assert delivery._human_is_maintenance("> **PERGUNTA para Maikol**: a sonda precisa de cookie?")
     assert delivery._human_is_maintenance("1. PERGUNTA para Maikol: credencial da sonda?")
+    assert delivery._human_is_maintenance("1 - PERGUNTA para Maikol: credencial da sonda?")
+    assert delivery._human_is_maintenance("2: PERGUNTA para Maikol: a sonda precisa de cookie?")
     assert not delivery._human_is_maintenance("1. PERGUNTA para Jhonatan: pode religar a VPS do TEST?")
 
 
@@ -606,31 +608,43 @@ def test_destination_back_keeps_the_wait_when_the_card_does_not_leave_the_block(
         assert delivery.get_decision(conn, decision_id)["status"] == "superseded"
 
 
-def test_a_crash_between_blocking_and_recording_the_block_is_adopted_by_target(board, monkeypatch):
+def test_block_is_recorded_by_its_event_and_a_crash_before_recording_is_adopted_by_target(board, monkeypatch):
     with kb.connect_closing() as conn:
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
         task = _card(conn, 32, spec=_spec(_http_probe()))
         _park(conn, task, monkeypatch)
-        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
         real_block = kb.block_task
 
-        def block_then_crash(conn, task_id, **kw):
+        def block_then_raise(conn, task_id, **kw):
             assert real_block(conn, task_id, **kw)
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(kb, "block_task", block_then_raise)
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+        monkeypatch.setattr(kb, "block_task", real_block)
+        assert _state(conn, task.id)["destination_wait"]["block_event_id"]
+
+        other = _card(conn, 45, spec=_spec(_http_probe()))
+        _park(conn, other, monkeypatch)
+        real_own = delivery._own_block_event
+
+        def crash(conn, task_id, after_id, reason):
             raise RuntimeError("gateway stopped")
 
-        monkeypatch.setattr(kb, "block_task", block_then_crash)
-        assert delivery.sweep_destination_waits(conn) == []
-        monkeypatch.setattr(kb, "block_task", real_block)
-        assert kb.get_task(conn, task.id).status == "blocked"
-        wait = _state(conn, task.id)["destination_wait"]
+        monkeypatch.setattr(delivery, "_own_block_event", crash)
+        delivery.sweep_destination_waits(conn)
+        monkeypatch.setattr(delivery, "_own_block_event", real_own)
+        assert kb.get_task(conn, other.id).status == "blocked"
+        wait = _state(conn, other.id)["destination_wait"]
         assert wait["target"] == TARGET and wait.get("block_event_id") is None
-        _shift(conn, task.id, next_check_at=0)
+        _shift(conn, other.id, next_check_at=0)
         delivery.sweep_destination_waits(conn)
-        assert _state(conn, task.id)["destination_wait"]["block_event_id"]
+        assert _state(conn, other.id)["destination_wait"]["block_event_id"]
         monkeypatch.setattr(delivery, "_destination_reachable", _reachable(True))
-        _shift(conn, task.id, next_check_at=0)
+        _shift(conn, other.id, next_check_at=0)
         delivery.sweep_destination_waits(conn)
-        _confirmed_up(conn, task.id)
-        assert delivery.sweep_destination_waits(conn) == [(task.id, "back")]
+        _confirmed_up(conn, other.id)
+        assert (other.id, "back") in delivery.sweep_destination_waits(conn)
 
 
 def test_legacy_adoption_needs_the_block_of_the_same_destination(board, monkeypatch):
@@ -775,3 +789,103 @@ def test_textual_next_check_still_orders_the_sweep(board, monkeypatch):
         delivery.sweep_destination_waits(conn)
         assert _state(conn, second.id)["destination_wait"]["checked_at"] > 1
         assert _state(conn, first.id)["destination_wait"]["checked_at"] == 1
+
+
+# --- revisão 5 (rejulgamento c93ce3bc) --------------------------------------------------------------------------------------------------
+
+def _expire_destination_check(conn, task_id):
+    st = _state(conn, task_id)
+    st["destination_check"]["next_check_at"] = 0
+    conn.execute("UPDATE nfos_workflows SET state_json=? WHERE task_id=?", (json.dumps(st), task_id))
+    conn.commit()
+
+
+def test_released_card_is_not_parked_again_on_the_old_measurement(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 46, spec=_spec(_http_probe()))
+        decision_id = _escalate(conn, task, monkeypatch)
+        delivery.resolve_decision(conn, decision_id, action="changes", author="Principal",
+                                  answer="O TEST mudou para https://novo.example.com; corrija spec, deploy e medição.")
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "released")]
+        _expire_destination_check(conn, task.id)
+        monkeypatch.setattr(delivery, "_destination_reachable", lambda target, timeout=5: pytest.fail("parked again before the worker measured"))
+        assert delivery.sweep_destination_waits(conn) == []
+        assert delivery.sweep_destination_waits(conn) == []
+        assert kb.get_task(conn, task.id).status == "ready" and "destination_wait" not in _state(conn, task.id)
+
+        conn.execute("UPDATE tasks SET status='running', current_run_id=? WHERE id=?", (task.current_run_id, task.id))  # o worker mede de novo
+        conn.commit()
+        time.sleep(1.1)  # medição nova precisa ser posterior ao evento de liberação (segundos inteiros)
+        _park(conn, task, monkeypatch)
+        _expire_destination_check(conn, task.id)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+
+
+def test_reconsideration_after_the_measurement_lets_the_worker_act_before_parking(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 47, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        with kb.write_txn(conn):
+            kb._append_event(conn, task.id, "nfos_principal_reconsidered", {"decision_id": "nd_x", "action": "changes"})
+        monkeypatch.setattr(delivery, "_destination_reachable", lambda target, timeout=5: pytest.fail("must not park after a reconsideration"))
+        assert delivery.sweep_destination_waits(conn) == []
+        assert kb.get_task(conn, task.id).status == "ready"
+
+
+def test_block_that_does_not_happen_leaves_no_wait_nor_false_next_action(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 48, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        before_action = delivery.get_workflow(conn, task.id)["next_action"]
+        real_block = kb.block_task
+
+        monkeypatch.setattr(kb, "block_task", lambda conn, task_id, **kw: False)
+        assert delivery.sweep_destination_waits(conn) == []
+        assert "destination_wait" not in _state(conn, task.id)
+        assert delivery.get_workflow(conn, task.id)["next_action"] == before_action
+
+        def claimed_then_block(conn, task_id, **kw):  # o card foi reivindicado entre a espera e o bloqueio
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+            conn.commit()
+            return real_block(conn, task_id, **kw)
+
+        _expire_destination_check(conn, task.id)
+        monkeypatch.setattr(kb, "block_task", claimed_then_block)
+        assert delivery.sweep_destination_waits(conn) == []
+        assert kb.get_task(conn, task.id).status == "running" and "destination_wait" not in _state(conn, task.id)
+
+        other = _card(conn, 49, spec=_spec(_http_probe()))
+        _park(conn, other, monkeypatch)
+
+        def foreign_block_first(conn, task_id, **kw):  # outro bloqueio chega antes; max(id) pegaria o dele
+            return real_block(conn, task_id, reason="Janela de manutenção do provedor em andamento", kind="transient")
+
+        monkeypatch.setattr(kb, "block_task", foreign_block_first)
+        assert (other.id, "wait") not in delivery.sweep_destination_waits(conn)
+        monkeypatch.setattr(kb, "block_task", real_block)
+        assert kb.get_task(conn, other.id).status == "blocked" and "destination_wait" not in _state(conn, other.id)
+        monkeypatch.setattr(delivery, "_destination_reachable", lambda target, timeout=5: pytest.fail("a foreign block is not watched"))
+        assert delivery.sweep_destination_waits(conn) == []
+
+
+def test_destination_block_without_its_wait_gets_the_wait_back(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 50, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+        block_id = _state(conn, task.id)["destination_wait"]["block_event_id"]
+        st = _state(conn, task.id)
+        st.pop("destination_wait")
+        conn.execute("UPDATE nfos_workflows SET state_json=? WHERE task_id=?", (json.dumps(st), task.id))
+        conn.commit()
+        assert (task.id, "recovered") in delivery.sweep_destination_waits(conn)
+        wait = _state(conn, task.id)["destination_wait"]
+        assert wait["block_event_id"] == block_id and wait["target"] == TARGET and wait["recovered"]
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(True))
+        _shift(conn, task.id, next_check_at=0)
+        delivery.sweep_destination_waits(conn)
+        _confirmed_up(conn, task.id)
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "back")]
