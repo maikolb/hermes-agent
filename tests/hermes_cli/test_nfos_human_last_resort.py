@@ -362,6 +362,8 @@ def test_unreachable_destination_parks_and_needs_two_answers_to_come_back(board,
         _shift(conn, task.id, next_check_at=0, up_at=int(time.time()) - delivery.DESTINATION_CONFIRM_SECONDS - 1)
         assert delivery.sweep_destination_waits(conn) == [(task.id, "back")]
         assert kb.get_task(conn, task.id).status == "ready"
+        action = delivery.get_workflow(conn, task.id)["next_action"]
+        assert "voltou a responder" in action and "sem resposta" not in action
         kinds = [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id=? ORDER BY id", (task.id,))]
         assert "nfos_destination_wait" in kinds and "nfos_destination_back" in kinds
 
@@ -742,6 +744,8 @@ def test_principal_changes_on_the_escalation_releases_the_card_and_continue_keep
                                   answer="O TEST mudou para https://novo.example.com; corrija spec, deploy e medição.")
         assert delivery.sweep_destination_waits(conn) == [(other.id, "released")]
         assert kb.get_task(conn, other.id).status == "ready" and "destination_wait" not in _state(conn, other.id)
+        action = delivery.get_workflow(conn, other.id)["next_action"]
+        assert "https://novo.example.com" in action and asked in action and "sem resposta" not in action
         assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_destination_wait_released'", (other.id,)).fetchone()[0] == 1
 
 
@@ -889,3 +893,81 @@ def test_destination_block_without_its_wait_gets_the_wait_back(board, monkeypatc
         delivery.sweep_destination_waits(conn)
         _confirmed_up(conn, task.id)
         assert delivery.sweep_destination_waits(conn) == [(task.id, "back")]
+
+
+# --- revisão 6 (rejulgamento 673c1ab1) --------------------------------------------------------------------------------------------------
+
+def _drop_wait(conn, task_id):
+    st = _state(conn, task_id)
+    st.pop("destination_wait")
+    conn.execute("UPDATE nfos_workflows SET state_json=? WHERE task_id=?", (json.dumps(st), task_id))
+    conn.commit()
+
+
+def test_recovered_wait_keeps_its_escalation_and_the_original_start(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 51, spec=_spec(_http_probe()))
+        asked = _escalate(conn, task, monkeypatch)
+        started = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_destination_wait' ORDER BY id DESC LIMIT 1",
+                                          (task.id,)).fetchone()[0])["since"]
+        reason = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' ORDER BY id DESC LIMIT 1",
+                                         (task.id,)).fetchone()[0])["reason"]
+        _drop_wait(conn, task.id)
+        with kb.write_txn(conn):  # recorrência recente: o último evento de bloqueio fica novo, o relógio da espera não zera
+            kb._append_event(conn, task.id, "block_loop_detected", {"reason": reason, "kind": "transient", "recurrences": 3})
+        assert (task.id, "recovered") in delivery.sweep_destination_waits(conn)
+        wait = _state(conn, task.id)["destination_wait"]
+        assert wait["since"] == started and wait["escalation_decision"] == asked
+        _shift(conn, task.id, since=int(time.time()) - delivery.DESTINATION_ESCALATE_SECONDS - 60)
+        delivery.sweep_destination_waits(conn)
+        assert conn.execute("SELECT count(*) FROM nfos_decisions WHERE task_id=?", (task.id,)).fetchone()[0] == 1
+
+        other = _card(conn, 52, spec=_spec(_http_probe()))
+        asked_other = _escalate(conn, other, monkeypatch)
+        delivery.resolve_decision(conn, asked_other, action="changes", author="Principal", answer="Endereço novo do TEST: https://novo.example.com")
+        _drop_wait(conn, other.id)
+        out = delivery.sweep_destination_waits(conn)
+        assert (other.id, "recovered") in out and (other.id, "released") in out
+        assert kb.get_task(conn, other.id).status == "ready"
+        assert "https://novo.example.com" in delivery.get_workflow(conn, other.id)["next_action"]
+        assert conn.execute("SELECT count(*) FROM nfos_decisions WHERE task_id=?", (other.id,)).fetchone()[0] == 1
+
+
+def test_recovered_is_reported_only_after_the_wait_is_stored(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 53, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+        _drop_wait(conn, task.id)
+        real_store = delivery._store_destination_wait
+
+        def store_fails(conn, task_id, wait):
+            raise RuntimeError("disk I/O error")
+
+        monkeypatch.setattr(delivery, "_store_destination_wait", store_fails)
+        assert (task.id, "recovered") not in delivery.sweep_destination_waits(conn)
+        monkeypatch.setattr(delivery, "_store_destination_wait", real_store)
+        assert (task.id, "recovered") in delivery.sweep_destination_waits(conn)
+        assert _state(conn, task.id)["destination_wait"]["recovered"]
+
+
+def test_a_wait_written_by_another_sweep_is_not_discarded(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 54, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+
+        def another_sweep_wrote_first(conn, task_id, **kw):  # outra varredura gravou a mesma espera antes de este bloqueio falhar
+            st = _state(conn, task_id)
+            theirs = dict(st["destination_wait"])
+            if "token" in theirs:
+                theirs["token"] = "outra-varredura"
+            st["destination_wait"] = theirs
+            conn.execute("UPDATE nfos_workflows SET state_json=? WHERE task_id=?", (json.dumps(st), task_id))
+            conn.commit()
+            return False
+
+        monkeypatch.setattr(kb, "block_task", another_sweep_wrote_first)
+        assert delivery.sweep_destination_waits(conn) == []
+        assert "destination_wait" in _state(conn, task.id)
