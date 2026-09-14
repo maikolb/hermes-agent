@@ -971,3 +971,93 @@ def test_a_wait_written_by_another_sweep_is_not_discarded(board, monkeypatch):
         monkeypatch.setattr(kb, "block_task", another_sweep_wrote_first)
         assert delivery.sweep_destination_waits(conn) == []
         assert "destination_wait" in _state(conn, task.id)
+
+
+# --- revisão 7 (rejulgamento 6f65f377) --------------------------------------------------------------------------------------------------
+
+def test_human_answer_to_the_escalation_reaches_the_worker(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 55, spec=_spec(_http_probe()))
+        asked = _escalate(conn, task, monkeypatch)
+        delivery.resolve_decision(conn, asked, action="human", author="Principal",
+                                  answer="PERGUNTA para Jhonatan: o servidor do TEST foi desligado? Qual é o endereço atual?")
+        answer = "Religuei, mas o IP mudou: https://infotributos.15.229.99.10.nip.io"
+        assert delivery.resume_after_answer(conn, task.id, answer=answer, source={"platform": "telegram", "actor": "Jhonatan", "message_id": "4242"})
+        assert kb.get_task(conn, task.id).status == "ready" and "destination_wait" not in _state(conn, task.id)
+        action = delivery.get_workflow(conn, task.id)["next_action"]
+        assert answer in action and "Jhonatan" in action and "sem resposta" not in action
+        assert answer in delivery.case_context(conn, task.id)
+
+
+def test_long_changes_answer_reaches_the_worker_whole(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 56, spec=_spec(_http_probe()))
+        asked = _escalate(conn, task, monkeypatch)
+        answer = ("O Jhonatan confirmou no grupo que desligou a instância do TEST para economizar e religou em outra zona. " * 6
+                  + "Endereço novo: https://infotributos.15.229.99.10.nip.io")
+        delivery.resolve_decision(conn, asked, action="changes", author="Principal", answer=answer)
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "released")]
+        assert asked in delivery.get_workflow(conn, task.id)["next_action"]
+        assert "https://infotributos.15.229.99.10.nip.io" in delivery.case_context(conn, task.id)
+
+
+def test_orphan_wait_links_only_the_escalation_of_its_own_wait(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 57, spec=_spec(_http_probe()))
+        first = _escalate(conn, task, monkeypatch)
+        delivery.resolve_decision(conn, first, action="continue", answer="Segue a espera do destino.", author="Principal")
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(True))
+        _shift(conn, task.id, next_check_at=0)
+        delivery.sweep_destination_waits(conn)
+        _confirmed_up(conn, task.id)
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "back")]
+
+        conn.execute("UPDATE tasks SET status='running', current_run_id=? WHERE id=?", (task.current_run_id, task.id))  # novo run, destino cai de novo
+        conn.commit()
+        _park(conn, task, monkeypatch)
+        _expire_destination_check(conn, task.id)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+        second_start = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind='nfos_destination_wait'", (task.id,)).fetchone()[0]
+        conn.execute("UPDATE nfos_decisions SET created_at=? WHERE id=?", (second_start, first))  # criada no mesmo segundo da espera nova
+        conn.commit()
+        _drop_wait(conn, task.id)
+        assert (task.id, "recovered") in delivery.sweep_destination_waits(conn)
+        assert not _state(conn, task.id)["destination_wait"].get("escalation_decision")
+
+
+def test_back_replaces_the_stalled_principal_note_of_its_escalation(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 58, spec=_spec(_http_probe()))
+        asked = _escalate(conn, task, monkeypatch)
+        stalled = (f"Aguardando o Principal há 95 min (3 lembretes sem resposta). Pergunta: Destino {TARGET} sem resposta. "
+                   f"Retomada: `decide --decision {asked} --resolution continue|changes` na sessão coordenadora.")
+        conn.execute("UPDATE nfos_workflows SET next_action=? WHERE task_id=?", (stalled, task.id))
+        conn.commit()
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(True))
+        _shift(conn, task.id, next_check_at=0)
+        delivery.sweep_destination_waits(conn)
+        _confirmed_up(conn, task.id)
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "back")]
+        assert delivery.get_workflow(conn, task.id)["next_action"].startswith(f"Destino {TARGET} voltou a responder")
+
+
+def test_ended_wait_clears_only_its_own_next_action(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 59, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+        assert kb.unblock_task(conn, task.id)  # desbloqueio manual: o card saiu da espera
+        delivery.sweep_destination_waits(conn)
+        action = delivery.get_workflow(conn, task.id)["next_action"]
+        assert action.startswith(f"Espera do destino {TARGET} encerrada") and "sem resposta desde" not in action
+
+        other = _card(conn, 60, spec=_spec(_http_probe()))
+        asked = _escalate(conn, other, monkeypatch)
+        kept = f"Principal reconsidered {asked} through nd_x (changes) under spec r1. Resume from the preserved work: medir no IP novo."
+        conn.execute("UPDATE nfos_workflows SET next_action=? WHERE task_id=?", (kept, other.id))
+        conn.commit()
+        assert kb.unblock_task(conn, other.id)
+        delivery.sweep_destination_waits(conn)
+        assert delivery.get_workflow(conn, other.id)["next_action"] == kept
