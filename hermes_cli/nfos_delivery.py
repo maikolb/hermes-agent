@@ -1635,6 +1635,9 @@ def case_context(conn, task_id):
         return ''
     st = json.loads(wf['state_json'] or '{}') or {}
     parts = []
+    escalation_answer = _destination_escalation_answer(conn, task_id)  # HUMAN_LAST_RESORT revisões 7 e 8: primeiro, antes do corte do worker_context
+    if escalation_answer:
+        parts.append(escalation_answer)
     measurements = st.get('measurements') or {}
     if measurements:
         parts.append('Measurements so far: ' + '; '.join(
@@ -1651,9 +1654,6 @@ def case_context(conn, task_id):
         parts.append('Attempts already made on this request (do not repeat what failed):\n' + '\n'.join(lines))
     if wf.get('next_action'):
         parts.append('Recorded next action: ' + str(wf['next_action'])[:400])  # HUMAN_LAST_RESORT revisão 7: o mesmo limite gravado
-    escalation_answer = _destination_escalation_answer(conn, task_id)  # HUMAN_LAST_RESORT revisão 7: resposta integral da escalada de destino
-    if escalation_answer:
-        parts.append(escalation_answer)
     note = completion_refusal_note(conn, task_id)
     if note:
         parts.append(note)
@@ -2138,9 +2138,9 @@ def _destination_next_action(conn, task_id, text, wait=None):
         if not wf:
             return False
         current = str(wf['next_action'] or '')
-        escalation = wait.get('escalation_decision') if isinstance(wait, dict) else None
         if wait is not None and not (current.startswith(f"Destino {wait.get('target')} sem resposta")
-                                     or (escalation and current.startswith('Aguardando o Principal') and escalation in current)):
+                                     or (current.startswith('Aguardando o Principal')  # revisão 8: o id da decisão cai fora do reason[:400] do nudge
+                                         and f"Pergunta: Destino {wait.get('target')} sem resposta" in current)):
             return False
         conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (text[:400], int(time.time()), task_id))
     return True
@@ -2148,33 +2148,64 @@ def _destination_next_action(conn, task_id, text, wait=None):
 
 def _destination_wait_answered(conn, task_id, reply, decision_id):
     """Revisão 7: resposta humana em card com espera de destino (a pergunta que o Principal mandou a quem opera o destino) encerra a espera na
-    transação que desbloqueia o card e vai ao next_action; a resposta integral aparece no contexto do caso."""
+    transação que desbloqueia o card e vai ao next_action. Revisão 8: só quando a decisão respondida é a escalada desta espera (falha fechada
+    sem vínculo); a íntegra fica no show do card (decisions)."""
     wf = get_workflow(conn, task_id)
     try:
         state = json.loads(wf['state_json'] or '{}') or {} if wf else {}
     except Exception:
         return False
-    if not isinstance(state, dict) or not isinstance(state.get('destination_wait'), dict):
+    wait = state.get('destination_wait') if isinstance(state, dict) else None
+    if not isinstance(wait, dict):
+        return False
+    escalation = get_decision(conn, wait['escalation_decision']) if wait.get('escalation_decision') else None
+    linked = bool(escalation and (escalation['id'] == decision_id
+                                  or (escalation['status'] == 'resolved' and escalation['answer'] == reply.get('answer'))))
+    if not linked:  # escalada ligada por outro caminho (órfão, legado): o contexto da decisão precisa nomear esta espera
+        decision = get_decision(conn, decision_id)
+        try:
+            ctx = json.loads(decision['context'] or '{}') or {} if decision else {}
+        except Exception:
+            ctx = {}
+        linked = bool(isinstance(ctx, dict) and ctx.get('destination_wait') and ctx.get('target') == wait.get('target')
+                      and (ctx.get('wait_id') or None) == (wait.get('token') or None))
+    if not linked:
         return False
     _store_destination_wait(conn, task_id, None)
-    _destination_next_action(conn, task_id, f"Resposta de {reply.get('author') or 'Human'} ({decision_id}; íntegra no contexto do caso): "
-                                            f"{reply.get('answer') or ''}")
+    _destination_next_action(conn, task_id, f"Resposta de {reply.get('author') or 'Human'} ({escalation['id'] if escalation else decision_id}; "
+                                            f"íntegra no `show` do card): {reply.get('answer') or ''}")
     return True
 
 
-def _destination_escalation_answer(conn, task_id):
-    """Revisão 7: resposta integral da última escalada de destino resolvida com informação para o worker (changes do Principal ou resposta
-    humana) desde a espera mais recente, para o endereço novo chegar inteiro mesmo quando não cabe no next_action."""
-    started = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind='nfos_destination_wait'", (task_id,)).fetchone()[0]
-    rows = conn.execute("SELECT id, context, action, answer, author FROM nfos_decisions WHERE task_id=? AND status='resolved' AND kind='impediment' "
-                        "AND resolved_at>=? ORDER BY resolved_at DESC, id DESC LIMIT 20", (task_id, int(started or 0))).fetchall()
-    for decision_id, context, action, answer, author in rows:
+def _destination_escalation_answer(conn, task_id, limit=4000):
+    """Revisão 7: resposta da última escalada de destino resolvida com informação para o worker. Revisão 8: só a escalada da espera mais
+    recente (wait_id do evento nfos_destination_wait; legado sem id: mesmo alvo e resolvida desde a espera), resposta humana reconhecida pelo
+    human_reply do contexto e não pelo autor, e texto acima do limite avisa que a íntegra está no show do card."""
+    last = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id=? AND kind='nfos_destination_wait' ORDER BY id DESC LIMIT 1",
+                        (task_id,)).fetchone()
+    if not last:
+        return ''
+    try:
+        info = json.loads(last[0] or '{}') or {}
+    except Exception:
+        return ''
+    if not isinstance(info, dict):
+        return ''
+    wait_id, target, started = info.get('wait_id') or None, info.get('target'), int(last[1] or 0)
+    rows = conn.execute("SELECT id, context, action, answer, author, resolved_at FROM nfos_decisions WHERE task_id=? AND status='resolved' "
+                        "AND kind='impediment' ORDER BY resolved_at DESC, id DESC LIMIT 50", (task_id,)).fetchall()
+    for decision_id, context, action, answer, author, resolved_at in rows:
         try:
             ctx = json.loads(context or '{}') or {}
         except Exception:
             continue
-        if isinstance(ctx, dict) and ctx.get('destination_wait') and answer and (action == 'changes' or author != 'Principal'):
-            return f"Answer to the destination escalation {decision_id} ({author}, {action}): {str(answer)[:2000]}"
+        if (not isinstance(ctx, dict) or not ctx.get('destination_wait') or not answer or ctx.get('target') != target
+                or (ctx.get('wait_id') or None) != wait_id or (wait_id is None and int(resolved_at or 0) < started)
+                or not (action == 'changes' or ctx.get('human_reply'))):
+            continue
+        text = str(answer)
+        note = f'; first {limit} of {len(text)} characters, whole answer in the card show' if len(text) > limit else ''
+        return f"Answer to the destination escalation {decision_id} ({author}, {action}{note}): {text[:limit]}"
     return ''
 
 
@@ -2233,7 +2264,7 @@ def sweep_destination_waits(conn):
                         released = _kb().unblock_task(conn, task_id)
                         if released:
                             _store_destination_wait(conn, task_id, None)
-                            _destination_next_action(conn, task_id, f"Principal (changes, {escalation['id']}; íntegra no contexto do caso): "  # revisões 6 e 7
+                            _destination_next_action(conn, task_id, f"Principal (changes, {escalation['id']}; íntegra no `show` do card): "  # revisões 6 a 8
                                                      f"{escalation['answer'] or ''}")
                             _event(conn, task_id, None, 'nfos_destination_wait_released',
                                    {'target': wait.get('target'), 'decision_id': escalation['id'], 'action': 'changes'})
