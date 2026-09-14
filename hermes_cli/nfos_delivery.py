@@ -999,6 +999,13 @@ def _probe_expect_ok(expect, observed):
     col = [r[0] if isinstance(r, (list, tuple)) and r else None for r in (rows or [])]
     if 'status' in expect and observed.get('status') != expect['status']:
         return False
+    checks = observed.get('body_checks')  # PROBE_TEXT_EXPECT_20260914: resposta http sem rows mede o texto inteiro (ou o nó do json_path)
+    if isinstance(checks, dict) and not rows:
+        if expect.get('not_matches') and (checks.get('not_matches') or not checks.get('complete', True)):
+            return False
+        if 'contains_all' in expect:
+            found = checks.get('contains_all') or []
+            return bool(found) and all(found)
     if 'row' in expect:
         return bool(rows) and list(rows[0]) == list(expect['row'])
     if 'scalar' in expect:
@@ -1127,10 +1134,12 @@ def _run_http_probe(probe, env, hosts=None):
     try:
         with opener.open(req, timeout=15) as resp:
             status, hdrs = resp.status, dict(resp.headers)
-            body = resp.read(200000) if method == 'GET' else b''
+            body = resp.read(200001) if method == 'GET' else b''
     except urllib.error.HTTPError as exc:
         status, hdrs = exc.code, dict(exc.headers or {})
-        body = exc.read(200000) if method == 'GET' else b''
+        body = exc.read(200001) if method == 'GET' else b''
+    truncated = len(body) > 200000  # PROBE_TEXT_EXPECT_20260914: corpo maior que o lido não prova ausência de texto
+    body = body[:200000]
     mitigated = next((f'{k}={v}' for k, v in hdrs.items() if k.lower() in ('x-vercel-mitigated', 'x-vercel-protection', 'cf-mitigated')), None)  # PROBE_HARDENING_20260911
     if probe['kind'] == 'header':
         name = str(probe['header']).lower()
@@ -1156,6 +1165,17 @@ def _run_http_probe(probe, env, hosts=None):
             observed['rows'] = [[x.get(probe.get('name_key') or 'name') if isinstance(x, dict) else x] for x in node][:200]
     else:
         observed['value'] = text[:2000]
+    expect = probe.get('expect') if isinstance(probe.get('expect'), dict) else {}
+    if 'rows' not in observed and (expect.get('contains_all') or expect.get('not_matches')):  # PROBE_TEXT_EXPECT_20260914
+        if probe.get('json_path') and data is not None:
+            value = observed.get('value')
+            scope = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        else:
+            scope = text
+        whole = _norm_text(scope)
+        observed['body_checks'] = {'contains_all': [_norm_text(x) in whole for x in (expect.get('contains_all') or [])],
+                                   'not_matches': bool(expect.get('not_matches')) and bool(re.search(str(expect['not_matches']), scope, re.I)),
+                                   'complete': bool(scope.strip()) and not truncated, 'scope_chars': len(scope)}
     return observed
 
 
@@ -1223,6 +1243,12 @@ def _execute_probe(conn, task_id, probe):
                        if _session_names else "carried no session or credential")
                     + ". Measure with the project session (probe_session), a vault credential referenced as $env:NAME, or a sql probe "
                     "for the data state; this is not a product FAIL and not a question for a human")
+            _checks = observed.get('body_checks') if isinstance(observed, dict) else None
+            if isinstance(_checks, dict) and not _checks.get('complete', True):  # PROBE_TEXT_EXPECT_20260914: sem corpo inteiro não há prova por omissão
+                _exp = probe.get('expect') or {}
+                if (_exp.get('not_matches') and not _checks.get('not_matches')) or (_exp.get('contains_all') and not all(_checks.get('contains_all') or [False])):
+                    return 'INDETERMINADO', observed, ('the response body was empty or larger than the 200 KB the probe reads, so the text check cannot '
+                                                       'conclude; measure a narrower route or point json_path at the part the user consumes')
     except WorkflowError as exc:
         return 'INDETERMINADO', None, str(exc)
     except Exception as exc:  # timeout, rede, sintaxe: medição indisponível, não defeito
