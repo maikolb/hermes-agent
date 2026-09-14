@@ -1813,6 +1813,7 @@ DESTINATION_RECHECK_SECONDS = 600
 DESTINATION_CONFIRM_SECONDS = 120
 DESTINATION_ESCALATE_SECONDS = 3600
 DESTINATION_MAX_CHECKS_PER_SWEEP = 3
+DESTINATION_HUMAN_REMINDER_SECONDS = 24 * 3600  # revisão 10: escalada em human sem resposta lembra o Principal uma vez por dia
 _NETWORK_ERROR_RX = re.compile(
     r'URLError|timed out|TimeoutError|Connection refused|ConnectionRefusedError|ConnectionResetError|RemoteDisconnected|No route to host|'
     r'Network is unreachable|Name or service not known|Temporary failure in name resolution|getaddrinfo failed|nodename nor servname', re.I)
@@ -2012,17 +2013,28 @@ def _escalate_destination_wait(conn, task, wf, wait, now):
     with _kb().write_txn(conn, allow_nested=True):
         open_rows = conn.execute("SELECT id, context, created_at FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human') "
                                  "ORDER BY created_at, id", (task.id,)).fetchall()
+        anchor = _destination_wait_started(conn, task.id, target)
+        stale = []
         for row in open_rows:
             try:
                 ctx = json.loads(row[1] or '{}') or {}
             except Exception:
                 ctx = {}
-            if (isinstance(ctx, dict) and ctx.get('destination_wait') and ctx.get('target') == target
-                    and (ctx.get('wait_id') or None) in (None, wait.get('token'))):  # revisão 7: escalada de outra espera não é adotada
+            if not (isinstance(ctx, dict) and ctx.get('destination_wait') and ctx.get('target') == target):
+                continue
+            decision_wait = ctx.get('wait_id') or None
+            if ((decision_wait is not None and decision_wait == wait.get('token'))  # revisão 7: escalada de outra espera não é adotada
+                    or (decision_wait is None and anchor is not None and int(row[2] or 0) >= anchor)):  # revisão 10: legado só depois do início
                 wait.update(escalated_at=int(row[2] or now), escalation_decision=row[0])
                 _store_destination_wait(conn, task.id, wait)
                 return 'adopted'
-        if open_rows:
+            stale.append((row[0], ctx))
+        for stale_id, stale_ctx in stale:  # revisão 10: escalada aberta de outra espera do mesmo alvo sai; a pergunta é refeita para esta espera
+            stale_ctx.update(superseded_reason='destination_wait_stale')
+            conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=? AND status IN ('pending','human')",
+                         (_json(stale_ctx), stale_id))
+            _event(conn, task.id, None, 'nfos_destination_escalation_withdrawn', {'decision_id': stale_id, 'reason': 'destination_wait_stale'})
+        if len(open_rows) > len(stale):
             return None
         decision_id = 'dec_' + uuid.uuid4().hex[:20]
         conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
@@ -2138,9 +2150,11 @@ def _destination_next_action(conn, task_id, text, wait=None):
         if not wf:
             return False
         current = str(wf['next_action'] or '')
-        if wait is not None and not (current.startswith(f"Destino {wait.get('target')} sem resposta")
+        target = str(wait.get('target')) if isinstance(wait, dict) else ''
+        if wait is not None and not (current.startswith(f"Destino {target[:200]}")  # revisão 10: alvo longo também no motivo inicial
                                      or (current.startswith('Aguardando o Principal')  # revisão 8: o id da decisão cai fora do reason[:400] do nudge
-                                         and f"Pergunta: Destino {str(wait.get('target'))[:200]}" in current)):  # revisão 9: alvo longo também
+                                         and f"Pergunta: Destino {target[:200]}" in current)  # revisão 9: alvo longo também
+                                     or current.startswith(f"Aguardando resposta humana sobre o destino {target[:200]}")):  # revisão 10
             return False
         conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (text[:400], int(time.time()), task_id))
     return True
@@ -2160,7 +2174,7 @@ def _destination_wait_answered(conn, task_id, reply, decision_id):
     wait = state.get('destination_wait') if isinstance(state, dict) else None
     if not isinstance(wait, dict):
         return False
-    answered = _human_answer_decisions(conn, task_id, reply.get('answer'))
+    answered = _human_answer_decisions(conn, task_id, reply)  # revisão 10: evento desta resposta, pela origem da mensagem
     if not answered or len(answered) != 1:
         return False  # resposta anexada a mais de uma pergunta (ou sem registro): não prova que respondeu a escalada
     answered = answered[0]
@@ -2174,7 +2188,7 @@ def _destination_wait_answered(conn, task_id, reply, decision_id):
         wait_id = wait.get('token') or None
         linked = bool(isinstance(ctx, dict) and ctx.get('destination_wait') and ctx.get('target') == wait.get('target')
                       and (ctx.get('wait_id') or None) == wait_id
-                      and (wait_id is not None or int(decision['created_at'] or 0) >= _destination_wait_started(conn, task_id, wait.get('target'))))
+                      and (wait_id is not None or _legacy_after_wait_start(conn, task_id, wait.get('target'), decision['created_at'])))
     if not linked:
         return False
     _store_destination_wait(conn, task_id, None)
@@ -2183,18 +2197,33 @@ def _destination_wait_answered(conn, task_id, reply, decision_id):
     return True
 
 
-def _human_answer_decisions(conn, task_id, answer):
-    """Revisão 9: decisões às quais a resposta humana foi anexada, pelo evento nfos_human_answer_received mais recente com esse texto."""
-    for (payload,) in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_human_answer_received' ORDER BY id DESC",
+def _human_answer_decisions(conn, task_id, reply):
+    """Revisão 9: decisões às quais a resposta humana foi anexada (evento nfos_human_answer_received). Revisão 10: o evento tem de ter o
+    mesmo texto e a mesma origem da resposta; a mesma mensagem de origem registrada antes para outro conjunto de perguntas (reentrega)
+    torna o vínculo ambíguo e devolve None."""
+    reply = reply if isinstance(reply, dict) else {}
+    source = reply.get('source') if isinstance(reply.get('source'), dict) else {}
+
+    def origin_of(src):
+        src = src if isinstance(src, dict) else {}
+        return tuple(str(src.get(k) or '') for k in ('platform', 'chat_id', 'thread_id', 'message_id'))
+
+    mine = origin_of(source)
+    events = []
+    for (payload,) in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_human_answer_received' ORDER BY id",
                                    (task_id,)).fetchall():
         try:
             info = json.loads(payload or '{}') or {}
         except Exception:
             continue
-        if isinstance(info, dict) and info.get('answer') == answer:
-            decisions = info.get('decisions')
-            return [d for d in decisions if isinstance(d, str)] if isinstance(decisions, list) else None
-    return None
+        if isinstance(info, dict) and isinstance(info.get('decisions'), list):
+            events.append((info.get('answer'), origin_of(info.get('source')), sorted(d for d in info['decisions'] if isinstance(d, str))))
+    matching = [decisions for answer, origin, decisions in events if answer == reply.get('answer') and origin == mine]
+    if not matching:
+        return None
+    if source.get('message_id') and any(decisions != matching[-1] for _, origin, decisions in events if origin == mine):
+        return None  # a mesma mensagem já foi anexada a outras perguntas
+    return matching[-1]
 
 
 def _destination_wait_started(conn, task_id, target):
@@ -2207,7 +2236,13 @@ def _destination_wait_started(conn, task_id, target):
             continue
         if isinstance(info, dict) and info.get('target') == target:
             return int(created_at or 0)
-    return 0
+    return None  # revisão 10: sem âncora o vínculo legado falha fechado
+
+
+def _legacy_after_wait_start(conn, task_id, target, created_at):
+    """Revisão 10: decisão legada (sem wait_id) só vale para a espera se foi criada depois do início dela; sem início registrado, não vale."""
+    started = _destination_wait_started(conn, task_id, target)
+    return started is not None and int(created_at or 0) >= started
 
 
 def _destination_escalation_answer(conn, task_id, limit=4000):
@@ -2225,23 +2260,84 @@ def _destination_escalation_answer(conn, task_id, limit=4000):
     if not isinstance(info, dict):
         return ''
     wait_id, target, started = info.get('wait_id') or None, info.get('target'), int(last[1] or 0)
-    rows = conn.execute("SELECT id, context, action, answer, author, resolved_at FROM nfos_decisions WHERE task_id=? AND status='resolved' "
+    rows = conn.execute("SELECT id, context, action, answer, author, created_at FROM nfos_decisions WHERE task_id=? AND status='resolved' "
                         "AND kind='impediment' ORDER BY resolved_at DESC, id DESC", (task_id,)).fetchall()  # revisão 9: sem corte arbitrário
-    for decision_id, context, action, answer, author, resolved_at in rows:
+    for decision_id, context, action, answer, author, created_at in rows:
         try:
             ctx = json.loads(context or '{}') or {}
         except Exception:
             continue
         if (not isinstance(ctx, dict) or not ctx.get('destination_wait') or not answer or ctx.get('target') != target
-                or (ctx.get('wait_id') or None) != wait_id or (wait_id is None and int(resolved_at or 0) < started)
+                or (ctx.get('wait_id') or None) != wait_id or (wait_id is None and int(created_at or 0) < started)  # revisão 10: criação
                 or not (action == 'changes' or ctx.get('human_reply'))):
             continue
-        if action != 'changes' and _human_answer_decisions(conn, task_id, answer) != [decision_id]:
+        if action != 'changes' and _human_answer_decisions(conn, task_id, ctx.get('human_reply')) != [decision_id]:
             continue  # revisão 9: resposta humana anexada a várias perguntas não é resposta da escalada
         text = str(answer)
         note = f'; first {limit} of {len(text)} characters, whole answer in the card show' if len(text) > limit else ''
         return f"Answer to the destination escalation {decision_id} ({author}, {action}{note}): {text[:limit]}"
     return ''
+
+
+def _remind_destination_escalation(conn, task_id, wait, now):
+    """Revisão 10: lembrete só da escalada desta espera, sem auto-continue (a pergunta cita alvo e critério e casaria com as classes
+    automáticas, resolvendo a escalada sozinha e deixando o card preso) e com CAS na própria decisão. pending: lembretes ao Principal no
+    ritmo do nudge e, esgotados, aviso visível. human: a cada DESTINATION_HUMAN_REMINDER_SECONDS sem resposta, lembrete ao Principal e
+    aviso visível; o runtime segue conferindo o destino."""
+    decision_id = wait.get('escalation_decision')
+    if not decision_id:
+        return None
+    with _kb().write_txn(conn, allow_nested=True):
+        row = get_decision(conn, decision_id)
+        if not row or row['status'] not in ('pending', 'human'):
+            return None
+        try:
+            ctx = json.loads(row['context'] or '{}') or {}
+        except Exception:
+            return None
+        if not isinstance(ctx, dict) or ctx.get('human_reply'):
+            return None
+        reminders = [int(x) for x in (ctx.get('reminders') or []) if str(x).isdigit()]
+        target = str(wait.get('target'))
+        if row['status'] == 'pending':
+            started = int(row['created_at'] or now)
+            last = reminders[-1] if reminders else started
+            if now - started < DECISION_REMINDER_AFTER:
+                return None
+            if len(reminders) < DECISION_MAX_REMINDERS:
+                if reminders and now - last < DECISION_REMINDER_GAP:
+                    return None
+                reminders.append(now)
+                ctx['reminders'] = reminders
+                conn.execute('UPDATE nfos_decisions SET context=? WHERE id=? AND status=?', (_json(ctx), decision_id, 'pending'))
+                _event(conn, task_id, row['run_id'], 'nfos_principal_requested',
+                       {'decision_id': decision_id, 'kind': row['kind'], 'question': row['question'], 'reminder': len(reminders),
+                        'waiting_minutes': (now - started) // 60})
+                return 'reminder'
+            if ctx.get('stalled_at') or now - last < DECISION_REMINDER_GAP:
+                return None
+            ctx['stalled_at'] = now
+            note = (f"Aguardando o Principal há {(now - started) // 60} min ({len(reminders)} lembretes sem resposta). Pergunta: "
+                    f"{str(row['question'] or '')[:300]} Retomada: `decide --decision {decision_id} --resolution human|changes|continue`.")
+            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=? AND status=?', (_json(ctx), decision_id, 'pending'))
+            _event(conn, task_id, row['run_id'], 'nfos_decision_stalled', {'decision_id': decision_id, 'maintenance': False, 'reason': note[:600]})
+            _destination_next_action(conn, task_id, note, wait=wait)
+            return 'stalled'
+        started = int(row['resolved_at'] or row['created_at'] or now)
+        last = reminders[-1] if reminders else started
+        if now - last < DESTINATION_HUMAN_REMINDER_SECONDS:
+            return None
+        reminders.append(now)
+        ctx['reminders'] = reminders
+        hours = (now - started) // 3600
+        conn.execute('UPDATE nfos_decisions SET context=? WHERE id=? AND status=?', (_json(ctx), decision_id, 'human'))
+        _event(conn, task_id, row['run_id'], 'nfos_principal_requested',
+               {'decision_id': decision_id, 'kind': row['kind'], 'reminder': len(reminders), 'waiting_hours': hours, 'awaiting': 'human_reply',
+                'question': (f"Sem resposta de quem opera o destino {target} há {hours} h (pergunta {decision_id}). O runtime segue conferindo a "
+                             "cada 10 min. Não repita a pergunta no grupo; se o destino não voltar, feche como entrega parcial com continuação.")})
+        _destination_next_action(conn, task_id, f"Aguardando resposta humana sobre o destino {target[:200]} há {hours} h (pergunta {decision_id}). "
+                                                "O runtime confere o destino a cada 10 min e devolve o card quando ele voltar.", wait=wait)
+        return 'human_reminder'
 
 
 def sweep_destination_waits(conn):
@@ -2306,8 +2402,8 @@ def sweep_destination_waits(conn):
                     if released:
                         changed.append((task_id, 'released'))
                     continue
-                if escalation and escalation['status'] == 'pending':  # revisão 9: card bloqueado também recebe lembretes e aviso visível
-                    nudge_open_decisions(conn, task_id)
+                if escalation and escalation['status'] in ('pending', 'human'):  # revisão 10: só esta escalada, sem auto-continue, com CAS
+                    _remind_destination_escalation(conn, task_id, wait, now)
                 if now - int(wait.get('since') or now) >= DESTINATION_ESCALATE_SECONDS and not wait.get('escalation_decision'):
                     outcome = _escalate_destination_wait(conn, task, wf, wait, now)  # revisão 4: grava a espera na transação da decisão
                     if outcome:
