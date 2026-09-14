@@ -5017,6 +5017,38 @@ def _wake_narration_to_suppress(inbound_text, response):
         return False
 
 
+_OWNER_QUESTION_RX = re.compile(r"^pergunta\s+para\s+(maikol|mantenedor|maintainer|nfos|runtime|operador|opera[cç][aã]o|principal)\b", re.I)  # HUMAN_LAST_RESORT_20260914
+
+
+def _wake_owner_question_in_client_chat(inbound_text, response, source):
+    """HUMAN_LAST_RESORT_20260914 (ordem do Maikol): pergunta ao dono ou à manutenção escrita num turno de wake de kanban nunca vai ao
+    chat do cliente. Ela fica no card (a Vigília mostra) e o card registra client_publication_suppressed. True quando suprime."""
+    try:
+        if not isinstance(inbound_text, str) or not inbound_text.lstrip().startswith("[kanban]"):
+            return False
+        text = (response or "").strip()
+        if not text:
+            return False
+        first = text.splitlines()[0].strip().lstrip("*#>_[ ").strip()
+        if not _OWNER_QUESTION_RX.match(first):
+            return False
+        board = re.search(r"^Board:\s*(\S+)", inbound_text, re.M)
+        if not board:
+            return False
+        from gateway.kanban_watchers import _is_client_chat, _record_client_suppression
+        platform = getattr(source, "platform", None)
+        sub = {"platform": str(getattr(platform, "value", platform) or ""),
+               "chat_id": getattr(source, "chat_id", None), "thread_id": getattr(source, "thread_id", None)}
+        if not _is_client_chat(board.group(1), sub):
+            return False
+        task = re.search(r"\bTask\s+(t_[0-9A-Za-z]+)", inbound_text)
+        if task:
+            _record_client_suppression(board.group(1), task.group(1), "owner_question", sub)
+        return True
+    except Exception:
+        return False
+
+
 def _normalize_empty_agent_response(
     agent_result: dict,
     response: str,
@@ -22480,6 +22512,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not _intentional_silence and _wake_narration_to_suppress(getattr(event, "text", None), response):  # WAKE_SILENCE_MECH_20260910
                 logger.info(
                     "kanban wake: narração suprimida (%d chars) em %s/%s",
+                    len(response or ""), getattr(source, "chat_id", "?"), getattr(source, "thread_id", "?"),
+                )
+                _intentional_silence = True
+            if not _intentional_silence and _wake_owner_question_in_client_chat(getattr(event, "text", None), response, source):  # HUMAN_LAST_RESORT_20260914
+                logger.info(
+                    "kanban wake: pergunta ao dono ou à manutenção suprimida no chat do cliente (%d chars) em %s/%s",
                     len(response or ""), getattr(source, "chat_id", "?"), getattr(source, "thread_id", "?"),
                 )
                 _intentional_silence = True

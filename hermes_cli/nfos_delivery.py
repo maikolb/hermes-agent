@@ -670,6 +670,126 @@ def _env_values(path):
     return values
 
 
+# HUMAN_LAST_RESORT_20260914: medição não depende de humano. O worker do card grava a credencial da sonda no cofre do projeto
+# (probe-env) e a sonda obrigatória mede o host do destino, nunca uma cópia local ou isolada.
+_PROBE_ENV_NAME_RX = re.compile(r'^[A-Z][A-Z0-9_]{0,63}$')
+
+
+def _probe_vault_file(conn, task_id):
+    """HUMAN_LAST_RESORT_20260914: cofre de sonda do projeto (HERMES_HOME/secrets/<project_id>/probe.env), gravado pelo `probe-env`."""
+    key, cfg = _probe_project(conn, task_id)
+    project_id = str((cfg or {}).get('project_id') or key or '').strip()
+    if not project_id or '/' in project_id or '\\' in project_id or project_id.startswith('.'):
+        return None
+    home = os.environ.get('HERMES_HOME') or str(Path.home() / '.hermes')
+    return Path(home) / 'secrets' / project_id / 'probe.env'
+
+
+def _probe_env_sources(conn, task_id):
+    """(env, nomes que vieram só do cofre do probe-env). O probe_env do config do projeto vence em nome repetido."""
+    env, vault_names = {}, set()
+    vault = _probe_vault_file(conn, task_id)
+    if vault is not None and vault.is_file():
+        env.update(_env_values(vault))
+        vault_names = set(env)
+    configured = _probe_env_file(conn, task_id)
+    if configured:
+        values = _env_values(configured)
+        env.update(values)
+        vault_names -= set(values)
+    return env, vault_names
+
+
+def _local_host(host):
+    """Loopback, rede privada ou nome local: não é o destino de entrega (é cópia local ou isolada)."""
+    import ipaddress
+    host = str(host or '').strip().strip('[]').lower()
+    if not host:
+        return False
+    if host == 'localhost' or host.endswith(('.localhost', '.local', '.internal')):
+        return True
+    match = re.search(r'(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})\.(?:nip|sslip)\.io$', host)
+    literal = '.'.join(match.groups()) if match else host
+    try:
+        ip = ipaddress.ip_address(literal)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified
+
+
+def _destination_host(conn, task_id, spec=None):
+    try:
+        content = spec if isinstance(spec, dict) else json.loads((get_spec(conn, task_id) or {}).get('content') or '{}')
+        scope = content.get('delivery_destination')
+        return _host_of(scope.get('target')) if isinstance(scope, dict) else ''
+    except Exception:
+        return ''
+
+
+def _local_probe_problem(conn, task_id, host, spec=None):
+    """Texto do problema quando a sonda mira host local que não é o destino nem está em probe_hosts; None quando pode medir."""
+    if not _local_host(host):
+        return None
+    dest = _destination_host(conn, task_id, spec)
+    _key, cfg = _probe_project(conn, task_id)
+    if host == dest or _host_allowed(host, (cfg or {}).get('probe_hosts')):
+        return None
+    return (f'probe targets a local host ({host}), not the delivery destination{(" " + dest) if dest else ""}: a local or isolated copy '
+            'is supporting evidence, not the measurement. Correct the probe with probe_corrections to measure the destination')
+
+
+def _dsn_host(dsn):
+    from urllib.parse import urlsplit
+    text = str(dsn or '')
+    if text.startswith('sqlite://'):
+        return 'localhost'
+    try:
+        return (urlsplit(text).hostname or '').lower()
+    except ValueError:
+        return ''
+
+
+def probe_env_command(conn, task_id, *, set_name=None, unset_name=None, value=None):
+    """HUMAN_LAST_RESORT_20260914: worker do card ou Principal grava a credencial da sonda no cofre do projeto, sem mexer no config.
+    O valor nunca volta na saída nem no evento; só nomes. Credencial em spec, relatório, argumento de comando ou chat segue proibida."""
+    worker = os.environ.get('HERMES_KANBAN_TASK')
+    if worker and worker != task_id:
+        raise WorkflowError('probe-env acts only on the card of this worker')
+    if not task_id or get_workflow(conn, task_id) is None:
+        raise WorkflowError('probe-env needs the NFOS card (--task)')
+    path = _probe_vault_file(conn, task_id)
+    if path is None:
+        raise WorkflowError('probe-env: the card has no project to hold the probe vault')
+    name = set_name or unset_name
+    if name is not None and not _PROBE_ENV_NAME_RX.match(str(name)):
+        raise WorkflowError('probe-env name must be UPPER_SNAKE_CASE (A-Z, 0-9, _), up to 64 characters')
+    current = _env_values(path) if path.is_file() else {}
+    if set_name:
+        text = str(value or '').strip('\r\n')
+        if not text.strip() or '\n' in text or '\r' in text or len(text) > 16384:
+            raise WorkflowError('probe-env --set reads exactly one non-empty line (the value) from standard input; nothing was saved')
+        current[set_name] = text
+        action = 'set'
+    elif unset_name:
+        if unset_name not in current:
+            return {'saved': False, 'name': unset_name, 'names': sorted(current), 'vault': str(path)}
+        current.pop(unset_name)
+        action = 'unset'
+    else:
+        return {'names': sorted(current), 'vault': str(path)}
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = path.with_name(f'{path.name}.tmp-{os.getpid()}')
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        handle.write('# NFOS probe vault: written by probe-env, read only by probes\n')
+        for key in sorted(current):
+            handle.write(f'{key}={current[key]}\n')
+    os.replace(tmp, path)
+    with _kb().write_txn(conn):
+        _event(conn, task_id, None, 'nfos_probe_env_changed', {'name': name, 'action': action})
+    return {'saved': True, 'name': name, 'action': action, 'names': sorted(current), 'vault': str(path)}
+
+
 def _validate_probe(cid, probe):
     if not isinstance(probe, dict) or probe.get('kind') not in PROBE_KINDS:
         raise WorkflowError(f'Criterion {cid}: a mandatory criterion needs probe {{kind: sql|http|header, ..., expect}}')
@@ -882,15 +1002,23 @@ def _same_mutation(recorded, current):
 def _execute_probe(conn, task_id, probe):
     """Fora de transação. Devolve (state, observed, error)."""
     kind = probe['kind']
-    env_file = _probe_env_file(conn, task_id)
-    env = _env_values(env_file) if env_file else {}
+    env, vault_names = _probe_env_sources(conn, task_id)  # HUMAN_LAST_RESORT_20260914: cofre do projeto (probe-env) e probe_env do config
     try:
         if kind == 'sql':
-            dsn = env.get('PROBE_DATABASE_URL') or env.get('DATABASE_URL')
+            dsn_name = 'PROBE_DATABASE_URL' if env.get('PROBE_DATABASE_URL') else 'DATABASE_URL'
+            dsn = env.get(dsn_name)
             if not dsn:
-                return 'INDETERMINADO', None, 'probe_env of the project has no PROBE_DATABASE_URL/DATABASE_URL (config kanban.delivery.projects.<slug>.probe_env)'
+                return 'INDETERMINADO', None, ('the project probe vault has no PROBE_DATABASE_URL/DATABASE_URL: record read access that already exists '
+                                               'with `probe-env --set PROBE_DATABASE_URL` (value on standard input); this is not a question for a human')
+            if dsn_name in vault_names:  # HUMAN_LAST_RESORT_20260914: DSN gravado pelo worker precisa apontar para o destino
+                problem = _local_probe_problem(conn, task_id, _dsn_host(dsn))
+                if problem:
+                    return 'INDETERMINADO', None, problem
             observed = {'rows': _json_safe(_run_sql_probe(dsn, str(probe['query']).strip().rstrip(';')))}
         else:
+            problem = _local_probe_problem(conn, task_id, _host_of(probe.get('url')))  # HUMAN_LAST_RESORT_20260914
+            if problem:
+                return 'INDETERMINADO', None, problem
             _key, _cfg = _probe_project(conn, task_id)
             observed = _run_http_probe(probe, env, hosts=(_cfg or {}).get('probe_hosts'))  # PROBE_BYPASS_SCOPE_20260911
             _status = observed.get('status'); _exp_status = (probe.get('expect') or {}).get('status')
@@ -1081,6 +1209,11 @@ def _spec_result_criteria_checks(conn, task_id, spec):
     for crit in spec.get('criteria') or []:
         if crit.get('probe') is not None or crit.get('mandatory'):
             _validate_probe(crit.get('id'), crit.get('probe'))
+        _p = crit.get('probe') if isinstance(crit.get('probe'), dict) else {}
+        if crit.get('mandatory') and _p.get('kind') in ('http', 'header') and _p.get('phase') != 'before':  # HUMAN_LAST_RESORT_20260914
+            problem = _local_probe_problem(conn, task_id, _host_of(_p.get('url')), spec)
+            if problem:
+                raise WorkflowError(f"Criterion {crit.get('id')}: {problem}")
         if crit.get('mandatory') and isinstance(crit.get('probe'), dict) and crit['probe'].get('phase') == 'before':  # PROBE_PHASE_20260911
             raise WorkflowError(f"Criterion {crit.get('id')}: a phase=before probe records the baseline and is not an acceptance criterion; "
                                 'declare the requested result as a separate mandatory criterion with an after probe')
@@ -1136,6 +1269,19 @@ def completion_refusal_note(conn, task_id):
     if attempts:
         last = attempts[-1]
         lines.append(f"Tentativas registradas: {len(attempts)}; última: hipótese '{str(last.get('hypothesis') or '')[:200]}', mudança '{str(last.get('change') or '')[:200]}'.")
+    _errors = ' '.join(str(e.get('error') or '') for e in pending)  # HUMAN_LAST_RESORT_20260914: rota autônoma para cada medição indisponível
+    if re.search(r'HTTP 40[13]', _errors):
+        lines.append('Superfície autenticada: faça login legítimo (credencial que já existe no cofre ou fluxo normal da aplicação no destino) e grave a '
+                     'credencial da sonda com `probe-env --set NOME` (valor pela entrada padrão); nos headers da sonda use "$env:NOME". Não pergunte a '
+                     'humano e não grave credencial na spec.')
+    if 'probe vault has no' in _errors:
+        lines.append('Sonda SQL sem DSN: grave um acesso de leitura que já existe com `probe-env --set PROBE_DATABASE_URL`. A sonda SQL lê PostgreSQL '
+                     'e sqlite; SQL Server se mede pela superfície HTTP do destino.')
+    if 'local host' in _errors:
+        lines.append('Sonda em host local mede cópia: corrija com probe_corrections para medir o destino.')
+    if _NETWORK_ERROR_RX.search(_errors):
+        lines.append('Destino sem resposta: não pergunte a ninguém; encerre o turno. O runtime confere o destino a cada 10 min e devolve este card à '
+                     'fila quando ele responder.')
     lines.append('Continue neste card, mesma prioridade: (1) registre hipótese e mudança delimitada: `progress --stage implement --next "..." '
                  '--hypothesis "..." --change "..."`; (2) aplique uma mudança e registre a mutação (`effect --operation repair|deploy|homolog ...` e '
                  '`reconcile`); (3) `probe --criterion <id>`; (4) `save-report` e kanban_complete. Não reclassifique, não crie card, não repita efeito '
@@ -1417,6 +1563,182 @@ def sweep_awaiting_principal(conn):
     except Exception:
         pass
     return freed
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# HUMAN_LAST_RESORT_20260914 (ordem do Maikol de 14/09): pergunta a humano é o último recurso. Sonda, medição, destino e manutenção
+# do runtime não vão a humano; pergunta desse tipo já parada volta ao Principal; destino fora do ar espera sem pergunta e o card
+# volta sozinho quando ele responde.
+_HUMAN_MAINTENANCE_RX = re.compile(
+    r'probe_env|probe_hosts|probe_database_url|probe-env|\bprobe\b|\bsonda\b|verificador|adaptador (sql|mssql)|\bmssql\b|t-sql|'
+    r'kanban\.delivery|config\.yaml|\bruntime\b|dispatcher|worktree|\blease\b|contrato git|git delivery|delivery_contract|policy_json|'
+    r'gate (do )?nfos|nfos gate|mantenedor|maintainer', re.I)
+HUMAN_MAINTENANCE_REFUSAL = ('human recusado (HUMAN_LAST_RESORT_20260914): sonda, credencial de medição, destino e manutenção do runtime não são '
+                             'perguntas a humano (premissas de 10/09). Decida com continue ou changes: a credencial da sonda vai para o cofre do '
+                             'projeto com `probe-env --set NOME` (valor pela entrada padrão); a sonda obrigatória mede o host do destino; destino '
+                             'sem resposta o runtime espera e devolve o card sozinho; o que não dá para medir agora fecha como entrega parcial '
+                             'com continuação.')
+DESTINATION_RECHECK_SECONDS = 600
+_NETWORK_ERROR_RX = re.compile(
+    r'URLError|timed out|TimeoutError|Connection refused|ConnectionRefusedError|ConnectionResetError|RemoteDisconnected|No route to host|'
+    r'Network is unreachable|Name or service not known|Temporary failure in name resolution|getaddrinfo failed|nodename nor servname', re.I)
+
+
+def _human_question_line(answer):
+    return str(answer or '').strip().split('\n', 1)[0]
+
+
+def _human_is_maintenance(answer):
+    """A linha da pergunta (PERGUNTA para X: ...) trata de sonda, medição ou manutenção do runtime."""
+    return bool(_HUMAN_MAINTENANCE_RX.search(_human_question_line(answer)))
+
+
+def review_maintenance_human_decisions(conn):
+    """Pergunta a humano sobre sonda, medição ou manutenção do runtime parada no card volta ao Principal como decisão pendente (a antiga
+    fica superseded, com rastro) e o card sai do bloqueio: o dispatcher não relança card com decisão aberta, lembra o Principal e, sem
+    resposta, aplica a classe automática."""
+    from hermes_cli.nfos_runtime import run_termination_pending
+    out = []
+    for row in [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()]:
+        try:
+            ctx = json.loads(row.get('context') or '{}') or {}
+        except Exception:
+            ctx = {}
+        if not isinstance(ctx, dict) or ctx.get('human_reply') or not _human_is_maintenance(row.get('answer')):
+            continue
+        task = _kb().get_task(conn, row['task_id'])
+        wf = get_workflow(conn, row['task_id'])
+        if not task or not wf or task.status not in ('blocked', 'ready'):
+            continue
+        if _run_process_alive(conn, task.id, row['run_id']) or run_termination_pending(conn, task.id, row['run_id']):
+            continue
+        refused = _human_question_line(row.get('answer'))
+        question = ('Revisão de autonomia (HUMAN_LAST_RESORT_20260914): a pergunta a humano deste card trata de sonda, medição ou manutenção '
+                    'do runtime e foi recusada pelas premissas de 10/09; o card voltou para você. Decida com continue ou changes, sem humano: '
+                    'credencial da sonda pelo `probe-env --set NOME` no cofre do projeto; sonda obrigatória no host do destino; destino sem '
+                    'resposta o runtime espera e devolve o card sozinho; o que não dá para medir agora fecha como entrega parcial com '
+                    'continuação. Pergunta recusada: ' + refused[:700])
+        new_id = 'dec_' + uuid.uuid4().hex[:20]
+        now = int(time.time())
+        with _kb().write_txn(conn, allow_nested=True):
+            current = get_decision(conn, row['id'])
+            if not current or current['status'] != 'human':
+                continue
+            ctx.update(superseded_by=new_id, superseded_reason='human_last_resort')
+            conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?", (_json(ctx), row['id']))
+            conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
+                         (new_id, task.id, row['run_id'], 'impediment', question,
+                          _json({'supersedes': row['id'], 'human_last_resort': True}), wf['spec_revision'], now))
+            _event(conn, task.id, row['run_id'], 'nfos_human_question_refused',
+                   {'decision_id': row['id'], 'new_decision_id': new_id, 'question': refused[:400]})
+            _event(conn, task.id, row['run_id'], 'nfos_principal_requested', {'decision_id': new_id, 'kind': 'impediment', 'question': question})
+        if task.status == 'blocked':
+            _kb().unblock_task(conn, task.id)
+        out.append((row['id'], new_id))
+    return out
+
+
+def _destination_reachable(target, timeout=8):
+    """O destino responde (qualquer status HTTP abaixo de 502) ou não. Fora de transação."""
+    import urllib.request, urllib.error
+    try:
+        request = urllib.request.Request(str(target), method='GET', headers={'User-Agent': 'nfos-destination-check/1'})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status < 502
+    except urllib.error.HTTPError as exc:
+        return exc.code < 502
+    except Exception:
+        return False
+
+
+def _destination_wait_candidate(conn, task_id):
+    """(target, criterion, error, since) quando todo critério obrigatório pendente ficou INDETERMINADO por rede na sonda do host do destino."""
+    spec = get_spec(conn, task_id)
+    if not spec:
+        return None
+    content = json.loads(spec['content'])
+    scope = content.get('delivery_destination') if isinstance(content, dict) else None
+    target = str(scope.get('target') or '') if isinstance(scope, dict) else ''
+    if not re.match(r'^https?://', target):
+        return None
+    dest = _host_of(target)
+    probes = {c.get('id'): c.get('probe') for c in (content.get('criteria') or []) if isinstance(c, dict)}
+    first = None
+    for entry in mandatory_pending(conn, task_id, spec):
+        probe = probes.get(entry['criterion']) if isinstance(probes.get(entry['criterion']), dict) else {}
+        error = str(entry.get('error') or '')
+        if (entry.get('state') != 'INDETERMINADO' or not str(entry.get('why') or '').startswith('measurement indeterminate')
+                or not _NETWORK_ERROR_RX.search(error) or probe.get('kind') not in ('http', 'header') or _host_of(probe.get('url')) != dest):
+            return None
+        first = first or (entry['criterion'], error, int(entry.get('ran_at') or time.time()))
+    return (target,) + first if first else None
+
+
+def sweep_destination_waits(conn):
+    """Destino fora do ar não vira pergunta nem loop de runs. Card NFOS na fila, sem decisão aberta, com todo obrigatório pendente
+    INDETERMINADO por rede no host do destino e destino sem resposta agora: bloqueio transient com o motivo. O runtime confere a cada
+    10 min e devolve o card à fila quando o destino responde."""
+    changed = []
+    now = int(time.time())
+    try:
+        rows = conn.execute("SELECT t.id FROM tasks t JOIN nfos_workflows w ON w.task_id=t.id WHERE t.status IN ('ready','blocked')").fetchall()
+    except sqlite3.Error:
+        return changed
+    for (task_id,) in rows:
+        try:
+            task = _kb().get_task(conn, task_id)
+            wf = get_workflow(conn, task_id)
+            if not task or not wf:
+                continue
+            state = json.loads(wf['state_json'] or '{}') or {}
+            wait = state.get('destination_wait') if isinstance(state.get('destination_wait'), dict) else None
+            if task.status == 'blocked':
+                if not wait or task.block_kind != 'transient' or now - int(wait.get('checked_at') or 0) < DESTINATION_RECHECK_SECONDS:
+                    continue
+                up = _destination_reachable(wait.get('target'))
+                state = json.loads(get_workflow(conn, task_id)['state_json'] or '{}') or {}
+                if up:
+                    state.pop('destination_wait', None)
+                    with _kb().write_txn(conn, allow_nested=True):
+                        conn.execute('UPDATE nfos_workflows SET state_json=?,updated_at=? WHERE task_id=?', (_json(state), now, task_id))
+                        _event(conn, task_id, None, 'nfos_destination_back', {'target': wait.get('target'), 'since': wait.get('since')})
+                    if _kb().unblock_task(conn, task_id):
+                        changed.append((task_id, 'back'))
+                else:
+                    state['destination_wait'] = dict(wait, checked_at=now)
+                    with _kb().write_txn(conn, allow_nested=True):
+                        conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (_json(state), task_id))
+                continue
+            measurements = state.get('measurements') if isinstance(state.get('measurements'), dict) else {}
+            if not any(isinstance(m, dict) and m.get('state') == 'INDETERMINADO' and _NETWORK_ERROR_RX.search(str(m.get('error') or ''))
+                       for m in measurements.values()):
+                continue
+            if now - int((state.get('destination_check') or {}).get('checked_at') or 0) < DESTINATION_RECHECK_SECONDS:
+                continue
+            if conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human') LIMIT 1", (task_id,)).fetchone():
+                continue
+            candidate = _destination_wait_candidate(conn, task_id)
+            if not candidate:
+                continue
+            target, criterion, error, since = candidate
+            up = _destination_reachable(target)
+            state = json.loads(get_workflow(conn, task_id)['state_json'] or '{}') or {}
+            state['destination_check'] = {'checked_at': now, 'up': up}
+            if up:
+                with _kb().write_txn(conn, allow_nested=True):
+                    conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (_json(state), task_id))
+                continue
+            state['destination_wait'] = {'target': target, 'since': since, 'checked_at': now, 'criterion': criterion, 'error': error[:200]}
+            reason = (f"Destino {target} sem resposta desde {time.strftime('%d/%m %H:%MZ', time.gmtime(since))} (medição {criterion}: {error[:160]}). "
+                      'O runtime confere a cada 10 min e devolve este card à fila quando o destino responder; nenhuma pergunta a humano.')
+            with _kb().write_txn(conn, allow_nested=True):
+                conn.execute('UPDATE nfos_workflows SET state_json=?,next_action=?,updated_at=? WHERE task_id=?', (_json(state), reason[:400], now, task_id))
+                _event(conn, task_id, None, 'nfos_destination_wait', {'target': target, 'criterion': criterion, 'error': error[:200], 'since': since})
+            if _kb().block_task(conn, task_id, reason=reason, kind='transient'):
+                changed.append((task_id, 'wait'))
+        except Exception:
+            continue
+    return changed
 
 
 def request_rework(conn, task_id, *, criterion, reason, evidence, author, title=None):
@@ -1886,6 +2208,15 @@ def save_report(conn, task_id, run_id, report):
 
 
 _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principal respondeu 'continue' em 223 de 302 casos (7 dias)
+    (r'probe_env|probe_hosts|probe_database_url|probe-env|\bsonda\b.{0,120}(401|403|cookie|credencia|sess[aã]o|login|dsn|database_url|mssql|sql server|t-sql|sem resposta|timed out|recusad)|'
+     r'(401|403|cookie|credencia|dsn|database_url|mssql|sql server|t-sql).{0,120}\bsonda\b|\bprobe\b.{0,120}(401|403|cookie|credential|session|login|dsn|mssql|sql server|timed out|refused)|'
+     r'verificador.{0,80}(mssql|sql server|t-sql)',  # HUMAN_LAST_RESORT_20260914: medição não é pergunta a humano
+     'CONTINUE (automático, HUMAN_LAST_RESORT_20260914): medição não é pergunta a humano. Credencial da sonda: faça login legítimo ou use um acesso '
+     'que já existe (cofre do projeto, EnvironmentFile do serviço no destino) e grave com `probe-env --set NOME` (valor pela entrada padrão; nunca '
+     'em argumento, spec, relatório ou chat); a sonda lê "$env:NOME" nos headers e PROBE_DATABASE_URL no SQL. A sonda obrigatória mede o host do '
+     'destino (delivery_destination), nunca cópia local ou isolada. A sonda SQL lê PostgreSQL e sqlite; SQL Server se mede pela superfície HTTP do '
+     'destino. Destino sem resposta: encerre o turno; o runtime confere a cada 10 min e devolve o card sozinho. Se nada disso cabe agora, feche '
+     'como entrega parcial com continuação.'),
     (r'pre-?push|pre-?commit|lefthook|husky|no-verify|build:local|DATABASE_URL|\bhooks?\b.{0,80}(fail|block|barr|falh|imped)|(fail|block|barr|falh|imped).{0,80}\bhooks?\b',  # HOOK_AUTO_20260911
      'CONTINUE (automático, premissa do owner 10/09): hook local de pre-push/pre-commit não é gate. Faça o push agora com --no-verify; o CI do PR é o gate. Não instale dependências nem configure ambiente só para satisfazer o hook; não reconcilie ambiente de build; não pergunte de novo.'),
     (r'slot|acquire-project|acquired.{0,4}false|hml (window|remains|slot)|janela (de )?hml|occupied|ocupad',
@@ -1900,7 +2231,7 @@ _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principa
      'CONTINUE (automático): o histórico de impedimentos foi tratado na triagem de 10/09. Retome o mesmo card do estado salvo e entregue; se algo só um humano pode fornecer, bloqueie com a pergunta e o destinatário no motivo.'),
     (r'contrato git|git delivery|delivery_contract|policy_json|contract (not|nao|não) initiali|contrato .{0,20}(nao|não) inicializ',  # CLOSURE_RECOVERY_20260911
      'CONTINUE (automático): contrato Git não inicializado é tratado no fechamento pelo registro NFOS (efeitos pr/merge/deploy/homolog confirmados); chame kanban_complete de novo e leia o motivo se recusar. Não é impedimento do mantenedor.'),
-    (r'rate.?limit|\b429\b|usage limit|quota|\bcota\b',
+    (r'rate.?limit|\b429\b|usage limit|too many requests|quota (exceeded|exhausted|reached)|(exceeded|exhausted).{0,20}quota|cota (excedida|esgotada|estourada|atingida)|limite de (uso|taxa|requisi)',  # HUMAN_LAST_RESORT_20260914: a "cota" do produto (pacote/cota do cliente) não é rate limit
      'CONTINUE (automático): rate limit é transitório. Aguarde com backoff (60 s, 120 s, 300 s) e repita; não bloqueie o card.'),
 ]
 
@@ -2182,6 +2513,12 @@ def reconcile_human_answers(conn):
     """The same runtime tick retains human blocks and applies saved replies."""
     resumed=[]
     sweep_awaiting_principal(conn)  # CLOSURE_RECOVERY_20260911
+    try:  # HUMAN_LAST_RESORT_20260914: pergunta de manutenção parada volta ao Principal; destino fora do ar espera e volta sozinho
+        review_maintenance_human_decisions(conn)
+        sweep_destination_waits(conn)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning('HUMAN_LAST_RESORT_20260914 sweep failed', exc_info=True)
     rows=conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()
     for row in rows:
         task=_kb().get_task(conn,row['task_id'])
@@ -2234,6 +2571,8 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
         raise WorkflowError('The Principal resolves reviews in its own coordinator session')
     if action not in {'continue','approve','changes','human'} or not answer.strip() or author!='Principal':
         raise WorkflowError('Principal decision requires its concrete answer and action')
+    if action=='human' and _human_is_maintenance(answer):  # HUMAN_LAST_RESORT_20260914
+        raise WorkflowError(HUMAN_MAINTENANCE_REFUSAL)
     initial=get_decision(conn,decision_id)
     assessed=None
     if initial and initial['status']=='pending' and initial['kind'] in {'spec_review','final_review'} and action=='continue':
@@ -2796,9 +3135,9 @@ def _credentials_hint(db_path):
                     item['keys']=sorted(set(names))
                 files.append(item)
         if not files:
-            return {'vault':str(vault),'files':[],'note':'Nenhum arquivo deste projeto no cofre. Se a tarefa exige credencial, bloqueie com pergunta ao owner indicando o caminho onde ela deve ser colocada.'}
+            return {'vault':str(vault),'files':[],'note':'Nenhum arquivo deste projeto no cofre. Credencial que você consegue obter (login legítimo, acesso que já existe no destino) vai para o cofre da sonda com `probe-env --set NOME`; pergunte ao dono só a informação que não existe em nenhum acesso seu, nunca sobre sonda ou runtime.'}  # HUMAN_LAST_RESORT_20260914
         return {'vault':str(vault),'files':files,
-                'how':'Carregue um .env dentro do seu comando: set -a; . <arquivo>; set +a. Arquivos .json são estados de sessão/acessos: leia e use. Nunca cole valores em cards, relatórios, commits ou chat.'}
+                'how':'Carregue um .env dentro do seu comando: set -a; . <arquivo>; set +a. Arquivos .json são estados de sessão/acessos: leia e use. Nunca cole valores em cards, relatórios, commits ou chat. Credencial de sonda: `probe-env --set NOME` (valor pela entrada padrão), lida pela sonda como $env:NOME.'}  # HUMAN_LAST_RESORT_20260914
     except Exception:
         return None
 
@@ -2965,7 +3304,7 @@ def main():
     import argparse
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['show','probe','lesson','rework','precheck','cancel','save-spec','save-report','progress','ask','decide',
+    parser.add_argument('action',choices=['show','probe','probe-env','lesson','rework','precheck','cancel','save-spec','save-report','progress','ask','decide',
         'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','acquire-project','release-project','receive','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
@@ -2982,6 +3321,8 @@ def main():
     parser.add_argument('--operation',choices=['homolog','pr','merge','deploy','staging_pr','staging_merge','repair'])  # RESULT_PROBE_20260911
     parser.add_argument('--criterion',help='Criterion id to measure (probe)')  # RESULT_PROBE_20260911
     parser.add_argument('--all',action='store_true',help='Measure every criterion that has a probe')  # RESULT_PROBE_20260911
+    parser.add_argument('--set',dest='set_name',help='probe-env: variable name; the value comes from standard input')  # HUMAN_LAST_RESORT_20260914
+    parser.add_argument('--unset',dest='unset_name',help='probe-env: variable name to remove')  # HUMAN_LAST_RESORT_20260914
     parser.add_argument('--hypothesis',default='',help='progress: hypothesis for the next attempt')  # RESULT_PROBE_20260911
     parser.add_argument('--change',default='',help='progress: bounded change of the next attempt')  # RESULT_PROBE_20260911
     parser.add_argument('--target')
@@ -3047,6 +3388,9 @@ def main():
             result=lesson_command(conn,payload,author=(os.environ.get('HERMES_KANBAN_TASK') or 'Principal'))
         elif args.action=='probe':  # RESULT_PROBE_20260911
             result={'measurements':run_probes(conn,args.task,args.run,criterion=args.criterion,all_=bool(args.all))}
+        elif args.action=='probe-env':  # HUMAN_LAST_RESORT_20260914: valor só pela entrada padrão, nunca em argumento
+            result=probe_env_command(conn,args.task,set_name=args.set_name,unset_name=args.unset_name,
+                                     value=sys.stdin.read() if args.set_name else None)
         elif args.action=='progress':
             if args.hypothesis or args.change:  # RESULT_PROBE_20260911: tentativa registrada no card
                 _wf=get_workflow(conn,args.task); _st=(json.loads(_wf['state_json'] or '{}') or {}) if _wf else {}

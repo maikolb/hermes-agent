@@ -390,7 +390,8 @@ WAKE_GROUP_RULE = (  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913: instru�
     "Escreva no grupo apenas o desfecho do card (comece com Pronto, Parcial ou Entregue), uma pergunta que um humano precisa "
     "responder (comece com PERGUNTA para <nome>) ou um aviso de impacto para o cliente (comece com Aviso); nesses casos NÃO "
     "acrescente [SILENT]. Qualquer outro texto é descartado pelo gateway. "
-    "Nada de narrar decisão, confirmar bloqueio, mandar progresso em mensagem nova ou responder a alerta repetido."
+    "Nada de narrar decisão, confirmar bloqueio, mandar progresso em mensagem nova ou responder a alerta repetido. "
+    "Pergunta ao Maikol ou à manutenção (sonda, credencial de medição, runtime) nunca vai ao grupo do cliente: fica no card."  # HUMAN_LAST_RESORT_20260914
 )
 
 _CLIENT_SILENT_KINDS = frozenset({  # CLIENT_CHAT_20260913: no chat do cliente nenhuma mensagem passiva do notificador
