@@ -305,6 +305,12 @@ async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
         return False
     if (sub.get("platform") or "").lower() != "telegram":
         return False
+    metadata = dict(metadata or {})  # LEAK_FIX_20260914: o tópico da barra vem só da assinatura deste card
+    metadata.pop("message_thread_id", None)
+    if sub.get("thread_id"):
+        metadata["thread_id"] = str(sub["thread_id"])
+    else:
+        metadata.pop("thread_id", None)
     board = board or ""
     task_id = sub["task_id"]
     latest, minutes, tools, budget, cls, title, body, n_runs = await asyncio.to_thread(_progress_state, board, task_id)
@@ -3265,10 +3271,16 @@ class GatewayKanbanWatchersMixin:
                     # exists on the board.
                     wake_handoff = ""
                     text_delivery_failed = False
+                    # LEAK_FIX_20260914: a barra recebe o metadata desta assinatura. Antes ela lia a variável `metadata`
+                    # da entrega anterior (só montada mais abaixo) e publicava no tópico do card de outro projeto.
+                    _pb_delivery_metadata = sub.get("delivery_metadata")
+                    _pb_metadata = dict(_pb_delivery_metadata) if isinstance(_pb_delivery_metadata, dict) else {}
+                    if sub.get("thread_id") and not _pb_metadata.get("thread_id"):
+                        _pb_metadata["thread_id"] = sub["thread_id"]
                     for ev in d["events"]:
                         kind = ev.kind
                         try:
-                            _pb_handled = await _kanban_progress_bar(kind, sub, board_slug, adapter, metadata)
+                            _pb_handled = await _kanban_progress_bar(kind, sub, board_slug, adapter, _pb_metadata)
                         except Exception as _pb_err:
                             logger.debug("kanban progress bar: %s", _pb_err)
                             _pb_handled = False
