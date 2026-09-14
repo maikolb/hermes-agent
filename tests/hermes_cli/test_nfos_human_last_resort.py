@@ -466,3 +466,93 @@ def test_second_wait_on_the_same_card_follows_the_recurrence_block(board, monkey
         delivery.sweep_destination_waits(conn)
         _shift(conn, task.id, next_check_at=0, up_at=int(time.time()) - delivery.DESTINATION_CONFIRM_SECONDS - 1)
         assert delivery.sweep_destination_waits(conn) == [(task.id, "back")]
+
+
+# --- revisão 3 (rejulgamento 7e702b57) --------------------------------------------------------------------------------------------------
+
+def test_question_part_keeps_the_whole_first_line_when_it_already_asks():
+    assert delivery._human_is_maintenance("PERGUNTA para Maikol: você pode me ajudar? A credencial da sonda de medição não está no cofre")
+    assert not delivery._human_is_maintenance("PERGUNTA para Jhonatan: pode religar a VPS do TEST?\nA sonda do NFOS e o probe_env seguem como estão.")
+
+
+def test_escalation_waits_for_an_open_decision_instead_of_burning_it(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 22, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+        conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES('dec_outro',?,?,?,?,?,?,?)",
+                     (task.id, task.current_run_id, "impediment", "Outro assunto?", "{}", 1, int(time.time())))
+        conn.commit()
+        _shift(conn, task.id, since=int(time.time()) - delivery.DESTINATION_ESCALATE_SECONDS - 60)
+        assert (task.id, "escalated") not in delivery.sweep_destination_waits(conn)
+        assert not _state(conn, task.id)["destination_wait"].get("escalated_at")
+        conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',answer='ok',author='Principal',resolved_at=? WHERE id='dec_outro'", (int(time.time()),))
+        conn.commit()
+        assert (task.id, "escalated") in delivery.sweep_destination_waits(conn)
+
+
+def test_every_waiting_card_gets_checked_across_sweeps(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        tasks = []
+        for n in range(23, 28):
+            task = _card(conn, n, spec=_spec(_http_probe()))
+            _park(conn, task, monkeypatch)
+            tasks.append(task)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        parked = delivery.sweep_destination_waits(conn) + delivery.sweep_destination_waits(conn)
+        assert sorted(parked) == sorted((t.id, "wait") for t in tasks)
+        for task in tasks:
+            _shift(conn, task.id, next_check_at=0, checked_at=0)
+        for _ in range(2):
+            delivery.sweep_destination_waits(conn)
+        assert all(_state(conn, t.id)["destination_wait"]["checked_at"] > 0 for t in tasks)
+
+
+def test_destination_back_withdraws_the_escalation_question(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 28, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+        _shift(conn, task.id, since=int(time.time()) - delivery.DESTINATION_ESCALATE_SECONDS - 60)
+        assert (task.id, "escalated") in delivery.sweep_destination_waits(conn)
+        decision_id = _state(conn, task.id)["destination_wait"]["escalation_decision"]
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(True))
+        _shift(conn, task.id, next_check_at=0)
+        delivery.sweep_destination_waits(conn)
+        _shift(conn, task.id, next_check_at=0, up_at=int(time.time()) - delivery.DESTINATION_CONFIRM_SECONDS - 1)
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "back")]
+        row = delivery.get_decision(conn, decision_id)
+        assert row["status"] == "superseded" and json.loads(row["context"])["superseded_reason"] == "destination_back"
+        assert kb.get_task(conn, task.id).status == "ready"
+
+
+def test_legacy_wait_is_not_adopted_by_a_newer_foreign_block_nor_without_block_events(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 29, spec=_spec(_http_probe()))
+        _park(conn, task, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        assert delivery.sweep_destination_waits(conn) == [(task.id, "wait")]
+        st = _state(conn, task.id)
+        st["destination_wait"].pop("block_event_id")
+        conn.execute("UPDATE nfos_workflows SET state_json=? WHERE task_id=?", (json.dumps(st), task.id))
+        conn.commit()
+        assert kb.unblock_task(conn, task.id)
+        assert kb.block_task(conn, task.id, reason="Janela de manutenção do provedor em andamento", kind="transient")
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(True))
+        _shift(conn, task.id, next_check_at=0)
+        assert delivery.sweep_destination_waits(conn) == []
+        assert kb.get_task(conn, task.id).status == "blocked" and "destination_wait" not in _state(conn, task.id)
+
+        other = _card(conn, 30, spec=_spec(_http_probe()))
+        _park(conn, other, monkeypatch)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(False))
+        delivery.sweep_destination_waits(conn)
+        assert kb.get_task(conn, other.id).status == "blocked"
+        conn.execute("DELETE FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected')", (other.id,))
+        conn.commit()
+        _shift(conn, other.id, next_check_at=0, block_event_id=None)
+        monkeypatch.setattr(delivery, "_destination_reachable", _reachable(True))
+        delivery.sweep_destination_waits(conn)
+        assert kb.get_task(conn, other.id).status == "blocked" and "destination_wait" not in _state(conn, other.id)

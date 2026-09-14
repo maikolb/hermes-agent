@@ -1683,8 +1683,12 @@ _NETWORK_ERROR_RX = re.compile(
 
 
 def _human_question_part(answer):
-    """A pergunta em si: do começo até o primeiro '?' (o decide grava 'PERGUNTA para X: pergunta?' e depois a explicação)."""
+    """A pergunta em si: a primeira linha inteira quando ela já pergunta; senão até o primeiro '?' (pergunta que quebra linha). Revisão 3:
+    cortar no primeiro '?' deixava passar 'você pode me ajudar? A credencial da sonda...'. A explicação das linhas seguintes não entra."""
     text = str(answer or '').strip()
+    first = text.split('\n', 1)[0]
+    if '?' in first:
+        return first
     mark = text.find('?')
     return text[:mark + 1] if mark >= 0 else text[:600]
 
@@ -1845,7 +1849,10 @@ def sweep_destination_waits(conn):
     now = int(time.time())
     budget = DESTINATION_MAX_CHECKS_PER_SWEEP
     try:
-        rows = conn.execute("SELECT t.id FROM tasks t JOIN nfos_workflows w ON w.task_id=t.id WHERE t.status IN ('ready','blocked')").fetchall()
+        rows = conn.execute(  # revisão 3: quem está há mais tempo sem checagem vem primeiro, então o orçamento roda entre todas as esperas
+            "SELECT t.id FROM tasks t JOIN nfos_workflows w ON w.task_id=t.id WHERE t.status IN ('ready','blocked') "
+            "ORDER BY CASE WHEN json_valid(w.state_json) THEN COALESCE(json_extract(w.state_json,'$.destination_wait.next_check_at'), "
+            "json_extract(w.state_json,'$.destination_check.next_check_at'), 0) ELSE 0 END, t.id").fetchall()
     except sqlite3.Error:
         return changed
     for (task_id,) in rows:
@@ -1869,14 +1876,14 @@ def sweep_destination_waits(conn):
                             wait['block_event_id'] = last_id
                     except Exception:
                         pass
-                if task.block_kind != 'transient' or last_id != wait.get('block_event_id'):
+                if last_id is None or task.block_kind != 'transient' or last_id != wait.get('block_event_id'):  # revisão 3: sem evento não é dela
                     state.pop('destination_wait', None)  # o bloqueio atual não é desta espera: não mexe nele
                     _save_workflow_state(conn, task_id, state)
                     continue
                 if now - int(wait.get('since') or now) >= DESTINATION_ESCALATE_SECONDS and not wait.get('escalated_at'):
                     decision_id = _escalate_destination_wait(conn, task, wf, wait, now)
-                    wait.update(escalated_at=now, escalation_decision=decision_id)
-                    if decision_id:
+                    if decision_id:  # revisão 3: com decisão aberta de outro assunto não marca; tenta de novo na próxima varredura
+                        wait.update(escalated_at=now, escalation_decision=decision_id)
                         changed.append((task_id, 'escalated'))
                 next_check = (int(wait['next_check_at']) if wait.get('next_check_at') is not None
                               else int(wait.get('checked_at') or 0) + DESTINATION_RECHECK_SECONDS)
@@ -1894,6 +1901,13 @@ def sweep_destination_waits(conn):
                     _save_workflow_state(conn, task_id, state)
                     with _kb().write_txn(conn, allow_nested=True):
                         _event(conn, task_id, None, 'nfos_destination_back', {'target': wait.get('target'), 'since': wait.get('since')})
+                        escalation = get_decision(conn, wait['escalation_decision']) if wait.get('escalation_decision') else None
+                        if escalation and escalation['status'] in ('pending', 'human'):
+                            esc_ctx = json.loads(escalation['context'] or '{}') or {}
+                            if not esc_ctx.get('human_reply'):  # revisão 3: destino voltou, a pergunta de escalada perdeu o objeto
+                                esc_ctx.update(superseded_reason='destination_back')
+                                conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?", (_json(esc_ctx), escalation['id']))
+                                _event(conn, task_id, None, 'nfos_destination_escalation_withdrawn', {'decision_id': escalation['id']})
                     if _kb().unblock_task(conn, task_id):
                         changed.append((task_id, 'back'))
                     continue
