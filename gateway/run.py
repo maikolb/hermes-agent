@@ -5052,7 +5052,7 @@ def _wake_owner_question_in_client_chat(inbound_text, response, source):
         return False
     addressees = []
     for line in text.splitlines():
-        normalized = re.sub(r"^[^0-9A-Za-zÀ-ÿ]+", "", line.strip())
+        normalized = re.sub(r"^(?:[^0-9A-Za-zÀ-ÿ]+|\d+[.)]\s*)+", "", line.strip())  # revisão 4: numeração de lista também ("1. PERGUNTA")
         match = _QUESTION_LINE_RX.match(normalized)
         if match:
             addressees.append(match.group(1).strip("*_`'\"").lower())
