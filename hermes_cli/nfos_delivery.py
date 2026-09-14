@@ -700,21 +700,47 @@ def _probe_env_sources(conn, task_id):
     return env, vault_names
 
 
-def _local_host(host):
-    """Loopback, rede privada ou nome local: não é o destino de entrega (é cópia local ou isolada)."""
+def _resolve_host(host):
+    """Endereços de um nome pelo DNS (separado para os testes trocarem)."""
+    import socket
+    return [info[4][0] for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)]
+
+
+def _host_ips(host):
+    """IPs de um host: literal, IP embutido em nip.io/sslip.io ou DNS. Falha de DNS devolve lista vazia."""
     import ipaddress
+    host = str(host or '').strip().strip('[]').lower()
+    try:
+        return [ipaddress.ip_address(host)]
+    except ValueError:
+        pass
+    match = re.search(r'(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})\.(?:nip|sslip)\.io$', host)
+    if match:
+        try:
+            return [ipaddress.ip_address('.'.join(match.groups()))]
+        except ValueError:
+            return []
+    out = []
+    try:
+        for address in _resolve_host(host):
+            try:
+                out.append(ipaddress.ip_address(str(address).split('%')[0]))
+            except ValueError:
+                continue
+    except Exception:
+        return []
+    return out
+
+
+def _local_host(host):
+    """Loopback, rede privada, link-local ou nome local, inclusive nome público que resolve para endereço não público: não é o destino de
+    entrega (é cópia local ou isolada, ou rede interna). HUMAN_LAST_RESORT_20260914 revisão 2: resolve o DNS."""
     host = str(host or '').strip().strip('[]').lower()
     if not host:
         return False
     if host == 'localhost' or host.endswith(('.localhost', '.local', '.internal')):
         return True
-    match = re.search(r'(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})\.(?:nip|sslip)\.io$', host)
-    literal = '.'.join(match.groups()) if match else host
-    try:
-        ip = ipaddress.ip_address(literal)
-    except ValueError:
-        return False
-    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified
+    return any(not ip.is_global for ip in _host_ips(host))
 
 
 def _destination_host(conn, task_id, spec=None):
@@ -726,27 +752,58 @@ def _destination_host(conn, task_id, spec=None):
         return ''
 
 
-def _local_probe_problem(conn, task_id, host, spec=None):
-    """Texto do problema quando a sonda mira host local que não é o destino nem está em probe_hosts; None quando pode medir."""
-    if not _local_host(host):
-        return None
+def _probe_in_scope(conn, task_id, host, spec=None):
+    """O host é o do destino de entrega ou está em probe_hosts do projeto (lista do mantenedor)."""
+    host = str(host or '').lower()
+    if not host:
+        return False
     dest = _destination_host(conn, task_id, spec)
     _key, cfg = _probe_project(conn, task_id)
-    if host == dest or _host_allowed(host, (cfg or {}).get('probe_hosts')):
+    return host == dest or _host_allowed(host, (cfg or {}).get('probe_hosts'))
+
+
+def _local_probe_problem(conn, task_id, host, spec=None):
+    """Texto do problema quando a sonda mira host local que não é o destino nem está em probe_hosts; None quando pode medir."""
+    if not _local_host(host) or _probe_in_scope(conn, task_id, host, spec):
         return None
+    dest = _destination_host(conn, task_id, spec)
     return (f'probe targets a local host ({host}), not the delivery destination{(" " + dest) if dest else ""}: a local or isolated copy '
             'is supporting evidence, not the measurement. Correct the probe with probe_corrections to measure the destination')
 
 
-def _dsn_host(dsn):
-    from urllib.parse import urlsplit
-    text = str(dsn or '')
+def _dsn_hosts(dsn):
+    """Hosts de um DSN: URL (postgresql://h1:5432,h2/db?host=...) ou libpq chave=valor (host=, hostaddr=). sqlite, socket Unix e host
+    ausente contam como locais."""
+    from urllib.parse import parse_qs
+    text = str(dsn or '').strip()
     if text.startswith('sqlite://'):
-        return 'localhost'
-    try:
-        return (urlsplit(text).hostname or '').lower()
-    except ValueError:
-        return ''
+        return ['localhost']
+    hosts = []
+    if '://' in text:
+        try:
+            parts = urlsplit(text)
+        except ValueError:
+            return ['localhost']
+        for item in parts.netloc.rsplit('@', 1)[-1].split(','):
+            item = item.strip()
+            if item.startswith('['):
+                hosts.append(item[1:item.find(']')] if ']' in item else item[1:])
+            elif item:
+                hosts.append(item.rsplit(':', 1)[0])
+        query = parse_qs(parts.query)
+        for key in ('host', 'hostaddr'):
+            for value in query.get(key, []):
+                hosts.extend(value.split(','))
+    else:
+        for _key, value in re.findall(r"\b(host|hostaddr)\s*=\s*('[^']*'|\S+)", text):
+            hosts.extend(value.strip("'").split(','))
+    out = []
+    for host in hosts:
+        host = unquote(str(host).strip())
+        host = 'localhost' if (not host or host.startswith('/')) else host.lower()
+        if host not in out:
+            out.append(host)
+    return out or ['localhost']
 
 
 def probe_env_command(conn, task_id, *, set_name=None, unset_name=None, value=None):
@@ -763,28 +820,52 @@ def probe_env_command(conn, task_id, *, set_name=None, unset_name=None, value=No
     name = set_name or unset_name
     if name is not None and not _PROBE_ENV_NAME_RX.match(str(name)):
         raise WorkflowError('probe-env name must be UPPER_SNAKE_CASE (A-Z, 0-9, _), up to 64 characters')
-    current = _env_values(path) if path.is_file() else {}
+    if path.is_symlink() or path.parent.is_symlink():  # revisão 2: cofre por link simbólico não é gravado
+        raise WorkflowError('probe-env refuses a symlinked probe vault path; nothing was saved')
+    text = ''
     if set_name:
         text = str(value or '').strip('\r\n')
         if not text.strip() or '\n' in text or '\r' in text or len(text) > 16384:
             raise WorkflowError('probe-env --set reads exactly one non-empty line (the value) from standard input; nothing was saved')
-        current[set_name] = text
-        action = 'set'
-    elif unset_name:
-        if unset_name not in current:
-            return {'saved': False, 'name': unset_name, 'names': sorted(current), 'vault': str(path)}
-        current.pop(unset_name)
-        action = 'unset'
-    else:
-        return {'names': sorted(current), 'vault': str(path)}
+    elif not unset_name:
+        return {'names': sorted(_env_values(path)) if path.is_file() else [], 'vault': str(path)}
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tmp = path.with_name(f'{path.name}.tmp-{os.getpid()}')
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-        handle.write('# NFOS probe vault: written by probe-env, read only by probes\n')
-        for key in sorted(current):
-            handle.write(f'{key}={current[key]}\n')
-    os.replace(tmp, path)
+    lock_fd = os.open(str(path.with_name(path.name + '.lock')), os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        try:  # revisão 2: ler, alterar e gravar sob lock, sem perder atualização concorrente
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        except ImportError:
+            pass
+        current = _env_values(path) if path.is_file() else {}
+        if set_name:
+            current[set_name] = text
+            action = 'set'
+        else:
+            if unset_name not in current:
+                return {'saved': False, 'name': unset_name, 'names': sorted(current), 'vault': str(path)}
+            current.pop(unset_name)
+            action = 'unset'
+        import tempfile
+        fd, tmp = tempfile.mkstemp(prefix='.probe.env.', dir=str(path.parent))
+        try:
+            if hasattr(os, 'fchmod'):
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                handle.write('# NFOS probe vault: written by probe-env, read only by probes\n')
+                for key in sorted(current):
+                    handle.write(f'{key}={current[key]}\n')
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(lock_fd)
     with _kb().write_txn(conn):
         _event(conn, task_id, None, 'nfos_probe_env_changed', {'name': name, 'action': action})
     return {'saved': True, 'name': name, 'action': action, 'names': sorted(current), 'vault': str(path)}
@@ -1010,15 +1091,20 @@ def _execute_probe(conn, task_id, probe):
             if not dsn:
                 return 'INDETERMINADO', None, ('the project probe vault has no PROBE_DATABASE_URL/DATABASE_URL: record read access that already exists '
                                                'with `probe-env --set PROBE_DATABASE_URL` (value on standard input); this is not a question for a human')
-            if dsn_name in vault_names:  # HUMAN_LAST_RESORT_20260914: DSN gravado pelo worker precisa apontar para o destino
-                problem = _local_probe_problem(conn, task_id, _dsn_host(dsn))
-                if problem:
-                    return 'INDETERMINADO', None, problem
+            if dsn_name in vault_names:  # HUMAN_LAST_RESORT_20260914: todo host do DSN gravado pelo worker (URL, libpq, socket) mede o destino
+                for dsn_host in _dsn_hosts(dsn):
+                    problem = _local_probe_problem(conn, task_id, dsn_host)
+                    if problem:
+                        return 'INDETERMINADO', None, problem
             observed = {'rows': _json_safe(_run_sql_probe(dsn, str(probe['query']).strip().rstrip(';')))}
         else:
-            problem = _local_probe_problem(conn, task_id, _host_of(probe.get('url')))  # HUMAN_LAST_RESORT_20260914
+            host = _host_of(probe.get('url'))
+            problem = _local_probe_problem(conn, task_id, host)  # HUMAN_LAST_RESORT_20260914
             if problem:
                 return 'INDETERMINADO', None, problem
+            if any(str(v).startswith('$env:') for v in (probe.get('headers') or {}).values()) and not _probe_in_scope(conn, task_id, host):
+                return 'INDETERMINADO', None, (f'probe headers with $env: (vault credentials) are only sent to the delivery destination host or to '
+                                               f'probe_hosts; {host} is neither. Measure the destination host')  # HUMAN_LAST_RESORT_20260914 revisão 2
             _key, _cfg = _probe_project(conn, task_id)
             observed = _run_http_probe(probe, env, hosts=(_cfg or {}).get('probe_hosts'))  # PROBE_BYPASS_SCOPE_20260911
             _status = observed.get('status'); _exp_status = (probe.get('expect') or {}).get('status')
@@ -1220,6 +1306,11 @@ def _spec_result_criteria_checks(conn, task_id, spec):
         if crit.get('optional'):  # CLOSURE_RECOVERY_20260911
             if crit.get('mandatory') or not str(crit.get('optional_reason') or '').strip():
                 raise WorkflowError(f"Criterion {crit.get('id')}: optional needs optional_reason and cannot be mandatory")
+    _dest = _destination_host(conn, task_id, spec)  # HUMAN_LAST_RESORT_20260914 revisão 2: ao menos uma sonda http obrigatória mede o destino
+    _http = [c['probe'] for c in spec.get('criteria') or [] if c.get('mandatory') and isinstance(c.get('probe'), dict)
+             and c['probe'].get('kind') in ('http', 'header') and c['probe'].get('phase') != 'before']
+    if _dest and _http and not any(_probe_in_scope(conn, task_id, _host_of(p.get('url')), spec) for p in _http):
+        raise WorkflowError(f'Mandatory http probes must measure the delivery destination: none targets {_dest} or a host listed in probe_hosts')
     _check_probe_corrections(get_spec(conn, task_id), spec)
     wf = get_workflow(conn, task_id)
     precheck = (json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') if wf else None
@@ -1280,8 +1371,8 @@ def completion_refusal_note(conn, task_id):
     if 'local host' in _errors:
         lines.append('Sonda em host local mede cópia: corrija com probe_corrections para medir o destino.')
     if _NETWORK_ERROR_RX.search(_errors):
-        lines.append('Destino sem resposta: não pergunte a ninguém; encerre o turno. O runtime confere o destino a cada 10 min e devolve este card à '
-                     'fila quando ele responder.')
+        lines.append('Destino sem resposta: não pergunte a ninguém; encerre o turno. O runtime confere o destino a cada 10 min, devolve este card à '
+                     'fila quando ele voltar e, depois de 1 h sem resposta, pede ao Principal que procure quem opera o destino.')
     lines.append('Continue neste card, mesma prioridade: (1) registre hipótese e mudança delimitada: `progress --stage implement --next "..." '
                  '--hypothesis "..." --change "..."`; (2) aplique uma mudança e registre a mutação (`effect --operation repair|deploy|homolog ...` e '
                  '`reconcile`); (3) `probe --criterion <id>`; (4) `save-report` e kanban_complete. Não reclassifique, não crie card, não repita efeito '
@@ -1569,28 +1660,47 @@ def sweep_awaiting_principal(conn):
 # HUMAN_LAST_RESORT_20260914 (ordem do Maikol de 14/09): pergunta a humano é o último recurso. Sonda, medição, destino e manutenção
 # do runtime não vão a humano; pergunta desse tipo já parada volta ao Principal; destino fora do ar espera sem pergunta e o card
 # volta sozinho quando ele responde.
-_HUMAN_MAINTENANCE_RX = re.compile(
-    r'probe_env|probe_hosts|probe_database_url|probe-env|\bprobe\b|\bsonda\b|verificador|adaptador (sql|mssql)|\bmssql\b|t-sql|'
-    r'kanban\.delivery|config\.yaml|\bruntime\b|dispatcher|worktree|\blease\b|contrato git|git delivery|delivery_contract|policy_json|'
-    r'gate (do )?nfos|nfos gate|mantenedor|maintainer', re.I)
-HUMAN_MAINTENANCE_REFUSAL = ('human recusado (HUMAN_LAST_RESORT_20260914): sonda, credencial de medição, destino e manutenção do runtime não são '
-                             'perguntas a humano (premissas de 10/09). Decida com continue ou changes: a credencial da sonda vai para o cofre do '
-                             'projeto com `probe-env --set NOME` (valor pela entrada padrão); a sonda obrigatória mede o host do destino; destino '
-                             'sem resposta o runtime espera e devolve o card sozinho; o que não dá para medir agora fecha como entrega parcial '
-                             'com continuação.')
+_RUNTIME_CONFIG_RX = re.compile(  # revisão 2: configuração do runtime NFOS nunca é pergunta a humano, para qualquer destinatário
+    r'probe_env|probe_hosts|probe_database_url|probe-env|kanban\.delivery|config\.yaml|hermes runtime|runtime (do|da) nfos|nfos runtime|'
+    r'contexto (do )?(hermes )?runtime|dispatcher|worktree|\blease\b|contrato git|git delivery|delivery_contract|policy_json|'
+    r'gate (do )?nfos|nfos gate|verificador (do )?nfos', re.I)
+_MEASUREMENT_RX = re.compile(  # revisão 2: medição e manutenção não são perguntas para o dono nem para a manutenção
+    r'\bsonda\b|\bprobe\b|verificador|credencial (de|da) (sonda|medi[cç][aã]o)|\bmssql\b|t-sql|\bruntime\b|mantenedor|maintainer', re.I)
+_OWNER_ADDRESSEE_RX = re.compile(r'^(maikol|mantenedor|maintainer|nfos|runtime|operador|opera[cç][aã]o|principal|equipe)\b', re.I)
+HUMAN_MAINTENANCE_REFUSAL = ('human recusado (HUMAN_LAST_RESORT_20260914): configuração do runtime nunca é pergunta a humano, e sonda, medição ou '
+                             'manutenção nunca é pergunta ao Maikol ou à manutenção (premissas de 10/09). Decida com continue ou changes: a '
+                             'credencial da sonda vai para o cofre do projeto com `probe-env --set NOME` (valor pela entrada padrão); a sonda '
+                             'obrigatória mede o host do destino; destino sem resposta o runtime espera, devolve o card quando volta e, depois de '
+                             '1 h, pede que você procure quem opera o destino; o que não dá para medir agora fecha como entrega parcial com '
+                             'continuação. Pergunta a quem opera o destino (religar o servidor, informar o endereço novo) é permitida.')
 DESTINATION_RECHECK_SECONDS = 600
+DESTINATION_CONFIRM_SECONDS = 120
+DESTINATION_ESCALATE_SECONDS = 3600
+DESTINATION_MAX_CHECKS_PER_SWEEP = 3
 _NETWORK_ERROR_RX = re.compile(
     r'URLError|timed out|TimeoutError|Connection refused|ConnectionRefusedError|ConnectionResetError|RemoteDisconnected|No route to host|'
     r'Network is unreachable|Name or service not known|Temporary failure in name resolution|getaddrinfo failed|nodename nor servname', re.I)
 
 
-def _human_question_line(answer):
-    return str(answer or '').strip().split('\n', 1)[0]
+def _human_question_part(answer):
+    """A pergunta em si: do começo até o primeiro '?' (o decide grava 'PERGUNTA para X: pergunta?' e depois a explicação)."""
+    text = str(answer or '').strip()
+    mark = text.find('?')
+    return text[:mark + 1] if mark >= 0 else text[:600]
+
+
+def _human_addressee(answer):
+    match = re.match(r'\s*pergunta\s+(?:para|pro|pra|ao|à|a)\s+([^\s:,?]+)', str(answer or ''), re.I)
+    return match.group(1).strip('*_`') if match else ''
 
 
 def _human_is_maintenance(answer):
-    """A linha da pergunta (PERGUNTA para X: ...) trata de sonda, medição ou manutenção do runtime."""
-    return bool(_HUMAN_MAINTENANCE_RX.search(_human_question_line(answer)))
+    """Revisão 2: classifica a pergunta inteira (até o primeiro '?'), não a primeira linha. Configuração do runtime em qualquer pergunta, ou
+    medição e manutenção numa pergunta ao dono ou à manutenção. Pergunta a quem opera o destino (religar, endereço novo) passa."""
+    question = _human_question_part(answer)
+    if _RUNTIME_CONFIG_RX.search(question):
+        return True
+    return bool(_OWNER_ADDRESSEE_RX.match(_human_addressee(question)) and _MEASUREMENT_RX.search(question))
 
 
 def review_maintenance_human_decisions(conn):
@@ -1612,7 +1722,7 @@ def review_maintenance_human_decisions(conn):
             continue
         if _run_process_alive(conn, task.id, row['run_id']) or run_termination_pending(conn, task.id, row['run_id']):
             continue
-        refused = _human_question_line(row.get('answer'))
+        refused = _human_question_part(row.get('answer'))
         question = ('Revisão de autonomia (HUMAN_LAST_RESORT_20260914): a pergunta a humano deste card trata de sonda, medição ou manutenção '
                     'do runtime e foi recusada pelas premissas de 10/09; o card voltou para você. Decida com continue ou changes, sem humano: '
                     'credencial da sonda pelo `probe-env --set NOME` no cofre do projeto; sonda obrigatória no host do destino; destino sem '
@@ -1638,12 +1748,23 @@ def review_maintenance_human_decisions(conn):
     return out
 
 
-def _destination_reachable(target, timeout=8):
-    """O destino responde (qualquer status HTTP abaixo de 502) ou não. Fora de transação."""
-    import urllib.request, urllib.error
+def _destination_reachable(target, timeout=5):
+    """O destino responde (qualquer status HTTP abaixo de 502, inclusive redirecionamento, que não é seguido) ou não. Fora de transação.
+    Revisão 2: alvo que não é http(s) ou que resolve para endereço não público nunca é consultado; redirecionamento não é seguido."""
+    import urllib.error
+    import urllib.request
+    parts = urlsplit(str(target or ''))
+    if parts.scheme not in ('http', 'https') or not parts.hostname or _local_host(parts.hostname):
+        return False
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect())
     try:
         request = urllib.request.Request(str(target), method='GET', headers={'User-Agent': 'nfos-destination-check/1'})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             return response.status < 502
     except urllib.error.HTTPError as exc:
         return exc.code < 502
@@ -1662,24 +1783,67 @@ def _destination_wait_candidate(conn, task_id):
     if not re.match(r'^https?://', target):
         return None
     dest = _host_of(target)
+    if not dest or _local_host(dest):  # revisão 2: destino local não entra em espera (a checagem não consulta rede interna)
+        return None
     probes = {c.get('id'): c.get('probe') for c in (content.get('criteria') or []) if isinstance(c, dict)}
     first = None
+    latest = 0
     for entry in mandatory_pending(conn, task_id, spec):
         probe = probes.get(entry['criterion']) if isinstance(probes.get(entry['criterion']), dict) else {}
         error = str(entry.get('error') or '')
         if (entry.get('state') != 'INDETERMINADO' or not str(entry.get('why') or '').startswith('measurement indeterminate')
                 or not _NETWORK_ERROR_RX.search(error) or probe.get('kind') not in ('http', 'header') or _host_of(probe.get('url')) != dest):
             return None
-        first = first or (entry['criterion'], error, int(entry.get('ran_at') or time.time()))
-    return (target,) + first if first else None
+        ran_at = int(entry.get('ran_at') or time.time())
+        first = first or (entry['criterion'], error, ran_at)
+        latest = max(latest, ran_at)
+    if not first:
+        return None
+    answered = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind='nfos_human_answered'", (task_id,)).fetchone()[0]
+    if answered and float(answered) >= latest:  # revisão 2: resposta humana depois da medição (endereço novo) é para o worker agir
+        return None
+    return (target,) + first
+
+
+def _save_workflow_state(conn, task_id, state, next_action=None):
+    with _kb().write_txn(conn, allow_nested=True):
+        if next_action is None:
+            conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (_json(state), task_id))
+        else:
+            conn.execute('UPDATE nfos_workflows SET state_json=?,next_action=?,updated_at=? WHERE task_id=?',
+                         (_json(state), next_action[:400], int(time.time()), task_id))
+
+
+def _escalate_destination_wait(conn, task, wf, wait, now):
+    """Revisão 2: destino sem resposta há mais de DESTINATION_ESCALATE_SECONDS vira decisão pendente para o Principal procurar quem opera o
+    destino (servidor desligado, endereço novo). Uma vez por espera; nada se já houver decisão aberta."""
+    if conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human') LIMIT 1", (task.id,)).fetchone():
+        return None
+    since = int(wait.get('since') or now)
+    minutes = (now - since) // 60
+    question = (f"Destino {wait.get('target')} sem resposta há {minutes} min (desde {time.strftime('%d/%m %H:%MZ', time.gmtime(since))}; "
+                f"medição {wait.get('criterion')}). O runtime segue conferindo a cada 10 min. Procure quem opera esse destino, no grupo do "
+                "projeto, e pergunte se o servidor foi desligado e qual é o endereço atual (decide human com human_to = essa pessoa). Com "
+                "endereço novo, responda changes com ele para o worker corrigir spec, deploy e medição.")
+    run = conn.execute('SELECT id FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1', (task.id,)).fetchone()
+    decision_id = 'dec_' + uuid.uuid4().hex[:20]
+    with _kb().write_txn(conn, allow_nested=True):
+        conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
+                     (decision_id, task.id, run[0] if run else 0, 'impediment', question,
+                      _json({'destination_wait': True, 'target': wait.get('target')}), wf['spec_revision'], now))
+        _event(conn, task.id, None, 'nfos_destination_escalated', {'decision_id': decision_id, 'target': wait.get('target'), 'minutes': minutes})
+        _event(conn, task.id, None, 'nfos_principal_requested', {'decision_id': decision_id, 'kind': 'impediment', 'question': question})
+    return decision_id
 
 
 def sweep_destination_waits(conn):
-    """Destino fora do ar não vira pergunta nem loop de runs. Card NFOS na fila, sem decisão aberta, com todo obrigatório pendente
-    INDETERMINADO por rede no host do destino e destino sem resposta agora: bloqueio transient com o motivo. O runtime confere a cada
-    10 min e devolve o card à fila quando o destino responde."""
+    """Destino fora do ar não vira pergunta imediata nem loop de runs. Card NFOS na fila, sem decisão aberta, com todo obrigatório pendente
+    INDETERMINADO por rede no host do destino e destino sem resposta agora: bloqueio transient com o motivo. Revisão 2: no máximo
+    DESTINATION_MAX_CHECKS_PER_SWEEP checagens de rede por varredura; só mexe no bloqueio que ela mesma criou; devolve o card depois de
+    duas respostas seguidas; passada 1 h sem resposta, abre decisão para o Principal procurar quem opera o destino."""
     changed = []
     now = int(time.time())
+    budget = DESTINATION_MAX_CHECKS_PER_SWEEP
     try:
         rows = conn.execute("SELECT t.id FROM tasks t JOIN nfos_workflows w ON w.task_id=t.id WHERE t.status IN ('ready','blocked')").fetchall()
     except sqlite3.Error:
@@ -1693,27 +1857,59 @@ def sweep_destination_waits(conn):
             state = json.loads(wf['state_json'] or '{}') or {}
             wait = state.get('destination_wait') if isinstance(state.get('destination_wait'), dict) else None
             if task.status == 'blocked':
-                if not wait or task.block_kind != 'transient' or now - int(wait.get('checked_at') or 0) < DESTINATION_RECHECK_SECONDS:
+                if not wait:
                     continue
+                original = _json(wait)
+                last = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected') "
+                                    "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()  # recorrência do mesmo tipo grava block_loop_detected
+                last_id = last[0] if last else None
+                if wait.get('block_event_id') is None and last and task.block_kind == 'transient':
+                    try:  # espera criada antes da revisão 2: adota o bloqueio se ele é desta espera
+                        if str((json.loads(last[1] or '{}') or {}).get('reason') or '').startswith('Destino '):
+                            wait['block_event_id'] = last_id
+                    except Exception:
+                        pass
+                if task.block_kind != 'transient' or last_id != wait.get('block_event_id'):
+                    state.pop('destination_wait', None)  # o bloqueio atual não é desta espera: não mexe nele
+                    _save_workflow_state(conn, task_id, state)
+                    continue
+                if now - int(wait.get('since') or now) >= DESTINATION_ESCALATE_SECONDS and not wait.get('escalated_at'):
+                    decision_id = _escalate_destination_wait(conn, task, wf, wait, now)
+                    wait.update(escalated_at=now, escalation_decision=decision_id)
+                    if decision_id:
+                        changed.append((task_id, 'escalated'))
+                next_check = (int(wait['next_check_at']) if wait.get('next_check_at') is not None
+                              else int(wait.get('checked_at') or 0) + DESTINATION_RECHECK_SECONDS)
+                if now < next_check or budget <= 0:
+                    if _json(wait) != original:  # grava só quando a espera mudou (adoção ou escalada), não a cada tick
+                        state['destination_wait'] = wait
+                        _save_workflow_state(conn, task_id, state)
+                    continue
+                budget -= 1
                 up = _destination_reachable(wait.get('target'))
                 state = json.loads(get_workflow(conn, task_id)['state_json'] or '{}') or {}
-                if up:
+                wait = dict(wait, checked_at=now)
+                if up and wait.get('up_at') and now - int(wait['up_at']) >= DESTINATION_CONFIRM_SECONDS:
                     state.pop('destination_wait', None)
+                    _save_workflow_state(conn, task_id, state)
                     with _kb().write_txn(conn, allow_nested=True):
-                        conn.execute('UPDATE nfos_workflows SET state_json=?,updated_at=? WHERE task_id=?', (_json(state), now, task_id))
                         _event(conn, task_id, None, 'nfos_destination_back', {'target': wait.get('target'), 'since': wait.get('since')})
                     if _kb().unblock_task(conn, task_id):
                         changed.append((task_id, 'back'))
+                    continue
+                if up:
+                    wait.update(up_at=wait.get('up_at') or now, next_check_at=now + DESTINATION_CONFIRM_SECONDS)
                 else:
-                    state['destination_wait'] = dict(wait, checked_at=now)
-                    with _kb().write_txn(conn, allow_nested=True):
-                        conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (_json(state), task_id))
+                    wait.pop('up_at', None)
+                    wait['next_check_at'] = now + DESTINATION_RECHECK_SECONDS
+                state['destination_wait'] = wait
+                _save_workflow_state(conn, task_id, state)
                 continue
             measurements = state.get('measurements') if isinstance(state.get('measurements'), dict) else {}
             if not any(isinstance(m, dict) and m.get('state') == 'INDETERMINADO' and _NETWORK_ERROR_RX.search(str(m.get('error') or ''))
                        for m in measurements.values()):
                 continue
-            if now - int((state.get('destination_check') or {}).get('checked_at') or 0) < DESTINATION_RECHECK_SECONDS:
+            if budget <= 0 or now < int((state.get('destination_check') or {}).get('next_check_at') or 0):
                 continue
             if conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human') LIMIT 1", (task_id,)).fetchone():
                 continue
@@ -1721,20 +1917,26 @@ def sweep_destination_waits(conn):
             if not candidate:
                 continue
             target, criterion, error, since = candidate
+            budget -= 1
             up = _destination_reachable(target)
             state = json.loads(get_workflow(conn, task_id)['state_json'] or '{}') or {}
-            state['destination_check'] = {'checked_at': now, 'up': up}
+            state['destination_check'] = {'checked_at': now, 'up': up, 'next_check_at': now + DESTINATION_RECHECK_SECONDS}
             if up:
-                with _kb().write_txn(conn, allow_nested=True):
-                    conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (_json(state), task_id))
+                _save_workflow_state(conn, task_id, state)
                 continue
-            state['destination_wait'] = {'target': target, 'since': since, 'checked_at': now, 'criterion': criterion, 'error': error[:200]}
             reason = (f"Destino {target} sem resposta desde {time.strftime('%d/%m %H:%MZ', time.gmtime(since))} (medição {criterion}: {error[:160]}). "
-                      'O runtime confere a cada 10 min e devolve este card à fila quando o destino responder; nenhuma pergunta a humano.')
+                      'O runtime confere a cada 10 min e devolve este card à fila quando o destino voltar; depois de 1 h sem resposta, o Principal '
+                      'procura quem opera o destino.')
+            _save_workflow_state(conn, task_id, state, next_action=reason)
             with _kb().write_txn(conn, allow_nested=True):
-                conn.execute('UPDATE nfos_workflows SET state_json=?,next_action=?,updated_at=? WHERE task_id=?', (_json(state), reason[:400], now, task_id))
                 _event(conn, task_id, None, 'nfos_destination_wait', {'target': target, 'criterion': criterion, 'error': error[:200], 'since': since})
             if _kb().block_task(conn, task_id, reason=reason, kind='transient'):
+                block_id = conn.execute("SELECT max(id) FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected')",
+                                        (task_id,)).fetchone()[0]
+                state = json.loads(get_workflow(conn, task_id)['state_json'] or '{}') or {}
+                state['destination_wait'] = {'target': target, 'since': since, 'checked_at': now, 'next_check_at': now + DESTINATION_RECHECK_SECONDS,
+                                             'criterion': criterion, 'error': error[:200], 'block_event_id': block_id}
+                _save_workflow_state(conn, task_id, state)
                 changed.append((task_id, 'wait'))
         except Exception:
             continue
@@ -2208,7 +2410,9 @@ def save_report(conn, task_id, run_id, report):
 
 
 _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principal respondeu 'continue' em 223 de 302 casos (7 dias)
-    (r'probe_env|probe_hosts|probe_database_url|probe-env|\bsonda\b.{0,120}(401|403|cookie|credencia|sess[aã]o|login|dsn|database_url|mssql|sql server|t-sql|sem resposta|timed out|recusad)|'
+    (r'(probe_env|probe_hosts|probe_database_url|probe-env).{0,120}(sem |n[aã]o tem|ausente|missing|has no|configur|vazio|empty|cookie|credencia|401|403)|'
+     r'(sem |n[aã]o tem|ausente|missing|has no|configur).{0,120}(probe_env|probe_database_url)|'
+     r'\bsonda\b.{0,120}(401|403|cookie|credencia|sess[aã]o|login|dsn|database_url|mssql|sql server|t-sql|sem resposta|timed out|recusad)|'
      r'(401|403|cookie|credencia|dsn|database_url|mssql|sql server|t-sql).{0,120}\bsonda\b|\bprobe\b.{0,120}(401|403|cookie|credential|session|login|dsn|mssql|sql server|timed out|refused)|'
      r'verificador.{0,80}(mssql|sql server|t-sql)',  # HUMAN_LAST_RESORT_20260914: medição não é pergunta a humano
      'CONTINUE (automático, HUMAN_LAST_RESORT_20260914): medição não é pergunta a humano. Credencial da sonda: faça login legítimo ou use um acesso '
@@ -2231,7 +2435,7 @@ _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principa
      'CONTINUE (automático): o histórico de impedimentos foi tratado na triagem de 10/09. Retome o mesmo card do estado salvo e entregue; se algo só um humano pode fornecer, bloqueie com a pergunta e o destinatário no motivo.'),
     (r'contrato git|git delivery|delivery_contract|policy_json|contract (not|nao|não) initiali|contrato .{0,20}(nao|não) inicializ',  # CLOSURE_RECOVERY_20260911
      'CONTINUE (automático): contrato Git não inicializado é tratado no fechamento pelo registro NFOS (efeitos pr/merge/deploy/homolog confirmados); chame kanban_complete de novo e leia o motivo se recusar. Não é impedimento do mantenedor.'),
-    (r'rate.?limit|\b429\b|usage limit|too many requests|quota (exceeded|exhausted|reached)|(exceeded|exhausted).{0,20}quota|cota (excedida|esgotada|estourada|atingida)|limite de (uso|taxa|requisi)',  # HUMAN_LAST_RESORT_20260914: a "cota" do produto (pacote/cota do cliente) não é rate limit
+    (r'rate.?limit|\b429\b|usage limit|too many requests|quota (exceeded|exhausted|reached)|(exceeded|exhausted).{0,20}quota|cota (excedida|esgotada|estourada|atingida)|limite de (taxa|requisi[cç][oõ]es)',  # HUMAN_LAST_RESORT_20260914: a "cota" do produto (pacote/cota do cliente) não é rate limit
      'CONTINUE (automático): rate limit é transitório. Aguarde com backoff (60 s, 120 s, 300 s) e repita; não bloqueie o card.'),
 ]
 

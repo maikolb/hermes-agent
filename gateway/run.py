@@ -5017,36 +5017,70 @@ def _wake_narration_to_suppress(inbound_text, response):
         return False
 
 
-_OWNER_QUESTION_RX = re.compile(r"^pergunta\s+para\s+(maikol|mantenedor|maintainer|nfos|runtime|operador|opera[cç][aã]o|principal)\b", re.I)  # HUMAN_LAST_RESORT_20260914
+_QUESTION_LINE_RX = re.compile(r"^pergunta\s+(?:para|pro|pra|ao|à|a)\s+([^\s:,?]+)", re.I)  # HUMAN_LAST_RESORT_20260914
+_INTERNAL_ADDRESSEE_RX = re.compile(r"^(maikol|mantenedor|maintainer|nfos|runtime|operador|opera[cç][aã]o|principal|equipe)$", re.I)
+
+
+def _client_chat_askable_names(board):
+    """HUMAN_LAST_RESORT_20260914: nomes de quem faz pedidos no quadro (prefixo [Nome|id] do pedido), minúsculos, sem os internos."""
+    from hermes_cli import kanban_db as _kb
+    names = set()
+    with _kb.connect_closing(board=board) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_requests'").fetchone():
+            return names
+        for (payload,) in conn.execute("SELECT payload FROM nfos_requests ORDER BY created_at DESC LIMIT 500"):
+            try:
+                text = str((json.loads(payload or "{}") or {}).get("text") or "")
+            except Exception:
+                continue
+            for name in re.findall(r"\[([^\]|\n]{1,40})\|\d{3,}\]", text[:600]):
+                name = name.strip().lower()
+                if name and not _INTERNAL_ADDRESSEE_RX.match(name):
+                    names.add(name)
+    return names
 
 
 def _wake_owner_question_in_client_chat(inbound_text, response, source):
-    """HUMAN_LAST_RESORT_20260914 (ordem do Maikol): pergunta ao dono ou à manutenção escrita num turno de wake de kanban nunca vai ao
-    chat do cliente. Ela fica no card (a Vigília mostra) e o card registra client_publication_suppressed. True quando suprime."""
+    """HUMAN_LAST_RESORT_20260914 (ordem do Maikol; revisão 2 fail-closed): num turno de wake de kanban no chat do cliente, PERGUNTA só é
+    publicada quando toda pergunta da resposta é para quem faz pedidos naquele quadro. Pergunta ao dono, à manutenção ou a destinatário
+    desconhecido fica no card (client_publication_suppressed kind owner_question). Falha na classificação no chat do cliente suprime.
+    True quando suprime."""
+    if not isinstance(inbound_text, str) or not inbound_text.lstrip().startswith("[kanban]"):
+        return False
+    text = (response or "").strip()
+    if not text:
+        return False
+    addressees = []
+    for line in text.splitlines():
+        normalized = re.sub(r"^[^0-9A-Za-zÀ-ÿ]+", "", line.strip())
+        match = _QUESTION_LINE_RX.match(normalized)
+        if match:
+            addressees.append(match.group(1).strip("*_`'\"").lower())
+    if not addressees:
+        return False
+    board = re.search(r"^Board:\s*(\S+)", inbound_text, re.M)
+    if not board:
+        return False
+    task = re.search(r"\bTask\s+(t_[0-9A-Za-z]+)", inbound_text)
+    platform = getattr(source, "platform", None)
+    sub = {"platform": str(getattr(platform, "value", platform) or ""),
+           "chat_id": getattr(source, "chat_id", None), "thread_id": getattr(source, "thread_id", None)}
     try:
-        if not isinstance(inbound_text, str) or not inbound_text.lstrip().startswith("[kanban]"):
-            return False
-        text = (response or "").strip()
-        if not text:
-            return False
-        first = text.splitlines()[0].strip().lstrip("*#>_[ ").strip()
-        if not _OWNER_QUESTION_RX.match(first):
-            return False
-        board = re.search(r"^Board:\s*(\S+)", inbound_text, re.M)
-        if not board:
-            return False
-        from gateway.kanban_watchers import _is_client_chat, _record_client_suppression
-        platform = getattr(source, "platform", None)
-        sub = {"platform": str(getattr(platform, "value", platform) or ""),
-               "chat_id": getattr(source, "chat_id", None), "thread_id": getattr(source, "thread_id", None)}
+        from gateway.kanban_watchers import _is_client_chat
         if not _is_client_chat(board.group(1), sub):
             return False
-        task = re.search(r"\bTask\s+(t_[0-9A-Za-z]+)", inbound_text)
+        askable = _client_chat_askable_names(board.group(1))
+        if all(not _INTERNAL_ADDRESSEE_RX.match(name) and name in askable for name in addressees):
+            return False
+    except Exception:
+        logger.warning("kanban wake: classificação de PERGUNTA no chat do cliente falhou; suprimida por segurança", exc_info=True)
+    try:
+        from gateway.kanban_watchers import _record_client_suppression
         if task:
             _record_client_suppression(board.group(1), task.group(1), "owner_question", sub)
-        return True
     except Exception:
-        return False
+        pass
+    return True
 
 
 def _normalize_empty_agent_response(
