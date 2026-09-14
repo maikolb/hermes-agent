@@ -1732,7 +1732,7 @@ _NETWORK_ERROR_RX = re.compile(
     r'Network is unreachable|Name or service not known|Temporary failure in name resolution|getaddrinfo failed|nodename nor servname', re.I)
 
 
-_QUESTION_MARKERS_RX = re.compile(r'^(?:[^0-9A-Za-zÀ-ÿ]+|\d+[.)]\s*)+')
+_QUESTION_MARKERS_RX = re.compile(r'^(?:[^0-9A-Za-zÀ-ÿ]+|\d+\s*[.):\-]\s*)+')  # revisão 5: também "1 - " e "1: "
 
 
 def _human_question_text(answer):
@@ -1862,7 +1862,8 @@ def _destination_wait_candidate(conn, task_id):
         latest = max(latest, ran_at)
     if not first:
         return None
-    answered = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind='nfos_human_answered'", (task_id,)).fetchone()[0]
+    answered = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind IN "  # revisão 5: changes da escalada e reconsideração
+                            "('nfos_human_answered','nfos_destination_wait_released','nfos_principal_reconsidered')", (task_id,)).fetchone()[0]
     if answered and float(answered) >= latest:  # revisão 2: resposta humana depois da medição (endereço novo) é para o worker agir
         return None
     return (target,) + first
@@ -1947,6 +1948,64 @@ def _escalate_destination_wait(conn, task, wf, wait, now):
     return 'escalated'
 
 
+def _own_block_event(conn, task_id, after_id, reason):
+    """Revisão 5: id do evento de bloqueio desta espera (blocked ou block_loop_detected com este motivo exato, depois de after_id), com o card
+    bloqueado transient agora. None quando o bloqueio não aconteceu ou não é dela: block_task devolve True sem bloquear card running (vira
+    pergunta ao Principal), e max(id) pode ser de outro bloqueio."""
+    task = _kb().get_task(conn, task_id)
+    if not task or task.status != 'blocked' or task.block_kind != 'transient':
+        return None
+    rows = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND id>? AND kind IN ('blocked','block_loop_detected') "
+                        "ORDER BY id DESC", (task_id, after_id)).fetchall()
+    for event_id, payload in rows:
+        try:
+            if (json.loads(payload or '{}') or {}).get('reason') == reason:
+                return event_id
+        except Exception:
+            continue
+    return None
+
+
+def _discard_unparked_wait(conn, task_id, wait, reason, previous_action):
+    """Revisão 5: o bloqueio não aconteceu (card saiu da fila, virou pergunta ou tem outro dono). A espera gravada antes dele sai e o
+    next_action volta ao anterior, se ainda são os desta varredura; card fora de ready e blocked não tem varredura que limpe depois."""
+    with _kb().write_txn(conn, allow_nested=True):
+        wf = get_workflow(conn, task_id)
+        state = json.loads(wf['state_json'] or '{}') or {}
+        if state.get('destination_wait') != wait:
+            return False
+        state.pop('destination_wait', None)
+        if wf['next_action'] == reason[:400]:
+            conn.execute('UPDATE nfos_workflows SET state_json=?,next_action=? WHERE task_id=?', (_json(state), previous_action, task_id))
+        else:
+            _save_workflow_state(conn, task_id, state)
+    return True
+
+
+def _orphan_destination_wait(conn, task):
+    """Revisão 5: card bloqueado transient cujo último bloqueio tem o motivo 'Destino <alvo da spec> ' e ficou sem espera no estado (queda no
+    meio de uma transição, ou estado deixado por revisão anterior) ganha a espera de volta a partir do evento, para nunca ficar parado sem
+    quem confira o destino."""
+    if task.block_kind != 'transient':
+        return None
+    last = conn.execute("SELECT id, payload, created_at FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected') "
+                        "ORDER BY id DESC LIMIT 1", (task.id,)).fetchone()
+    spec = get_spec(conn, task.id)
+    if not last or not spec:
+        return None
+    try:
+        content = json.loads(spec['content'])
+        scope = content.get('delivery_destination') if isinstance(content, dict) else None
+        target = str(scope.get('target') or '') if isinstance(scope, dict) else ''
+        reason = str((json.loads(last[1] or '{}') or {}).get('reason') or '')
+    except Exception:
+        return None
+    if not target or not reason.startswith(f'Destino {target} '):
+        return None
+    return {'target': target, 'since': int(last[2] or time.time()), 'checked_at': 0, 'next_check_at': 0, 'criterion': None, 'error': '',
+            'block_event_id': last[0], 'recovered': True}
+
+
 def sweep_destination_waits(conn):
     """Destino fora do ar não vira pergunta imediata nem loop de runs. Card NFOS na fila, sem decisão aberta, com todo obrigatório pendente
     INDETERMINADO por rede no host do destino e destino sem resposta agora: bloqueio transient com o motivo. Revisão 2: no máximo
@@ -1973,9 +2032,14 @@ def sweep_destination_waits(conn):
             state = json.loads(wf['state_json'] or '{}') or {}
             wait = state.get('destination_wait') if isinstance(state.get('destination_wait'), dict) else None
             if task.status == 'blocked':
-                if not wait:
-                    continue
-                original = _json(wait)
+                recovered = False
+                if not wait:  # revisão 5: bloqueio "Destino <alvo>" sem espera ganha a espera de volta
+                    wait = _orphan_destination_wait(conn, task)
+                    if not wait:
+                        continue
+                    recovered = True
+                    changed.append((task_id, 'recovered'))
+                original = '' if recovered else _json(wait)
                 last = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected') "
                                     "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()  # recorrência do mesmo tipo grava block_loop_detected
                 last_id = last[0] if last else None
@@ -2065,15 +2129,23 @@ def sweep_destination_waits(conn):
             wait = {'target': target, 'since': since, 'checked_at': now, 'next_check_at': now + DESTINATION_RECHECK_SECONDS,
                     'criterion': criterion, 'error': error[:200]}
             with _kb().write_txn(conn, allow_nested=True):  # revisão 4: a espera nasce antes do bloqueio; queda entre os dois é adotada pelo alvo
-                state = json.loads(get_workflow(conn, task_id)['state_json'] or '{}') or {}
+                current = get_workflow(conn, task_id)
+                previous_action = current['next_action']
+                state = json.loads(current['state_json'] or '{}') or {}
                 state.update(destination_check=check, destination_wait=wait)
                 _save_workflow_state(conn, task_id, state, next_action=reason)
                 _event(conn, task_id, None, 'nfos_destination_wait', {'target': target, 'criterion': criterion, 'error': error[:200], 'since': since})
-            if _kb().block_task(conn, task_id, reason=reason, kind='transient'):
-                block_id = conn.execute("SELECT max(id) FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected')",
-                                        (task_id,)).fetchone()[0]
-                _store_destination_wait(conn, task_id, dict(wait, block_event_id=block_id))
-                changed.append((task_id, 'wait'))
+                before = conn.execute('SELECT coalesce(max(id), 0) FROM task_events WHERE task_id=?', (task_id,)).fetchone()[0]
+            try:
+                if _kb().get_task(conn, task_id).status == 'ready':  # revisão 5: card que saiu da fila não é bloqueado (running viraria pergunta)
+                    _kb().block_task(conn, task_id, reason=reason, kind='transient')
+            finally:  # revisão 5: o vínculo vem do evento com este motivo, não do retorno do block_task nem de max(id)
+                block_id = _own_block_event(conn, task_id, before, reason)
+                if block_id:
+                    _store_destination_wait(conn, task_id, dict(wait, block_event_id=block_id))
+                    changed.append((task_id, 'wait'))
+                else:
+                    _discard_unparked_wait(conn, task_id, wait, reason, previous_action)
         except Exception:
             continue
     return changed
