@@ -1408,16 +1408,18 @@ def test_stale_escalation_is_not_withdrawn_while_another_decision_is_open(board,
         assert delivery.get_decision(conn, "dec_velha")["status"] == "pending"
 
 
-def test_human_answer_without_a_message_id_does_not_close_the_escalation(board, monkeypatch):
+def test_human_answer_relayed_without_a_message_id_reaches_the_worker(board, monkeypatch):
     with kb.connect_closing() as conn:
         task = _card(conn, 80, spec=_spec(_http_probe()))
         asked = _escalate(conn, task, monkeypatch)
         delivery.resolve_decision(conn, asked, action="human", author="Principal", answer="PERGUNTA para Jhonatan: o servidor do TEST foi desligado?")
-        reason = delivery.get_workflow(conn, task.id)["next_action"]
-        assert delivery.resume_after_answer(conn, task.id, answer="Religuei.", source={"platform": "telegram", "actor": "Jhonatan"})
-        assert delivery.get_workflow(conn, task.id)["next_action"] == reason
-        assert "destination_wait" in _state(conn, task.id)
-        assert "Answer to the destination escalation" not in delivery.case_context(conn, task.id)
+        answer = "Religuei em outro IP: https://infotributos.15.229.99.11.nip.io"
+        # o Principal repassa pela CLI a resposta dada no grupo, sem message_id: o resume resolve a pergunta e a resposta tem de chegar ao worker
+        assert delivery.resume_after_answer(conn, task.id, answer=answer, source={"platform": "telegram", "actor": "Principal"})
+        assert delivery.get_decision(conn, asked)["status"] == "resolved"
+        assert "destination_wait" not in _state(conn, task.id)
+        assert answer in delivery.get_workflow(conn, task.id)["next_action"]
+        assert answer in delivery.case_context(conn, task.id)
 
 
 def test_human_phase_reminder_counts_from_the_question_not_from_older_reminders(board, monkeypatch):
