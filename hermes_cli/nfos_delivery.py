@@ -3381,7 +3381,11 @@ _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principa
      'CONTINUE (automático): faça a releitura (`reconcile`) do alvo e siga com o que a releitura mostrar; não bloqueie.'),
     (r'stale lease|retained lease|partial hml delivery',
      'CONTINUE (automático): trate o lease retido com `repair-workspace`/`reconcile` e siga no mesmo card.'),
-    (r'next authorized action|next step|pr[oó]xim[oa] (passo|a[cç][aã]o)|what should .{0,30} do',
+    # Only a bare request for the next step is routine. A description of a
+    # failed next step must reach the Principal, not be silently resolved.
+    (r'\A\s*(?:what is the next (?:authorized action|step)|what should i do next|'
+     r'qual (?:[eé] )?[oa] pr[oó]xim[oa] (?:passo|a[cç][aã]o))'
+     r'(?: (?:for|para) (?:card )?t_[a-z0-9]+)?\s*\?\s*\Z',
      'CONTINUE (automático): siga a próxima etapa da spec salva. O principal não decide passo a passo.'),
     (r'reavaliar o impedimento registrado|retomar o mesmo card se resolv|impediment registered in the history',  # BLOCK_LESS2_20260910
      'CONTINUE (automático): o histórico de impedimentos foi tratado na triagem de 10/09. Retome o mesmo card do estado salvo e entregue; se algo só um humano pode fornecer, bloqueie com a pergunta e o destinatário no motivo.'),
