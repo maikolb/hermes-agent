@@ -3174,7 +3174,7 @@ class GatewayKanbanWatchersMixin:
                                         platform=sub["platform"],
                                         chat_id=sub["chat_id"],
                                         thread_id=sub.get("thread_id") or "",
-                                        kinds=("nfos_principal_requested",) if sub.get("_principal_target") else CLAIM_KINDS,
+                                        kinds=("nfos_principal_requested", "completed") if sub.get("_principal_target") else CLAIM_KINDS,
                                         claim_token=claim_token,
                                     )
                                     if not events:
@@ -3794,6 +3794,10 @@ class GatewayKanbanWatchersMixin:
                             # push-capable adapters (the non-push /
                             # self-post branch is handled BEFORE the
                             # cursor advance above).
+                            if 'completed' in _wake_kinds:
+                                sub['_notify_receipt']['completed_worker'] = {
+                                    'board': board_slug, 'task_id': sub['task_id'],
+                                }
                             accepted = await deliver_wake(
                                 adapter,
                                 text=_synth,

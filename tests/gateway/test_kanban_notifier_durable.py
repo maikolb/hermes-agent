@@ -60,6 +60,7 @@ def test_notify_and_wake_have_independent_acknowledgement(pending, monkeypatch):
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
     assert len(adapter.sent) == 1
     assert len(adapter.handled) == 2
+    assert adapter.handled[-1].metadata['kanban_wake_delivery']['completed_worker']['task_id'] == pending['task_id']
     with kb.connect_closing() as conn:
         assert not kb.unseen_events_for_sub(conn, **pending)[1]
 

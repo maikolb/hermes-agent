@@ -880,6 +880,15 @@ def finalize_turn(
     # Suppressed when skip_background_review=True (e.g. cron) — review forks
     # spawn another AIAgent (~30K tokens / event) and cron sessions have no
     # human-in-the-loop benefit from the review.
+    # The persistent coordinator learns from a worker's completed handoff.
+    # A short-lived worker may exit before a daemon review can save memory;
+    # this native review stays in the gateway and does not delay card closure.
+    from gateway.wake import current_notify_receipt
+    if ((current_notify_receipt.get() or {}).get('completed_worker')
+            and getattr(agent, '_memory_enabled', False)
+            and getattr(agent, '_memory_store', None)
+            and 'memory' in agent.valid_tool_names):
+        _should_review_memory = True
     if (
         final_response
         and not interrupted

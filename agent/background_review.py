@@ -1151,6 +1151,10 @@ def _run_review_in_thread(
         _unregister_review_agent(agent_ref)
         finish_background_review_run(agent, review_run)
 
+    # A memory fork inherits the profile, not ownership of its parent's
+    # Kanban delivery. It deliberately has no session checkpoint to ACK it.
+    from gateway.wake import current_notify_receipt
+    receipt_token = current_notify_receipt.set(None)
     try:
         # Silence stdout/stderr for THIS worker thread only.  A process-global
         # ``contextlib.redirect_stdout(devnull)`` here would also blank
@@ -1587,6 +1591,7 @@ def _run_review_in_thread(
             _log_review_completion(review_usage, "error")
         agent._emit_auxiliary_failure("background review", e)
     finally:
+        current_notify_receipt.reset(receipt_token)
         # Safety-net cleanup for the exception path.  Normal completion already
         # shut down inside the thread-scoped silence above.  Re-enter the
         # thread-scoped silence here so teardown output (Honcho flush, Hindsight
@@ -1654,6 +1659,15 @@ def spawn_background_review_thread(
         prompt = getattr(agent, "_MEMORY_REVIEW_PROMPT", _MEMORY_REVIEW_PROMPT)
     else:
         prompt = getattr(agent, "_SKILL_REVIEW_PROMPT", _SKILL_REVIEW_PROMPT)
+
+    from gateway.wake import current_notify_receipt
+    completed = (current_notify_receipt.get() or {}).get('completed_worker')
+    if completed:
+        prompt += ("\n\nCompleted worker context: " + json.dumps(completed, ensure_ascii=False)
+                   + "\nUse the reviewed handoff and evidence above. Save only durable, verified project knowledge "
+                     "in native memory, explicitly labeled with this project/board. Do not turn worker claims, "
+                     "unverified hypotheses, temporary status or secrets into established facts. "
+                     "Update an existing note when appropriate. No new task or stakeholder message is needed.")
 
     focus = (focus or "").strip()
     if focus:
