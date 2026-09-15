@@ -3662,6 +3662,49 @@ def wait_decision(conn,decision_id,*,timeout=300):
         time.sleep(min(1,max(0,deadline-time.monotonic())))
 
 
+def reconcile_owner_guidance(conn):
+    """Apply Principal-requested rework of completed cards through Project Ops."""
+    if os.environ.get('HERMES_KANBAN_TASK'):
+        return []
+    from hermes_cli.nfos_runtime import previous_runs_termination_pending
+    applied = []
+    rows = conn.execute("SELECT d.id FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
+                        "WHERE t.status='done' AND d.status='resolved' AND d.action='changes' "
+                        "AND d.author='Principal' AND d.resolved_at>=t.completed_at "
+                        "AND json_extract(d.context,'$.owner_guidance') IS NOT NULL "
+                        "AND json_extract(d.context,'$.guidance_applied_at') IS NULL "
+                        "ORDER BY d.created_at DESC,d.rowid DESC").fetchall()
+    for item in rows:
+        row = get_decision(conn, item['id'])
+        if previous_runs_termination_pending(conn, row['task_id']):
+            continue
+        with _kb().write_txn(conn, allow_nested=True):
+            row = get_decision(conn, item['id'])
+            context = json.loads(row['context'])
+            source = context.get('source') or {}
+            task = _kb().get_task(conn, row['task_id'])
+            if (context.get('guidance_applied_at') or not source.get('actor') or not source.get('message_id')
+                    or not task or task.status != 'done' or row['resolved_at'] < task.completed_at):
+                continue
+            report = _artifact(conn, task.id, 'report')
+            if report and json.loads(report['content']).get('disposition') == 'cancelled_by_owner':
+                continue
+            if not _kb().reopen_completed_task(conn, task.id, expected_completed_at=task.completed_at,
+                                              actor=source['actor'], reason=row['answer']):
+                continue
+            body = (task.body or '') + '\n\nOrientação do proprietário ('+str(row['id'])+'):\n'+context['owner_guidance']+'\n\nDecisão do Principal:\n'+row['answer']
+            _kb().update_task_instruction(conn, task.id, body=body, author=source['actor'],
+                                          expected_revision=task.instruction_revision)
+            conn.execute("UPDATE nfos_workflows SET stage='spec',updated_at=? WHERE task_id=?", (int(time.time()),task.id))
+            context['guidance_applied_at'] = int(time.time())
+            context['instruction_revision'] = _kb().get_task(conn,task.id).instruction_revision
+            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(context),row['id']))
+            _event(conn,task.id,None,'nfos_owner_guidance_applied',{'decision_id':row['id'],
+                   'status':_kb().get_task(conn,task.id).status,'instruction_revision':context['instruction_revision']})
+            applied.append(task.id)
+    return applied
+
+
 def receive_owner_guidance(conn, task_id, *, text, source):
     """Queue an authenticated owner's instruction on the existing card."""
     if os.environ.get('HERMES_KANBAN_TASK'):
@@ -3875,6 +3918,8 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             _kb().unblock_task(conn,row['task_id'])
             if _kb().get_task(conn,row['task_id']).status=='review':
                 _kb().reopen_review_task(conn,row['task_id'])
+    if action=='changes' and context.get('owner_guidance'):
+        reconcile_owner_guidance(conn)
     if action=='human':  # HUMAN_BLOCK_NOW_20260910 / HUMAN_BLOCK_NOW2_20260910: bloqueia na hora só se não há worker vivo neste run
         _t=_kb().get_task(conn,row['task_id'])
         if _t and (_t.status=='ready' or (_t.status=='running' and not _run_process_alive(conn,_t.id,_t.current_run_id))):
