@@ -1550,6 +1550,144 @@ def _check_distinct_measurements(spec):
         vistos[assinatura] = crit.get('id')
 
 
+def _probe_target(probe):
+    """O que a sonda OBSERVA, sem o limiar que ela exige.  # MEASUREMENT_INTEGRITY_20260915
+
+    Inclui o json_path de propósito: uma mesma resposta carrega fatos
+    independentes, e dois critérios lendo campos diferentes dela são duas
+    observações legítimas. Exclui o expect de propósito: o expect é o limiar,
+    não a observação, e é justamente por incluí-lo que _probe_signature não
+    enxerga quatro sondas colapsadas numa leitura só.
+    """
+    if not isinstance(probe, dict):
+        return None
+    kind = str(probe.get('kind') or '')
+    if kind in ('http', 'header'):
+        url = str(probe.get('url') or '').split('?')[0].strip()
+        if not url:
+            return None
+        return f"{kind} {url} {str(probe.get('json_path') or '').strip()}".strip()
+    alvo = probe.get('query') or probe.get('command') or probe.get('target')
+    if not alvo:
+        return None
+    return f"{kind} {re.sub(r'[ \t\r\n]+', ' ', str(alvo)).strip().lower()[:160]}"
+
+
+def _probe_shape(probe):
+    """A medição sem o endereço: trocar de host não muda o que se prova."""
+    if not isinstance(probe, dict):
+        return None
+    caminho = ''
+    if probe.get('url'):
+        try:
+            caminho = urlsplit(str(probe.get('url'))).path
+        except ValueError:
+            caminho = str(probe.get('url'))
+    consulta = probe.get('query') or probe.get('command') or ''
+    return _json({'kind': probe.get('kind'), 'path': caminho,
+                  'query': re.sub(r'[ \t\r\n]+', ' ', str(consulta)).strip().lower()[:160],
+                  'json_path': probe.get('json_path'), 'expect': probe.get('expect')})
+
+
+def _resolved_decision(conn, task_id, decision_id):
+    """Decisão existente, deste card e resolvida. Justificativa em texto não é autorização."""
+    ident = str(decision_id or '').strip()
+    if not ident:
+        return False
+    try:
+        return bool(conn.execute("SELECT 1 FROM nfos_decisions WHERE id=? AND task_id=? AND status='resolved' LIMIT 1",
+                                 (ident, task_id)).fetchone())
+    except Exception:
+        return False
+
+
+def _check_measurement_integrity(conn, task_id, previous, spec):
+    """MEASUREMENT_INTEGRITY_20260915: quem executa não afrouxa sozinho a régua do próprio sucesso.
+
+    Medido em 15/09 no card t_f2eb188d, pedido real do cliente. Às 12:57:48Z o
+    fechamento foi recusado por quatro critérios obrigatórios sem medição PASS.
+    Às 13:01:45Z o worker salvou uma revisão que manteve os quatro ids e os
+    quatro mandatory=true, e reescreveu as quatro sondas para a MESMA url, o ref
+    advertisement do git. 'ci-green' parou de medir CI, e 'test-readback' virou
+    tautologia: qualquer repositório com branch main satisfaz
+    contains_all ['refs/heads/main']. O precheck já registrava que o TEST estava
+    inalcançável. Às 13:02:59Z o card fechou com quatro PASS.
+
+    Os guardas existentes não pegaram. _probe_signature inclui o expect, então
+    quatro sondas na mesma url com expects diferentes contam como distintas.
+    _check_probe_corrections compara o FORMATO da expectativa por _expect_rank
+    (contains_all e equals valem 3 os dois) e nunca compara o alvo.
+
+    Três regras, cada uma medida antes de escrita:
+
+    COLAPSO: se todos os obrigatórios observam um único alvo, um fato vira N
+    indicadores verdes. Seis cards fecharam assim. Não proíbe dois critérios
+    lerem a mesma resposta (o json_path entra no alvo), só proíbe que não sobre
+    nenhuma outra observação.
+
+    TROCA DE ALVO: mudar o que uma sonda obrigatória observa passa a exigir
+    decisão resolvida, não só o texto em probe_corrections. Relocação de
+    endereço segue livre: em t_b464e591 só o host mudou, porque o EC2 de TEST do
+    cliente trocou de IP, com mesmo caminho, json_path e expect. Isso é conserto
+    de instrumentação, não afrouxamento, e barrar isso seria criar muro.
+
+    META CONGELADA: depois de uma recusa, reescrever o goal também exige
+    decisão. Em t_f2eb188d o goal passou de "publicar a revisão integrada no
+    ambiente TEST com leitura do alvo" para "o TEST é apenas conferência
+    read-only complementar".
+    """
+    obrigatorios = [c for c in (spec.get('criteria') or [])
+                    if isinstance(c, dict) and c.get('mandatory') and not c.get('optional')
+                    and isinstance(c.get('probe'), dict) and c['probe'].get('phase') != 'before']
+    alvos = [(c.get('id'), _probe_target(c.get('probe'))) for c in obrigatorios]
+    alvos = [(i, a) for i, a in alvos if a]
+    if len(alvos) >= 2 and len({a for _i, a in alvos}) == 1:
+        raise WorkflowError(
+            f"Criteria {sorted(str(i) for i, _a in alvos)} are all mandatory and all observe the SAME thing "
+            f"({alvos[0][1]}): one observation cannot prove {len(alvos)} different requirements, it only turns one "
+            f"fact into {len(alvos)} green lights. Give at least one of them a probe that measures ITS OWN "
+            f"requirement on the surface the user consumes, or declare the redundant ones optional with "
+            f"optional_reason.")
+    if not previous:
+        return
+    try:
+        anterior = json.loads(previous['content'])
+    except Exception:
+        return
+    correcoes = {c.get('id'): c for c in (spec.get('probe_corrections') or []) if isinstance(c, dict)}
+    antigos = {c.get('id'): c for c in (anterior.get('criteria') or []) if isinstance(c, dict)}
+    for crit in obrigatorios:
+        cid = crit.get('id')
+        velho = antigos.get(cid)
+        if not velho or not velho.get('mandatory') or not isinstance(velho.get('probe'), dict):
+            continue
+        antes, depois = _probe_target(velho.get('probe')), _probe_target(crit.get('probe'))
+        if not antes or not depois or antes == depois:
+            continue
+        if _probe_shape(velho.get('probe')) == _probe_shape(crit.get('probe')):
+            continue
+        if not _resolved_decision(conn, task_id, (correcoes.get(cid) or {}).get('decision')):
+            raise WorkflowError(
+                f"Criterion {cid}: the probe stops observing [{antes}] and starts observing [{depois}]. Keeping the id "
+                f"and mandatory=true preserves the contract's appearance while changing what gets proven, so a written "
+                f"reason is not enough: name the resolved decision in probe_corrections "
+                f"[{{id, reason, evidence, decision}}]. If only the address moved, keep the same path, json_path and "
+                f"expect and no decision is needed.")
+    if str(anterior.get('goal') or '') != str(spec.get('goal') or ''):
+        try:
+            recusas = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='nfos_completion_refused'",
+                                   (task_id,)).fetchone()
+        except Exception:
+            recusas = None
+        if recusas and recusas[0]:
+            citadas = [c.get('decision') for c in (spec.get('probe_corrections') or []) if isinstance(c, dict)]
+            if not any(_resolved_decision(conn, task_id, d) for d in citadas):
+                raise WorkflowError(
+                    "The goal changed after a refused closure: rewriting what the card promises is how a refusal "
+                    "becomes a pass without the work being done. Keep the goal and close the criteria with evidence, "
+                    "or carry a resolved decision that authorises the narrower scope.")
+
+
 def _spec_result_criteria_checks(conn, task_id, spec):
     """Owner mode: valida sondas e exige critério obrigatório quando a reprodução foi medida."""
     _check_distinct_measurements(spec)  # DISTINCT_MEASUREMENT_20260915
@@ -1572,7 +1710,9 @@ def _spec_result_criteria_checks(conn, task_id, spec):
              and c['probe'].get('kind') in ('http', 'header') and c['probe'].get('phase') != 'before']
     if _dest and _http and not any(_probe_in_scope(conn, task_id, _host_of(p.get('url')), spec) for p in _http):
         raise WorkflowError(f'Mandatory http probes must measure the delivery destination: none targets {_dest} or a host listed in probe_hosts')
-    _check_probe_corrections(get_spec(conn, task_id), spec)
+    _spec_anterior = get_spec(conn, task_id)
+    _check_probe_corrections(_spec_anterior, spec)
+    _check_measurement_integrity(conn, task_id, _spec_anterior, spec)  # MEASUREMENT_INTEGRITY_20260915
     wf = get_workflow(conn, task_id)
     precheck = (json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') if wf else None
     precheck = precheck or {}
