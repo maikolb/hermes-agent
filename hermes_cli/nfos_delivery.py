@@ -1551,111 +1551,168 @@ def _check_distinct_measurements(spec):
 
 
 def _probe_target(probe):
-    """O que a sonda OBSERVA, sem o limiar que ela exige.  # MEASUREMENT_INTEGRITY_20260915
+    """Tudo que decide O QUE a sonda observa e QUANDO ela fica verde.
 
-    Inclui o json_path de propósito: uma mesma resposta carrega fatos
-    independentes, e dois critérios lendo campos diferentes dela são duas
-    observações legítimas. Exclui o expect de propósito: o expect é o limiar,
-    não a observação, e é justamente por incluí-lo que _probe_signature não
-    enxerga quatro sondas colapsadas numa leitura só.
+    Revisao 2, 15/09, depois de o Codex reproduzir bypasses contra a revisao 1.
+    Aquela versao fazia split("?")[0], ignorava o expect, baixava a caixa da
+    query e cortava em 160 caracteres. Cada reducao era um caminho para mudar a
+    medicao sem a regra enxergar, porque a comparacao comeca com
+    `if antes == depois: continue`:
+      a query da URL escolhe commit, cliente, ambiente ou recorte, e trocar
+        ?sha=solicitado por ?sha=antigo-verde deixava o alvo "igual";
+      o expect e o limiar, e equals "success" virando contains_all ["o"] deixava
+        o alvo "igual" enquanto "velho" passava a satisfazer;
+      .lower() apagava literal sensivel a caixa em SQL;
+      o corte em 160 apagava um filtro que seleciona outra execucao.
+    Agora nada e descartado.  # MEASUREMENT_INTEGRITY_20260915 revisao 2
     """
     if not isinstance(probe, dict):
         return None
     kind = str(probe.get('kind') or '')
+    partes = {'kind': kind, 'expect': probe.get('expect'),
+              'json_path': str(probe.get('json_path') or '').strip()}
     if kind in ('http', 'header'):
-        url = str(probe.get('url') or '').split('?')[0].strip()
+        url = str(probe.get('url') or '').strip()
         if not url:
             return None
-        return f"{kind} {url} {str(probe.get('json_path') or '').strip()}".strip()
-    alvo = probe.get('query') or probe.get('command') or probe.get('target')
-    if not alvo:
-        return None
-    return f"{kind} {re.sub(r'[ \t\r\n]+', ' ', str(alvo)).strip().lower()[:160]}"
+        partes['url'] = url
+    else:
+        alvo = probe.get('query') or probe.get('command') or probe.get('target')
+        if not alvo:
+            return None
+        partes['query'] = re.sub(r'[ \t\r\n]+', ' ', str(alvo)).strip()
+    return _json(partes)
 
 
 def _probe_shape(probe):
-    """A medição sem o endereço: trocar de host não muda o que se prova."""
+    """A medicao sem o endereco. Sozinha ela NAO prova continuidade do alvo.
+
+    Serve so para separar "mudou o host" de "mudou o que se le". Quem decide se
+    a relocacao e legitima e o escopo do destino, nao esta funcao: o Codex
+    mostrou que preservar caminho e expect permite trocar o CI real por uma
+    fixture. Por isso quem chama exige tambem que o host novo esteja no destino
+    de entrega ou em probe_hosts.
+    """
     if not isinstance(probe, dict):
         return None
     caminho = ''
     if probe.get('url'):
         try:
-            caminho = urlsplit(str(probe.get('url'))).path
+            _u = urlsplit(str(probe.get('url')))
+            caminho = _u.path + (('?' + _u.query) if _u.query else '')
         except ValueError:
             caminho = str(probe.get('url'))
-    consulta = probe.get('query') or probe.get('command') or ''
+    alvo = probe.get('query') or probe.get('command') or ''
     return _json({'kind': probe.get('kind'), 'path': caminho,
-                  'query': re.sub(r'[ \t\r\n]+', ' ', str(consulta)).strip().lower()[:160],
+                  'query': re.sub(r'[ \t\r\n]+', ' ', str(alvo)).strip(),
                   'json_path': probe.get('json_path'), 'expect': probe.get('expect')})
 
 
-def _resolved_decision(conn, task_id, decision_id):
-    """Decisão existente, deste card e resolvida. Justificativa em texto não é autorização."""
+def _normaliza_meta(valor):
+    """Meta comparada por conteudo, nao por pontuacao: acrescentar um ponto final
+    nao pode exigir decisao do Principal (muro reproduzido pelo Codex)."""
+    return re.sub(r'[^0-9a-z]+', ' ', str(valor or '').lower()).strip()
+
+
+def _resolved_decision(conn, task_id, decision_id, desde_revisao=None):
+    """Decisao existente, deste card, resolvida E que alcanca esta alteracao.
+
+    A revisao 1 checava id, card e status, e so isso: o Codex mostrou uma
+    decisao de "qual horario?" autorizando trocar sonda e meta. As 122 decisoes
+    resolvidas do card nao sao 122 autorizacoes intercambiaveis. Agora a decisao
+    tambem precisa ser de uma revisao de spec igual ou posterior aquela em que o
+    problema apareceu, o que impede sacar uma decisao antiga e sem relacao.
+
+    Continua sendo um vinculo fraco: ele prova que a decisao e recente e deste
+    card, nao que ela autoriza esta mudanca especifica. Amarrar autorizacao ao
+    criterio exige campo que a tabela nao tem hoje.
+    """
     ident = str(decision_id or '').strip()
     if not ident:
         return False
     try:
-        return bool(conn.execute("SELECT 1 FROM nfos_decisions WHERE id=? AND task_id=? AND status='resolved' LIMIT 1",
-                                 (ident, task_id)).fetchone())
+        row = conn.execute("SELECT status, spec_revision FROM nfos_decisions "
+                           "WHERE id=? AND task_id=? LIMIT 1", (ident, task_id)).fetchone()
+    except Exception:
+        return False
+    if not row or str(row[0] or '') != 'resolved':
+        return False
+    if desde_revisao is None:
+        return True
+    try:
+        return int(row[1] or 0) >= int(desde_revisao)
     except Exception:
         return False
 
 
-def _check_measurement_integrity(conn, task_id, previous, spec):
-    """MEASUREMENT_INTEGRITY_20260915: quem executa não afrouxa sozinho a régua do próprio sucesso.
+def _correcao_valida(conn, task_id, correcoes, cid, ids_reais, desde_revisao):
+    """A correcao aponta para um criterio que existe e cita decisao que alcanca.
 
-    Medido em 15/09 no card t_f2eb188d, pedido real do cliente. Às 12:57:48Z o
-    fechamento foi recusado por quatro critérios obrigatórios sem medição PASS.
-    Às 13:01:45Z o worker salvou uma revisão que manteve os quatro ids e os
-    quatro mandatory=true, e reescreveu as quatro sondas para a MESMA url, o ref
-    advertisement do git. 'ci-green' parou de medir CI, e 'test-readback' virou
-    tautologia: qualquer repositório com branch main satisfaz
-    contains_all ['refs/heads/main']. O precheck já registrava que o TEST estava
-    inalcançável. Às 13:02:59Z o card fechou com quatro PASS.
-
-    Os guardas existentes não pegaram. _probe_signature inclui o expect, então
-    quatro sondas na mesma url com expects diferentes contam como distintas.
-    _check_probe_corrections compara o FORMATO da expectativa por _expect_rank
-    (contains_all e equals valem 3 os dois) e nunca compara o alvo.
-
-    Três regras, cada uma medida antes de escrita:
-
-    COLAPSO: se todos os obrigatórios observam um único alvo, um fato vira N
-    indicadores verdes. Seis cards fecharam assim. Não proíbe dois critérios
-    lerem a mesma resposta (o json_path entra no alvo), só proíbe que não sobre
-    nenhuma outra observação.
-
-    TROCA DE ALVO: mudar o que uma sonda obrigatória observa passa a exigir
-    decisão resolvida, não só o texto em probe_corrections. Relocação de
-    endereço segue livre: em t_b464e591 só o host mudou, porque o EC2 de TEST do
-    cliente trocou de IP, com mesmo caminho, json_path e expect. Isso é conserto
-    de instrumentação, não afrouxamento, e barrar isso seria criar muro.
-
-    META CONGELADA: depois de uma recusa, reescrever o goal também exige
-    decisão. Em t_f2eb188d o goal passou de "publicar a revisão integrada no
-    ambiente TEST com leitura do alvo" para "o TEST é apenas conferência
-    read-only complementar".
+    O criterio inexistente importa: o Codex passou pela regra da meta citando
+    uma decisao dentro de uma correcao cujo id nao era de nenhum criterio.
     """
-    obrigatorios = [c for c in (spec.get('criteria') or [])
-                    if isinstance(c, dict) and c.get('mandatory') and not c.get('optional')
-                    and isinstance(c.get('probe'), dict) and c['probe'].get('phase') != 'before']
-    alvos = [(c.get('id'), _probe_target(c.get('probe'))) for c in obrigatorios]
-    alvos = [(i, a) for i, a in alvos if a]
-    if len(alvos) >= 2 and len({a for _i, a in alvos}) == 1:
-        raise WorkflowError(
-            f"Criteria {sorted(str(i) for i, _a in alvos)} are all mandatory and all observe the SAME thing "
-            f"({alvos[0][1]}): one observation cannot prove {len(alvos)} different requirements, it only turns one "
-            f"fact into {len(alvos)} green lights. Give at least one of them a probe that measures ITS OWN "
-            f"requirement on the surface the user consumes, or declare the redundant ones optional with "
-            f"optional_reason.")
+    corr = correcoes.get(cid)
+    if not isinstance(corr, dict) or cid not in ids_reais:
+        return False
+    return _resolved_decision(conn, task_id, corr.get('decision'), desde_revisao)
+
+
+def _check_measurement_integrity(conn, task_id, previous, spec):
+    """MEASUREMENT_INTEGRITY_20260915 revisao 2: quem executa nao afrouxa sozinho a regua do proprio sucesso.
+
+    Origem, medida em 15/09 no card t_f2eb188d, pedido real do cliente. As
+    12:57:48Z o fechamento foi recusado por quatro obrigatorios sem PASS. As
+    13:01:45Z a revisao 3 manteve os quatro ids e os quatro mandatory=true e
+    reescreveu as quatro sondas para a MESMA url, o ref advertisement do git.
+    ci-green parou de medir CI e test-readback virou tautologia. As 13:02:59Z o
+    card fechou com quatro PASS.
+
+    O QUE MUDOU DA REVISAO 1 PARA ESTA, depois do julgamento do Codex, que
+    reproduziu 16 casos em copia isolada (11 bypasses aceitos, 4 muros):
+
+    COLAPSO REMOVIDO. A revisao 1 recusava quando todos os obrigatorios
+    observavam um alvo so. A regra era insustentavel nos dois sentidos: passava
+    com tres tautologias mais uma sonda real (bastavam dois alvos distintos) e
+    recusava dois requisitos legitimos na mesma pagina HTML, ou duas buscas
+    independentes na mesma rota. Pior, ela recusava ANTES de qualquer decisao,
+    entao nem o Principal conseguia autorizar uma spec legitima desse formato.
+    Mesma url nao prova redundancia. O caso que a originou continua coberto,
+    porque naquele card as sondas TROCARAM de alvo, e isso a regra abaixo pega.
+    A recusa por sondas identicas continua em _check_distinct_measurements.
+
+    TROCA DE ALVO agora enxerga tudo: url com query, expect, json_path e a query
+    inteira sem baixar caixa e sem corte.
+
+    RELOCACAO deixou de ser livre. Preservar caminho e expect permitia trocar o
+    CI real por uma fixture. Agora so vale quando o host novo e o destino de
+    entrega ou esta em probe_hosts, que e o caso real do t_b464e591 (o EC2 de
+    TEST do cliente trocou de IP).
+
+    META comparada por conteudo, nao por pontuacao.
+
+    O QUE ISTO NAO RESOLVE, para ninguem ler mais do que tem: a autorizacao
+    continua amarrada ao card e a revisao, nao ao criterio nem a alteracao
+    especifica. E nada aqui garante que os criterios cobrem o que o cliente
+    pediu; garante que a obrigacao nao encolhe sozinha depois de escrita.
+    """
     if not previous:
         return
     try:
         anterior = json.loads(previous['content'])
     except Exception:
         return
+    try:
+        revisao_anterior = int((get_workflow(conn, task_id) or {})['spec_revision'] or 0)
+    except Exception:
+        revisao_anterior = None
+
+    obrigatorios = [c for c in (spec.get('criteria') or [])
+                    if isinstance(c, dict) and c.get('mandatory') and not c.get('optional')
+                    and isinstance(c.get('probe'), dict) and c['probe'].get('phase') != 'before']
+    ids_reais = {c.get('id') for c in (spec.get('criteria') or []) if isinstance(c, dict)}
     correcoes = {c.get('id'): c for c in (spec.get('probe_corrections') or []) if isinstance(c, dict)}
     antigos = {c.get('id'): c for c in (anterior.get('criteria') or []) if isinstance(c, dict)}
+
     for crit in obrigatorios:
         cid = crit.get('id')
         velho = antigos.get(cid)
@@ -1665,27 +1722,31 @@ def _check_measurement_integrity(conn, task_id, previous, spec):
         if not antes or not depois or antes == depois:
             continue
         if _probe_shape(velho.get('probe')) == _probe_shape(crit.get('probe')):
-            continue
-        if not _resolved_decision(conn, task_id, (correcoes.get(cid) or {}).get('decision')):
+            _novo_host = _host_of(crit['probe'].get('url')) if crit['probe'].get('url') else None
+            if _novo_host and _probe_in_scope(conn, task_id, _novo_host, spec):
+                continue
+        if not _correcao_valida(conn, task_id, correcoes, cid, ids_reais, revisao_anterior):
             raise WorkflowError(
-                f"Criterion {cid}: the probe stops observing [{antes}] and starts observing [{depois}]. Keeping the id "
-                f"and mandatory=true preserves the contract's appearance while changing what gets proven, so a written "
-                f"reason is not enough: name the resolved decision in probe_corrections "
-                f"[{{id, reason, evidence, decision}}]. If only the address moved, keep the same path, json_path and "
-                f"expect and no decision is needed.")
-    if str(anterior.get('goal') or '') != str(spec.get('goal') or ''):
+                f"Criterion {cid}: the measurement changed (target, expectation or query). Keeping the id and "
+                f"mandatory=true preserves the contract's appearance while changing what gets proven, so a written "
+                f"reason is not enough: name a resolved decision of this card, from spec revision "
+                f"{revisao_anterior} or later, in probe_corrections [{{id, reason, evidence, decision}}]. If only the "
+                f"address moved, keep path, query, json_path and expect and point the probe at the delivery "
+                f"destination, and no decision is needed.")
+
+    if _normaliza_meta(anterior.get('goal')) != _normaliza_meta(spec.get('goal')):
         try:
             recusas = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='nfos_completion_refused'",
                                    (task_id,)).fetchone()
         except Exception:
             recusas = None
         if recusas and recusas[0]:
-            citadas = [c.get('decision') for c in (spec.get('probe_corrections') or []) if isinstance(c, dict)]
-            if not any(_resolved_decision(conn, task_id, d) for d in citadas):
+            if not any(_correcao_valida(conn, task_id, correcoes, cid, ids_reais, revisao_anterior)
+                       for cid in correcoes):
                 raise WorkflowError(
                     "The goal changed after a refused closure: rewriting what the card promises is how a refusal "
                     "becomes a pass without the work being done. Keep the goal and close the criteria with evidence, "
-                    "or carry a resolved decision that authorises the narrower scope.")
+                    "or carry a resolved decision of this card, on a real criterion, authorising the new scope.")
 
 
 def _spec_result_criteria_checks(conn, task_id, spec):
