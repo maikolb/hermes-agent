@@ -7450,6 +7450,9 @@ def complete_task(
             )
         if cur.rowcount != 1:
             return False
+        if delivery_enrolled:
+            conn.execute("UPDATE nfos_workflows SET stage='done',next_action='',updated_at=? WHERE task_id=?",
+                         (now, task_id))
         if delivery is not None and bool(delivery["required"]) and not _contract_waived:  # CLOSURE_RECOVERY_20260911: sem recibo não há obrigação de limpeza selada
             owner_pid = (
                 int(prior["worker_pid"])
