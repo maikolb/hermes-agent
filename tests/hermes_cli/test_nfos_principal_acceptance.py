@@ -75,6 +75,20 @@ def test_spec_requires_principal_and_reuses_pending_decision(task_context):
     d.advance(conn, task.id, task.current_run_id, 'implement', next_action='work')
 
 
+def test_result_review_prompt_is_selected_without_reactivating_legacy_policy(monkeypatch):
+    from hermes_cli import nfos_runtime as runtime
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    prompt = runtime.worker_instructions()
+    assert 'Wait for spec_review' in prompt
+    assert 'report requests final_review automatically' in prompt
+    assert 'no Principal decisions on code' not in prompt
+    assert 'Nobody reviews the spec' not in prompt
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False})
+    prompt = runtime.worker_instructions()
+    assert 'no Principal decisions on code' in prompt
+    assert 'spec_review' not in prompt
+
+
 def test_record_mode_still_requires_real_spec_review(task_context, monkeypatch):
     conn, task, _, _ = task_context
     monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
