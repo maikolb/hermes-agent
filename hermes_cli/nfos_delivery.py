@@ -224,6 +224,79 @@ def escalate_urgent(conn, task_id, *, reason, author='Principal', request_id=Non
     return {'task_id': task_id, 'priority': task.priority, 'status': task.status, 'reason': doc['reason']}
 
 
+# CLIENT_ACK_20260915: o prefixo truncado precisa de \w* antes do limite.
+# `\b(resolvid)\b` NUNCA casa "resolvido", porque o \b final exige fim de
+# palavra logo apos o prefixo, e uma confirmacao real do cliente cairia como
+# ambigua. Pego por teste antes de ir para producao.
+_ACEITE_RX = re.compile(r'\b(resolvid\w*|corrigid\w*|funcionou|funcionando|deu certo|est[aá] certo|t[aá] certo|'
+                        r'est[aá] ok|ficou bom|perfeito|show|beleza)\b', re.I)
+_RECUSA_RX = re.compile(r'\b(n[aã]o resolveu|n[aã]o funcionou|n[aã]o foi|continua|ainda (est[aá]|n[aã]o|aparece|d[aá])|'
+                        r'piorou|permanece|mesmo (erro|problema)|voltou|errado)\b', re.I)
+
+
+def _classify_ack(text):
+    """CLIENT_ACK_20260915: aceito, recusado ou ambíguo. Na dúvida, ambíguo.
+
+    Deliberadamente não aceita "obrigado", "vou testar", "recebido" nem emoji
+    isolado como aprovação: são acusações de recebimento, não do resultado.
+    Recusa vence aceite quando as duas expressões aparecem ("resolvido? não,
+    continua igual").
+    """
+    corpo = str(text or '')
+    recusa = bool(_RECUSA_RX.search(corpo))
+    aceite = bool(_ACEITE_RX.search(corpo))
+    if recusa:
+        return 'recusado'
+    if aceite:
+        return 'aceito'
+    return 'ambiguo'
+
+
+def _delivery_awaiting_ack(conn, source, message_id):
+    """Card cuja devolutiva publicada tem este message_id, na mesma conversa."""
+    if not message_id:
+        return None, None
+    row = conn.execute(
+        "SELECT task_id, payload FROM task_events WHERE kind='nfos_client_delivery_published' "
+        "AND json_extract(payload,'$.message_id')=? ORDER BY id DESC LIMIT 1", (str(message_id),)).fetchone()
+    if row is None:
+        return None, None
+    try:
+        p = json.loads(row['payload'] or '{}')
+    except Exception:
+        return None, None
+    if (str(p.get('chat_id') or ''), str(p.get('thread_id') or '')) != (
+            str(source.get('chat_id') or ''), str(source.get('thread_id') or '')):
+        return None, None  # mesma id em outra conversa nao e a mesma entrega
+    return row['task_id'], p
+
+
+def _client_ack_intake(conn, source, text, reply_to_message_id, *, author):
+    """CLIENT_ACK_20260915: registra o endosso (ou a recusa) do cliente.
+
+    Só conta resposta DIRETA à devolutiva: o reply_to_message_id tem de casar
+    com o message_id que publicamos. Silêncio nunca vira aceite, e proximidade
+    de horário na thread não é vínculo — vários cards fecham perto no tempo.
+    """
+    try:
+        task_id, pub = _delivery_awaiting_ack(conn, source, reply_to_message_id)
+        if not task_id:
+            return None
+        veredito = _classify_ack(text)
+        _event(conn, task_id, None, 'nfos_client_ack', {
+            'ack': veredito,
+            'author': author,
+            'text': str(text or '').strip()[:1000],
+            'reply_to': str(reply_to_message_id),
+            'delivery_outcome': pub.get('outcome'),
+        })
+        _kb().add_comment(conn, task_id, author,
+                          f"[cliente: {veredito}] " + str(text or '').strip()[:1200])
+        return {'task_id': task_id, 'ack': veredito}
+    except Exception:
+        return None  # nunca derruba o intake
+
+
 def _urgent_intake(conn, request_id, source, text, reply_to_message_id, *, author, urgency=None):
     """URGENT_20260910 e URGENCY_CONTEXT_20260914: resposta a pedido de card aberto ou repetição da sua referência anexa ao
     card existente (sem card novo). A urgência vem só do julgamento do Principal (urgency com motivo), nunca de
@@ -284,6 +357,11 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
                 conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(saved),request_id))
         try:  # URGENT_20260910: anexa a card aberto e escala a urgência julgada; sem urgência, nunca derruba o intake
             _author=(re.match(r'\s*\[([^|\]]+)\|', text or '') or [None, None])[1] or 'nfos-intake'
+            # CLIENT_ACK_20260915: uma resposta direta à devolutiva é primeiro um
+            # aceite (ou uma recusa) da entrega, e só depois um pedido. Registrar
+            # antes do intake preserva as duas informações: a mensagem pode
+            # confirmar E trazer demanda nova.
+            _client_ack_intake(conn, source, text, reply_to_message_id, author=_author)
             _urgent_intake(conn, request_id, source, text, reply_to_message_id, author=_author, urgency=urgency)
         except Exception:
             if urgency is not None:

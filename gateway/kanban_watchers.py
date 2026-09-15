@@ -472,7 +472,42 @@ def _client_delivery_message(board, task_id):
         "parcial": "Resolvido em parte",
         "encerrado": "Encerrado",
     }.get(outcome, "Concluído")
-    return f"{cabecalho}: {resumo}" if resumo else cabecalho
+    corpo = f"{cabecalho}: {resumo}" if resumo else cabecalho
+    # CLIENT_ACK_20260915: pede confirmação UMA vez, na própria devolutiva, e
+    # só quando há resultado que o cliente possa conferir. Um pedido a cada
+    # fechamento interno transformaria o grupo em fila de validação, que é
+    # exatamente o que o contrato de 13/09 quis evitar.
+    if outcome in ("entregue", "parcial"):
+        corpo += "\n\nPode conferir? Responda a esta mensagem confirmando se resolveu."
+    return corpo
+
+
+def _record_client_delivery(board, task_id, send_res, sub):
+    """CLIENT_ACK_20260915: registra a devolutiva publicada e fica aguardando confirmação.
+
+    Guarda o ``message_id`` da mensagem enviada ao cliente. Uma resposta direta
+    a ela é o único vínculo que permite registrar aceite: mesma thread e
+    proximidade de horário não provam a qual entrega o cliente se referia,
+    ainda mais com vários cards fechando perto no tempo.
+    """
+    message_id = getattr(send_res, "message_id", None) if send_res is not None else None
+    if not message_id:
+        logger.warning("kanban notifier: devolutiva de %s publicada sem message_id; aceite não poderá ser vinculado", task_id)
+        return
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.connect_closing(board=board) as conn:
+            with _kb.write_txn(conn):
+                _kb._append_event(conn, task_id, "nfos_client_delivery_published", {
+                    "message_id": str(message_id),
+                    "platform": sub.get("platform"),
+                    "chat_id": str(sub.get("chat_id") or ""),
+                    "thread_id": str(sub.get("thread_id") or ""),
+                    "outcome": _progress_outcome(board, task_id),
+                    "ack": "awaiting",
+                })
+    except Exception:
+        logger.debug("kanban notifier: registro da devolutiva falhou para %s", task_id, exc_info=True)
 
 
 def _record_client_suppression(board, task_id, kind, sub):
@@ -3520,6 +3555,12 @@ class GatewayKanbanWatchersMixin:
                                 _send_res = await adapter.send(
                                     sub["chat_id"], _client_msg, metadata=metadata,
                                 )
+                                # CLIENT_ACK_20260915: guarda a identidade desta mensagem para
+                                # que uma resposta DIRETA a ela possa ser reconhecida como
+                                # aceite. Sem isso o aceite teria de ser inferido por thread e
+                                # proximidade de horário, que não é vínculo.
+                                await asyncio.to_thread(
+                                    _record_client_delivery, board_slug, sub["task_id"], _send_res, sub)
                             else:
                                 _send_res = await adapter.send(
                                     sub["chat_id"], msg, metadata=metadata,
