@@ -1386,7 +1386,7 @@ def _mandatory_effective(conn, task_id, spec):
     mutation = _relevant_mutation(conn, task_id)
     out = {}
     for crit in criteria:
-        if not crit.get('mandatory'):
+        if not crit.get('mandatory') or (_result_review() and not crit.get('probe')):
             continue
         cid = crit['id']
         art = _artifact(conn, task_id, f'probe:{cid}')
@@ -1421,19 +1421,21 @@ def _apply_measurements_to_report(conn, task_id, spec, report):
     effective = _mandatory_effective(conn, task_id, spec)
     if not effective:
         return
-    reclassified = {r.get('id') for r in (report.get('reclassified') or []) if isinstance(r, dict)}
     artifacts = report.setdefault('artifacts', [])
+    reclassified = {r.get('id') for r in (report.get('reclassified') or []) if isinstance(r, dict)}
     measurements = {}
     for row in report.get('criteria') or []:
         cid = row.get('id')
         if cid not in effective:
             continue
-        if cid in reclassified:
-            raise WorkflowError(f'Criterion {cid} is mandatory: its status comes from the measurement, not from reclassification')
         eff = effective[cid]
-        if row.get('status') != eff['status']:
+        if not _result_review() and cid in reclassified:
+            raise WorkflowError(f'Criterion {cid} is mandatory: its status comes from the measurement, not from reclassification')
+        # A failed/missing measurement can disprove a claim. A passing probe
+        # cannot turn the worker's failed outcome into a successful delivery.
+        if (not _result_review() or eff['status'] != 'PASS') and row.get('status') != eff['status']:
             row['declared_status'] = row.get('status')
-        row['status'] = eff['status']
+            row['status'] = eff['status']
         row['measurement'] = {k: eff.get(k) for k in ('state', 'ran_at', 'revision', 'why', 'error')}
         if eff['status'] == 'PASS':
             aid = f'probe:{cid}'
@@ -1467,7 +1469,10 @@ def _check_probe_corrections(previous, spec):
             raise WorkflowError(f'Criterion {cid} is mandatory and stays mandatory; a wrong probe is corrected with probe_corrections, not by dropping the obligation')
         if crit.get('optional') and not before.get('optional'):
             raise WorkflowError(f'Criterion {cid} cannot become optional in a later revision; optional is declared in the first revision with optional_reason')
-        if not before.get('mandatory') or not before.get('probe'):
+        # Every changed spec requires a fresh Principal assessment against the
+        # original request. Changing the proof method needs no second decision
+        # or mechanical ranking of SQL, browser and native test evidence.
+        if _result_review() or not before.get('mandatory') or not before.get('probe'):
             continue
         if _json(before.get('probe')) == _json(crit.get('probe')):
             continue
@@ -1751,9 +1756,10 @@ def _check_measurement_integrity(conn, task_id, previous, spec):
 
 def _spec_result_criteria_checks(conn, task_id, spec):
     """Owner mode: valida sondas e exige critério obrigatório quando a reprodução foi medida."""
-    _check_distinct_measurements(spec)  # DISTINCT_MEASUREMENT_20260915
+    if not _result_review():
+        _check_distinct_measurements(spec)
     for crit in spec.get('criteria') or []:
-        if crit.get('probe') is not None or crit.get('mandatory'):
+        if crit.get('probe') is not None or (crit.get('mandatory') and not _result_review()):
             _validate_probe(crit.get('id'), crit.get('probe'))
         _p = crit.get('probe') if isinstance(crit.get('probe'), dict) else {}
         if crit.get('mandatory') and _p.get('kind') in ('http', 'header') and _p.get('phase') != 'before':  # HUMAN_LAST_RESORT_20260914
@@ -1773,7 +1779,10 @@ def _spec_result_criteria_checks(conn, task_id, spec):
         raise WorkflowError(f'Mandatory http probes must measure the delivery destination: none targets {_dest} or a host listed in probe_hosts')
     _spec_anterior = get_spec(conn, task_id)
     _check_probe_corrections(_spec_anterior, spec)
-    _check_measurement_integrity(conn, task_id, _spec_anterior, spec)  # MEASUREMENT_INTEGRITY_20260915
+    # Semantic changes are reviewed with the persisted spec before execution.
+    # Regexes over an earlier answer cannot decide whether new evidence is apt.
+    if not _result_review():
+        _check_measurement_integrity(conn, task_id, _spec_anterior, spec)
     wf = get_workflow(conn, task_id)
     precheck = (json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') if wf else None
     precheck = precheck or {}
@@ -1793,7 +1802,7 @@ def _spec_result_criteria_checks(conn, task_id, spec):
         raise WorkflowError(
             _porque + 'This spec has no mandatory criterion, so nothing gates the closure and the card can be '
             'completed without the requested result ever being measured. Declare at least one criterion with '
-            'mandatory=true whose probe measures THE RESULT THE REQUESTER ASKED FOR on the surface they consume '
+            'mandatory=true with evidence of THE RESULT THE REQUESTER ASKED FOR on the surface they consume '
             '(for a data repair, the readback after the mutation; for a report, the data the analysis asserts). '
             'Building, testing, deploying or publishing is not that result.')
 
@@ -2097,7 +2106,7 @@ def nudge_open_decisions(conn, task_id):
         age = now - int(row.get('created_at') or now)
         if age < DECISION_REMINDER_AFTER:
             continue
-        auto = _auto_continue_answer(row.get('kind'), row.get('question'))
+        auto = None if ctx.get('owner_guidance') else _auto_continue_answer(row.get('kind'), row.get('question'))
         if auto:
             try:
                 resolve_decision(conn, row['id'], action='continue', answer=auto + f' (aplicado pelo runtime após {age // 60} min sem resposta do Principal)', author='Principal')
@@ -3325,7 +3334,10 @@ def save_report(conn, task_id, run_id, report):
         raise WorkflowError('No persisted spec')
     _require_current_instruction_spec(conn,task_id)
     report=json.loads(_json(report))
-    _check_reclassification(conn,task_id,report)  # RECORD_CONTINUATION_20260911
+    # Report versions retain the previous result. The Principal assesses the
+    # new evidence; a second reclassification form is not a separate gate.
+    if not _result_review():
+        _check_reclassification(conn,task_id,report)
     if _owner_mode():  # RESULT_PROBE_20260911: critério obrigatório recebe o status da última medição válida
         _apply_measurements_to_report(conn,task_id,spec,report)
     encoded=_json(report)
@@ -3341,6 +3353,12 @@ def save_report(conn, task_id, run_id, report):
         conn.execute('INSERT INTO nfos_artifacts(task_id,run_id,kind,revision,content,author,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)',
             (task_id,run_id,'report',revision,encoded,'worker',_json(evidence),int(time.time())))
         _event(conn,task_id,run_id,'nfos_report_saved',{'revision':revision,'spec_revision':spec['revision']})
+        from hermes_cli.nfos_principal_review import required
+        if required(conn,task_id) and all(r['status'] == 'PASS' for r in _report_results(spec, report).values()):
+            ask_principal(conn,task_id,run_id,kind='final_review',
+                          question='Verify the requested outcome against the original source and saved evidence',context={})
+            conn.execute("UPDATE nfos_workflows SET stage='report',next_action=?,updated_at=? WHERE task_id=?",
+                         ('Principal reviewing the saved result; address any requested changes on this card',int(time.time()),task_id))
 
 
 _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principal respondeu 'continue' em 223 de 302 casos (7 dias)
@@ -3372,6 +3390,11 @@ _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principa
     (r'rate.?limit|\b429\b|usage limit|too many requests|quota (exceeded|exhausted|reached)|(exceeded|exhausted).{0,20}quota|cota (excedida|esgotada|estourada|atingida)|limite de (taxa|requisi[cç][oõ]es)',  # HUMAN_LAST_RESORT_20260914: a "cota" do produto (pacote/cota do cliente) não é rate limit
      'CONTINUE (automático): rate limit é transitório. Aguarde com backoff (60 s, 120 s, 300 s) e repita; não bloqueie o card.'),
 ]
+
+
+def _result_review():
+    from hermes_cli.nfos_principal_review import settings
+    return settings().get('result_review') is True
 
 
 def _owner_mode():
@@ -3417,10 +3440,16 @@ def _code_route_review(conn, task_id):
     state = json.loads(get_workflow(conn, task_id)['state_json'] or '{}')
     candidate = state.get('candidate_sha')
     ev = _pr_green(conn, task_id, candidate)
+    from hermes_cli.nfos_destination import destination, review_only
+    scope = destination(conn, task_id)
+    if review_only(scope):
+        return 'continue', ('Registro automático: o destino autorizado termina no PR de revisão. '
+                            'Não faça merge nem deploy. Salve os testes e as evidências do candidato '
+                            'e peça final_review ao Principal; CI verde não substitui essa revisão.')
     if ev:
         return 'approve', ('APPROVE (automático, premissa do owner 10/09): PR ' + str(ev.get('pull_request') or '') + ' com CI verde para o candidato '
-                           + str(candidate)[:12] + '. Faça o merge (gh pr merge --merge) registrando o efeito merge e reconciliando o SHA integrado, '
-                           'aguarde o deploy automático (efeito deploy + readback de produção), salve o relatório e chame kanban_complete.')
+                           + str(candidate)[:12] + '. Continue somente até o destino autorizado na spec, '
+                           'registre os readbacks, salve o relatório e peça final_review ao Principal.')
     return 'continue', ('CONTINUE (automático, premissa do owner 10/09): a revisão é mecânica e exige o efeito pr reconciliado com ci_status success '
                         'para o candidato atual (' + str(candidate)[:12] + '). Abra ou atualize o PR da rota do projeto (show: delivery_environment), registre `effect --operation pr` e `reconcile` '
                         'com o readback do CI; se o CI falhar, corrija e repita; depois peça review de novo.')  # RECORD_MODE_TEXT_20260911
@@ -3431,15 +3460,13 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
         raise WorkflowError('A decision needs its kind and concrete question')
     with _kb().write_txn(conn,allow_nested=True):
         _owned(conn,task_id,run_id)
-        if kind in {'spec_review','final_review'}:  # BLOCK_LESS2_20260910: validação desligada no perfil = pergunta sem efeito
-            if _owner_mode():  # BLOCK_LESS8_20260910
-                decision_id='dec_'+uuid.uuid4().hex[:20]; now=int(time.time())
-                revision=get_workflow(conn,task_id)['spec_revision']
-                auto='CONTINUE (automático, premissa do owner 10/09): validação do principal desligada no perfil; não peça '+kind+'. Siga: implemente, salve o relatório e chame kanban_complete.'
-                conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                             (decision_id,task_id,run_id,kind,question,_json(dict(context)),revision,now,'resolved','continue',auto,'Principal',now))
-                _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'question':question,'answer':auto})
-                return decision_id
+        if kind in {'spec_review','final_review'} and _owner_mode() and not _result_review():
+            decision_id='dec_'+uuid.uuid4().hex[:20];now=int(time.time())
+            answer='Registro automático: revisão do resultado não está habilitada neste perfil.'
+            conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                         (decision_id,task_id,run_id,kind,question,_json(context),get_workflow(conn,task_id)['spec_revision'],now,'resolved','continue',answer,'NFOS automation',now))
+            _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'answer':answer})
+            return decision_id
         if kind=='review':  # BLOCK_LESS3_20260910: relatório/operação não tem publicação a aprovar
             from hermes_cli.nfos_principal_review import required
             _t=_kb().get_task(conn,task_id)
@@ -3470,6 +3497,12 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
             _require_current_instruction_spec(conn,task_id)
             context.pop('assessment',None)
             context['acceptance_identity']=identity(conn,task_id,kind)
+            for pending in conn.execute("SELECT id,context FROM nfos_decisions WHERE task_id=? AND kind=? AND status='pending'",
+                                        (task_id,kind)).fetchall():
+                if json.loads(pending['context']).get('acceptance_identity') != context['acceptance_identity']:
+                    conn.execute("UPDATE nfos_decisions SET status='resolved',action='changes',author='NFOS automation',answer=?,resolved_at=? WHERE id=?",
+                                 ('Superseded by the current revision; review its current evidence',int(time.time()),pending['id']))
+                    _event(conn,task_id,run_id,'nfos_review_superseded',{'decision_id':pending['id'],'kind':kind})
             latest=conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',
                                 (task_id,kind)).fetchone()
             if (latest and latest['status']=='pending'
@@ -3627,6 +3660,37 @@ def wait_decision(conn,decision_id,*,timeout=300):
         if row['status']!='pending' or time.monotonic()>=deadline:
             return row
         time.sleep(min(1,max(0,deadline-time.monotonic())))
+
+
+def receive_owner_guidance(conn, task_id, *, text, source):
+    """Queue an authenticated owner's instruction on the existing card."""
+    if os.environ.get('HERMES_KANBAN_TASK'):
+        raise WorkflowError('Owner guidance must come from an authenticated operator')
+    if not isinstance(text, str) or not text.strip() or len(text) > 12000:
+        raise WorkflowError('Write an instruction of at most 12000 characters')
+    if not isinstance(source, dict) or not source.get('actor') or not source.get('message_id'):
+        raise WorkflowError('Owner guidance needs its authenticated actor and stable message id')
+    decision_id = 'dec_' + hashlib.sha256(_json([task_id,source]).encode()).hexdigest()[:24]
+    with _kb().write_txn(conn):
+        task = _kb().get_task(conn,task_id)
+        if not task or not get_workflow(conn,task_id):
+            raise WorkflowError('Unknown NFOS card')
+        existing = get_decision(conn,decision_id)
+        if existing:
+            if json.loads(existing['context']).get('owner_guidance') != text.strip():
+                raise WorkflowError('This message id already names a different instruction')
+            return {'decision_id':decision_id,'duplicate':True}
+        now = int(time.time())
+        context = {'owner_guidance':text.strip(),'source':source}
+        question = 'Orientação de '+source['actor']+' neste card: '+text.strip()
+        run_id = task.current_run_id or 0
+        conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status) VALUES(?,?,?,?,?,?,?,?,?)',
+                     (decision_id,task_id,run_id,'impediment',question,_json(context),get_workflow(conn,task_id)['spec_revision'],now,'pending'))
+        comment = conn.execute('INSERT INTO task_comments(task_id,author,body,created_at) VALUES(?,?,?,?)',
+                               (task_id,source['actor'],text.strip(),now))
+        _event(conn,task_id,task.current_run_id,'nfos_principal_requested',
+               {'decision_id':decision_id,'kind':'impediment','question':question,'owner_guidance':True,'comment_id':comment.lastrowid})
+    return {'decision_id':decision_id,'duplicate':False}
 
 
 def resume_after_answer(conn,task_id,*,answer,source):
@@ -4120,6 +4184,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         if task.delivery_type=='code' and operation!='repair':
             from hermes_cli.nfos_destination import destination, review_only
             scope=destination(conn,task_id)
+            if review_only(scope) and operation != 'pr':
+                raise WorkflowError('This delivery ends at the review PR; merge, homolog and deploy are outside its scope')
             if operation in {'merge','deploy'} and _project_delivery_environment(conn,task_id)=='hml' and not _express_production_order(task.body):  # DELIVERY_ENV_20260911
                 raise WorkflowError('This project delivers in HML: staging PR, HML deploy and HML readback close the card. Production (merge or deploy on main) only with the owner express order in the card body')
             if _owner_mode():  # RECORD_MODE_20260911: o runtime registra a publicação (task, run, operação, alvo, SHA) e não conduz
@@ -4231,9 +4297,8 @@ def completion_evidence_check(conn, task_id):
         if (metadata.get('schema_version')!=1 or metadata.get('report_sha256')!=digest
                 or metadata.get('spec_revision')!=spec['revision']):
             return None
-        strict=not _owner_mode()  # BLOCK_LESS2/BLOCK_LESS8_20260910
         proved=set()
-        for check in (metadata.get('artifact_checks',[]) if strict else []):
+        for check in metadata.get('artifact_checks',[]):
             if (check.get('task_id')!=task_id or check.get('run_id')!=report['run_id']
                     or check.get('spec_revision')!=spec['revision']):
                 return None

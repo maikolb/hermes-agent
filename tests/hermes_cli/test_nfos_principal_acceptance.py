@@ -75,6 +75,114 @@ def test_spec_requires_principal_and_reuses_pending_decision(task_context):
     d.advance(conn, task.id, task.current_run_id, 'implement', next_action='work')
 
 
+def test_result_review_prompt_is_selected_without_reactivating_legacy_policy(monkeypatch):
+    from hermes_cli import nfos_runtime as runtime
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    prompt = runtime.worker_instructions()
+    assert 'Wait for spec_review' in prompt
+    assert 'report requests final_review automatically' in prompt
+    assert 'no Principal decisions on code' not in prompt
+    assert 'Nobody reviews the spec' not in prompt
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False})
+    prompt = runtime.worker_instructions()
+    assert 'no Principal decisions on code' in prompt
+    assert 'spec_review' not in prompt
+
+
+def test_record_mode_still_requires_real_spec_review(task_context, monkeypatch):
+    conn, task, _, _ = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    assert review.required(conn, task.id)
+    decision = ask(conn, task, 'spec_review')
+    assert d.get_decision(conn, decision)['status'] == 'pending'
+    assert not review.accepted(conn, task.id, 'spec_review')
+    accept(conn, task, 'spec_review')
+    assert review.accepted(conn, task.id, 'spec_review')
+
+
+def test_record_mode_final_review_does_not_auto_accept(task_context, monkeypatch):
+    conn, task, _, artifact = task_context
+    accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact)
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    decision = ask(conn, task, 'final_review')
+    assert d.get_decision(conn, decision)['status'] == 'pending'
+    assert not review.accepted(conn, task.id, 'final_review')
+
+
+def test_record_mode_rechecks_reviewed_artifact_bytes(task_context, monkeypatch):
+    conn, task, _, artifact = task_context
+    accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact)
+    accept(conn, task, 'final_review', artifact)
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    artifact.write_text('count=99\n')
+    assert d.completion_evidence_check(conn, task.id) is None
+
+
+def test_mandatory_artifact_can_be_reviewed_without_network_probe(task_context, monkeypatch):
+    conn, task, spec, artifact = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    spec['criteria'][0]['mandatory'] = True
+    d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'session': 'fixture'})
+    assert not review.accepted(conn, task.id, 'spec_review')
+    accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact)
+    assert not d.completion_ready(conn, task.id)
+    accept(conn, task, 'final_review', artifact)
+    assert d.completion_ready(conn, task.id)
+
+
+def test_internal_rework_does_not_request_owner_or_create_another_card(task_context, monkeypatch):
+    conn, task, spec, artifact = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    spec['criteria'][0]['mandatory'] = True
+    d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'session': 'fixture'})
+    accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact)
+    decisions = d.pending_decisions(conn)
+    assert len(decisions) == 1 and decisions[0]['kind'] == 'final_review'
+    d.resolve_decision(conn, decisions[0]['id'], action='changes', answer='Read the original count source', author='Principal')
+    assert kb.get_task(conn, task.id).status == 'running'
+    assert not conn.execute("SELECT 1 FROM nfos_decisions WHERE status='human'").fetchone()
+    artifact.write_text('Original count source read: count=31\n')
+    save_report(conn, task, artifact)
+    accept(conn, task, 'final_review', artifact)
+    assert kb.complete_task(conn, task.id, result='Count verified from original source')
+    assert d.get_workflow(conn, task.id)['stage'] == 'done'
+    assert d.get_workflow(conn, task.id)['next_action'] == ''
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
+
+
+def test_green_probe_does_not_turn_failed_outcome_into_pass(task_context, monkeypatch):
+    conn, task, _, artifact = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    spec = d.get_spec(conn, task.id)
+    monkeypatch.setattr(d, '_mandatory_effective', lambda *a: {'C1': {'status': 'PASS', 'revision': 1}})
+    report = {'summary': 'Counter passed but content is incorrect',
+              'criteria': [{'id': 'C1', 'status': 'FAIL', 'evidence': [str(artifact)]}],
+              'artifacts': [str(artifact)]}
+    d._apply_measurements_to_report(conn, task.id, spec, report)
+    assert report['criteria'][0]['status'] == 'FAIL'
+    assert report['measurements']['C1']['status'] == 'PASS'
+
+
+def test_owner_guidance_is_durable_idempotent_and_preserves_card(task_context):
+    conn, task, _, _ = task_context
+    source = {'platform':'vigilia','actor':'Maikol','message_id':'fixture-guidance-1'}
+    result = d.receive_owner_guidance(conn, task.id, text='Preserve the requested destination', source=source)
+    again = d.receive_owner_guidance(conn, task.id, text='Preserve the requested destination', source=source)
+    assert again == dict(result, duplicate=True)
+    row = d.get_decision(conn, result['decision_id'])
+    assert row['status'] == 'pending' and row['kind'] == 'impediment'
+    assert json.loads(row['context'])['source']['actor'] == 'Maikol'
+    assert conn.execute("SELECT count(*) FROM task_comments WHERE task_id=? AND author='Maikol'", (task.id,)).fetchone()[0] == 1
+    assert kb.get_task(conn, task.id).body == task.body
+    assert kb.get_task(conn, task.id).current_run_id == task.current_run_id
+    with pytest.raises(d.WorkflowError, match='different instruction'):
+        d.receive_owner_guidance(conn, task.id, text='Different request', source=source)
+
+
 def test_worker_cannot_self_accept_or_supply_prefilled_assessment(task_context, monkeypatch):
     conn, task, _, _ = task_context
     decision = ask(conn, task, 'spec_review')
