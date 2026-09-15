@@ -75,6 +75,56 @@ def test_spec_requires_principal_and_reuses_pending_decision(task_context):
     d.advance(conn, task.id, task.current_run_id, 'implement', next_action='work')
 
 
+@pytest.mark.parametrize('recover_existing', [False, True])
+def test_owner_recheck_resumes_completed_card_once_with_original_history(task_context, monkeypatch, recover_existing):
+    from hermes_cli import nfos_runtime as runtime
+    conn, task, _, artifact = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact)
+    accept(conn, task, 'final_review', artifact)
+    assert kb.complete_task(conn, task.id, result='Verified fixture')
+    ended = dict(conn.execute('SELECT * FROM task_runs WHERE id=?',(task.current_run_id,)).fetchone())
+    report = dict(d._artifact(conn,task.id,'report'))
+    monkeypatch.setattr(runtime,'previous_runs_termination_pending',lambda *args: False)
+    receipt = d.receive_owner_guidance(conn,task.id,text='Recheck against the original source',
+                                      source={'actor':'Maikol','platform':'vigilia','message_id':'fixture-recheck'})
+    assert kb.get_task(conn,task.id).status == 'done'
+    if recover_existing:
+        conn.execute("UPDATE nfos_decisions SET status='resolved',action='changes',author='Principal',answer='Recheck and correct the outcome',resolved_at=? WHERE id=?",
+                     (kb.get_task(conn,task.id).completed_at,receipt['decision_id']))
+        conn.commit()
+        assert d.reconcile_owner_guidance(conn) == [task.id]
+    else:
+        d.resolve_decision(conn,receipt['decision_id'],action='changes',answer='Recheck and correct the outcome',author='Principal')
+    current = kb.get_task(conn,task.id)
+    assert current.status == 'ready' and current.completed_at is None and current.current_run_id is None
+    assert current.id == task.id and current.workspace_path == task.workspace_path
+    assert current.instruction_revision == task.instruction_revision+1
+    assert 'Recheck against the original source' in current.body
+    assert not review.accepted(conn,task.id,'spec_review') and not review.accepted(conn,task.id,'final_review')
+    assert dict(conn.execute('SELECT * FROM task_runs WHERE id=?',(task.current_run_id,)).fetchone()) == ended
+    assert dict(d._artifact(conn,task.id,'report')) == report
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
+    assert d.reconcile_owner_guidance(conn) == []
+    assert kb.get_task(conn,task.id).instruction_revision == current.instruction_revision
+
+
+def test_recheck_does_not_reopen_a_later_successful_completion(task_context, monkeypatch):
+    from hermes_cli import nfos_runtime as runtime
+    conn, task, _, artifact = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    accept(conn, task, 'spec_review');save_report(conn, task, artifact);accept(conn, task, 'final_review', artifact)
+    assert kb.complete_task(conn, task.id, result='Verified fixture')
+    receipt=d.receive_owner_guidance(conn,task.id,text='Earlier request',source={'actor':'Maikol','message_id':'earlier-fixture'})
+    conn.execute("UPDATE nfos_decisions SET status='resolved',action='changes',author='Principal',answer='Earlier instruction',resolved_at=? WHERE id=?",
+                 (kb.get_task(conn,task.id).completed_at-1,receipt['decision_id']))
+    conn.commit()
+    monkeypatch.setattr(runtime,'previous_runs_termination_pending',lambda *args: False)
+    assert d.reconcile_owner_guidance(conn) == []
+    assert kb.get_task(conn,task.id).status == 'done'
+
+
 def test_result_review_prompt_is_selected_without_reactivating_legacy_policy(monkeypatch):
     from hermes_cli import nfos_runtime as runtime
     monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})

@@ -5374,6 +5374,26 @@ def recover_interrupted_task(
         return True
 
 
+def reopen_completed_task(conn: sqlite3.Connection, task_id: str, *, expected_completed_at: int,
+                          actor: str, reason: str) -> bool:
+    """Resume an owner-requested recheck without replacing its task or history."""
+    with write_txn(conn, allow_nested=True):
+        task = get_task(conn, task_id)
+        if not task or task.status != 'done' or task.completed_at != expected_completed_at:
+            return False
+        if task.workspace_kind == 'worktree' and task.requires_repo:
+            _invalidate_worktree_for_terminal_reopen(conn, task_id)
+        status = _landing_status_after_parents(conn, task_id)
+        if status == 'ready':
+            _ensure_ready_assignee(conn, task_id)
+        conn.execute("UPDATE tasks SET status=?,completed_at=NULL,result=NULL,current_run_id=NULL,"
+                     "claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,worker_started_at=NULL,"
+                     "consecutive_failures=0,last_failure_error=NULL WHERE id=?", (status, task_id))
+        _append_event(conn, task_id, 'status', {'status':status,'previous_status':'done',
+                      'reason':reason,'actor':actor,'previous_completed_at':expected_completed_at})
+        return True
+
+
 def update_task_instruction(
     conn: sqlite3.Connection, task_id: str, *, body: str, author: str,
     expected_revision: int,
@@ -5381,7 +5401,7 @@ def update_task_instruction(
     """Record an explicit operator correction on the existing card."""
     if not body.strip():
         raise ValueError("current instruction cannot be empty")
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         task = get_task(conn, task_id)
         if task is None or task.instruction_revision != expected_revision:
             raise ValueError("instruction changed; read the current card before updating")

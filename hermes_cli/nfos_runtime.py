@@ -377,6 +377,7 @@ def reconcile_runtime(conn, *, worker_exit_grace_seconds=15):
     """Run NFOS recovery inside the existing canonical dispatcher tick."""
     delivery.reconcile_human_answers(conn)
     reconcile_terminal_workers(conn,worker_exit_grace_seconds=worker_exit_grace_seconds)
+    delivery.reconcile_owner_guidance(conn)
     delivery.reconcile_human_answers(conn)
     from hermes_cli.nfos_tool import reconcile_calls
     for call in reconcile_calls(conn):
@@ -820,6 +821,10 @@ After verifying the correction, reconsider only the technical impediment it
 resolved. Do not demand another business approval for that same authorized work.
 An impediment with context.owner_guidance is an authenticated owner instruction
 sent through the Vigilia card. Read it first and apply it to this same card. If it
+requests rechecking completed work, resolve changes: the runtime reopens the same
+card, preserves its history and records the new instruction for a revised spec.
+Do not update a closed card's instruction directly or create a replacement task.
+If it
 answers an earlier human question, use its saved source in resume; if it changes
 scope, update the instruction and have the worker revise the spec. Resolve routine
 CI/tool/dependency repairs internally when needed for the authorized delivery.
