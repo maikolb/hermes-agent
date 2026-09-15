@@ -788,8 +788,13 @@ expected_source_sha, reason and actor. Both default to preview; apply=true
 performs the repair. Repository repair keeps the original directory available.
 After verifying the correction, reconsider only the technical impediment it
 resolved. Do not demand another business approval for that same authorized work.
+An impediment with context.owner_guidance is an authenticated owner instruction
+sent through the Vigilia card. Read it first and apply it to this same card. If it
+answers an earlier human question, use its saved source in resume; if it changes
+scope, update the instruction and have the worker revise the spec. Resolve routine
+CI/tool/dependency repairs internally when needed for the authorized delivery.
 When the human answers, use `resume --task ID --input answer.json` containing
-answer and source (the actual Telegram message identity). This restores the same
+answer and source (the actual Telegram or Vigilia message identity). This restores the same
 card with its spec, workspace, history and next step; do not create another card.
 If you find a concrete solution to your own prior human escalation without a new
 human answer, use `reconsider --decision ID --resolution continue|approve|changes

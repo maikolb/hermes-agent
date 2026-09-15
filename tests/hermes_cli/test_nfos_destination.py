@@ -112,7 +112,7 @@ def test_record_mode_cannot_publish_beyond_review_pr(task_context, monkeypatch, 
     from hermes_cli import nfos_principal_review as review
     conn, task, artifact, sha, tree = prepare_review_pr(task_context, review_scope())
     accept(conn, task, 'spec_review')
-    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False})
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
     with pytest.raises(d.WorkflowError, match='review PR'):
         d.begin_effect(conn, task.id, task.current_run_id, operation=operation, target=REPOSITORY, candidate=sha)
     assert conn.execute('SELECT count(*) FROM nfos_effects WHERE task_id=?', (task.id,)).fetchone()[0] == 0

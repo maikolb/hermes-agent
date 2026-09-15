@@ -1386,7 +1386,7 @@ def _mandatory_effective(conn, task_id, spec):
     mutation = _relevant_mutation(conn, task_id)
     out = {}
     for crit in criteria:
-        if not crit.get('mandatory') or not crit.get('probe'):
+        if not crit.get('mandatory') or (_result_review() and not crit.get('probe')):
             continue
         cid = crit['id']
         art = _artifact(conn, task_id, f'probe:{cid}')
@@ -1422,15 +1422,18 @@ def _apply_measurements_to_report(conn, task_id, spec, report):
     if not effective:
         return
     artifacts = report.setdefault('artifacts', [])
+    reclassified = {r.get('id') for r in (report.get('reclassified') or []) if isinstance(r, dict)}
     measurements = {}
     for row in report.get('criteria') or []:
         cid = row.get('id')
         if cid not in effective:
             continue
         eff = effective[cid]
+        if not _result_review() and cid in reclassified:
+            raise WorkflowError(f'Criterion {cid} is mandatory: its status comes from the measurement, not from reclassification')
         # A failed/missing measurement can disprove a claim. A passing probe
         # cannot turn the worker's failed outcome into a successful delivery.
-        if eff['status'] != 'PASS' and row.get('status') != eff['status']:
+        if (not _result_review() or eff['status'] != 'PASS') and row.get('status') != eff['status']:
             row['declared_status'] = row.get('status')
             row['status'] = eff['status']
         row['measurement'] = {k: eff.get(k) for k in ('state', 'ran_at', 'revision', 'why', 'error')}
@@ -1469,6 +1472,16 @@ def _check_probe_corrections(previous, spec):
         # Every changed spec requires a fresh Principal assessment against the
         # original request. Changing the proof method needs no second decision
         # or mechanical ranking of SQL, browser and native test evidence.
+        if _result_review() or not before.get('mandatory') or not before.get('probe'):
+            continue
+        if _json(before.get('probe')) == _json(crit.get('probe')):
+            continue
+        corr = corrections.get(cid)
+        if not corr or not str(corr.get('reason') or '').strip() or not corr.get('evidence'):
+            raise WorkflowError(f'Criterion {cid}: changing the probe of a mandatory criterion needs probe_corrections '
+                                '[{id, reason, evidence:[...]}] in the new spec revision; the earlier measurement stays in history')
+        if _expect_rank(crit.get('probe')) < _expect_rank(before.get('probe')):
+            raise WorkflowError(f'Criterion {cid}: the corrected probe is weaker than the previous one (an expectation on content cannot become a count or a status)')
 
 
 _EXPECT_RANK = {'status': 1, 'count_between': 2, 'op': 2, 'value': 2, 'row': 3, 'scalar': 3, 'set_equals': 3, 'contains_all': 3, 'not_matches': 3, 'equals': 3}
@@ -1743,9 +1756,10 @@ def _check_measurement_integrity(conn, task_id, previous, spec):
 
 def _spec_result_criteria_checks(conn, task_id, spec):
     """Owner mode: valida sondas e exige critério obrigatório quando a reprodução foi medida."""
-    _check_distinct_measurements(spec)  # DISTINCT_MEASUREMENT_20260915
+    if not _result_review():
+        _check_distinct_measurements(spec)
     for crit in spec.get('criteria') or []:
-        if crit.get('probe') is not None:
+        if crit.get('probe') is not None or (crit.get('mandatory') and not _result_review()):
             _validate_probe(crit.get('id'), crit.get('probe'))
         _p = crit.get('probe') if isinstance(crit.get('probe'), dict) else {}
         if crit.get('mandatory') and _p.get('kind') in ('http', 'header') and _p.get('phase') != 'before':  # HUMAN_LAST_RESORT_20260914
@@ -1767,6 +1781,8 @@ def _spec_result_criteria_checks(conn, task_id, spec):
     _check_probe_corrections(_spec_anterior, spec)
     # Semantic changes are reviewed with the persisted spec before execution.
     # Regexes over an earlier answer cannot decide whether new evidence is apt.
+    if not _result_review():
+        _check_measurement_integrity(conn, task_id, _spec_anterior, spec)
     wf = get_workflow(conn, task_id)
     precheck = (json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') if wf else None
     precheck = precheck or {}
@@ -3320,6 +3336,8 @@ def save_report(conn, task_id, run_id, report):
     report=json.loads(_json(report))
     # Report versions retain the previous result. The Principal assesses the
     # new evidence; a second reclassification form is not a separate gate.
+    if not _result_review():
+        _check_reclassification(conn,task_id,report)
     if _owner_mode():  # RESULT_PROBE_20260911: critério obrigatório recebe o status da última medição válida
         _apply_measurements_to_report(conn,task_id,spec,report)
     encoded=_json(report)
@@ -3372,6 +3390,11 @@ _AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principa
     (r'rate.?limit|\b429\b|usage limit|too many requests|quota (exceeded|exhausted|reached)|(exceeded|exhausted).{0,20}quota|cota (excedida|esgotada|estourada|atingida)|limite de (taxa|requisi[cç][oõ]es)',  # HUMAN_LAST_RESORT_20260914: a "cota" do produto (pacote/cota do cliente) não é rate limit
      'CONTINUE (automático): rate limit é transitório. Aguarde com backoff (60 s, 120 s, 300 s) e repita; não bloqueie o card.'),
 ]
+
+
+def _result_review():
+    from hermes_cli.nfos_principal_review import settings
+    return settings().get('result_review') is True
 
 
 def _owner_mode():
@@ -3437,6 +3460,13 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
         raise WorkflowError('A decision needs its kind and concrete question')
     with _kb().write_txn(conn,allow_nested=True):
         _owned(conn,task_id,run_id)
+        if kind in {'spec_review','final_review'} and _owner_mode() and not _result_review():
+            decision_id='dec_'+uuid.uuid4().hex[:20];now=int(time.time())
+            answer='Registro automático: revisão do resultado não está habilitada neste perfil.'
+            conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                         (decision_id,task_id,run_id,kind,question,_json(context),get_workflow(conn,task_id)['spec_revision'],now,'resolved','continue',answer,'NFOS automation',now))
+            _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'answer':answer})
+            return decision_id
         if kind=='review':  # BLOCK_LESS3_20260910: relatório/operação não tem publicação a aprovar
             from hermes_cli.nfos_principal_review import required
             _t=_kb().get_task(conn,task_id)

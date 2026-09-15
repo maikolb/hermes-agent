@@ -77,7 +77,7 @@ def test_spec_requires_principal_and_reuses_pending_decision(task_context):
 
 def test_record_mode_still_requires_real_spec_review(task_context, monkeypatch):
     conn, task, _, _ = task_context
-    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False})
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
     assert review.required(conn, task.id)
     decision = ask(conn, task, 'spec_review')
     assert d.get_decision(conn, decision)['status'] == 'pending'
@@ -90,7 +90,7 @@ def test_record_mode_final_review_does_not_auto_accept(task_context, monkeypatch
     conn, task, _, artifact = task_context
     accept(conn, task, 'spec_review')
     save_report(conn, task, artifact)
-    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False})
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
     decision = ask(conn, task, 'final_review')
     assert d.get_decision(conn, decision)['status'] == 'pending'
     assert not review.accepted(conn, task.id, 'final_review')
@@ -101,14 +101,14 @@ def test_record_mode_rechecks_reviewed_artifact_bytes(task_context, monkeypatch)
     accept(conn, task, 'spec_review')
     save_report(conn, task, artifact)
     accept(conn, task, 'final_review', artifact)
-    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False})
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
     artifact.write_text('count=99\n')
     assert d.completion_evidence_check(conn, task.id) is None
 
 
 def test_mandatory_artifact_can_be_reviewed_without_network_probe(task_context, monkeypatch):
     conn, task, spec, artifact = task_context
-    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False})
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
     spec['criteria'][0]['mandatory'] = True
     d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'session': 'fixture'})
     assert not review.accepted(conn, task.id, 'spec_review')
@@ -121,7 +121,7 @@ def test_mandatory_artifact_can_be_reviewed_without_network_probe(task_context, 
 
 def test_internal_rework_does_not_request_owner_or_create_another_card(task_context, monkeypatch):
     conn, task, spec, artifact = task_context
-    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False})
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
     spec['criteria'][0]['mandatory'] = True
     d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'session': 'fixture'})
     accept(conn, task, 'spec_review')
@@ -142,6 +142,7 @@ def test_internal_rework_does_not_request_owner_or_create_another_card(task_cont
 
 def test_green_probe_does_not_turn_failed_outcome_into_pass(task_context, monkeypatch):
     conn, task, _, artifact = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
     spec = d.get_spec(conn, task.id)
     monkeypatch.setattr(d, '_mandatory_effective', lambda *a: {'C1': {'status': 'PASS', 'revision': 1}})
     report = {'summary': 'Counter passed but content is incorrect',

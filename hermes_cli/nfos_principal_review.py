@@ -19,14 +19,16 @@ def required(conn, task_id):
     workflow = d.get_workflow(conn, task_id)
     if not workflow:
         return False
-    if 'principal_validation' in settings():
+    if settings().get('result_review') is True:
         return True
+    if settings().get('principal_validation') is False:
+        return False
     spec = d.get_spec(conn, task_id)
     if spec and json.loads(spec['content']).get('delivery_destination'):
         return True
     request = d.get_request(conn, workflow['request_id'])
     project = json.loads(request['payload']).get('project', {}) if request else {}
-    return project.get('principal_validation') is True
+    return settings().get('principal_validation') is True or project.get('principal_validation') is True
 
 
 def worker_model_args(task):
