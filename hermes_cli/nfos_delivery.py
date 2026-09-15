@@ -1500,10 +1500,23 @@ def _spec_result_criteria_checks(conn, task_id, spec):
     precheck = precheck or {}
     measured = any(_MEASURED_RX.search(' '.join(str(c.get(k) or '') for k in ('method', 'target', 'result')))  # MEASURED_PRECHECK_20260911
                    for c in (precheck.get('checked') or []) if isinstance(c, dict))
-    if (spec.get('delivery_type') in {'code', 'operation'} and precheck.get('verdict') in {'partial', 'not_delivered'} and measured
-            and not any(c.get('mandatory') for c in spec.get('criteria') or [])):
-        raise WorkflowError('The precheck measured the complaint (method sql/http): declare at least one criterion with mandatory=true and a '
-                            'probe that measures the requested result on the surface the user consumes')
+    # MANDATORY_RESULT_20260915: uma spec sem nenhum critério obrigatório fecha
+    # o card sem medir nada, porque o gate de fechamento só barra obrigatório
+    # sem PASS. Medido em 15/09: 101 de 144 specs (70%) nasciam assim, e a
+    # regra anterior só exigia obrigatório quando o precheck tinha medido a
+    # queixa — bastava não registrar precheck para escapar (29 de 42 cards de
+    # código e 16 de 17 de operação sem obrigatório não tinham precheck).
+    # Não é exigência de sonda http: relatório e auditoria já satisfazem isso
+    # hoje com sonda sql sobre o dado que a análise afirma.
+    if not any(c.get('mandatory') for c in spec.get('criteria') or []):
+        _porque = ('The precheck measured the complaint (method sql/http). ' if measured and
+                   precheck.get('verdict') in {'partial', 'not_delivered'} else '')
+        raise WorkflowError(
+            _porque + 'This spec has no mandatory criterion, so nothing gates the closure and the card can be '
+            'completed without the requested result ever being measured. Declare at least one criterion with '
+            'mandatory=true whose probe measures THE RESULT THE REQUESTER ASKED FOR on the surface they consume '
+            '(for a data repair, the readback after the mutation; for a report, the data the analysis asserts). '
+            'Building, testing, deploying or publishing is not that result.')
 
 
 def completion_refusal_note(conn, task_id):
@@ -1514,6 +1527,13 @@ def completion_refusal_note(conn, task_id):
     if not spec or get_workflow(conn, task_id) is None:
         return None
     pending = mandatory_pending(conn, task_id, spec)
+    # MANDATORY_RESULT_20260915: validar só em save_spec deixaria passar toda
+    # spec antiga já salva, e são 70% delas. A mesma invariante vale aqui: sem
+    # critério obrigatório não existe aceite, existe card fechado.
+    try:
+        _sem_obrigatorio = not any(c.get('mandatory') for c in (json.loads(spec['content']).get('criteria') or []))
+    except Exception:
+        _sem_obrigatorio = False
     unmet = []  # CLOSURE_RECOVERY_20260911: requisitos não opcionais sem PASS no último relatório, sem continuação válida
     report = _artifact(conn, task_id, 'report')
     if report:
@@ -1523,11 +1543,17 @@ def completion_refusal_note(conn, task_id):
                 unmet = [c for c in (content.get('criteria') or []) if c.get('status') != 'PASS' and c.get('id') not in opt and c.get('id') not in pend_ids]
         except Exception:
             unmet = []
-    if not pending and not unmet:
+    if not pending and not unmet and not _sem_obrigatorio:
         return None
     wf = get_workflow(conn, task_id); st = json.loads(wf['state_json'] or '{}') or {}
     mutation = _relevant_mutation(conn, task_id)
     lines = ['Fechamento recusado: critério obrigatório sem medição PASS; o pedido não está resolvido no destino.']
+    if _sem_obrigatorio:  # MANDATORY_RESULT_20260915
+        lines[0] = ('Fechamento recusado: esta spec não tem nenhum critério obrigatório, então nada mede o pedido e o '
+                    'card fecharia sem resultado comprovado.')
+        lines.append('- salve uma nova revisão da spec declarando ao menos um critério com mandatory=true cuja sonda meça O RESULTADO '
+                     'QUE FOI PEDIDO na superfície que o solicitante usa (num reparo de dado, o readback depois da mutação; num '
+                     'relatório, o dado que a análise afirma). Construir, testar, publicar ou fazer deploy não é esse resultado.')
     for e in pending:
         ran = time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(e['ran_at'])) if e.get('ran_at') else 'não medido'
         lines.append(f"- {e['criterion']}: {e.get('text')}\n  esperado: {_json(e.get('expected'))[:400]}\n  observado: {_json(e.get('observed'))[:600]} ({e.get('state') or 'sem medição'}, {ran})\n  motivo: {e['why']}")
