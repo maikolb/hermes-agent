@@ -2162,12 +2162,15 @@ def _destination_next_action(conn, task_id, text, wait=None):
     return True
 
 
-def _destination_wait_answered(conn, task_id, reply, decision_id):
+def _destination_wait_answered(conn, task_id, reply):
     """Revisão 7: resposta humana em card com espera de destino (a pergunta que o Principal mandou a quem opera o destino) encerra a espera na
     transação que desbloqueia o card e vai ao next_action. Revisão 8: só quando a decisão respondida é a escalada desta espera (falha fechada
     sem vínculo); a íntegra fica no show do card (decisions). Revisão 9: a decisão respondida sai do evento nfos_human_answer_received e
     precisa ser única (o resume anexa a resposta a toda pergunta human aberta e o reconcile resolve todas, então comparar a resposta gravada
-    na escalada não prova nada); vínculo legado, sem wait_id, só com decisão criada depois do início da espera."""
+    na escalada não prova nada); vínculo legado, sem wait_id, só com decisão criada depois do início da espera. Revisão 13: resposta anexada a
+    várias perguntas abertas, entre elas a escalada desta espera, também encerra a espera e chega ao worker, marcada como sem pergunta
+    definida e sem valer como volta do destino (antes o reconcile resolvia e desbloqueava do mesmo jeito, a varredura descartava a espera e o
+    worker voltava sem a resposta); o vínculo sai só do evento da resposta, não da linha que o reconcile está processando."""
     wf = get_workflow(conn, task_id)
     try:
         state = json.loads(wf['state_json'] or '{}') or {} if wf else {}
@@ -2177,26 +2180,33 @@ def _destination_wait_answered(conn, task_id, reply, decision_id):
     if not isinstance(wait, dict):
         return False
     answered = _human_answer_decisions(conn, task_id, reply)  # revisão 10: evento desta resposta, pela origem da mensagem
-    if not answered or len(answered) != 1:
-        return False  # resposta anexada a mais de uma pergunta (ou sem registro): não prova que respondeu a escalada
-    answered = answered[0]
-    linked = wait.get('escalation_decision') == answered
-    if not linked:  # escalada ligada por outro caminho (órfão, legado): o contexto da decisão precisa nomear esta espera
-        decision = get_decision(conn, answered)
-        try:
-            ctx = json.loads(decision['context'] or '{}') or {} if decision else {}
-        except Exception:
-            ctx = {}
-        wait_id = wait.get('token') or None
-        linked = bool(isinstance(ctx, dict) and ctx.get('destination_wait') and ctx.get('target') == wait.get('target')
-                      and (ctx.get('wait_id') or None) == wait_id
-                      and (wait_id is not None or _legacy_after_wait_start(conn, task_id, wait.get('target'), decision['created_at'])))
-    if not linked:
-        return False
+    if not answered or not any(_escalation_of_wait(conn, task_id, wait, decision_id) for decision_id in answered):
+        return False  # sem registro desta resposta, ou resposta só de outras perguntas: não é resposta da escalada desta espera
     _store_destination_wait(conn, task_id, None)
-    _destination_next_action(conn, task_id, f"Resposta de {reply.get('author') or 'Human'} ({answered}; íntegra no `show` do card): "
-                                            f"{reply.get('answer') or ''}")
+    author, answer = reply.get('author') or 'Human', reply.get('answer') or ''
+    if len(answered) == 1:
+        _destination_next_action(conn, task_id, f"Resposta de {author} ({answered[0]}; íntegra no `show` do card): {answer}")
+    else:  # revisão 13: a mesma resposta foi para várias perguntas; chega ao worker sem ser atribuída à escalada nem valer como volta do destino
+        _destination_next_action(conn, task_id, f"Resposta de {author} a {len(answered)} perguntas abertas ({', '.join(answered)}), sem dizer a qual "
+                                                f"responde; não prova que o destino voltou, meça de novo (íntegra no `show` do card): {answer}")
     return True
+
+
+def _escalation_of_wait(conn, task_id, wait, decision_id):
+    """Revisão 8: a decisão é a escalada desta espera, pelo vínculo gravado na espera ou pelo contexto que nomeia a espera (wait_id; legado
+    sem wait_id só com decisão criada depois do início dela). Revisão 13: separado de _destination_wait_answered para valer em cada decisão
+    à qual a resposta foi anexada."""
+    if wait.get('escalation_decision') == decision_id:
+        return True
+    decision = get_decision(conn, decision_id)
+    try:
+        ctx = json.loads(decision['context'] or '{}') or {} if decision else {}
+    except Exception:
+        ctx = {}
+    wait_id = wait.get('token') or None
+    return bool(isinstance(ctx, dict) and ctx.get('destination_wait') and ctx.get('target') == wait.get('target')
+                and (ctx.get('wait_id') or None) == wait_id
+                and (wait_id is not None or _legacy_after_wait_start(conn, task_id, wait.get('target'), decision['created_at'])))
 
 
 def _human_answer_decisions(conn, task_id, reply):
@@ -2257,7 +2267,8 @@ def _legacy_after_wait_start(conn, task_id, target, created_at):
 def _destination_escalation_answer(conn, task_id, limit=4000):
     """Revisão 7: resposta da última escalada de destino resolvida com informação para o worker. Revisão 8: só a escalada da espera mais
     recente (wait_id do evento nfos_destination_wait; legado sem id: mesmo alvo e resolvida desde a espera), resposta humana reconhecida pelo
-    human_reply do contexto e não pelo autor, e texto acima do limite avisa que a íntegra está no show do card."""
+    human_reply do contexto e não pelo autor, e texto acima do limite avisa que a íntegra está no show do card. Revisão 13: resposta humana
+    anexada a várias perguntas abertas aparece marcada como sem pergunta definida, sem ser atribuída à escalada."""
     last = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id=? AND kind='nfos_destination_wait' ORDER BY id DESC LIMIT 1",
                         (task_id,)).fetchone()
     if not last:
@@ -2280,10 +2291,15 @@ def _destination_escalation_answer(conn, task_id, limit=4000):
                 or (ctx.get('wait_id') or None) != wait_id or (wait_id is None and int(created_at or 0) < started)  # revisão 10: criação
                 or not (action == 'changes' or ctx.get('human_reply'))):
             continue
-        if action != 'changes' and _human_answer_decisions(conn, task_id, ctx.get('human_reply')) != [decision_id]:
-            continue  # revisão 9: resposta humana anexada a várias perguntas não é resposta da escalada
         text = str(answer)
         note = f'; first {limit} of {len(text)} characters, whole answer in the card show' if len(text) > limit else ''
+        if action != 'changes':
+            answered = _human_answer_decisions(conn, task_id, ctx.get('human_reply'))
+            if not answered or decision_id not in answered:
+                continue  # revisão 9: resposta sem o registro desta pergunta (reentrega) não é resposta da escalada
+            if len(answered) > 1:  # revisão 13: anexada a várias perguntas abertas, chega ao worker sem ser atribuída à escalada
+                return (f"Human answer from {author} attached to {len(answered)} open questions of this card ({', '.join(answered)}), not known "
+                        f"which one it answers; it does not prove the destination is back{note}: {text[:limit]}")
         return f"Answer to the destination escalation {decision_id} ({author}, {action}{note}): {text[:limit]}"
     return ''
 
@@ -3291,6 +3307,9 @@ def reconcile_human_answers(conn):
         task=_kb().get_task(conn,row['task_id'])
         if not task or task.status in {'done','archived'}:
             continue
+        current=get_decision(conn,row['id'])  # HUMAN_LAST_RESORT revisão 13: a lista é do início do tick; uma volta anterior pode ter resolvido
+        if not current or current['status']!='human':  # esta pergunta com a mesma resposta e desbloqueado o card, que não pode voltar a bloquear
+            continue
         # Apply the Principal's persisted decision even when the model ignores
         # it or waits on a newer question. Closing the run enables the existing
         # process-tree reconciler; waiting for the live worker first deadlocks.
@@ -3319,7 +3338,7 @@ def reconcile_human_answers(conn):
             conn.execute("UPDATE nfos_decisions SET status='pending',action=NULL,answer=NULL,author=NULL,resolved_at=NULL,dispatched_at=NULL WHERE task_id=? AND status='human' AND kind='additional_tasks'",
                          (row['task_id'],))
             _event(conn,row['task_id'],None,'nfos_human_answered',reply)
-            _destination_wait_answered(conn,row['task_id'],reply,row['id'])  # HUMAN_LAST_RESORT revisão 7: a resposta ao operador chega ao worker
+            _destination_wait_answered(conn,row['task_id'],reply)  # HUMAN_LAST_RESORT revisão 7: a resposta ao operador chega ao worker
             for split in splits:
                 _event(conn,row['task_id'],None,'nfos_principal_requested',
                        {'decision_id':split['id'],'kind':'additional_tasks','question':split['question'],

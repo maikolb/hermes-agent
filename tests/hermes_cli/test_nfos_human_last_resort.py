@@ -1150,7 +1150,7 @@ def test_answer_to_another_question_does_not_end_the_wait(board, monkeypatch):
 
 # --- revisão 9 (rejulgamento 6e022b05) --------------------------------------------------------------------------------------------------
 
-def test_answer_attached_to_two_questions_does_not_close_the_escalation(board, monkeypatch):
+def test_answer_attached_to_two_questions_reaches_the_worker_without_being_taken_as_the_operator_answer(board, monkeypatch):
     with kb.connect_closing() as conn:
         task = _card(conn, 65, spec=_spec(_http_probe()))
         asked = _escalate(conn, task, monkeypatch)
@@ -1161,11 +1161,20 @@ def test_answer_attached_to_two_questions_does_not_close_the_escalation(board, m
         conn.execute("UPDATE nfos_decisions SET status='human', action='human', author='Principal', answer=? WHERE id='dec_plano'",
                      ("PERGUNTA para Jhonatan: qual plano Hotmart conta como pago?",))
         conn.commit()
-        reason = delivery.get_workflow(conn, task.id)["next_action"]
-        assert delivery.resume_after_answer(conn, task.id, answer="O plano anual.", source={"platform": "telegram", "actor": "Jhonatan", "message_id": "4246"})
-        assert delivery.get_workflow(conn, task.id)["next_action"] == reason
-        assert "destination_wait" in _state(conn, task.id)
-        assert "Answer to the destination escalation" not in delivery.case_context(conn, task.id)
+        answer = "Religuei em outro IP: https://infotributos.15.229.99.12.nip.io"
+        assert delivery.resume_after_answer(conn, task.id, answer=answer, source={"platform": "telegram", "actor": "Jhonatan", "message_id": "4246"})
+        # revisão 13: o resume anexou a resposta às duas perguntas e o reconcile resolveu as duas; ela chega ao worker sem virar resposta da escalada
+        assert delivery.get_decision(conn, asked)["status"] == "resolved" and "destination_wait" not in _state(conn, task.id)
+        assert kb.get_task(conn, task.id).status == "ready"  # a outra pergunta, da lista do início do tick, não bloqueia o card de novo
+        action = delivery.get_workflow(conn, task.id)["next_action"]
+        assert answer in action and "sem dizer a qual" in action and "não prova que o destino voltou" in action
+        assert asked in action and "dec_plano" in action
+        context = delivery.case_context(conn, task.id)
+        assert answer in context and "not known which one it answers" in context
+        assert "Answer to the destination escalation" not in context
+        # a medição antiga não estaciona o card de novo antes de o worker agir sobre a resposta
+        assert delivery.sweep_destination_waits(conn) == []
+        assert kb.get_task(conn, task.id).status == "ready" and answer in delivery.get_workflow(conn, task.id)["next_action"]
 
 
 def test_escalation_of_a_blocked_card_gets_reminders_and_a_visible_stall(board, monkeypatch):
@@ -1434,3 +1443,28 @@ def test_human_phase_reminder_counts_from_the_question_not_from_older_reminders(
         before = conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'", (task.id,)).fetchone()[0]
         delivery.sweep_destination_waits(conn)
         assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'", (task.id,)).fetchone()[0] == before
+
+
+# --- revisão 13 (rejulgamento 0eff7f9c) -------------------------------------------------------------------------------------------------
+
+def test_one_answer_to_two_open_questions_does_not_block_the_card_again(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _card(conn, 81, spec=_spec(_http_probe()))
+        _worker_gone(conn, task, monkeypatch)
+        questions = ("Qual plano Hotmart conta como pago?", "A validade conta da compra ou da aprovação?")
+        for n, question in enumerate(questions):
+            conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                         (f"dec_q{n}", task.id, task.current_run_id, "impediment", question, "{}", 1, int(time.time()) + n))
+            conn.execute("UPDATE nfos_decisions SET status='human', action='human', author='Principal', answer=? WHERE id=?",
+                         (f"PERGUNTA para Jhonatan: {question}", f"dec_q{n}"))
+        conn.commit()
+        delivery.reconcile_human_answers(conn)
+        assert kb.get_task(conn, task.id).status == "blocked"  # sem resposta, a pergunta segura o card
+        answer = "O plano anual, contando da aprovação."
+        assert delivery.resume_after_answer(conn, task.id, answer=answer, source={"platform": "telegram", "actor": "Jhonatan", "message_id": "4260"})
+        # a primeira volta do reconcile resolve as duas perguntas e desbloqueia; a segunda, com a lista do início do tick, não bloqueia de novo
+        assert kb.get_task(conn, task.id).status == "ready"
+        statuses = [row["status"] for row in conn.execute("SELECT status FROM nfos_decisions WHERE task_id=? ORDER BY id", (task.id,)).fetchall()]
+        assert statuses == ["resolved", "resolved"]
+        assert not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='blocked' AND payload LIKE ?",
+                                (task.id, "%A validade conta%")).fetchone()
