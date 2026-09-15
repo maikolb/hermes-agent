@@ -402,9 +402,18 @@ WAKE_GROUP_RULE = (  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913: instru�
 )
 
 _CLIENT_SILENT_KINDS = frozenset({  # CLIENT_CHAT_20260913: no chat do cliente nenhuma mensagem passiva do notificador
-    "completed", "blocked", "gave_up", "crashed", "timed_out", "model_fallback", "claimed", "status",
+    "blocked", "gave_up", "crashed", "timed_out", "model_fallback", "claimed", "status",
     "nfos_principal_requested", "block_loop_detected", "review_requested",
 })
+
+# CLIENT_DELIVERY_20260915: "completed" saiu da lista acima. O contrato de
+# 13/09 quis tirar ruído do grupo do cliente (claimed, status, blocked,
+# crashed) e levou junto a CONCLUSÃO do pedido dele. Efeito medido em 15/09:
+# todo card fechado emitia client_publication_suppressed e o cliente nunca era
+# avisado — a causa literal de nenhuma entrega ter endosso. A conclusão do
+# pedido não é mensagem passiva do notificador: é a resposta ao que o cliente
+# pediu, e sem ela não existe aceite, só card fechado.
+_CLIENT_DELIVERY_KINDS = frozenset({"completed"})
 
 
 def _client_source_for_board(board):
@@ -435,6 +444,35 @@ def _is_client_chat(board, sub):
     return (str(src.get("platform") or "").lower() == str(sub.get("platform") or "").lower()
             and str(src.get("chat_id") or "") == str(sub.get("chat_id") or "")
             and str(src.get("thread_id") or "") == str(sub.get("thread_id") or ""))
+
+
+def _client_delivery_message(board, task_id):
+    """CLIENT_DELIVERY_20260915: o que o cliente lê quando o pedido dele fecha.
+
+    Usa o mesmo veredito honesto da barra (``_progress_outcome``): "entregue"
+    só com relatório e todos os critérios não opcionais em PASS, "parcial"
+    com pendência, "encerrado" quando cancelado pelo dono, "concluído" quando
+    o card fechou sem relatório legível. Nunca afirma entrega que o relatório
+    não sustenta, e nunca publica detalhe interno (spec, sonda, worker, run).
+    """
+    outcome = _progress_outcome(board, task_id)
+    resumo = ""
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.connect_closing(board=board) as conn:
+            row = conn.execute("SELECT result, title FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row:
+                resumo = str(row["result"] or row["title"] or "").strip()
+    except Exception:
+        logger.debug("kanban notifier: client delivery summary failed for %s", task_id, exc_info=True)
+    if len(resumo) > 900:
+        resumo = resumo[:900].rsplit(" ", 1)[0] + "…"
+    cabecalho = {
+        "entregue": "Resolvido",
+        "parcial": "Resolvido em parte",
+        "encerrado": "Encerrado",
+    }.get(outcome, "Concluído")
+    return f"{cabecalho}: {resumo}" if resumo else cabecalho
 
 
 def _record_client_suppression(board, task_id, kind, sub):
@@ -3420,6 +3458,7 @@ class GatewayKanbanWatchersMixin:
                                 ),
                             )
                         _client_chat = kind in _CLIENT_SILENT_KINDS and _is_client_chat(board_slug, sub)  # CLIENT_CHAT_20260913
+                        _client_delivery = kind in _CLIENT_DELIVERY_KINDS and _is_client_chat(board_slug, sub)  # CLIENT_DELIVERY_20260915
                         if _client_chat:
                             sub["_model_fallback_notices"] = []
                         if sub.get("_model_fallback_notices"):
@@ -3475,6 +3514,12 @@ class GatewayKanbanWatchersMixin:
                             if _client_chat:  # CLIENT_CHAT_20260913: nada publicado no chat do cliente; recibo e wake seguem
                                 _send_res = None
                                 await asyncio.to_thread(_record_client_suppression, board_slug, sub["task_id"], kind, sub)
+                            elif _client_delivery:  # CLIENT_DELIVERY_20260915: o cliente é avisado do resultado do pedido dele
+                                _client_msg = await asyncio.to_thread(
+                                    _client_delivery_message, board_slug, sub["task_id"])
+                                _send_res = await adapter.send(
+                                    sub["chat_id"], _client_msg, metadata=metadata,
+                                )
                             else:
                                 _send_res = await adapter.send(
                                     sub["chat_id"], msg, metadata=metadata,

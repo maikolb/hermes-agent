@@ -1423,8 +1423,58 @@ def _optional_criteria(spec_row):
 _MEASURED_RX = re.compile(r'(sql|https?://|\bhttp\b|curl|\bget\b|readback|\bapi\b|query|\bselect\b|playwright|browser|psql|postgres|\bdb\b|banco|\brota\b|route|endpoint|tabela|\btable\b|snapshot|admin\.|/api/|wget|fetch)', re.I)  # MEASURED_PRECHECK_20260911
 
 
+def _probe_signature(probe):
+    """Identidade da MEDIÇÃO, não do critério: o que a sonda observa e o que espera.
+
+    Dois critérios podem legitimamente ler a mesma URL; o que não pode é a
+    mesma leitura com a mesma expectativa responder por requisitos
+    diferentes, porque aí um único fato vira vários indicadores verdes.
+    """
+    if not isinstance(probe, dict):
+        return None
+    alvo = probe.get('url') or probe.get('query') or ''
+    return _json({'kind': probe.get('kind'), 'target': str(alvo).strip(),
+                  'header': str(probe.get('header') or '').strip(),
+                  'json_path': str(probe.get('json_path') or '').strip(),
+                  'expect': probe.get('expect')})
+
+
+def _check_distinct_measurements(spec):
+    """DISTINCT_MEASUREMENT_20260915: um requisito obrigatório, uma medição própria.
+
+    Medido em 15/09: 10 de 19 cards tinham critérios obrigatórios distintos
+    apontando para a mesma requisição com a mesma expectativa. No t_ff7b8ccc
+    os cinco critérios compartilhavam URL e expect, inclusive um que exigia
+    testes unitários verdes e era medido por um HTTP procurando o nome de um
+    cargo. O relatório fechava com cinco PASS e uma única condição medida.
+
+    Critérios optional e sondas phase=before ficam de fora: não sustentam
+    aceite. A saída legítima para um requisito que a mesma leitura já cobre é
+    declará-lo optional com optional_reason, não duplicar a sonda.
+    """
+    vistos = {}
+    for crit in spec.get('criteria') or []:
+        if not isinstance(crit, dict) or not crit.get('mandatory') or crit.get('optional'):
+            continue
+        probe = crit.get('probe')
+        if not isinstance(probe, dict) or probe.get('phase') == 'before':
+            continue
+        assinatura = _probe_signature(probe)
+        if assinatura is None:
+            continue
+        anterior = vistos.get(assinatura)
+        if anterior is not None:
+            raise WorkflowError(
+                f"Criteria {anterior} and {crit.get('id')} are both mandatory and are measured by the SAME probe "
+                f"(same kind, same target and same expect): one observation cannot prove two different requirements. "
+                f"Give each mandatory criterion a probe that measures ITS OWN requirement on the surface the user "
+                f"consumes, or declare the redundant one optional with optional_reason.")
+        vistos[assinatura] = crit.get('id')
+
+
 def _spec_result_criteria_checks(conn, task_id, spec):
     """Owner mode: valida sondas e exige critério obrigatório quando a reprodução foi medida."""
+    _check_distinct_measurements(spec)  # DISTINCT_MEASUREMENT_20260915
     for crit in spec.get('criteria') or []:
         if crit.get('probe') is not None or crit.get('mandatory'):
             _validate_probe(crit.get('id'), crit.get('probe'))
