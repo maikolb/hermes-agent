@@ -3139,6 +3139,17 @@ class GatewayKanbanWatchersMixin:
                                             )
                                             continue
                                     platform = (sub.get("platform") or "").lower()
+                                    if platform == "portal":
+                                        # Portal has no chat adapter. Reuse the project's
+                                        # persisted Principal route for internal decisions;
+                                        # keep the portal receipt/cursor as their authority.
+                                        targets = [target for target in board_targets
+                                                   if target.get("notifier_profile") == (owner_profile or notifier_profile)
+                                                   and target.get("platform") in active_platforms]
+                                        if len(targets) != 1:
+                                            continue
+                                        sub["_principal_target"] = targets[0]
+                                        platform = targets[0]["platform"]
                                     if platform not in active_platforms:
                                         logger.debug(
                                             "kanban notifier: subscription for %s on %s skipped; adapter not connected",
@@ -3163,7 +3174,7 @@ class GatewayKanbanWatchersMixin:
                                         platform=sub["platform"],
                                         chat_id=sub["chat_id"],
                                         thread_id=sub.get("thread_id") or "",
-                                        kinds=CLAIM_KINDS,
+                                        kinds=("nfos_principal_requested",) if sub.get("_principal_target") else CLAIM_KINDS,
                                         claim_token=claim_token,
                                     )
                                     if not events:
@@ -3291,7 +3302,9 @@ class GatewayKanbanWatchersMixin:
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
-                    platform_str = (sub["platform"] or "").lower()
+                    principal_target = sub.get("_principal_target")
+                    route = principal_target or sub
+                    platform_str = (route["platform"] or "").lower()
                     try:
                         plat = _Platform(platform_str)
                     except ValueError:
@@ -3335,7 +3348,7 @@ class GatewayKanbanWatchersMixin:
                         sub["task_id"], sub["platform"],
                         sub["chat_id"], sub.get("thread_id") or "",
                     )
-                    mode = sub.get("delivery_mode") or "notify"
+                    mode = "wake" if principal_target else sub.get("delivery_mode") or "notify"
                     wake_agent = mode in ("notify+wake", "wake")
                     send_passive = mode != "wake"
                     # Worker handoff carried into the synthetic wake turn below
@@ -3352,6 +3365,10 @@ class GatewayKanbanWatchersMixin:
                         _pb_metadata["thread_id"] = sub["thread_id"]
                     for ev in d["events"]:
                         kind = ev.kind
+                        if principal_target:
+                            # The card is the response surface. No passive chat post
+                            # or progress bubble belongs to this internal wake.
+                            continue
                         try:
                             _pb_handled = await _kanban_progress_bar(kind, sub, board_slug, adapter, _pb_metadata)
                         except Exception as _pb_err:
@@ -3694,6 +3711,9 @@ class GatewayKanbanWatchersMixin:
                             )
                             # WAKE_SILENCE_20260910 (ordem do Maikol): a regra de silêncio vai no próprio wake
                             _synth += "\n\n" + WAKE_GROUP_RULE  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913
+                            if principal_target:
+                                _synth += ("\nOrigem: card do portal/Vigília. Registre a resposta no próprio card por `decide`; "
+                                           "não publique mensagem no chat. A rota do projeto serve apenas para acordar o Principal.")
                             if "nfos_principal_requested" in _wake_kinds:
                                 from hermes_cli.nfos_runtime import workflow_command
                                 _synth += (f"\nNFOS: consulte `{workflow_command()} pending` "
@@ -3758,16 +3778,16 @@ class GatewayKanbanWatchersMixin:
                             # handle_message() get_or_create_session's the
                             # target, so a mismatch only ever degrades to a
                             # fresh session, never an exception.
-                            _chat_type = _sub_chat_type(sub, platform_str)  # DM_NEG_CHAT_20260910
+                            _chat_type = _sub_chat_type(route, platform_str)  # DM_NEG_CHAT_20260910
                             _source = SessionSource(
                                 platform=plat,
-                                chat_id=sub["chat_id"],
+                                chat_id=route["chat_id"],
                                 chat_type=_chat_type,
-                                thread_id=sub.get("thread_id") or None,
-                                user_id=sub.get("user_id"),
-                                user_id_alt=sub.get("user_id_alt"),
+                                thread_id=route.get("thread_id") or None,
+                                user_id=route.get("user_id"),
+                                user_id_alt=route.get("user_id_alt"),
                                 profile=sub_profile or None,
-                                scope_id=_wake_scope_id(adapter, sub),
+                                scope_id=_wake_scope_id(adapter, route),
                             )
                             # deliver_wake preserves the synthetic
                             # MessageEvent/handle_message path for
