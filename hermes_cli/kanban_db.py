@@ -3363,14 +3363,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                         task_id, profile, status,
                         claim_lock, claim_expires, worker_pid,
                         max_runtime_seconds, last_heartbeat_at,
-                        started_at
-                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)
+                        started_at, metadata
+                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"], row["assignee"], row["claim_lock"],
                         row["claim_expires"], row["worker_pid"],
                         row["max_runtime_seconds"], row["last_heartbeat_at"],
-                        started,
+                        started, _stamped_run_metadata(),
                     ),
                 )
                 # CAS: only install the pointer if nothing else claimed
@@ -5414,6 +5414,20 @@ def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
     return int(row["current_run_id"]) if row and row["current_run_id"] else None
 
 
+def _stamped_run_metadata(metadata=None):
+    """Serialize run metadata carrying the runtime identity (Entrega 1B).
+
+    Returns the JSON string to store in ``task_runs.metadata``. Degrades to
+    the caller's own metadata (or NULL) if identification fails: a run that
+    cannot be identified is a gap in the audit trail, never a blocked claim.
+    """
+    try:
+        from hermes_cli.runtime_identity import stamp_metadata
+        return json.dumps(stamp_metadata(metadata), ensure_ascii=False)
+    except Exception:
+        return json.dumps(metadata, ensure_ascii=False) if metadata else None
+
+
 def _synthesize_ended_run(
     conn: sqlite3.Connection,
     task_id: str,
@@ -5458,7 +5472,7 @@ def _synthesize_ended_run(
             task_id, profile, step_key,
             outcome, outcome,
             summary, error,
-            json.dumps(metadata, ensure_ascii=False) if metadata else None,
+            _stamped_run_metadata(metadata),
             now, now,
         ),
     )
@@ -5753,8 +5767,8 @@ def claim_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, metadata
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -5764,6 +5778,7 @@ def claim_task(
                 expires,
                 trow["max_runtime_seconds"] if trow else None,
                 now,
+                _stamped_run_metadata(),
             ),
         )
         run_id = run_cur.lastrowid
@@ -5854,8 +5869,8 @@ def claim_review_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, metadata
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -5865,6 +5880,7 @@ def claim_review_task(
                 expires,
                 trow["max_runtime_seconds"] if trow else None,
                 now,
+                _stamped_run_metadata(),
             ),
         )
         run_id = run_cur.lastrowid
@@ -8547,9 +8563,11 @@ def edit_completed_task_result(
                 (handoff_summary, run_id),
             )
             if metadata is not None:
+                from hermes_cli.runtime_identity import merge_run_metadata
                 conn.execute(
                     "UPDATE task_runs SET metadata = ? WHERE id = ?",
-                    (json.dumps(metadata, ensure_ascii=False), run_id),
+                    (json.dumps(merge_run_metadata(conn, run_id, metadata),
+                                ensure_ascii=False), run_id),
                 )
         _ev_lines = (handoff_summary or "").strip().splitlines()
         ev_summary = _ev_lines[0][:400] if _ev_lines else ""

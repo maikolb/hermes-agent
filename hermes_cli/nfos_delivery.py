@@ -224,6 +224,79 @@ def escalate_urgent(conn, task_id, *, reason, author='Principal', request_id=Non
     return {'task_id': task_id, 'priority': task.priority, 'status': task.status, 'reason': doc['reason']}
 
 
+# CLIENT_ACK_20260915: o prefixo truncado precisa de \w* antes do limite.
+# `\b(resolvid)\b` NUNCA casa "resolvido", porque o \b final exige fim de
+# palavra logo apos o prefixo, e uma confirmacao real do cliente cairia como
+# ambigua. Pego por teste antes de ir para producao.
+_ACEITE_RX = re.compile(r'\b(resolvid\w*|corrigid\w*|funcionou|funcionando|deu certo|est[aá] certo|t[aá] certo|'
+                        r'est[aá] ok|ficou bom|perfeito|show|beleza)\b', re.I)
+_RECUSA_RX = re.compile(r'\b(n[aã]o resolveu|n[aã]o funcionou|n[aã]o foi|continua|ainda (est[aá]|n[aã]o|aparece|d[aá])|'
+                        r'piorou|permanece|mesmo (erro|problema)|voltou|errado)\b', re.I)
+
+
+def _classify_ack(text):
+    """CLIENT_ACK_20260915: aceito, recusado ou ambíguo. Na dúvida, ambíguo.
+
+    Deliberadamente não aceita "obrigado", "vou testar", "recebido" nem emoji
+    isolado como aprovação: são acusações de recebimento, não do resultado.
+    Recusa vence aceite quando as duas expressões aparecem ("resolvido? não,
+    continua igual").
+    """
+    corpo = str(text or '')
+    recusa = bool(_RECUSA_RX.search(corpo))
+    aceite = bool(_ACEITE_RX.search(corpo))
+    if recusa:
+        return 'recusado'
+    if aceite:
+        return 'aceito'
+    return 'ambiguo'
+
+
+def _delivery_awaiting_ack(conn, source, message_id):
+    """Card cuja devolutiva publicada tem este message_id, na mesma conversa."""
+    if not message_id:
+        return None, None
+    row = conn.execute(
+        "SELECT task_id, payload FROM task_events WHERE kind='nfos_client_delivery_published' "
+        "AND json_extract(payload,'$.message_id')=? ORDER BY id DESC LIMIT 1", (str(message_id),)).fetchone()
+    if row is None:
+        return None, None
+    try:
+        p = json.loads(row['payload'] or '{}')
+    except Exception:
+        return None, None
+    if (str(p.get('chat_id') or ''), str(p.get('thread_id') or '')) != (
+            str(source.get('chat_id') or ''), str(source.get('thread_id') or '')):
+        return None, None  # mesma id em outra conversa nao e a mesma entrega
+    return row['task_id'], p
+
+
+def _client_ack_intake(conn, source, text, reply_to_message_id, *, author):
+    """CLIENT_ACK_20260915: registra o endosso (ou a recusa) do cliente.
+
+    Só conta resposta DIRETA à devolutiva: o reply_to_message_id tem de casar
+    com o message_id que publicamos. Silêncio nunca vira aceite, e proximidade
+    de horário na thread não é vínculo — vários cards fecham perto no tempo.
+    """
+    try:
+        task_id, pub = _delivery_awaiting_ack(conn, source, reply_to_message_id)
+        if not task_id:
+            return None
+        veredito = _classify_ack(text)
+        _event(conn, task_id, None, 'nfos_client_ack', {
+            'ack': veredito,
+            'author': author,
+            'text': str(text or '').strip()[:1000],
+            'reply_to': str(reply_to_message_id),
+            'delivery_outcome': pub.get('outcome'),
+        })
+        _kb().add_comment(conn, task_id, author,
+                          f"[cliente: {veredito}] " + str(text or '').strip()[:1200])
+        return {'task_id': task_id, 'ack': veredito}
+    except Exception:
+        return None  # nunca derruba o intake
+
+
 def _urgent_intake(conn, request_id, source, text, reply_to_message_id, *, author, urgency=None):
     """URGENT_20260910 e URGENCY_CONTEXT_20260914: resposta a pedido de card aberto ou repetição da sua referência anexa ao
     card existente (sem card novo). A urgência vem só do julgamento do Principal (urgency com motivo), nunca de
@@ -284,6 +357,11 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
                 conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(saved),request_id))
         try:  # URGENT_20260910: anexa a card aberto e escala a urgência julgada; sem urgência, nunca derruba o intake
             _author=(re.match(r'\s*\[([^|\]]+)\|', text or '') or [None, None])[1] or 'nfos-intake'
+            # CLIENT_ACK_20260915: uma resposta direta à devolutiva é primeiro um
+            # aceite (ou uma recusa) da entrega, e só depois um pedido. Registrar
+            # antes do intake preserva as duas informações: a mensagem pode
+            # confirmar E trazer demanda nova.
+            _client_ack_intake(conn, source, text, reply_to_message_id, author=_author)
             _urgent_intake(conn, request_id, source, text, reply_to_message_id, author=_author, urgency=urgency)
         except Exception:
             if urgency is not None:
@@ -1423,8 +1501,257 @@ def _optional_criteria(spec_row):
 _MEASURED_RX = re.compile(r'(sql|https?://|\bhttp\b|curl|\bget\b|readback|\bapi\b|query|\bselect\b|playwright|browser|psql|postgres|\bdb\b|banco|\brota\b|route|endpoint|tabela|\btable\b|snapshot|admin\.|/api/|wget|fetch)', re.I)  # MEASURED_PRECHECK_20260911
 
 
+def _probe_signature(probe):
+    """Identidade da MEDIÇÃO, não do critério: o que a sonda observa e o que espera.
+
+    Dois critérios podem legitimamente ler a mesma URL; o que não pode é a
+    mesma leitura com a mesma expectativa responder por requisitos
+    diferentes, porque aí um único fato vira vários indicadores verdes.
+    """
+    if not isinstance(probe, dict):
+        return None
+    alvo = probe.get('url') or probe.get('query') or ''
+    return _json({'kind': probe.get('kind'), 'target': str(alvo).strip(),
+                  'header': str(probe.get('header') or '').strip(),
+                  'json_path': str(probe.get('json_path') or '').strip(),
+                  'expect': probe.get('expect')})
+
+
+def _check_distinct_measurements(spec):
+    """DISTINCT_MEASUREMENT_20260915: um requisito obrigatório, uma medição própria.
+
+    Medido em 15/09: 10 de 19 cards tinham critérios obrigatórios distintos
+    apontando para a mesma requisição com a mesma expectativa. No t_ff7b8ccc
+    os cinco critérios compartilhavam URL e expect, inclusive um que exigia
+    testes unitários verdes e era medido por um HTTP procurando o nome de um
+    cargo. O relatório fechava com cinco PASS e uma única condição medida.
+
+    Critérios optional e sondas phase=before ficam de fora: não sustentam
+    aceite. A saída legítima para um requisito que a mesma leitura já cobre é
+    declará-lo optional com optional_reason, não duplicar a sonda.
+    """
+    vistos = {}
+    for crit in spec.get('criteria') or []:
+        if not isinstance(crit, dict) or not crit.get('mandatory') or crit.get('optional'):
+            continue
+        probe = crit.get('probe')
+        if not isinstance(probe, dict) or probe.get('phase') == 'before':
+            continue
+        assinatura = _probe_signature(probe)
+        if assinatura is None:
+            continue
+        anterior = vistos.get(assinatura)
+        if anterior is not None:
+            raise WorkflowError(
+                f"Criteria {anterior} and {crit.get('id')} are both mandatory and are measured by the SAME probe "
+                f"(same kind, same target and same expect): one observation cannot prove two different requirements. "
+                f"Give each mandatory criterion a probe that measures ITS OWN requirement on the surface the user "
+                f"consumes, or declare the redundant one optional with optional_reason.")
+        vistos[assinatura] = crit.get('id')
+
+
+def _probe_target(probe):
+    """Tudo que decide O QUE a sonda observa e QUANDO ela fica verde.
+
+    Revisao 2, 15/09, depois de o Codex reproduzir bypasses contra a revisao 1.
+    Aquela versao fazia split("?")[0], ignorava o expect, baixava a caixa da
+    query e cortava em 160 caracteres. Cada reducao era um caminho para mudar a
+    medicao sem a regra enxergar, porque a comparacao comeca com
+    `if antes == depois: continue`:
+      a query da URL escolhe commit, cliente, ambiente ou recorte, e trocar
+        ?sha=solicitado por ?sha=antigo-verde deixava o alvo "igual";
+      o expect e o limiar, e equals "success" virando contains_all ["o"] deixava
+        o alvo "igual" enquanto "velho" passava a satisfazer;
+      .lower() apagava literal sensivel a caixa em SQL;
+      o corte em 160 apagava um filtro que seleciona outra execucao.
+    Agora nada e descartado.  # MEASUREMENT_INTEGRITY_20260915 revisao 2
+    """
+    if not isinstance(probe, dict):
+        return None
+    kind = str(probe.get('kind') or '')
+    partes = {'kind': kind, 'expect': probe.get('expect'),
+              'json_path': str(probe.get('json_path') or '').strip()}
+    if kind in ('http', 'header'):
+        url = str(probe.get('url') or '').strip()
+        if not url:
+            return None
+        partes['url'] = url
+    else:
+        alvo = probe.get('query') or probe.get('command') or probe.get('target')
+        if not alvo:
+            return None
+        partes['query'] = re.sub(r'[ \t\r\n]+', ' ', str(alvo)).strip()
+    return _json(partes)
+
+
+def _probe_shape(probe):
+    """A medicao sem o endereco. Sozinha ela NAO prova continuidade do alvo.
+
+    Serve so para separar "mudou o host" de "mudou o que se le". Quem decide se
+    a relocacao e legitima e o escopo do destino, nao esta funcao: o Codex
+    mostrou que preservar caminho e expect permite trocar o CI real por uma
+    fixture. Por isso quem chama exige tambem que o host novo esteja no destino
+    de entrega ou em probe_hosts.
+    """
+    if not isinstance(probe, dict):
+        return None
+    caminho = ''
+    if probe.get('url'):
+        try:
+            _u = urlsplit(str(probe.get('url')))
+            caminho = _u.path + (('?' + _u.query) if _u.query else '')
+        except ValueError:
+            caminho = str(probe.get('url'))
+    alvo = probe.get('query') or probe.get('command') or ''
+    return _json({'kind': probe.get('kind'), 'path': caminho,
+                  'query': re.sub(r'[ \t\r\n]+', ' ', str(alvo)).strip(),
+                  'json_path': probe.get('json_path'), 'expect': probe.get('expect')})
+
+
+def _normaliza_meta(valor):
+    """Meta comparada por conteudo, nao por pontuacao: acrescentar um ponto final
+    nao pode exigir decisao do Principal (muro reproduzido pelo Codex)."""
+    return re.sub(r'[^0-9a-z]+', ' ', str(valor or '').lower()).strip()
+
+
+def _resolved_decision(conn, task_id, decision_id, desde_revisao=None):
+    """Decisao existente, deste card, resolvida E que alcanca esta alteracao.
+
+    A revisao 1 checava id, card e status, e so isso: o Codex mostrou uma
+    decisao de "qual horario?" autorizando trocar sonda e meta. As 122 decisoes
+    resolvidas do card nao sao 122 autorizacoes intercambiaveis. Agora a decisao
+    tambem precisa ser de uma revisao de spec igual ou posterior aquela em que o
+    problema apareceu, o que impede sacar uma decisao antiga e sem relacao.
+
+    Continua sendo um vinculo fraco: ele prova que a decisao e recente e deste
+    card, nao que ela autoriza esta mudanca especifica. Amarrar autorizacao ao
+    criterio exige campo que a tabela nao tem hoje.
+    """
+    ident = str(decision_id or '').strip()
+    if not ident:
+        return False
+    try:
+        row = conn.execute("SELECT status, spec_revision FROM nfos_decisions "
+                           "WHERE id=? AND task_id=? LIMIT 1", (ident, task_id)).fetchone()
+    except Exception:
+        return False
+    if not row or str(row[0] or '') != 'resolved':
+        return False
+    if desde_revisao is None:
+        return True
+    try:
+        return int(row[1] or 0) >= int(desde_revisao)
+    except Exception:
+        return False
+
+
+def _correcao_valida(conn, task_id, correcoes, cid, ids_reais, desde_revisao):
+    """A correcao aponta para um criterio que existe e cita decisao que alcanca.
+
+    O criterio inexistente importa: o Codex passou pela regra da meta citando
+    uma decisao dentro de uma correcao cujo id nao era de nenhum criterio.
+    """
+    corr = correcoes.get(cid)
+    if not isinstance(corr, dict) or cid not in ids_reais:
+        return False
+    return _resolved_decision(conn, task_id, corr.get('decision'), desde_revisao)
+
+
+def _check_measurement_integrity(conn, task_id, previous, spec):
+    """MEASUREMENT_INTEGRITY_20260915 revisao 2: quem executa nao afrouxa sozinho a regua do proprio sucesso.
+
+    Origem, medida em 15/09 no card t_f2eb188d, pedido real do cliente. As
+    12:57:48Z o fechamento foi recusado por quatro obrigatorios sem PASS. As
+    13:01:45Z a revisao 3 manteve os quatro ids e os quatro mandatory=true e
+    reescreveu as quatro sondas para a MESMA url, o ref advertisement do git.
+    ci-green parou de medir CI e test-readback virou tautologia. As 13:02:59Z o
+    card fechou com quatro PASS.
+
+    O QUE MUDOU DA REVISAO 1 PARA ESTA, depois do julgamento do Codex, que
+    reproduziu 16 casos em copia isolada (11 bypasses aceitos, 4 muros):
+
+    COLAPSO REMOVIDO. A revisao 1 recusava quando todos os obrigatorios
+    observavam um alvo so. A regra era insustentavel nos dois sentidos: passava
+    com tres tautologias mais uma sonda real (bastavam dois alvos distintos) e
+    recusava dois requisitos legitimos na mesma pagina HTML, ou duas buscas
+    independentes na mesma rota. Pior, ela recusava ANTES de qualquer decisao,
+    entao nem o Principal conseguia autorizar uma spec legitima desse formato.
+    Mesma url nao prova redundancia. O caso que a originou continua coberto,
+    porque naquele card as sondas TROCARAM de alvo, e isso a regra abaixo pega.
+    A recusa por sondas identicas continua em _check_distinct_measurements.
+
+    TROCA DE ALVO agora enxerga tudo: url com query, expect, json_path e a query
+    inteira sem baixar caixa e sem corte.
+
+    RELOCACAO deixou de ser livre. Preservar caminho e expect permitia trocar o
+    CI real por uma fixture. Agora so vale quando o host novo e o destino de
+    entrega ou esta em probe_hosts, que e o caso real do t_b464e591 (o EC2 de
+    TEST do cliente trocou de IP).
+
+    META comparada por conteudo, nao por pontuacao.
+
+    O QUE ISTO NAO RESOLVE, para ninguem ler mais do que tem: a autorizacao
+    continua amarrada ao card e a revisao, nao ao criterio nem a alteracao
+    especifica. E nada aqui garante que os criterios cobrem o que o cliente
+    pediu; garante que a obrigacao nao encolhe sozinha depois de escrita.
+    """
+    if not previous:
+        return
+    try:
+        anterior = json.loads(previous['content'])
+    except Exception:
+        return
+    try:
+        revisao_anterior = int((get_workflow(conn, task_id) or {})['spec_revision'] or 0)
+    except Exception:
+        revisao_anterior = None
+
+    obrigatorios = [c for c in (spec.get('criteria') or [])
+                    if isinstance(c, dict) and c.get('mandatory') and not c.get('optional')
+                    and isinstance(c.get('probe'), dict) and c['probe'].get('phase') != 'before']
+    ids_reais = {c.get('id') for c in (spec.get('criteria') or []) if isinstance(c, dict)}
+    correcoes = {c.get('id'): c for c in (spec.get('probe_corrections') or []) if isinstance(c, dict)}
+    antigos = {c.get('id'): c for c in (anterior.get('criteria') or []) if isinstance(c, dict)}
+
+    for crit in obrigatorios:
+        cid = crit.get('id')
+        velho = antigos.get(cid)
+        if not velho or not velho.get('mandatory') or not isinstance(velho.get('probe'), dict):
+            continue
+        antes, depois = _probe_target(velho.get('probe')), _probe_target(crit.get('probe'))
+        if not antes or not depois or antes == depois:
+            continue
+        if _probe_shape(velho.get('probe')) == _probe_shape(crit.get('probe')):
+            _novo_host = _host_of(crit['probe'].get('url')) if crit['probe'].get('url') else None
+            if _novo_host and _probe_in_scope(conn, task_id, _novo_host, spec):
+                continue
+        if not _correcao_valida(conn, task_id, correcoes, cid, ids_reais, revisao_anterior):
+            raise WorkflowError(
+                f"Criterion {cid}: the measurement changed (target, expectation or query). Keeping the id and "
+                f"mandatory=true preserves the contract's appearance while changing what gets proven, so a written "
+                f"reason is not enough: name a resolved decision of this card, from spec revision "
+                f"{revisao_anterior} or later, in probe_corrections [{{id, reason, evidence, decision}}]. If only the "
+                f"address moved, keep path, query, json_path and expect and point the probe at the delivery "
+                f"destination, and no decision is needed.")
+
+    if _normaliza_meta(anterior.get('goal')) != _normaliza_meta(spec.get('goal')):
+        try:
+            recusas = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='nfos_completion_refused'",
+                                   (task_id,)).fetchone()
+        except Exception:
+            recusas = None
+        if recusas and recusas[0]:
+            if not any(_correcao_valida(conn, task_id, correcoes, cid, ids_reais, revisao_anterior)
+                       for cid in correcoes):
+                raise WorkflowError(
+                    "The goal changed after a refused closure: rewriting what the card promises is how a refusal "
+                    "becomes a pass without the work being done. Keep the goal and close the criteria with evidence, "
+                    "or carry a resolved decision of this card, on a real criterion, authorising the new scope.")
+
+
 def _spec_result_criteria_checks(conn, task_id, spec):
     """Owner mode: valida sondas e exige critério obrigatório quando a reprodução foi medida."""
+    _check_distinct_measurements(spec)  # DISTINCT_MEASUREMENT_20260915
     for crit in spec.get('criteria') or []:
         if crit.get('probe') is not None or crit.get('mandatory'):
             _validate_probe(crit.get('id'), crit.get('probe'))
@@ -1444,16 +1771,31 @@ def _spec_result_criteria_checks(conn, task_id, spec):
              and c['probe'].get('kind') in ('http', 'header') and c['probe'].get('phase') != 'before']
     if _dest and _http and not any(_probe_in_scope(conn, task_id, _host_of(p.get('url')), spec) for p in _http):
         raise WorkflowError(f'Mandatory http probes must measure the delivery destination: none targets {_dest} or a host listed in probe_hosts')
-    _check_probe_corrections(get_spec(conn, task_id), spec)
+    _spec_anterior = get_spec(conn, task_id)
+    _check_probe_corrections(_spec_anterior, spec)
+    _check_measurement_integrity(conn, task_id, _spec_anterior, spec)  # MEASUREMENT_INTEGRITY_20260915
     wf = get_workflow(conn, task_id)
     precheck = (json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') if wf else None
     precheck = precheck or {}
     measured = any(_MEASURED_RX.search(' '.join(str(c.get(k) or '') for k in ('method', 'target', 'result')))  # MEASURED_PRECHECK_20260911
                    for c in (precheck.get('checked') or []) if isinstance(c, dict))
-    if (spec.get('delivery_type') in {'code', 'operation'} and precheck.get('verdict') in {'partial', 'not_delivered'} and measured
-            and not any(c.get('mandatory') for c in spec.get('criteria') or [])):
-        raise WorkflowError('The precheck measured the complaint (method sql/http): declare at least one criterion with mandatory=true and a '
-                            'probe that measures the requested result on the surface the user consumes')
+    # MANDATORY_RESULT_20260915: uma spec sem nenhum critério obrigatório fecha
+    # o card sem medir nada, porque o gate de fechamento só barra obrigatório
+    # sem PASS. Medido em 15/09: 101 de 144 specs (70%) nasciam assim, e a
+    # regra anterior só exigia obrigatório quando o precheck tinha medido a
+    # queixa — bastava não registrar precheck para escapar (29 de 42 cards de
+    # código e 16 de 17 de operação sem obrigatório não tinham precheck).
+    # Não é exigência de sonda http: relatório e auditoria já satisfazem isso
+    # hoje com sonda sql sobre o dado que a análise afirma.
+    if not any(c.get('mandatory') for c in spec.get('criteria') or []):
+        _porque = ('The precheck measured the complaint (method sql/http). ' if measured and
+                   precheck.get('verdict') in {'partial', 'not_delivered'} else '')
+        raise WorkflowError(
+            _porque + 'This spec has no mandatory criterion, so nothing gates the closure and the card can be '
+            'completed without the requested result ever being measured. Declare at least one criterion with '
+            'mandatory=true whose probe measures THE RESULT THE REQUESTER ASKED FOR on the surface they consume '
+            '(for a data repair, the readback after the mutation; for a report, the data the analysis asserts). '
+            'Building, testing, deploying or publishing is not that result.')
 
 
 def completion_refusal_note(conn, task_id):
@@ -1464,6 +1806,13 @@ def completion_refusal_note(conn, task_id):
     if not spec or get_workflow(conn, task_id) is None:
         return None
     pending = mandatory_pending(conn, task_id, spec)
+    # MANDATORY_RESULT_20260915: validar só em save_spec deixaria passar toda
+    # spec antiga já salva, e são 70% delas. A mesma invariante vale aqui: sem
+    # critério obrigatório não existe aceite, existe card fechado.
+    try:
+        _sem_obrigatorio = not any(c.get('mandatory') for c in (json.loads(spec['content']).get('criteria') or []))
+    except Exception:
+        _sem_obrigatorio = False
     unmet = []  # CLOSURE_RECOVERY_20260911: requisitos não opcionais sem PASS no último relatório, sem continuação válida
     report = _artifact(conn, task_id, 'report')
     if report:
@@ -1473,11 +1822,17 @@ def completion_refusal_note(conn, task_id):
                 unmet = [c for c in (content.get('criteria') or []) if c.get('status') != 'PASS' and c.get('id') not in opt and c.get('id') not in pend_ids]
         except Exception:
             unmet = []
-    if not pending and not unmet:
+    if not pending and not unmet and not _sem_obrigatorio:
         return None
     wf = get_workflow(conn, task_id); st = json.loads(wf['state_json'] or '{}') or {}
     mutation = _relevant_mutation(conn, task_id)
     lines = ['Fechamento recusado: critério obrigatório sem medição PASS; o pedido não está resolvido no destino.']
+    if _sem_obrigatorio:  # MANDATORY_RESULT_20260915
+        lines[0] = ('Fechamento recusado: esta spec não tem nenhum critério obrigatório, então nada mede o pedido e o '
+                    'card fecharia sem resultado comprovado.')
+        lines.append('- salve uma nova revisão da spec declarando ao menos um critério com mandatory=true cuja sonda meça O RESULTADO '
+                     'QUE FOI PEDIDO na superfície que o solicitante usa (num reparo de dado, o readback depois da mutação; num '
+                     'relatório, o dado que a análise afirma). Construir, testar, publicar ou fazer deploy não é esse resultado.')
     for e in pending:
         ran = time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(e['ran_at'])) if e.get('ran_at') else 'não medido'
         lines.append(f"- {e['criterion']}: {e.get('text')}\n  esperado: {_json(e.get('expected'))[:400]}\n  observado: {_json(e.get('observed'))[:600]} ({e.get('state') or 'sem medição'}, {ran})\n  motivo: {e['why']}")

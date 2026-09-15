@@ -402,9 +402,18 @@ WAKE_GROUP_RULE = (  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913: instru�
 )
 
 _CLIENT_SILENT_KINDS = frozenset({  # CLIENT_CHAT_20260913: no chat do cliente nenhuma mensagem passiva do notificador
-    "completed", "blocked", "gave_up", "crashed", "timed_out", "model_fallback", "claimed", "status",
+    "blocked", "gave_up", "crashed", "timed_out", "model_fallback", "claimed", "status",
     "nfos_principal_requested", "block_loop_detected", "review_requested",
 })
+
+# CLIENT_DELIVERY_20260915: "completed" saiu da lista acima. O contrato de
+# 13/09 quis tirar ruído do grupo do cliente (claimed, status, blocked,
+# crashed) e levou junto a CONCLUSÃO do pedido dele. Efeito medido em 15/09:
+# todo card fechado emitia client_publication_suppressed e o cliente nunca era
+# avisado — a causa literal de nenhuma entrega ter endosso. A conclusão do
+# pedido não é mensagem passiva do notificador: é a resposta ao que o cliente
+# pediu, e sem ela não existe aceite, só card fechado.
+_CLIENT_DELIVERY_KINDS = frozenset({"completed"})
 
 
 def _client_source_for_board(board):
@@ -435,6 +444,70 @@ def _is_client_chat(board, sub):
     return (str(src.get("platform") or "").lower() == str(sub.get("platform") or "").lower()
             and str(src.get("chat_id") or "") == str(sub.get("chat_id") or "")
             and str(src.get("thread_id") or "") == str(sub.get("thread_id") or ""))
+
+
+def _client_delivery_message(board, task_id):
+    """CLIENT_DELIVERY_20260915: o que o cliente lê quando o pedido dele fecha.
+
+    Usa o mesmo veredito honesto da barra (``_progress_outcome``): "entregue"
+    só com relatório e todos os critérios não opcionais em PASS, "parcial"
+    com pendência, "encerrado" quando cancelado pelo dono, "concluído" quando
+    o card fechou sem relatório legível. Nunca afirma entrega que o relatório
+    não sustenta, e nunca publica detalhe interno (spec, sonda, worker, run).
+    """
+    outcome = _progress_outcome(board, task_id)
+    resumo = ""
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.connect_closing(board=board) as conn:
+            row = conn.execute("SELECT result, title FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row:
+                resumo = str(row["result"] or row["title"] or "").strip()
+    except Exception:
+        logger.debug("kanban notifier: client delivery summary failed for %s", task_id, exc_info=True)
+    if len(resumo) > 900:
+        resumo = resumo[:900].rsplit(" ", 1)[0] + "…"
+    cabecalho = {
+        "entregue": "Resolvido",
+        "parcial": "Resolvido em parte",
+        "encerrado": "Encerrado",
+    }.get(outcome, "Concluído")
+    corpo = f"{cabecalho}: {resumo}" if resumo else cabecalho
+    # CLIENT_ACK_20260915: pede confirmação UMA vez, na própria devolutiva, e
+    # só quando há resultado que o cliente possa conferir. Um pedido a cada
+    # fechamento interno transformaria o grupo em fila de validação, que é
+    # exatamente o que o contrato de 13/09 quis evitar.
+    if outcome in ("entregue", "parcial"):
+        corpo += "\n\nPode conferir? Responda a esta mensagem confirmando se resolveu."
+    return corpo
+
+
+def _record_client_delivery(board, task_id, send_res, sub):
+    """CLIENT_ACK_20260915: registra a devolutiva publicada e fica aguardando confirmação.
+
+    Guarda o ``message_id`` da mensagem enviada ao cliente. Uma resposta direta
+    a ela é o único vínculo que permite registrar aceite: mesma thread e
+    proximidade de horário não provam a qual entrega o cliente se referia,
+    ainda mais com vários cards fechando perto no tempo.
+    """
+    message_id = getattr(send_res, "message_id", None) if send_res is not None else None
+    if not message_id:
+        logger.warning("kanban notifier: devolutiva de %s publicada sem message_id; aceite não poderá ser vinculado", task_id)
+        return
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.connect_closing(board=board) as conn:
+            with _kb.write_txn(conn):
+                _kb._append_event(conn, task_id, "nfos_client_delivery_published", {
+                    "message_id": str(message_id),
+                    "platform": sub.get("platform"),
+                    "chat_id": str(sub.get("chat_id") or ""),
+                    "thread_id": str(sub.get("thread_id") or ""),
+                    "outcome": _progress_outcome(board, task_id),
+                    "ack": "awaiting",
+                })
+    except Exception:
+        logger.debug("kanban notifier: registro da devolutiva falhou para %s", task_id, exc_info=True)
 
 
 def _record_client_suppression(board, task_id, kind, sub):
@@ -3420,6 +3493,7 @@ class GatewayKanbanWatchersMixin:
                                 ),
                             )
                         _client_chat = kind in _CLIENT_SILENT_KINDS and _is_client_chat(board_slug, sub)  # CLIENT_CHAT_20260913
+                        _client_delivery = kind in _CLIENT_DELIVERY_KINDS and _is_client_chat(board_slug, sub)  # CLIENT_DELIVERY_20260915
                         if _client_chat:
                             sub["_model_fallback_notices"] = []
                         if sub.get("_model_fallback_notices"):
@@ -3475,6 +3549,18 @@ class GatewayKanbanWatchersMixin:
                             if _client_chat:  # CLIENT_CHAT_20260913: nada publicado no chat do cliente; recibo e wake seguem
                                 _send_res = None
                                 await asyncio.to_thread(_record_client_suppression, board_slug, sub["task_id"], kind, sub)
+                            elif _client_delivery:  # CLIENT_DELIVERY_20260915: o cliente é avisado do resultado do pedido dele
+                                _client_msg = await asyncio.to_thread(
+                                    _client_delivery_message, board_slug, sub["task_id"])
+                                _send_res = await adapter.send(
+                                    sub["chat_id"], _client_msg, metadata=metadata,
+                                )
+                                # CLIENT_ACK_20260915: guarda a identidade desta mensagem para
+                                # que uma resposta DIRETA a ela possa ser reconhecida como
+                                # aceite. Sem isso o aceite teria de ser inferido por thread e
+                                # proximidade de horário, que não é vínculo.
+                                await asyncio.to_thread(
+                                    _record_client_delivery, board_slug, sub["task_id"], _send_res, sub)
                             else:
                                 _send_res = await adapter.send(
                                     sub["chat_id"], msg, metadata=metadata,
