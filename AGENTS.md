@@ -1,5 +1,11 @@
 # Hermes Agent - Development Guide
 
+## Owner release coordination (2026-09-16)
+
+Maikol designated thread `01a0a8ad-dd7b-7000-9528-77e45c50e8c3` as the master coordinator for every NFOS/Hermes Fork production activation. Implementation, pull requests and isolated tests may proceed independently. Before acquiring the deployment lock or activating production, send the master thread the exact Git SHA/base, components, evidence and limitations, configuration diff, rollout order and preservation plan. Activate only after that thread explicitly confirms the reviewed release and its place in the deployment sequence; this does not require another permission request to Maikol.
+
+Preserve running workers, their work and temporary files, the latest shared service packages/configuration, and other threads' integrated changes. Report an already-running rollout immediately and finish its critical operation safely. Record the final runtime/PIDs, configuration and API readbacks with the master thread. A documentation-only change does not justify republishing the runtime.
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 **Never give up on the right solution.**
