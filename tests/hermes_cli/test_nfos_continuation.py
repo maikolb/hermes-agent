@@ -80,6 +80,17 @@ def test_continuation_is_executable_urgent_and_idempotent(board):
         assert again["task_id"] == child.id and again["existing"] is True
         assert delivery.continuation_links(conn, parent.id)["children"] == [child.id]
         assert delivery.continuation_links(conn, child.id)["of"] == parent.id
+        assert child.assignee == parent.assignee
+        assert child.project_id == parent.project_id
+        # A later owner request on the origin must not gate this independent remainder.
+        completed_at = int(time.time())
+        conn.execute("UPDATE tasks SET status='done',completed_at=? WHERE id=?", (completed_at, parent.id))
+        conn.commit()
+        assert kb.reopen_completed_task(conn, parent.id, expected_completed_at=completed_at,
+                                        actor='owner', reason='New ownership instruction')
+        assert kb.get_task(conn, child.id).status == 'ready'
+        assert conn.execute("SELECT count(*) FROM task_links WHERE child_id=?", (child.id,)).fetchone()[0] == 0
+        assert delivery.create_continuation(conn, parent.id)['task_id'] == child.id
 
 
 def test_blocked_parent_passes_its_question_to_the_child(board):

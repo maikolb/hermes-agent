@@ -346,9 +346,26 @@ def final_assessment(conn, task_id):
     return context.get('assessment', {})
 
 
+def _unresolved_functional_failures(spec, report):
+    """An open functional blocker cannot become a documentary observation."""
+    delivery = report.get('delivery') if isinstance(report.get('delivery'), dict) else {}
+    blockers = [*(report.get('blockers') or []), *(delivery.get('blockers') or [])]
+    unresolved = any(not isinstance(b, dict) or b.get('status', 'unresolved') not in {'resolved', 'closed'}
+                     for b in blockers)
+    if not unresolved and report.get('functional_delivery') is not False and delivery.get('functional_delivery') is not False:
+        return set()
+    mandatory = {c['id'] for c in json.loads(spec['content'])['criteria'] if c.get('mandatory')}
+    return {cid for cid, row in d._report_results(spec, report).items()
+            if cid in mandatory and row['status'] == 'FAIL'}
+
+
 def observed_criteria(conn, task_id):
-    return {row['id'] for row in final_assessment(conn, task_id).get('criteria', [])
-            if row.get('verdict') == 'observe'}
+    observed = {row['id'] for row in final_assessment(conn, task_id).get('criteria', [])
+                if row.get('verdict') == 'observe'}
+    if observed:
+        report = d._artifact(conn, task_id, 'report')
+        observed -= _unresolved_functional_failures(d.get_spec(conn, task_id), json.loads(report['content']))
+    return observed
 
 
 def closeout_packet(conn, task_id):
@@ -421,8 +438,16 @@ def assess(conn, decision, assessment):
     if kind == 'final_review':
         require_spec(conn, task_id)
         report = d._artifact(conn, task_id, 'report')
-        results = d._report_results(spec, json.loads(report['content']))
+        content = json.loads(report['content'])
+        results = d._report_results(spec, content)
         observed = {r['id'] for r in rows if r['verdict'] == 'observe'}
+        functional_failures = _unresolved_functional_failures(spec, content) & observed
+        if functional_failures:
+            raise d.WorkflowError(
+                'Unresolved functional criteria cannot close as observations: ' + ', '.join(sorted(functional_failures))
+                + '. Continue the unmet requirement in this same card. If a real scope transfer is necessary, '
+                'use kanban_create continuation_of=<this card>, not a child dependent on its completion. '
+                'A continuation does not prove the missing result; no additional owner approval is needed.')
         if observed and not str(assessment.get('resolution') or '').strip():
             raise d.WorkflowError('Closure with observations needs the Principal resolution; do not ask the owner to decide closure')
         if any(r['status'] != 'PASS' and cid not in observed for cid, r in results.items()):

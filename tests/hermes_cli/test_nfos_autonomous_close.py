@@ -1,5 +1,8 @@
 import base64
 import json
+from contextlib import nullcontext
+
+import pytest
 
 from hermes_cli import kanban_db as kb, nfos_delivery as d, nfos_principal_review as review
 from tests.hermes_cli.test_nfos_principal_acceptance import task_context, accept
@@ -50,6 +53,103 @@ def test_observation_does_not_accept_missing_or_modified_evidence(task_context, 
     d.resolve_decision(conn,decision['id'],action='continue',answer='Encerrar com observação',author='Principal',assessment=assessment(artifact))
     artifact.write_text('changed after acceptance')
     assert not kb.complete_task(conn,task.id,result='Cannot reuse changed evidence')
+
+
+def functional_partial(ctx, monkeypatch, other_observation=False):
+    conn, task, spec, artifact = ctx
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    spec['criteria'][0].update(mandatory=True, text='The requested Basic license is active')
+    if other_observation:
+        spec['criteria'].append({'id': 'C2', 'text': 'Historical receipt available'})
+    d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'source': 'original request'})
+    if other_observation:
+        decision = d.pending_decisions(conn)[0]
+        d.resolve_decision(conn, decision['id'], action='continue', answer='Review both criteria', author='Principal',
+                           assessment={'request_alignment': 'License and historical receipt',
+                                       'scope_assessment': 'Original requirement and supporting evidence',
+                                       'criteria': [{'id': c['id'], 'verdict': 'accept', 'observation': c['text']}
+                                                    for c in spec['criteria']]})
+    else:
+        accept(conn, task, 'spec_review')
+    child = kb.create_task(conn, title='Finish the same Basic license request',
+                           assignee=task.assignee, parents=[task.id], workspace_kind='scratch')
+    report = {
+        'summary': 'Accounts delivered; Basic license still missing',
+        'criteria': [{'id': 'C1', 'status': 'FAIL', 'evidence': ['readback']}],
+        'artifacts': [{'id': 'readback', 'path': str(artifact)}],
+        'blockers': [{'id': 'license-missing', 'status': 'unresolved'}],
+        'delivery': {'partial_delivery': not other_observation, 'follow_ups': [child]},
+    }
+    if other_observation:
+        report['criteria'].append({'id': 'C2', 'status': 'NOT_RUN', 'evidence': ['readback']})
+    d.save_report(conn, task.id, task.current_run_id, report)
+    proposed = assessment(artifact)
+    proposed.update(resolution='Partial delivery; child keeps the missing license',
+                    scope_assessment='The original mandatory license remains unfulfilled')
+    proposed['criteria'][0]['observation'] = 'FAIL retained; functional remainder transferred to the child'
+    if other_observation:
+        proposed['criteria'].append({'id': 'C2', 'verdict': 'observe',
+                                     'observation': 'Historical receipt unavailable', 'evidence': [str(artifact)]})
+    return conn, task, child, proposed
+
+
+def test_functional_failure_cannot_close_as_observation_with_dependent_child(task_context, monkeypatch):
+    conn, task, child, proposed = functional_partial(task_context, monkeypatch)
+    decision = d.pending_decisions(conn)[0]
+    assert kb.get_task(conn, child).status == 'todo'
+    assert d.continuation_links(conn, task.id)['children'] == []
+    with pytest.raises(d.WorkflowError, match='functional') as refused:
+        d.resolve_decision(conn, decision['id'], action='continue', answer='Close partial',
+                           author='Principal', assessment=proposed)
+    assert 'same card' in str(refused.value) and 'continuation_of' in str(refused.value)
+    assert not kb.complete_task(conn, task.id, result='Partial accounts')
+    assert kb.get_task(conn, task.id).status == 'running'
+    assert d.get_decision(conn, decision['id'])['status'] == 'pending'
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 2
+    assert not conn.execute("SELECT 1 FROM nfos_decisions WHERE status='human'").fetchone()
+    # Finish the original obligation in place, rather than wait for the gated child.
+    artifact = task_context[3]
+    artifact.write_text('Basic license active; entitlement allowed\n')
+    d.save_report(conn, task.id, task.current_run_id, {
+        'summary': 'Basic license active',
+        'criteria': [{'id': 'C1', 'status': 'PASS', 'evidence': ['readback']}],
+        'artifacts': [{'id': 'readback', 'path': str(artifact)}],
+        'blockers': [{'id': 'license-missing', 'status': 'resolved'}],
+    })
+    accept(conn, task, 'final_review', artifact)
+    assert kb.complete_task(conn, task.id, result='Basic license verified')
+    assert kb.get_task(conn, child).status == 'ready'
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 2
+    assert not conn.execute("SELECT 1 FROM nfos_decisions WHERE status='human'").fetchone()
+
+
+@pytest.mark.parametrize('other_observation', [False, True])
+def test_legacy_observation_does_not_hide_functional_failure_or_partial_label(task_context, monkeypatch, other_observation):
+    from gateway.kanban_watchers import _progress_outcome
+    conn, task, _, proposed = functional_partial(task_context, monkeypatch, other_observation)
+    decision = d.pending_decisions(conn)[0]
+    # Persist a previously accepted review, as in the incident, in this isolated DB.
+    context = json.loads(decision['context'])
+    context['assessment'] = proposed
+    conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',author='Principal',context=? WHERE id=?",
+                 (json.dumps(context), decision['id']))
+    conn.commit()
+    assert review.final_assessment(conn, task.id) == proposed
+    assert review.observed_criteria(conn, task.id) == ({'C2'} if other_observation else set())
+    assert not kb.complete_task(conn, task.id, result='Legacy partial')
+    monkeypatch.setattr(kb, 'connect_closing', lambda **kwargs: nullcontext(conn))
+    assert _progress_outcome('pilot', task.id) == 'parcial'
+
+
+def test_explicit_partial_label_takes_precedence_over_documentary_observation(task_context, monkeypatch):
+    from gateway.kanban_watchers import _progress_outcome
+    conn, task, artifact, _ = prepare(task_context, monkeypatch)
+    decision = d.pending_decisions(conn)[0]
+    d.resolve_decision(conn, decision['id'], action='continue', answer='Close with historical limitation',
+                       author='Principal', assessment=assessment(artifact))
+    assert kb.complete_task(conn, task.id, result='Investigation complete')
+    monkeypatch.setattr(kb, 'connect_closing', lambda **kwargs: nullcontext(conn))
+    assert _progress_outcome('pilot', task.id) == 'parcial'
 
 
 def test_legacy_human_closure_question_returns_to_principal_once(task_context, monkeypatch):
