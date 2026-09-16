@@ -44,6 +44,34 @@ async def test_idle_intake_persists_request_before_ack_without_principal_creatin
 
 
 @pytest.mark.asyncio
+async def test_telegram_caption_pins_only_flagged_worker(setup, monkeypatch):
+    from hermes_cli import nfos_delivery as delivery, nfos_principal_review as review
+    runner,event,adapter,root=setup
+    monkeypatch.setattr(review,'settings',lambda:{'deepseek_worker_trial':True,
+        'worker_model':'gpt-5.6-luna','worker_provider':'openai-codex','worker_reasoning_effort':'high'})
+    event.text='#deepseek Analise os dados e entregue um relatório.'
+    image=root/'request.png';image.write_bytes(b'synthetic-intake-attachment')
+    event.media_urls=[str(image)];event.media_types=['image/png']
+    await runner._nfos_receive(event)
+    with kb.connect_closing() as conn:
+        row=conn.execute('SELECT * FROM nfos_requests').fetchone()
+        payload=json.loads(row['payload'])
+        assert payload['text']==event.text
+        assert payload['attachments'][0]['mime_type']=='image/png'
+        assert payload['project']['provider']=='opencode-go'
+        reservation=delivery.reserve_request(conn,capacity=2)
+        import os
+        task=delivery.bootstrap_card(conn,row['id'],reservation['claim_token'],pid=os.getpid())
+        assert review.worker_model_args(task)==[
+            '-m','deepseek-v4.1-flash','--provider','opencode-go','--reasoning','max']
+    event.message_id='124';event.text='Analise outro relatório.';event.media_urls=[];event.media_types=[]
+    await runner._nfos_receive(event)
+    with kb.connect_closing() as conn:
+        payload=json.loads(conn.execute('SELECT payload FROM nfos_requests WHERE id<>?',(row['id'],)).fetchone()[0])
+        assert 'model' not in payload['project']
+
+
+@pytest.mark.asyncio
 async def test_busy_intake_uses_same_path_and_survives_ack_failure(setup):
     runner,event,adapter,root=setup
     adapter._send_with_retry.side_effect=ConnectionError('Telegram connection lost')

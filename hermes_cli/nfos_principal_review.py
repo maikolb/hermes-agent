@@ -34,9 +34,14 @@ def required(conn, task_id):
 
 def worker_model_args(task):
     policy = settings()
-    model = policy.get('worker_model') or task.model_override
-    provider = policy.get('worker_provider') or task.provider_override
-    effort = policy.get('worker_reasoning_effort') or task.reasoning_effort
+    if task.provider_override == 'opencode-go' and task.model_override == 'deepseek-v4.1-flash':
+        # An explicit trial request stays pinned across retries even when the
+        # trial intake switch is later disabled. Other cards keep role policy.
+        model, provider, effort = task.model_override, task.provider_override, task.reasoning_effort
+    else:
+        model = policy.get('worker_model') or task.model_override
+        provider = policy.get('worker_provider') or task.provider_override
+        effort = policy.get('worker_reasoning_effort') or task.reasoning_effort
     args = ['-m', model] if model else []
     if model and provider:
         args += ['--provider', provider]

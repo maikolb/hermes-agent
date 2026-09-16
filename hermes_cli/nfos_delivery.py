@@ -334,6 +334,14 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
         raise WorkflowError('A request needs its original platform/chat/topic/message identity')
     if not text.strip() and not attachments:
         raise WorkflowError('A request needs text or attachments')
+    # Temporary owner opt-in, scoped to this preserved Telegram request.
+    # Keep the original text and the configured project defaults unchanged.
+    if (source.get('platform') == 'telegram'
+            and re.search(r'(?<!\S)#deepseek(?=\s|$)', text, re.IGNORECASE)):
+        from hermes_cli.nfos_principal_review import settings
+        if settings().get('deepseek_worker_trial') is True:
+            project = dict(project, model='deepseek-v4.1-flash',
+                           provider='opencode-go', reasoning_effort='max')
     urgency=_urgency_doc(urgency)  # URGENCY_CONTEXT_20260914: só o julgamento do Principal marca urgência
     source_key=_json([str(source[k]) for k in required]+[str(part)])
     request_id='req_'+hashlib.sha256(source_key.encode()).hexdigest()[:24]
@@ -3302,13 +3310,18 @@ def create_continuation(conn, parent_id, *, title=None, body=None, requester='wo
             child = kb.get_task(conn, existing[0])
             return {'task_id': child.id, 'continuation_of': parent_id, 'priority': child.priority, 'status': child.status, 'existing': True}
         _child_kind = 'scratch' if (parent.workspace_kind == 'scratch' and parent.delivery_type != 'code') else 'worktree'  # REWORK_IDEMPOTENT_20260911
+        trial_model = {}
+        if parent.provider_override == 'opencode-go' and parent.model_override == 'deepseek-v4.1-flash':
+            trial_model = dict(model_override=parent.model_override,
+                               provider_override=parent.provider_override,
+                               reasoning_effort=parent.reasoning_effort)
         child_id = kb.create_task(conn, title=child_title, body=child_body, assignee=parent.assignee,
                                   created_by=f"continuation:{requester}",
                                   workspace_kind=_child_kind,
                                   workspace_path=parent.workspace_path if _child_kind == 'scratch' else None,
                                   tenant=parent.tenant, priority=max(int(parent.priority or 0), 0), parents=(),
                                   project_id=parent.project_id, delivery_type=parent.delivery_type,
-                                  max_runtime_seconds=parent.max_runtime_seconds)
+                                  max_runtime_seconds=parent.max_runtime_seconds, **trial_model)
         conn.execute('INSERT INTO nfos_continuations(child_id,parent_id,created_at) VALUES(?,?,?)', (child_id, parent_id, int(time.time())))
         kb._append_event(conn, parent_id, 'nfos_continuation_created', {'child': child_id, 'by': requester, 'priority': max(int(parent.priority or 0), 0)})
         kb._append_event(conn, child_id, 'nfos_continuation_of', {'parent': parent_id, 'by': requester})
