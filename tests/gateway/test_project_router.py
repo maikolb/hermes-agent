@@ -25,6 +25,45 @@ class Clock:
         return self.value
 
 
+def test_topic_onboarding_runs_after_binding_commit_and_repairs_existing_board(tmp_path, monkeypatch):
+    from hermes_cli import lifecycle
+    calls = []
+    db = tmp_path / 'router.db'
+    def hook(name, **payload):
+        assert name == 'on_project_provisioned'
+        with sqlite3.connect(db) as check:
+            assert check.execute('SELECT count(*) FROM topic_bindings').fetchone()[0] == 1
+        calls.append(payload)
+        return [{'success': True}]
+    monkeypatch.setattr(lifecycle, 'has_hook', lambda name: name == 'on_project_provisioned')
+    monkeypatch.setattr(lifecycle, 'invoke_hook', hook)
+    with ProjectRouter(db, 'hermes-project-factory') as router:
+        project = router.provision_topic_project('Alpha', 'Alpha', 'telegram', '100', '200',
+            workspace_root=tmp_path/'projects', allowed_users={'7': 'allow'},
+            board_creator=lambda *args, **kwargs: None)
+        assert len(calls) == 1
+        assert calls[0]['project']['id'] == 'alpha'
+        assert calls[0]['board_slug'] == project.board_slug
+        router.ensure_bound_board(router.resolve('telegram', '100', '200', '7'),
+            board_creator=lambda *args, **kwargs: None)
+        assert len(calls) == 2
+
+
+def test_onboarding_failure_preserves_topic_binding_for_retry(tmp_path,monkeypatch):
+    from hermes_cli import lifecycle
+    monkeypatch.setattr(lifecycle,'has_hook',lambda name:True)
+    monkeypatch.setattr(lifecycle,'invoke_hook',lambda *args,**kwargs:[{'success':False,'error':'GitHub unavailable'}])
+    with ProjectRouter(tmp_path/'router.db','hermes-project-factory') as router:
+        with pytest.raises(RuntimeError,match='GitHub unavailable'):
+            router.provision_topic_project('Alpha','Alpha','telegram','100','200',
+                workspace_root=tmp_path/'projects',allowed_users={'7':'allow'},
+                board_creator=lambda *args,**kwargs:None)
+        context=router.resolve('telegram','100','200','7')
+        assert context.slug=='alpha'
+        monkeypatch.setattr(lifecycle,'invoke_hook',lambda *args,**kwargs:[{'success':True}])
+        router.ensure_bound_board(context,board_creator=lambda *args,**kwargs:None)
+
+
 def configured_router(db_path: Path, workdir: Path, *, profile: str = "default"):
     router = ProjectRouter(db_path, profile)
     router.upsert_project("project-1", "alpha", "alpha-board", workdir)

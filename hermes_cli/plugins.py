@@ -350,6 +350,9 @@ VALID_HOOKS: Set[str] = {
     #     skipped_nonspawnable, skipped_locked).
     #   Privacy: result carries task ids, assignees, and workspace paths.
     "on_kanban_dispatch_tick",
+    # Canonical Topic binding is committed; profile plugins may finish repo
+    # onboarding for either a human-created Topic or project_topic_create.
+    "on_project_provisioned",
     # Gateway platform-boundary observer hooks (#64176). Observer-only; each
     # callback isolated by invoke_hook. Payloads are normalized envelopes only,
     # never raw platform SDK objects (per #64176 / #64182 ground rule). This
