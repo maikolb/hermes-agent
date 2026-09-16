@@ -191,6 +191,20 @@ def _ensure_repo(payload: Mapping[str, Any], settings: Mapping[str, Any]) -> dic
     profile = str(settings["profile"])
     root = Path(str(settings["workspace_root"]))
     _validate_workspace(workspace, root)
+    if (workspace / '.git').exists():
+        # An existing checkout is authoritative even when its repository name
+        # differs from the Topic slug. Never initialize, rename or push it.
+        origin = _run(['git', 'remote', 'get-url', 'origin'], cwd=workspace).strip()
+        match = re.fullmatch(r'(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?', origin)
+        if not match:
+            raise PreflightError('existing checkout has no supported GitHub origin')
+        repository = match.group(1)
+        existing = _gh_repo(repository)
+        if existing is None:
+            raise PreflightError('existing checkout origin could not be found on GitHub')
+        return {'status': 'repository_ready', 'repository': repository,
+                'url': str(existing.get('url') or _REPOSITORY_URL.format(repository=repository)),
+                'visibility': 'PRIVATE' if existing.get('isPrivate') else 'PUBLIC', 'reused': True}
     repository = f"{owner}/{slug}"
     existing = _gh_repo(repository)
     expected_remote = f"https://github.com/{repository}.git"
@@ -288,7 +302,7 @@ def _transform_tool_result(tool_name: str = "", result: Any = None, status: str 
             raise PreflightError(outcome.get('error') or 'Project onboarding is incomplete')
         preflight = outcome['preflight']
         payload["preflight"] = preflight
-        payload["readiness"] = "repository_ready"
+        payload["readiness"] = preflight['status']
     except Exception as exc:
         logger.exception("Project Factory preflight failed")
         payload["success"] = False
@@ -329,8 +343,9 @@ def _onboard_project(payload, settings, profile):
         cfg = config.load_config_readonly() or {}
         projects = cfg.setdefault('kanban', {}).setdefault('delivery', {}).setdefault('projects', {})
         previous = projects.get(board)
-        if isinstance(previous, dict) and previous.get('onboarding_repository'):
-            return {'success': True, 'preflight': previous['onboarding_repository']}
+        if isinstance(previous, dict):
+            return {'success': True, 'preflight': previous.get('onboarding_repository') or
+                    {'status': 'project_configured', 'reused_configuration': True}}
         receipt = _ensure_repo(payload, settings)
         if previous is None:
             slug, _, workspace = _project_fields(payload)
