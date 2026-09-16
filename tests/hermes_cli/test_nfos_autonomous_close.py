@@ -152,6 +152,37 @@ def test_explicit_partial_label_takes_precedence_over_documentary_observation(ta
     assert _progress_outcome('pilot', task.id) == 'parcial'
 
 
+def test_mitigated_historical_failure_can_close_with_functional_delivery(task_context, monkeypatch):
+    from gateway.kanban_watchers import _progress_outcome
+    conn, task, artifact, image = prepare(task_context, monkeypatch)
+    spec = json.loads(d.get_spec(conn, task.id)['content'])
+    spec['criteria'][0].update(mandatory=True, text='Historical internal evidence contained no secret')
+    d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'source': 'original request'})
+    accept(conn, task, 'spec_review')
+    artifact.write_text('Functional outcome verified. Shareable evidence sanitized; historical failure retained.\n')
+    d.save_report(conn, task.id, task.current_run_id, {
+        'summary': 'Functional delivery verified; historical evidence issue mitigated',
+        'criteria': [{'id': 'C1', 'status': 'FAIL', 'evidence': ['inventory', 'image']}],
+        'artifacts': [{'id': 'inventory', 'path': str(artifact)}, {'id': 'image', 'path': str(image)}],
+        'blockers': [{'id': 'evidence-hygiene', 'status': 'resolved'}],
+        'delivery': {'functional_delivery': True, 'partial_delivery': False},
+    })
+    proposed = assessment(artifact)
+    proposed.update(resolution='Functional outcome verified; retain the mitigated historical failure',
+                    scope_assessment='No functional blocker and no outstanding work transferred')
+    proposed['criteria'][0]['observation'] = 'Historical hygiene FAIL retained; shareable evidence sanitized'
+    decision = d.pending_decisions(conn)[0]
+    d.resolve_decision(conn, decision['id'], action='continue', answer='Close with explicit observation',
+                       author='Principal', assessment=proposed)
+    assert kb.complete_task(conn, task.id, result='Verified delivery with historical observation')
+    assert kb.get_task(conn, task.id).status == 'done'
+    assert json.loads(d._artifact(conn, task.id, 'report')['content'])['criteria'][0]['status'] == 'FAIL'
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
+    assert not conn.execute("SELECT 1 FROM nfos_decisions WHERE status='human'").fetchone()
+    monkeypatch.setattr(kb, 'connect_closing', lambda **kwargs: nullcontext(conn))
+    assert _progress_outcome('pilot', task.id) == 'concluído com observações'
+
+
 def test_legacy_human_closure_question_returns_to_principal_once(task_context, monkeypatch):
     conn,task,artifact,image=prepare(task_context,monkeypatch)
     question=d.ask_principal(conn,task.id,task.current_run_id,kind='impediment',question='Should the owner authorize closure with missing old receipt?',context={})
