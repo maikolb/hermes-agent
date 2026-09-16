@@ -104,7 +104,6 @@ def test_urgent_accepted_delivery_closes_before_older_normal(task_context):
     assert [r[0] for r in conn.execute("SELECT task_id FROM task_events WHERE kind='completed' ORDER BY id")] == [urgent.id, normal.id]
 
 
-@pytest.mark.skipif(os.name == 'nt', reason='Run the gateway dispatcher timing on its deployed Linux platform')
 def test_gateway_real_dispatch_tick_completes_after_acceptance(task_context, monkeypatch, tmp_path):
     import asyncio
     import time
@@ -117,12 +116,12 @@ def test_gateway_real_dispatch_tick_completes_after_acceptance(task_context, mon
                          'max_spawn': 0, 'auto_decompose': False,
                          'delivery': {'principal_validation': True}}}
     monkeypatch.setattr('hermes_cli.config.load_config', lambda: config)
-    monkeypatch.setattr('gateway.kanban_watchers._kanban_dispatch_allowed', lambda: True)
     monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path / 'home'))
     monkeypatch.setattr(kb, 'list_boards', lambda **kwargs: [{'slug': 'default'}])
     first_tick = []
     real_dispatch = kb.dispatch_once
     def dispatch(*args, **kwargs):
+        kwargs['reconcile_orphans'] = False  # Fixture PID is pytest, not a spawned worker.
         value = real_dispatch(*args, **kwargs)
         first_tick.append(time.monotonic())
         return value
@@ -135,7 +134,9 @@ def test_gateway_real_dispatch_tick_completes_after_acceptance(task_context, mon
             async def started():
                 while not first_tick:
                     await asyncio.sleep(.01)
-            await asyncio.wait_for(started(), 5)
+            # The real gateway has a five-second adapter-wiring startup delay.
+            # Measure acceptance latency only after startup and the first tick.
+            await asyncio.wait_for(started(), 10)
             accepted_at = time.monotonic()
             accept(conn, task, 'final_review', artifact)
             async def completed():
