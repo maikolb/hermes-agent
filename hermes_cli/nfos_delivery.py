@@ -3841,7 +3841,9 @@ def _dispatch_additional_tasks(conn, decision, proposal):
 
 
 def pending_decisions(conn):
-    return [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE status='pending' ORDER BY created_at,id")]
+    return [dict(r) for r in conn.execute(
+        "SELECT d.* FROM nfos_decisions d LEFT JOIN tasks t ON t.id=d.task_id "
+        "WHERE d.status='pending' ORDER BY COALESCE(t.priority,0) DESC,d.created_at,d.id")]
 
 
 def wait_decision(conn,decision_id,*,timeout=300):
