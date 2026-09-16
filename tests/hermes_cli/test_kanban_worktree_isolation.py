@@ -31,6 +31,10 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from hermes_cli.profiles import create_profile
+    for name in ("alice", "bob", "orchestrator"):
+        create_profile(name, no_alias=True, no_skills=True)
+    (home / "config.yaml").write_text("kanban:\n  default_assignee: default\n")
     kb.init_db()
     return home
 
@@ -68,7 +72,7 @@ def _add_worktree(repo: Path, target: Path, branch: str) -> Path:
 
 def test_decompose_worktree_children_get_own_workspace(kanban_home):
     with kb.connect() as conn:
-        root = kb.create_task(conn, title="build the feature", triage=True)
+        root = kb.create_task(conn, title="build the feature", triage=True, workspace_kind="worktree", delivery_type="code", requires_repo=True)
         conn.execute(
             "UPDATE tasks SET workspace_kind='worktree', "
             "workspace_path='/repo/.worktrees/root' WHERE id = ?",

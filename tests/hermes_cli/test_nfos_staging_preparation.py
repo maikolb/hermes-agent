@@ -163,7 +163,9 @@ def test_cli_routes_preparation_and_preserves_worker_decision_guard(delivery,tmp
     path.write_text(json.dumps({'answer':'Not allowed from worker'}))
     monkeypatch.setattr(sys,'argv',['nfos_delivery.py','decide','--decision',decision,'--resolution','continue','--input',str(path)])
     with pytest.raises(d.WorkflowError,match='coordinator'): d.main()
-    d.resolve_decision(conn,decision,action='continue',answer='Staging only',author='Principal')
+    with monkeypatch.context() as principal:
+        principal.delenv('HERMES_KANBAN_TASK')
+        d.resolve_decision(conn,decision,action='continue',answer='Staging only',author='Principal')
     assert d.acquire_project(conn,'pilot',task.id,task.current_run_id,A)
     monkeypatch.setattr(sys,'argv',['nfos_delivery.py','effect','--operation','staging_pr','--target',TARGET,'--candidate',A])
     d.main()

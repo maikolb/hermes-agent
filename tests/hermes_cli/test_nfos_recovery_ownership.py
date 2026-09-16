@@ -73,8 +73,10 @@ def test_initial_analysis_can_classify_report_without_git_delivery(tmp_path, mon
         assert saved.delivery_type == 'report' and saved.requires_repo is False
         assert conn.execute('SELECT required FROM task_git_delivery WHERE task_id=?', (task.id,)).fetchone()[0] == 0
         d.advance(conn, task.id, task.current_run_id, 'implement', next_action='Collect evidence')
-        with pytest.raises(d.WorkflowError, match='delivery type'):
-            d.save_spec(conn, task.id, task.current_run_id, dict(spec, delivery_type='code'), author='Claude TL', evidence={'session':'fixture-two'})
+        assert d.save_spec(conn, task.id, task.current_run_id, dict(spec, delivery_type='code'), author='Claude TL', evidence={'session':'fixture-two'}) == 2
+        reclassified = kb.get_task(conn, task.id)
+        assert reclassified.delivery_type == 'code' and reclassified.requires_repo is True
+        assert conn.execute('SELECT required FROM task_git_delivery WHERE task_id=?', (task.id,)).fetchone()[0] == 1
 
 
 def test_human_reply_is_persisted_until_previous_real_process_exits(tmp_path, monkeypatch):
