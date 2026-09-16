@@ -55,9 +55,9 @@ def _card(conn, tmp_path):
     return kb.get_task(conn, task.id)
 
 
-def test_slot_answer_sends_production_effects_ahead():
+def test_slot_word_does_not_authorize_production():
     answer = delivery._auto_continue_answer("impediment", "The canonical staging slot is occupied by another task")
-    assert "só registra quem publica" in answer  # RECORD_MODE_TEXT_20260911: resposta neutra quanto à rota
+    assert answer is None  # RECORD_MODE_TEXT_20260911: resposta neutra quanto à rota
 
 
 def test_green_pr_rebinds_the_candidate_and_merge_needs_no_homologated_tree(board):

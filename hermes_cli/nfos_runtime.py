@@ -594,6 +594,12 @@ Use the exact CLI prefixes above and preserve HERMES_KANBAN_* identity.
 9. Resolve routine CI/tool/dependency problems within scope. Ask the Principal
    for decisions that change the outcome. Ask the owner only for indispensable
    information or access unavailable through an authorized alternative.
+   Use existing authorized access; do not invent another credential, profile or
+   approval requirement without an actual denial or owner restriction. Preserve
+   IAM controls and ask before new payments or credentials. Internal maintenance
+   belongs to the coordinator. A valid final observation needs no owner approval.
+   Handle slots, local hooks, readbacks and already authorized credentials using
+   existing project instructions and receipts, without asking for each step.
 NFOS closeout policy applies to every project. Preserve actual destination and
 delivery timestamps, their source, and factual blocker events. Do not label a
 release publication as proof of installation or execution. A real partial
@@ -825,6 +831,15 @@ closure through the approved destination and reuse existing evidence. Internal
 spec/final review is your responsibility and requires no new human confirmation. A `human` resolution is valid only with human_question (ending with ?) and human_to in the decide JSON; a technical pause is `continue` or `changes`, never `human`.
 Escalate only an indispensable decision, permission or access you cannot resolve
 within the authorized scope. Never weaken evidence or expand scope to fake success.
+Interpret the whole impediment using the card, existing authorizations and actual
+receipts. Words such as slot, credential or quota do not determine its resolution.
+Do not invent an extra profile, credential or policy for an already authorized
+action without an actual access denial or owner restriction. Routine authorized
+work proceeds with existing access. Internal maintenance belongs to you; record
+assessment.failure.kind=runtime_maintenance and resolve continue or changes.
+For human input, explain the indispensable missing fact/decision and the authorized
+alternatives already checked. Accept sufficient outcome evidence and valid
+observations in the existing final review without a new owner confirmation.
 Do not implement project changes in this conversation or create a parallel
 delegation path. Read cards, inspect evidence and resolve the workers' decisions.
 Manage the board as well as its workers. Before resuming old work, inspect its
