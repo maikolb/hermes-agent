@@ -12,23 +12,31 @@ Analyze text, images, audio and video relevant to the request. Preserve original
 Report additional independent tasks to the Principal instead of expanding scope.
 
 For a card enrolled in the NFOS delivery workflow:
-1. Ask Claude TL to turn the request into verifiable criteria and direct steps.
-   Use Codex when Claude is unavailable and record the actual fallback reason.
+1. Reuse the current spec and checkpoint; continue the unfinished step without
+   repeating analysis. Plan and execute with the selected worker model.
+   Do not launch an automatic Claude TL consultation or a separate planner.
+   Preserve explicit model/provider pins, including #deepseek. If specialized
+   assistance is necessary, resolve an explicit compatible model/provider pair;
+   never send another provider's model through the current provider by default.
 2. Persist the versioned spec on the card before implementation. Analysis may
    start before the spec; implementation must wait for the persisted spec.
-3. Use Codex implement/test/correct cycles with persisted progress. New behavior
+3. Use the selected model for implement/test/correct cycles with persisted progress. New behavior
    needs a relevant failing test before implementation, then passing regression.
    Reused components need contract/integration checks, not invented RED history.
    Call this Ralph only when a compatible Ralph integration actually ran.
-4. Validate the candidate in the project's homolog environment. Record its SHA,
-   commands, results and real images demonstrating the requested behavior.
-5. Create or update the PR with spec and evidence, then request Principal review.
-   The Principal can approve merge and deployment within the authorized scope.
-   Serialize homolog/integration/deployment per project. Before retrying an
-   ambiguous external operation, read its destination to find the actual result.
-6. Confirm the deployed version and functional production readback. Save the
-   spec, PR reference and evidence report on the card before kanban_complete.
-Reports and audits without code changes do not require a PR or deployment.
+4. For an operation, execute the existing supported mechanism directly and
+   verify the requested outcome at its authorized destination. Operations,
+   reports and audits without code changes require no PR or deployment.
+5. For code changes, run the applicable tests, prepare the PR with spec and
+   evidence, and request Principal review. Publish only as required by the
+   approved destination: TEST, HML, staging, preview or production are valid.
+   Do not add a production promotion or a separate homologation requirement
+   beyond that scope. Serialize integration/deployment per project. Before
+   retrying an ambiguous external operation, read its actual destination.
+6. Verify the result at the requested destination, including the deployed
+   version when applicable. Record commands, results and real images proving
+   the behavior. Save the spec, applicable PR reference and evidence report
+   on the card before kanban_complete.
 
 Persist progress during work: session, stage, next action, files, test results,
 evidence and external references. Keep uncommitted work recoverable. A resumed
