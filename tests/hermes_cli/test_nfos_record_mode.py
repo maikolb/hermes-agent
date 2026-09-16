@@ -41,7 +41,8 @@ def _card(conn, tmp_path, n=1):
     delivery.record_precheck(conn, task.id, task.current_run_id, {
         "checked": [{"target": "prod", "method": "ui", "result": "bug"}], "verdict": "not_delivered"})
     delivery.save_spec(conn, task.id, task.current_run_id, {
-        "goal": "Corrigir", "criteria": [{"id": "C1", "text": "ok"}], "steps": ["Corrigir"], "delivery_type": "code", "size": "P",
+        "goal": "Corrigir", "criteria": [{"id": "C1", "text": "item corrigido", "mandatory": True,
+            "probe": {"kind": "sql", "query": "SELECT corrected FROM item_checks", "expect": {"scalar": 1}}}], "steps": ["Corrigir"], "delivery_type": "code", "size": "P",
         "delivery_destination": {"environment": "production", "target": PROD, "source": "config",
                                  "authorization_message": "owner", "verification_operation": "deploy"}},
         author="worker", evidence={"source": "worker"})

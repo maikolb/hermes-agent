@@ -38,7 +38,8 @@ def board(tmp_path, monkeypatch):
 def _spec(criteria=None, **extra):
     spec = {"goal": "Resultado no destino", "steps": ["fazer"], "delivery_type": "operation", "size": "P",
             "operation": {"target": "produção", "mutation": "dado"}, "no_code_reason": "reparo",
-            "criteria": criteria or [{"id": "C1", "text": "dado corrigido"}, {"id": "C2", "text": "tela conferida"}]}
+            "criteria": criteria or [{"id": "C1", "text": "dado corrigido", "mandatory": True,
+                "probe": {"kind": "sql", "query": "SELECT count(*) FROM exam_disciplines", "expect": {"scalar": 7}}}, {"id": "C2", "text": "tela conferida"}]}
     spec.update(extra)
     return spec
 
@@ -51,6 +52,7 @@ def _card(conn, n, *, method="leitura do card", spec=None):
     task = delivery.bootstrap_card(conn, rid, request["claim_token"], pid=os.getpid())
     delivery.record_precheck(conn, task.id, task.current_run_id, {"checked": [{"target": "alvo", "method": method, "result": "errado"}], "verdict": "not_delivered"})
     delivery.save_spec(conn, task.id, task.current_run_id, spec or _spec(), author="worker", evidence={"source": "worker"})
+    delivery.run_probes(conn, task.id, task.current_run_id, all_=True)
     return kb.get_task(conn, task.id)
 
 
@@ -77,7 +79,8 @@ def test_not_run_non_optional_blocks_and_continuation_or_optional_unblock(board)
         delivery.save_report(conn, task.id, task.current_run_id, _report(board, {"C1": "PASS", "C2": "NOT_RUN"}, partial_delivery=True, continuation=child["task_id"]))
         assert delivery.completion_evidence_check(conn, task.id) is not None
         # optional na primeira revisão, com motivo
-        task2 = _card(conn, 2, spec=_spec([{"id": "C1", "text": "dado"}, {"id": "C2", "text": "tela", "optional": True, "optional_reason": "sem acesso à tela; medido pelo dado"}]))
+        task2 = _card(conn, 2, spec=_spec([{"id": "C1", "text": "dado", "mandatory": True,
+            "probe": {"kind": "sql", "query": "SELECT count(*) FROM exam_disciplines", "expect": {"scalar": 7}}}, {"id": "C2", "text": "tela", "optional": True, "optional_reason": "sem acesso à tela; medido pelo dado"}]))
         delivery.save_report(conn, task2.id, task2.current_run_id, _report(board, {"C1": "PASS", "C2": "NOT_RUN"}))
         assert delivery.completion_evidence_check(conn, task2.id) is not None
         with pytest.raises(delivery.WorkflowError, match="optional_reason"):

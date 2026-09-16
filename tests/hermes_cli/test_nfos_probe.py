@@ -107,7 +107,9 @@ def test_verbose_precheck_method_counts_as_measured(board):
         with pytest.raises(delivery.WorkflowError, match="mandatory=true"):
             delivery.save_spec(conn, task.id, task.current_run_id, _spec(mandatory=False), author="worker", evidence={"source": "worker"})
         task2 = _card(conn, 12, method="leitura do card e do histórico do pai")
-        assert delivery.save_spec(conn, task2.id, task2.current_run_id, _spec(mandatory=False), author="worker", evidence={"source": "worker"}) == 1
+        with pytest.raises(delivery.WorkflowError, match="mandatory=true"):
+            delivery.save_spec(conn, task2.id, task2.current_run_id, _spec(mandatory=False), author="worker", evidence={"source": "worker"})
+        assert delivery.save_spec(conn, task2.id, task2.current_run_id, _spec(), author="worker", evidence={"source": "worker"}) == 1
 
 
 def test_probe_validation_rejects_mutation_and_weak_expectation(board):
@@ -189,8 +191,15 @@ def test_probe_correction_needs_reason_and_invalidates_old_pass(board):
         better = _probe(query="select name from exam_disciplines where name is not null")
         with pytest.raises(delivery.WorkflowError, match="probe_corrections"):
             delivery.save_spec(conn, task.id, task.current_run_id, _spec(probe=better), author="worker", evidence={"source": "worker"})
+        correction = {"id": "C1", "reason": "excluir nomes nulos sem alterar as disciplinas esperadas", "evidence": ["probe-correction.json"]}
+        (board / "probe-correction.json").write_text(json.dumps({"query": better["query"], "expected": NAMES}))
+        with pytest.raises(delivery.WorkflowError, match="decision"):
+            delivery.save_spec(conn, task.id, task.current_run_id, _spec(probe=better, probe_corrections=[correction]), author="worker", evidence={"source": "worker"})
+        decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind="impediment",
+            question="Revisar correção da consulta sem alterar o resultado esperado", context={"correction": correction})
+        delivery.resolve_decision(conn, decision, action="continue", answer="Consulta corrigida mantém as mesmas disciplinas esperadas", author="Principal")
         rev = delivery.save_spec(conn, task.id, task.current_run_id, _spec(probe=better, probe_corrections=[
-            {"id": "C1", "reason": "a consulta anterior lia a tabela errada", "evidence": ["proof.json"]}]), author="worker", evidence={"source": "worker"})
+            dict(correction, decision=decision)]), author="worker", evidence={"source": "worker"})
         assert rev == 2
         pending = delivery.mandatory_pending(conn, task.id)
         assert pending and "earlier spec revision" in pending[0]["why"]

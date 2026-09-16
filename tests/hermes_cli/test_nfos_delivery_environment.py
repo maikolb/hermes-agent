@@ -30,7 +30,7 @@ def board(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _code_card(conn, tmp_path, text, environment="pr"):
+def _code_card(conn, tmp_path, text, environment="production"):
     rid = delivery.receive_request(conn,
         source={"platform": "telegram", "chat_id": "-10001", "thread_id": "4", "message_id": "14"},
         text=text,
@@ -41,10 +41,11 @@ def _code_card(conn, tmp_path, text, environment="pr"):
     delivery.record_precheck(conn, task.id, task.current_run_id, {
         "checked": [{"target": "hml", "method": "ui", "result": "sintoma presente"}], "verdict": "not_delivered"})
     delivery.save_spec(conn, task.id, task.current_run_id, {
-        "goal": "Modal interno", "criteria": [{"id": "C1", "text": "sem prompt nativo"}], "steps": ["Corrigir"],
+        "goal": "Modal interno", "criteria": [{"id": "C1", "text": "sem prompt nativo", "mandatory": True,
+            "probe": {"kind": "sql", "query": "SELECT uses_native_prompt FROM modal_checks", "expect": {"scalar": 0}}}], "steps": ["Corrigir"],
         "delivery_type": "code", "size": "P",
         "delivery_destination": {"environment": environment, "target": REPO, "source": "config do projeto",
-                                 "authorization_message": "owner 11/09", "verification_operation": "pr"}},
+                                 "authorization_message": "owner 11/09", "verification_operation": "pr" if environment == "pr" else "deploy"}},
         author="worker", evidence={"source": "worker"})
     wf = delivery.get_workflow(conn, task.id)
     state = json.loads(wf["state_json"] or "{}")

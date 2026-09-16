@@ -1,5 +1,4 @@
-"""CODE_FAST_ROUTE_20260910: em owner mode, card de código segue a rota de produção sem homologação: preparação e revisão
-automáticas (revisão aprova só com PR reconciliado e CI verde), merge e deploy permitidos no destino de PR de revisão."""
+"""Owner mode automates production preparation/review, while a PR-only scope forbids publication."""
 import json
 import os
 import time
@@ -29,7 +28,7 @@ def board(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _code_card(conn, tmp_path):
+def _code_card(conn, tmp_path, environment="production"):
     rid = delivery.receive_request(conn,
         source={"platform": "telegram", "chat_id": "-10001", "thread_id": "8", "message_id": "13"},
         text="Corrigir a extração do edital.",
@@ -40,10 +39,11 @@ def _code_card(conn, tmp_path):
     delivery.record_precheck(conn, task.id, task.current_run_id, {
         "checked": [{"target": "produção", "method": "ui", "result": "sintoma presente"}], "verdict": "not_delivered"})
     delivery.save_spec(conn, task.id, task.current_run_id, {
-        "goal": "Extração correta", "criteria": [{"id": "C1", "text": "cargo extraído"}], "steps": ["Corrigir"],
+        "goal": "Extração correta", "criteria": [{"id": "C1", "text": "cargo extraído", "mandatory": True,
+            "probe": {"kind": "sql", "query": "SELECT cargo FROM extraction_result", "expect": {"scalar": "Agente Administrativo"}}}], "steps": ["Corrigir"],
         "delivery_type": "code", "size": "M",
-        "delivery_destination": {"environment": "pr", "target": REPO, "source": "premissas do owner",
-                                 "authorization_message": "owner 10/09", "verification_operation": "pr"}},
+        "delivery_destination": {"environment": environment, "target": REPO, "source": "premissas do owner",
+                                 "authorization_message": "owner 10/09", "verification_operation": "pr" if environment == "pr" else "deploy"}},
         author="worker", evidence={"source": "worker"})
     return kb.get_task(conn, task.id)
 
@@ -93,20 +93,20 @@ def test_review_waits_for_green_ci_then_approves(board):
         assert delivery._approved(conn, task.id, delivery.get_workflow(conn, task.id)["spec_revision"])
 
 
-def test_merge_is_allowed_on_the_review_pr_route_in_owner_mode(board):
+def test_merge_stays_outside_the_review_pr_route_in_owner_mode(board):
     with kb.connect_closing() as conn:
-        task = _code_card(conn, board)
+        task = _code_card(conn, board, environment="pr")
         _set_candidate(conn, task)
         _green_pr(conn, task)
         delivery.ask_principal(conn, task.id, task.current_run_id, kind="review", question="Aprovar merge?", context={})
         _own_slot(conn, task)
-        effect = delivery.begin_effect(conn, task.id, task.current_run_id, operation="merge", target=REPO + "/tree/main", candidate=SHA)
-        assert effect["execute"] is True
+        with pytest.raises(delivery.WorkflowError, match="ends at the review PR"):
+            delivery.begin_effect(conn, task.id, task.current_run_id, operation="merge", target=REPO + "/tree/main", candidate=SHA)
 
 
 def test_merge_stays_outside_the_review_pr_route_without_owner_mode(board, monkeypatch):
     with kb.connect_closing() as conn:
-        task = _code_card(conn, board)
+        task = _code_card(conn, board, environment="pr")
         _set_candidate(conn, task)
         _green_pr(conn, task)
         _own_slot(conn, task)

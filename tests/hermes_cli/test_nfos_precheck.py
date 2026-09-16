@@ -31,7 +31,8 @@ def _started(conn):
 
 def _spec(conn, task):
     return delivery.save_spec(conn, task.id, task.current_run_id,
-        {"goal": "Gabarito correto", "criteria": [{"id": "AC1", "text": "Questão 12 com gabarito B"}],
+        {"goal": "Gabarito correto", "criteria": [{"id": "AC1", "text": "Questão 12 com gabarito B", "mandatory": True,
+            "probe": {"kind": "sql", "query": "SELECT answer FROM questions WHERE id = 12", "expect": {"scalar": "B"}}}],
          "steps": ["Ler produção", "Corrigir"], "delivery_type": "report", "size": "P"},
         author="worker", evidence={"source": "worker"})
 

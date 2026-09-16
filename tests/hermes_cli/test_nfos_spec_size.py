@@ -32,7 +32,8 @@ def _started(conn):
 
 
 def _spec(conn, task, **extra):
-    spec = {"goal": "Plano scale", "criteria": [{"id": "C1", "text": "plan=scale"}], "steps": ["Atualizar"], "delivery_type": "report"}
+    spec = {"goal": "Plano scale", "criteria": [{"id": "C1", "text": "plan=scale", "mandatory": True,
+        "probe": {"kind": "sql", "query": "SELECT plan FROM tenants WHERE id = 61", "expect": {"scalar": "scale"}}}], "steps": ["Atualizar"], "delivery_type": "report"}
     spec.update(extra)
     return delivery.save_spec(conn, task.id, task.current_run_id, spec, author="worker", evidence={"source": "worker"})
 

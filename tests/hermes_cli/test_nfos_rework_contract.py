@@ -39,7 +39,8 @@ def _card(conn, n):
     delivery.record_precheck(conn, task.id, task.current_run_id, {
         "checked": [{"target": "prod", "method": "ui", "result": "errado"}], "verdict": "not_delivered"})
     delivery.save_spec(conn, task.id, task.current_run_id, {
-        "goal": "Pontuação correta", "criteria": [{"id": "C1", "text": "análise sem -1"}],
+        "goal": "Pontuação correta", "criteria": [{"id": "C1", "text": "análise sem -1", "mandatory": True,
+            "probe": {"kind": "sql", "query": "SELECT score FROM analysis WHERE id = 1", "expect": {"scalar": 31}}}],
         "steps": ["Reparar"], "delivery_type": "report", "size": "P"}, author="worker", evidence={"source": "worker"})
     return kb.get_task(conn, task.id)
 
@@ -95,7 +96,8 @@ def _reclassified_code_card(conn, n):
     _seal_board_policy(conn, task.id)
     assert _required(conn, task.id) == 0
     delivery.save_spec(conn, task.id, task.current_run_id, {
-        "goal": "Pontuação correta", "criteria": [{"id": "C1", "text": "análise sem -1"}],
+        "goal": "Pontuação correta", "criteria": [{"id": "C1", "text": "análise sem -1", "mandatory": True,
+            "probe": {"kind": "sql", "query": "SELECT score FROM analysis WHERE id = 1", "expect": {"scalar": 31}}}],
         "steps": ["Corrigir o código"], "delivery_type": "code", "size": "P"}, author="worker", evidence={"source": "worker"})
     assert kb.get_task(conn, task.id).delivery_type == "code" and _required(conn, task.id) == 1
     return kb.get_task(conn, task.id)
