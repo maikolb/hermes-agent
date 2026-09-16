@@ -8698,6 +8698,11 @@ def block_task(
         )
     from hermes_cli.nfos_delivery import get_workflow, ask_principal
     if get_workflow(conn, task_id):
+        # A technical/external wait has no unfinished parent for recompute_ready
+        # to watch. Keep the existing run and route it to the Principal instead
+        # of ending it in todo and immediately dispatching another worker.
+        if kind == 'dependency' and _parents_satisfied(conn, task_id):
+            kind = 'transient'
         current = get_task(conn, task_id)
         if current and current.status == 'running':
             if expected_run_id is not None and current.current_run_id != expected_run_id:
