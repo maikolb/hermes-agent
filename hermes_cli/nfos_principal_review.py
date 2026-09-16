@@ -197,11 +197,14 @@ def confirm_worker_dispatch(conn, task_id, run_id, model, reasoning):
     if pending.get('status') != 'pending' or run_id == pending.get('source_run_id'):
         return
     task = d._kb().get_task(conn, task_id)
-    if task.model_override and task.model_override != 'gpt-5.6-luna':
-        if model != task.model_override or (task.reasoning_effort and reasoning != task.reasoning_effort):
-            raise d.WorkflowError('Worker dispatch did not apply the explicit model pin')
+    args = worker_model_args(task, conn)
+    expected_model = args[args.index('-m')+1] if '-m' in args else None
+    expected_effort = args[args.index('--reasoning')+1] if '--reasoning' in args else None
+    if expected_model != pending['model'] or (expected_effort and expected_effort != pending['reasoning_effort']):
+        if model != expected_model or (expected_effort and reasoning != expected_effort):
+            raise d.WorkflowError('Worker dispatch did not apply the effective model policy')
         pending.update(model=model, reasoning_effort=reasoning,
-                       reason='Explicit card model pin superseded the pending escalation')
+                       reason='Effective model policy superseded the pending escalation')
     if model != pending['model'] or reasoning != pending['reasoning_effort']:
         raise d.WorkflowError('Worker dispatch did not apply the pending model and reasoning')
     workflow = d.get_workflow(conn, task_id); state = json.loads(workflow['state_json'])

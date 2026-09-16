@@ -507,6 +507,19 @@ def test_explicit_pin_supersedes_pending_dispatch_without_downgrade(task_context
     assert state['status']=='applied' and state['model']=='gpt-6-astra' and state['reasoning_effort']=='high'
 
 
+def test_higher_global_policy_supersedes_pending_dispatch(task_context, monkeypatch):
+    monkeypatch.setattr('hermes_cli.nfos_runtime.previous_runs_termination_pending', lambda *a: False)
+    conn, task, _, artifact = task_context
+    _enable_escalation(monkeypatch); accept(conn, task, 'spec_review')
+    save_report(conn,task,artifact,status='FAIL'); _reject_functional(conn,task,artifact)
+    with kb.write_txn(conn): review.reclaim_escalation(conn,task.id)
+    task=kb.claim_task(conn,task.id)
+    monkeypatch.setattr(review,'settings',lambda:dict(worker_model='gpt-6-astra',worker_provider='openai-codex',worker_reasoning_effort='medium'))
+    with kb.write_txn(conn): review.confirm_worker_dispatch(conn,task.id,task.current_run_id,'gpt-6-astra','medium')
+    state=review.worker_escalation(conn,task.id)
+    assert state['status']=='applied' and state['model']=='gpt-6-astra' and state['reasoning_effort']=='medium'
+
+
 def test_checkpoint_waits_for_active_tool_and_dispatch_confirms_actual_model(task_context, monkeypatch):
     monkeypatch.setattr('hermes_cli.nfos_runtime.previous_runs_termination_pending', lambda *a: False)
     from hermes_cli import nfos_tool
