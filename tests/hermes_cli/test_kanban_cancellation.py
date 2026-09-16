@@ -147,3 +147,28 @@ def test_cancel_active_worker_preserves_files_and_stops_tree(board,worker):
     assert_exited(identities)
     assert file.read_text()=='Original evidence'
     assert kb.get_task(conn,task.id).status=='done'
+
+def test_standing_owner_delegation_closes_only_auxiliary_without_faking_delivery(task_context):
+    conn,parent,_=task_context
+    child=kb.create_task(conn,title='NFOS internal receipt reconciliation',assignee='default',parents=[parent])
+    prior_parent=kb.get_task(conn,parent)
+    metadata=authorization(kb.get_task(conn,child).instruction_revision)
+    metadata.update(author='Principal acting under Maikol delegation',
+        source='codex:01a0a642-d3bf-7da1-84fd-41e4f7eefd6f:auxiliary-closure-20260915',
+        authorization_message='Sem contar que isso não era nem pra ter me pedido autorização, inclusive e não somente por isso: nem fui eu que pedi ou criei esse card',
+        reason='Internal duplicate receipt review exhausted; no requested outcome abandoned; historical gaps remain NOT_RUN')
+    assert kb.complete_task(conn,child,metadata=metadata)
+    assert kb.get_task(conn,child).status=='done'
+    after_parent=kb.get_task(conn,parent)
+    assert (after_parent.status,after_parent.body,after_parent.result)==(prior_parent.status,prior_parent.body,prior_parent.result)
+    receipt=json.loads(conn.execute("select payload from task_events where task_id=? and kind='administrative_cancelled'",(child,)).fetchone()['payload'])
+    assert receipt['functional_delivery'] is False
+    assert receipt['source']==metadata['source']
+    assert 'NOT_RUN' in receipt['reason']
+
+
+def test_auxiliary_delegation_reaches_worker_and_principal():
+    for prompt in (runtime.worker_instructions(),runtime.principal_instructions()):
+        assert runtime.AUXILIARY_CLOSURE_POLICY in prompt
+        assert 'an agent-created child carrying unfinished requested work is NOT disposable' in prompt
+        assert 'without asking the owner' in prompt

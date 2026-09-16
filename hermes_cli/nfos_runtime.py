@@ -424,6 +424,28 @@ def workflow_command():
     return _script_command(delivery.__file__)
 
 
+AUXILIARY_CLOSURE_POLICY = """Owner delegation, 15/09/2026 (auxiliary work):
+Maikol: "Sem contar que isso não era nem pra ter me pedido autorização, inclusive e não somente por isso: nem fui eu que pedi ou criei esse card".
+The Principal owns cleanup of auxiliary cards created by NFOS itself. When their
+purpose is obsolete, redundant or exhausted and their closure drops no outstanding
+user-requested outcome, close them administratively without asking the owner to
+authorize internal housekeeping. Workers refer this decision to the Principal,
+not to a human. Inspect the original request and parent/continuation history:
+an agent-created child carrying unfinished requested work is NOT disposable.
+Missing evidence never becomes PASS. Preserve gaps, reports and artifacts; do not
+repeat mutations to reconstruct missing historical receipts, create another support
+card, or hold an already-proven parent delivery hostage to internal bookkeeping.
+Use the existing `cancel` command with disposition=cancelled_by_owner and
+functional_delivery=false under this standing owner delegation. Record author as
+Principal acting under Maikol's delegation, reason explaining why no requested
+outcome is abandoned, source=codex:01a0a642-d3bf-7da1-84fd-41e4f7eefd6f:auxiliary-closure-20260915,
+authorization_message as the owner instruction quoted above, and the current
+expected_instruction_revision. Do not invent a new per-card owner authorization.
+This does not authorize cancelling original user requests or required unfinished
+work. Administrative closure is not functional delivery.
+"""
+
+
 def owner_premises():  # RECORD_MODE_20260911
     """Premissas do owner (10/09) em modo registro (11/09): uma lista só, usada pelo show e pelo prefixo do worker."""
     return [
@@ -469,7 +491,7 @@ def _record_mode():  # RECORD_MODE_TEXT_20260911
 
 def worker_instructions():
     _cli=('Exact workflow CLI prefix: '+workflow_command()+'\n'
-          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n')
+          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n'+AUXILIARY_CLOSURE_POLICY+'\n')
     if _record_mode():
         if not delivery._result_review():
             return _premises_prefix()+_cli+RECORD_MODE_PROTOCOL
@@ -742,7 +764,7 @@ def coordinator_intake_instructions(context, *, reply_to=None):
 
 
 def principal_instructions():
-    return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+"""NFOS project coordinator, the owner's active instructions:
+    return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+AUXILIARY_CLOSURE_POLICY+'\n'+"""NFOS project coordinator, the owner's active instructions:
 You are the Principal, responsible for intake, dispatch, board visibility,
 impediments and review. Project implementation belongs to full Hermes workers.
 The owner's priority is delivery from the request through verification at the requested destination
