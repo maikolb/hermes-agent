@@ -36,9 +36,9 @@ def is_opencode_target(provider: Optional[str], base_url: Optional[str]) -> bool
     except Exception:
         pass
     try:
-        from agent.anthropic_endpoints import _is_opencode_endpoint
+        from utils import base_url_host_matches
 
-        return _is_opencode_endpoint(str(base_url or ""))
+        return base_url_host_matches(str(base_url or ""), "opencode.ai")
     except Exception:
         return False
 

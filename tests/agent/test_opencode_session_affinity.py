@@ -33,6 +33,7 @@ def _agent(provider, model, base_url, api_mode=None):
     "provider, model, base_url, api_mode",
     [
         ("opencode-go", "glm-5", "https://opencode.ai/zen/go/v1", None),  # chat_completions
+        ("opencode-go", "deepseek-v4.1-flash", "https://opencode.ai/zen/go/v1", None),
         ("opencode-go", "gpt-5.6-luna", "https://opencode.ai/zen/go/v1", None),  # codex_responses
         ("opencode-go", "minimax-m2.7", "https://opencode.ai/zen/go/v1", "anthropic_messages"),
         ("opencode-free", "laguna-s-2.1-free", "https://opencode.ai/zen/v1", None),
