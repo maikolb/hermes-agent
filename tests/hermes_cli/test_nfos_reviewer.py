@@ -38,6 +38,7 @@ def judgment(case,memory,emit):
     emit('observed',project=case['project'],task_id=case['task_id'],source=refs[0])
     return {'summary':'Checkout required its own verification','findings':['Write receipt did not establish checkout behavior'],
             'discarded':['No evidence of a universal cache defect'],'inspected_sources':refs,
+            'memory_summary':'Verify the customer checkout after price changes; write receipts do not establish the customer result.',
             'lessons':[{'key':'checkout-readback','kind':'practice','when':'Price changes at checkout',
                         'lesson':'Verify the customer checkout after a price change','because':'Principal found write receipt insufficient',
                         'limits':'Applies to checkout, not every cache','sources':refs}]}
@@ -88,6 +89,7 @@ def test_consolidate_same_key_and_reject_unread_sources(home):
     data=judgment(case,[],lambda *a,**k:None)
     reviewer.save_lessons(case,data,store,lambda *a,**k:None)
     data['lessons'][0]['limits']='Explicitly restricted to price propagation'
+    data['memory_summary']='Verify actual checkout; restricted to price propagation.'
     reviewer.save_lessons(case,data,store,lambda *a,**k:None)
     store.load_from_disk();assert len(store.memory_entries)==1
     assert 'price propagation' in store.memory_entries[0]

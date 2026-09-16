@@ -163,7 +163,10 @@ repetir. Uma ocorrência sem causa comprovada pode gerar hipótese, nunca uma re
 Retorne JSON: {"summary":"análise", "findings":["achados"], "lessons":[{"key":"slug-estável",
 "kind":"practice|failure|decision|hypothesis", "when":"quando se aplica", "lesson":"aprendizado",
 "because":"base factual", "limits":"limites/contraprovas", "sources":["ref exata de registro"]}],
-"discarded":["o que não virou aprendizado e por quê"]}. Pode retornar lessons vazio.
+"discarded":["o que não virou aprendizado e por quê"],
+"memory_summary":"Síntese reutilizável do projeto, até 1800 caracteres, consolidando a memória
+anterior ainda válida com os novos aprendizados e seus limites importantes. Detalhes e fontes
+completas ficam no histórico permanente; não copie relatórios para esta síntese."}. Pode retornar lessons vazio.
 A solução utilizável é prioridade. Lacunas documentais não justificam pedir autorização de fechamento
 nem repetir efeitos em produção. O resultado da sua análise será salvo automaticamente.
 '''
@@ -267,15 +270,20 @@ def save_lessons(case, review, store, emit):
                 or not set(lesson['sources']) <= set(review.get('inspected_sources', []))
                 or any(not str(lesson.get(k,'')).strip() for k in ['when','lesson','because','limits'])):
             raise ValueError('Aprendizado sem estrutura ou fonte válida')
+    if not review.get('lessons'):
+        return saved
+    summary=str(review.get('memory_summary','')).strip()
+    if not summary or len(summary)>1800:
+        raise ValueError('Síntese de memória ausente ou maior que 1800 caracteres')
+    marker=f'[NFOS Revisor:{case["project"]}]'
+    entry=(f'{marker} {summary} Histórico e fontes completos: '
+           f'{root()}/runs (projeto {case["project"]}; última origem {case["task_id"]}).')
+    store.load_from_disk()
+    exists=any(marker in e for e in store.memory_entries)
+    result=store.replace('memory',marker,entry) if exists else store.add('memory',entry)
+    emit('consolidated' if result.get('success') else 'memory_pending',project=case['project'],
+         task_id=case['task_id'],summary=summary,error=result.get('error'))
     for lesson in review.get('lessons', []):
-        key=lesson['key']
-        marker = f'[NFOS Revisor:{case["project"]}:{key}]'
-        entry = (f'{marker} Tipo: {lesson["kind"]}. Quando: {lesson["when"]}. '
-                 f'Aprendizado: {lesson["lesson"]}. Base: {lesson["because"]}. '
-                 f'Limites: {lesson["limits"]}. Fontes: {", ".join(lesson["sources"])}')
-        store.load_from_disk()
-        exists = any(marker in e for e in store.memory_entries)
-        result = store.replace('memory', marker, entry) if exists else store.add('memory', entry)
         saved.append({'lesson':lesson,'memory_result':{'success':result.get('success'),'error':result.get('error')}})
         emit('saved' if result.get('success') else 'memory_pending', project=case['project'],
              task_id=case['task_id'], lesson=lesson, error=result.get('error'))
@@ -343,7 +351,7 @@ def run(day=None, boards=None, analyzer=analyse):
                 emit('case',project=slug,task_id=case['task_id'],title=case['title'],records=len(case['records']))
                 try:
                     store.load_from_disk()
-                    memory=[e for e in store.memory_entries if e.startswith(f'[{slug}]') or e.startswith(f'[NFOS Revisor:{slug}:')]
+                    memory=[e for e in store.memory_entries if e.startswith(f'[{slug}]') or e.startswith(f'[NFOS Revisor:{slug}]')]
                     review=analyzer(case,memory,emit)
                     write(folder/'reviews'/f'{identity}.json',review)
                     emit('analysed',project=slug,task_id=case['task_id'],**{k:review.get(k,[]) for k in ['summary','findings','discarded','lessons']})
