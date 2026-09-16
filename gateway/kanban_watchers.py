@@ -3314,6 +3314,9 @@ class GatewayKanbanWatchersMixin:
                 if rehydrate_worker_focus and rehydrate_complete:
                     self._kanban_worker_focus_rehydrated = True
                 self._kanban_focus_apply_rows(focus_rows)
+                # Admission to a busy Principal is serial: offer urgent work first,
+                # including when its board/subscription was collected last.
+                deliveries.sort(key=lambda item: -int(getattr(item["task"], "priority", 0) or 0))
                 for d in deliveries:
                     sub = d["sub"]
                     task = d["task"]
