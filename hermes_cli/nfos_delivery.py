@@ -2170,7 +2170,7 @@ def project_knowledge_context(conn, task_id):
         command = str(policy['graphify_command'])
         graph = str(Path(repo) / 'graphify-out' / 'graph.json')
         out += ['Graphify project_path: '+_json(str(repo)),
-                'For code navigation, reuse a current graph. If missing or stale, prepare this checkout with '+shlex.join([command,'extract',str(repo),'--code-only','--no-cluster','--max-workers','1','--exclude','.runs/**','--exclude','.worktrees/**','--exclude','graphify-out/**','--exclude','.env*','--exclude','**/.env*','--out',str(Path(repo)/'graphify-out')])+
+                'For code navigation, reuse a current graph. If missing or stale, run from this checkout: '+shlex.join([command,'extract',str(repo),'--code-only','--no-cluster','--max-workers','1','--exclude','.runs/**','--exclude','**/.runs/**','--exclude','.worktrees/**','--exclude','**/.worktrees/**','--exclude','graphify-out*/**','--exclude','.env*','--exclude','**/.env*','--out',str(repo)])+
                 ' (local code parsing, no LLM), then use Graphify query_graph with this project_path and a bounded query. '
                 'CLI fallback: '+shlex.join([command,'query','<symbol or symptom>','--graph',graph,'--budget','1500'])+'. '
                 'Reuse the index in this run; refresh after relevant code changes. Verify graph findings in the current files. '

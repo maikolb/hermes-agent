@@ -22,6 +22,7 @@ def test_new_worker_gets_explicit_project_scope_and_its_own_checkout(tmp_path, m
             prompt=d.worker_context(conn,task.id)
             assert f'"project":"{scope}"' in prompt
             assert checkout in prompt and '--no-cluster' in prompt
+            assert "--out '" + checkout + "' (local code parsing" in prompt
             assert 'memory_query' in prompt and 'memory_read_page' in prompt
             assert 'query_graph' in prompt and 'not a delivery gate' in prompt
             assert 'AOF was disabled' in prompt
