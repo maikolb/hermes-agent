@@ -103,3 +103,16 @@ def test_goal_loop_yield_during_later_turn_preserves_claim_without_block(resumed
     assert after.status == 'running'
 
 
+def test_last_consumed_iteration_is_preserved_when_tool_completes_run(resumed):
+    conn, task, first = resumed
+    agent = SimpleNamespace(model='gpt-5.6-luna',reasoning_config={'effort':'max'},iteration_budget=IterationBudget(10))
+    assert review.worker_checkpoint(agent,'final-turn') is False
+    assert agent.iteration_budget.consume()
+    review.record_worker_iteration(agent)
+    with kb.write_txn(conn): kb._end_run(conn,task.id,outcome='completed',status='done')
+    usage=json.loads(conn.execute('SELECT metadata FROM task_runs WHERE id=?',(task.current_run_id,)).fetchone()[0])['escalation_usage']
+    assert usage['iterations']==1
+    # No later loop checkpoint exists after a terminal tool closes this run.
+    assert kb.get_task(conn,task.id).current_run_id is None
+
+
