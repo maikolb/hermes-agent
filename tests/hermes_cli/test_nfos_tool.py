@@ -398,7 +398,10 @@ print(p.pid,flush=True)
             identity = json.loads(receipt.read_text())
             row=read(board,"SELECT * FROM nfos_tool_calls WHERE id='orphan'")[0]
             assert identity['pid'] == pid and identity['group_id'] == row['worker_pid']
-            assert started - .01 <= identity['started_at'] <= time.time()
+            # Kernel process times and wall-clock timestamps have different
+            # precision. Compare each with a receipt from its own clock.
+            assert started <= row['created_at'] <= time.time()
+            assert row['worker_started_at'] <= identity['started_at']
             assert adapter._matches(pid,identity['started_at']) and not future.done()
             with adapter.connect(board) as conn:
                 conn.execute("UPDATE nfos_tool_calls SET deadline_at=? WHERE id='orphan'",(time.time()-1,))
@@ -413,9 +416,10 @@ print(p.pid,flush=True)
                 adapter.terminate_calls(conn,'t_one',7,reason='Fixture cleanup')
             if receipt.exists():
                 identity = json.loads(receipt.read_text())
-                assert started - .01 <= identity['started_at'] <= time.time()
                 rows = read(board, "SELECT * FROM nfos_tool_calls WHERE id='orphan'")
                 assert rows and rows[0]['cwd'] == str(board.parent)
+                assert started <= rows[0]['created_at'] <= time.time()
+                assert rows[0]['worker_started_at'] <= identity['started_at']
                 assert rows[0]['worker_pid'] == identity['group_id']
                 cleanup_verified_test_processes([
                     {'pid':rows[0]['worker_pid'],'started_at':rows[0]['worker_started_at']}, identity])
