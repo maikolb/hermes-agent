@@ -1,5 +1,6 @@
 """Independent regression checks for escalation budgets and goal-loop handoff."""
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -25,9 +26,10 @@ def resumed(task_context, monkeypatch):
                      (json.dumps({'worker_session_id': 'retained-session', 'escalation_usage': {'iterations': 7, 'turns': 2}}), first))
     current = kb.claim_task(conn, task.id)
     assert current is not None
+    kb._set_worker_pid(conn, task.id, os.getpid())
     with kb.write_txn(conn):
         conn.execute('UPDATE task_runs SET started_at=1000 WHERE id=?', (current.current_run_id,))
-        conn.execute('UPDATE tasks SET max_runtime_seconds=100,goal_max_turns=3,worker_pid=987654 WHERE id=?', (task.id,))
+        conn.execute('UPDATE tasks SET max_runtime_seconds=100,goal_max_turns=3 WHERE id=?', (task.id,))
     monkeypatch.setenv('HERMES_KANBAN_TASK', task.id)
     monkeypatch.setenv('HERMES_KANBAN_RUN_ID', str(current.current_run_id))
     monkeypatch.setenv('HERMES_KANBAN_CLAIM_LOCK', current.claim_lock)
@@ -66,7 +68,7 @@ def test_runtime_limit_includes_previous_active_time_but_not_wait(resumed, monke
     assert kb.enforce_max_runtime(conn, signal_fn=lambda *args: signals.append(args)) == [task.id]
     event = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='timed_out' ORDER BY id DESC LIMIT 1", (task.id,)).fetchone()
     assert json.loads(event[0])['elapsed_seconds'] == 101
-    assert len(signals) == 1 and signals[0][0] == 987654  # Captured callback only; no real signal.
+    assert len(signals) == 1 and signals[0][0] == os.getpid()  # Captured callback only; no real signal.
 
 
 def test_goal_loop_with_prior_turns_does_not_get_a_fresh_allowance(resumed, monkeypatch):
@@ -114,5 +116,4 @@ def test_last_consumed_iteration_is_preserved_when_tool_completes_run(resumed):
     assert usage['iterations']==1
     # No later loop checkpoint exists after a terminal tool closes this run.
     assert kb.get_task(conn,task.id).current_run_id is None
-
 

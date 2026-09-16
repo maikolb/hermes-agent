@@ -539,6 +539,7 @@ def test_checkpoint_waits_for_active_tool_and_dispatch_confirms_actual_model(tas
     assert kb.get_task(conn,task.id).current_run_id == task.current_run_id
     with kb.write_txn(conn): review.reclaim_escalation(conn,task.id)
     task = kb.claim_task(conn,task.id)
+    kb._set_worker_pid(conn, task.id, os.getpid())
     monkeypatch.setenv('HERMES_KANBAN_RUN_ID', str(task.current_run_id))
     monkeypatch.setenv('HERMES_KANBAN_CLAIM_LOCK', task.claim_lock)
     with pytest.raises(d.WorkflowError, match='did not apply'):

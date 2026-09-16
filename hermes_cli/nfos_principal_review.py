@@ -130,15 +130,39 @@ def escalation_usage(conn, task_id, run_id):
             'turns': sum(json.loads(r['metadata'] or '{}').get('escalation_usage', {}).get('turns', 0) for r in rows)}
 
 
+def _owned_worker_run(conn, task_id, run_id, claim):
+    """Read the current process owner; callers recheck inside each write transaction."""
+    from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER, is_dispatcher_owned_worker_context
+    if (not claim or not is_dispatcher_owned_worker_context()
+            or os.environ.get(DELEGATED_CHILD_ENV_MARKER) == '1'):
+        return None
+    pid = os.getpid()
+    row = conn.execute("SELECT r.metadata,t.worker_started_at FROM task_runs r "
+                       "JOIN tasks t ON t.current_run_id=r.id "
+                       "WHERE t.id=? AND r.id=? AND r.task_id=t.id AND t.claim_lock=? "
+                       "AND t.status='running' AND r.ended_at IS NULL "
+                       "AND t.worker_pid=? AND r.worker_pid=?", (task_id, int(run_id), claim, pid, pid)).fetchone()
+    if row is None or row['worker_started_at'] is None:
+        return None
+    started_at = d._kb()._process_start_time(pid)
+    if started_at is None or abs(started_at - row['worker_started_at']) >= 0.01:
+        return None
+    return row
+
+
 def worker_checkpoint(agent, turn_id=None):
     """Called only between completed tool batches, before another model call."""
     task_id, run_id = os.environ.get('HERMES_KANBAN_TASK'), os.environ.get('HERMES_KANBAN_RUN_ID')
     if not task_id or not run_id:
         return False
-    from agent.delegation_context import is_delegated_child_context
-    if is_delegated_child_context():
+    from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER, is_dispatcher_owned_worker_context
+    if (not is_dispatcher_owned_worker_context()
+            or os.environ.get(DELEGATED_CHILD_ENV_MARKER) == '1'):
         return False
+    claim = os.environ.get('HERMES_KANBAN_CLAIM_LOCK')
     with d._kb().connect_closing() as conn:
+        if _owned_worker_run(conn, task_id, run_id, claim) is None:
+            return False
         task = d._kb().get_task(conn, task_id)
         pending = worker_escalation(conn, task_id)
         if not task or task.current_run_id != int(run_id):
@@ -149,9 +173,7 @@ def worker_checkpoint(agent, turn_id=None):
                      'reasoning_effort': (agent.reasoning_config or {}).get('effort'),
                      'session_id': getattr(agent, 'session_id', None), 'source': 'agent_pre_request'}
         with d._kb().write_txn(conn):
-            row = conn.execute("SELECT r.metadata FROM task_runs r JOIN tasks t ON t.current_run_id=r.id "
-                               "WHERE t.id=? AND r.id=? AND t.claim_lock=? AND t.status='running' AND r.ended_at IS NULL",
-                               (task_id, int(run_id), task.claim_lock)).fetchone()
+            row = _owned_worker_run(conn, task_id, run_id, claim)
             if row is None:
                 return False
             metadata = json.loads(row['metadata'] or '{}')
@@ -170,7 +192,9 @@ def worker_checkpoint(agent, turn_id=None):
                 budget.max_total = max(0, budget.max_total - prior['iterations'])
                 agent._nfos_budget_loaded = True
             with d._kb().write_txn(conn):
-                row = conn.execute('SELECT metadata FROM task_runs WHERE id=?', (int(run_id),)).fetchone()
+                row = _owned_worker_run(conn, task_id, run_id, claim)
+                if row is None:
+                    return False
                 metadata = json.loads(row['metadata'] or '{}')
                 usage = metadata.setdefault('escalation_usage', {'turns': 0})
                 usage['iterations'] = budget.used
@@ -183,6 +207,8 @@ def worker_checkpoint(agent, turn_id=None):
             return False
         if pending.get('source_run_id') != int(run_id):
             with d._kb().write_txn(conn):
+                if _owned_worker_run(conn, task_id, run_id, claim) is None:
+                    return False
                 confirm_worker_dispatch(conn, task_id, int(run_id), agent.model,
                                         (agent.reasoning_config or {}).get('effort'))
             return False
@@ -202,16 +228,15 @@ def record_worker_iteration(agent):
     budget = getattr(agent, 'iteration_budget', None)
     if not task_id or not run_id or not claim or budget is None:
         return
-    from agent.delegation_context import is_delegated_child_context
-    if is_delegated_child_context():
+    from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER, is_dispatcher_owned_worker_context
+    if (not is_dispatcher_owned_worker_context()
+            or os.environ.get(DELEGATED_CHILD_ENV_MARKER) == '1'):
         return
     with d._kb().connect_closing() as conn:
         if not worker_escalation(conn, task_id) and settings().get('worker_escalation') is not True:
             return
         with d._kb().write_txn(conn):
-            row = conn.execute("SELECT r.metadata FROM task_runs r JOIN tasks t ON t.current_run_id=r.id "
-                               "WHERE t.id=? AND r.id=? AND t.claim_lock=? AND t.status='running' AND r.ended_at IS NULL",
-                               (task_id, int(run_id), claim)).fetchone()
+            row = _owned_worker_run(conn, task_id, run_id, claim)
             if row is None:
                 return
             metadata = json.loads(row['metadata'] or '{}')
