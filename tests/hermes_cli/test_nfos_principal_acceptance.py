@@ -93,6 +93,10 @@ def test_record_mode_changed_acceptance_requires_new_review(task_context, monkey
         spec['goal'] = 'Verify updated count'
         spec['criteria'][0]['mandatory'] = True
         d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'source': 'updated request'})
+    elif change == 'report':
+        report = json.loads(d._artifact(conn, task.id, 'report')['content'])
+        report['summary'] = 'Updated outcome claim requiring a new review'
+        d.save_report(conn, task.id, task.current_run_id, report)
     else:
         if change == 'evidence':
             artifact.write_text('count=32\n')
