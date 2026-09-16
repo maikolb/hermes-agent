@@ -178,6 +178,30 @@ def worker_checkpoint(agent, turn_id=None):
         return True
 
 
+def record_worker_iteration(agent):
+    """Persist consumed allowance before a tool can complete this run."""
+    task_id, run_id = os.environ.get('HERMES_KANBAN_TASK'), os.environ.get('HERMES_KANBAN_RUN_ID')
+    claim = os.environ.get('HERMES_KANBAN_CLAIM_LOCK')
+    budget = getattr(agent, 'iteration_budget', None)
+    if not task_id or not run_id or not claim or budget is None:
+        return
+    from agent.delegation_context import is_delegated_child_context
+    if is_delegated_child_context():
+        return
+    with d._kb().connect_closing() as conn:
+        if not worker_escalation(conn, task_id) and settings().get('worker_escalation') is not True:
+            return
+        with d._kb().write_txn(conn):
+            row = conn.execute("SELECT r.metadata FROM task_runs r JOIN tasks t ON t.current_run_id=r.id "
+                               "WHERE t.id=? AND r.id=? AND t.claim_lock=? AND t.status='running' AND r.ended_at IS NULL",
+                               (task_id, int(run_id), claim)).fetchone()
+            if row is None:
+                return
+            metadata = json.loads(row['metadata'] or '{}')
+            metadata.setdefault('escalation_usage', {})['iterations'] = budget.used
+            conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (d._json(metadata), int(run_id)))
+
+
 def reclaim_escalation(conn, task_id):
     """Dispatcher calls only after confirming the old process is dead."""
     task = d._kb().get_task(conn, task_id)

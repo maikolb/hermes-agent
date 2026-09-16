@@ -2171,6 +2171,10 @@ def run_conversation(
                 agent._safe_print(f"\n⚠️  Iteration budget exhausted ({agent.iteration_budget.used}/{agent.iteration_budget.max_total} iterations used)")
             break
 
+        if os.environ.get('HERMES_KANBAN_TASK'):
+            from hermes_cli.nfos_principal_review import record_worker_iteration
+            record_worker_iteration(agent)
+
         # Fire step_callback for gateway hooks (agent:step event)
         if agent.step_callback is not None:
             try:
