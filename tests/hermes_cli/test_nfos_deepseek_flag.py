@@ -31,8 +31,9 @@ def claim(conn, rid):
     return delivery.bootstrap_card(conn, rid, reservation['claim_token'], pid=os.getpid())
 
 
-def test_flag_preserves_request_and_pins_first_worker(trial):
-    original = '@hermes_nexafactory_bot #deepseek Confira o relatório.'
+@pytest.mark.parametrize('punctuation', ['', ',', '.', ':', ';', '!', '?', '…', ')', ']'])
+def test_flag_preserves_request_and_pins_first_worker(trial, punctuation):
+    original = '@hermes_nexafactory_bot #deepseek' + punctuation + ' Confira o relatório somente em HML.'
     with kb.connect_closing() as conn:
         rid = receive(conn, original)
         assert receive(conn, original) == rid
@@ -49,6 +50,9 @@ def test_flag_preserves_request_and_pins_first_worker(trial):
 @pytest.mark.parametrize('text,platform,enabled', [
     ('Confira o relatório.', 'telegram', True),
     ('#deepseekish Confira o relatório.', 'telegram', True),
+    ('#deepseek_other Confira o relatório.', 'telegram', True),
+    ('#deepseek123 Confira o relatório.', 'telegram', True),
+    ('#deepseek-other Confira o relatório.', 'telegram', True),
     ('#deepseek Confira o relatório.', 'telegram', False),
     ('#deepseek Confira o relatório.', 'fixture', True),
 ])
@@ -74,7 +78,7 @@ def test_coordinator_dispatch_keeps_original_flag_and_does_not_leak(trial):
 
 def test_persisted_pin_reaches_spawn_and_continuation(trial, monkeypatch, tmp_path):
     with kb.connect_closing() as conn:
-        task_id = claim(conn, receive(conn, '#deepseek Audite o resultado.')).id
+        task_id = claim(conn, receive(conn, '#deepseek, Audite o resultado somente em HML.')).id
     captured = []
     monkeypatch.setattr(kb, '_retag_legacy_worker_sessions', lambda path: None)
     monkeypatch.setattr(kb, '_resolve_worker_cli_toolsets', lambda path: [])

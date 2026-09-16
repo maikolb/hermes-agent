@@ -337,7 +337,7 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
     # Temporary owner opt-in, scoped to this preserved Telegram request.
     # Keep the original text and the configured project defaults unchanged.
     if (source.get('platform') == 'telegram'
-            and re.search(r'(?<!\S)#deepseek(?=\s|$)', text, re.IGNORECASE)):
+            and re.search(r'(?<!\S)#deepseek(?![\w-])', text, re.IGNORECASE)):
         from hermes_cli.nfos_principal_review import settings
         if settings().get('deepseek_worker_trial') is True:
             project = dict(project, model='deepseek-v4.1-flash',
