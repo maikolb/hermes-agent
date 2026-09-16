@@ -32,22 +32,186 @@ def required(conn, task_id):
     return settings().get('principal_validation') is True or project.get('principal_validation') is True
 
 
-def worker_model_args(task):
+def worker_model_args(task, conn=None):
     policy = settings()
-    if task.provider_override == 'opencode-go' and task.model_override == 'deepseek-v4.1-flash':
-        # An explicit trial request stays pinned across retries even when the
-        # trial intake switch is later disabled. Other cards keep role policy.
+    if task.model_override:
+        # Explicit project/card pins outrank a global worker default.
         model, provider, effort = task.model_override, task.provider_override, task.reasoning_effort
     else:
         model = policy.get('worker_model') or task.model_override
         provider = policy.get('worker_provider') or task.provider_override
         effort = policy.get('worker_reasoning_effort') or task.reasoning_effort
+    if conn is not None:
+        escalation = worker_escalation(conn, task.id)
+        if escalation and model == 'gpt-5.6-luna' and provider in (None, 'openai-codex'):
+            model, provider, effort = escalation['model'], 'openai-codex', escalation['reasoning_effort']
     args = ['-m', model] if model else []
     if model and provider:
         args += ['--provider', provider]
     if effort:
         args += ['--reasoning', effort]
     return args
+
+
+def worker_escalation(conn, task_id):
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_workflows'").fetchone():
+        return {}
+    workflow = d.get_workflow(conn, task_id)
+    return json.loads(workflow['state_json']).get('worker_escalation', {}) if workflow else {}
+
+
+def escalate_rework(conn, decision, assessment):
+    """Principal classifies a current functional rejection, never local test FAILs."""
+    if settings().get('worker_escalation') is not True or decision['kind'] != 'final_review':
+        return
+    failure = (assessment or {}).get('failure')
+    if not isinstance(failure, dict) or failure.get('kind') != 'functional':
+        return
+    task_id = decision['task_id']
+    current = identity(conn, task_id, 'final_review')
+    if json.loads(decision['context']).get('acceptance_identity') != current:
+        raise d.WorkflowError('Functional rejection requires the current report and instruction')
+    reason = failure.get('reason')
+    rows = failure.get('criteria')
+    report = d._artifact(conn, task_id, 'report')
+    checks = json.loads(report['evidence']).get('artifact_checks', [])
+    if not isinstance(reason, str) or not reason.strip() or not isinstance(rows, list) or not rows:
+        raise d.WorkflowError('Functional rejection requires a reason, criteria and inspected evidence')
+    for row in rows:
+        refs = row.get('evidence') if isinstance(row, dict) else None
+        linked = [c for c in checks if row.get('id') in c.get('criteria', []) and c.get('status') == 'verified_local'] if isinstance(row, dict) else []
+        if not isinstance(refs, list) or not refs or any(not any(ref in (c['ref'], c.get('path')) for c in linked) for ref in refs):
+            raise d.WorkflowError('Functional rejection needs criterion-linked report evidence')
+        for check in linked:
+            actual = d._inspect_local_evidence(check['path'])
+            if any(actual[k] != check[k] for k in ('sha256', 'size_bytes')):
+                raise d.WorkflowError('Functional rejection evidence changed; review the current bytes')
+    task = d._kb().get_task(conn, task_id)
+    args = worker_model_args(task)
+    model = args[args.index('-m')+1] if '-m' in args else None
+    effort = args[args.index('--reasoning')+1] if '--reasoning' in args else None
+    provider = args[args.index('--provider')+1] if '--provider' in args else None
+    if model != 'gpt-5.6-luna' or provider not in (None, 'openai-codex'):
+        return  # Other model pins and already-higher models remain untouched.
+    workflow = d.get_workflow(conn, task_id)
+    state = json.loads(workflow['state_json'])
+    old = state.get('worker_escalation') or {}
+    # A changed report from the same attempt cannot spend another escalation.
+    if old and (old.get('status') in {'pending', 'exhausted'} or old.get('source_run_id') == report['run_id']
+                or old.get('report_id') == report['id'] and old.get('report_revision') == report['revision']):
+        return
+    level = max(int(old.get('level', 0)), 1 if effort == 'max' else 0)
+    if old and old.get('run_id') != report['run_id']:
+        return  # Only a correction actually dispatched on this tier can fail it.
+    level = min(2, level + 1)
+    exhausted = bool(old and old.get('level') == 2)
+    escalation = dict(level=level, model='gpt-5.6-luna' if level == 1 else 'gpt-6-astra',
+                      reasoning_effort='max' if level == 1 else 'low', reason=reason,
+                      decision_id=decision['id'], report_id=report['id'], report_revision=report['revision'],
+                      source_run_id=report['run_id'], first_run_id=old.get('first_run_id', report['run_id']),
+                      status='exhausted' if exhausted else 'pending')
+    if exhausted:
+        escalation['run_id'] = old['run_id']
+    state['worker_escalation'] = escalation
+    conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (d._json(state), task_id))
+    context = json.loads(decision['context']); context['assessment'] = assessment
+    conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (d._json(context), decision['id']))
+    d._event(conn, task_id, task.current_run_id, 'nfos_worker_escalated', escalation)
+
+
+def escalation_usage(conn, task_id, run_id):
+    escalation = worker_escalation(conn, task_id)
+    first = escalation.get('first_run_id', run_id)
+    rows = conn.execute('SELECT started_at,ended_at,metadata FROM task_runs WHERE task_id=? AND id>=? AND id<?',
+                        (task_id, first, run_id)).fetchall()
+    return {'seconds': sum(max(0, (r['ended_at'] or r['started_at'])-r['started_at']) for r in rows),
+            'iterations': sum(json.loads(r['metadata'] or '{}').get('escalation_usage', {}).get('iterations', 0) for r in rows),
+            'turns': sum(json.loads(r['metadata'] or '{}').get('escalation_usage', {}).get('turns', 0) for r in rows)}
+
+
+def worker_checkpoint(agent, turn_id=None):
+    """Called only between completed tool batches, before another model call."""
+    task_id, run_id = os.environ.get('HERMES_KANBAN_TASK'), os.environ.get('HERMES_KANBAN_RUN_ID')
+    if not task_id or not run_id:
+        return False
+    from agent.delegation_context import is_delegated_child_context
+    if is_delegated_child_context():
+        return False
+    with d._kb().connect_closing() as conn:
+        task = d._kb().get_task(conn, task_id)
+        pending = worker_escalation(conn, task_id)
+        if not task or task.current_run_id != int(run_id):
+            return False
+        if task.claim_lock != os.environ.get('HERMES_KANBAN_CLAIM_LOCK'):
+            return False
+        if not pending and settings().get('worker_escalation') is not True:
+            return False
+        budget = getattr(agent, 'iteration_budget', None)
+        if budget is not None:
+            prior = escalation_usage(conn, task_id, int(run_id))
+            if not getattr(agent, '_nfos_budget_loaded', False):
+                budget.max_total = max(0, budget.max_total - prior['iterations'])
+                agent._nfos_budget_loaded = True
+            with d._kb().write_txn(conn):
+                row = conn.execute('SELECT metadata FROM task_runs WHERE id=?', (int(run_id),)).fetchone()
+                metadata = json.loads(row['metadata'] or '{}')
+                usage = metadata.setdefault('escalation_usage', {'turns': 0})
+                usage['iterations'] = budget.used
+                if turn_id and usage.get('turn_id') != turn_id and not (
+                        pending.get('status') == 'pending' and pending.get('source_run_id') == int(run_id)):
+                    usage.update(turn_id=turn_id, turns=usage['turns']+1)
+                metadata['escalation_usage'] = usage
+                conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (d._json(metadata), int(run_id)))
+        if pending.get('status') != 'pending':
+            return False
+        if pending.get('source_run_id') != int(run_id):
+            with d._kb().write_txn(conn):
+                confirm_worker_dispatch(conn, task_id, int(run_id), agent.model,
+                                        (agent.reasoning_config or {}).get('effort'))
+            return False
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_tool_calls'").fetchone() and conn.execute(
+                "SELECT 1 FROM nfos_tool_calls WHERE task_id=? AND run_id=? AND status IN ('intent','running','stopping')",
+                (task_id, int(run_id))).fetchone():
+            return False
+        # Keep the claim/run live until this process has flushed its session and exited.
+        agent._nfos_escalation_yield = True
+        return True
+
+
+def reclaim_escalation(conn, task_id):
+    """Dispatcher calls only after confirming the old process is dead."""
+    task = d._kb().get_task(conn, task_id)
+    pending = worker_escalation(conn, task_id)
+    if not task or pending.get('status') != 'pending' or pending.get('source_run_id') != task.current_run_id:
+        return False
+    d._kb()._end_run(conn, task_id, outcome='reclaimed', status='reclaimed',
+                    metadata={'worker_escalation': pending, 'retry_status': 'ready'})
+    conn.execute("UPDATE tasks SET status='ready',claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?", (task_id,))
+    d._event(conn, task_id, pending['source_run_id'], 'nfos_worker_checkpoint', pending)
+    return True
+
+
+def confirm_worker_dispatch(conn, task_id, run_id, model, reasoning):
+    """The initialized worker confirms the selected model, not merely Popen success."""
+    pending = worker_escalation(conn, task_id)
+    if pending.get('status') != 'pending' or run_id == pending.get('source_run_id'):
+        return
+    task = d._kb().get_task(conn, task_id)
+    args = worker_model_args(task, conn)
+    expected_model = args[args.index('-m')+1] if '-m' in args else None
+    expected_effort = args[args.index('--reasoning')+1] if '--reasoning' in args else None
+    if expected_model != pending['model'] or (expected_effort and expected_effort != pending['reasoning_effort']):
+        if model != expected_model or (expected_effort and reasoning != expected_effort):
+            raise d.WorkflowError('Worker dispatch did not apply the effective model policy')
+        pending.update(model=model, reasoning_effort=reasoning,
+                       reason='Effective model policy superseded the pending escalation')
+    if model != pending['model'] or reasoning != pending['reasoning_effort']:
+        raise d.WorkflowError('Worker dispatch did not apply the pending model and reasoning')
+    workflow = d.get_workflow(conn, task_id); state = json.loads(workflow['state_json'])
+    pending.update(status='applied', run_id=run_id)
+    state['worker_escalation'] = pending
+    conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (d._json(state), task_id))
+    d._event(conn, task_id, run_id, 'nfos_worker_escalated', pending)
 
 
 def identity(conn, task_id, kind):

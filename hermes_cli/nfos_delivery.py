@@ -3127,6 +3127,7 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
             require_spec(conn,task_id)
         updates=dict(state or {})
         updates.pop('task_partition',None)  # Only Principal decisions own this receipt.
+        updates.pop('worker_escalation',None)  # Only reviewed rework and actual dispatch own the tier.
         saved=json.loads(wf['state_json']);saved.update(updates)
         if stage=='implement' and wf['stage'] in {'analysis','spec'} and not json.loads(wf['state_json']).get('task_partition'):
             partition=conn.execute("SELECT status,action FROM nfos_decisions WHERE task_id=? AND kind='additional_tasks' ORDER BY rowid DESC LIMIT 1",
@@ -4102,6 +4103,9 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                         raise WorkflowError('Review needs the confirmed PR for this candidate')
             elif not identity.get('report_revision'):
                 raise WorkflowError('Review needs the saved report')
+        if action == 'changes':
+            from hermes_cli.nfos_principal_review import escalate_rework
+            escalate_rework(conn, row, assessment)
         conn.execute('UPDATE nfos_decisions SET status=?,answer=?,author=?,action=?,resolved_at=? WHERE id=?',
                      ('human' if action=='human' else 'resolved',answer,author,action,int(time.time()),decision_id))
         if action == 'human':

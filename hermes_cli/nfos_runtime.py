@@ -908,8 +908,19 @@ The limitation remains unproven; the Principal accepts closure, not a false PASS
 Include each spec criterion exactly once. Evidence is mandatory for final_review
 and names a declared report artifact path/ref with saved local bytes. Save remote
 readback as a report artifact; a bare URL is not a verified result. Use changes
-with concrete corrections when you cannot accept. A new spec, instruction,
-candidate, final report or evidence change needs a current review. Do not
+with concrete corrections when you cannot accept.
+Functional rework escalation is internal and applies only to an actually failed
+delivery attempt, never a local development test failure. When returning changes
+for a functional defect demonstrated by the CURRENT final report, include
+assessment.failure={"kind":"functional","reason":"Observed failure and correction",
+"criteria":[{"id":"C1","evidence":["inspected report artifact ref/path"]}]}.
+Classify scope changes, missing documentation, billing and external CI problems
+with a different kind; they never escalate the worker. The runtime moves the same
+card from Luna high to Luna max, then Astra low only after a correction on that
+tier also fails. Duplicate reviews cannot consume tiers. When worker_escalation
+is exhausted, reassess the cause and approach internally; do not automatically
+ask the owner, downgrade, create a new card or restart the sequence.
+A new spec, instruction, candidate, final report or evidence change needs a current review. Do not
 approve on the worker's behalf or invent observations. Preserve the task/run
 history and let the worker do rework, while you continue handling other requests.
 You may approve merge/deploy within the user's authorized spec without asking for
