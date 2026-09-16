@@ -2,6 +2,7 @@
 reclassificação com histórico, fechamento parcial só com continuação válida, consumo da cadeia."""
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -21,6 +22,13 @@ def board(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(review, "settings", lambda: {"principal_validation": False})
+    (tmp_path / "secrets").mkdir()
+    database = tmp_path / "upload.db"
+    with sqlite3.connect(database) as source:
+        source.execute("CREATE TABLE upload_result(correct INTEGER)")
+        source.execute("INSERT INTO upload_result VALUES (0)")
+    (tmp_path / "secrets/pilot.env").write_text(f"DATABASE_URL=sqlite://{database}\n")
+    monkeypatch.setattr(runtime, "project_config", lambda board, config=None: {"probe_env": "pilot.env"})
     with kb.connect_closing() as conn:
         delivery.init_schema(conn)
     return tmp_path
@@ -37,8 +45,10 @@ def _card(conn, tmp_path, n=1):
     delivery.record_precheck(conn, task.id, task.current_run_id, {
         "checked": [{"target": "prod", "method": "ui", "result": "bug"}], "verdict": "not_delivered"})
     delivery.save_spec(conn, task.id, task.current_run_id, {
-        "goal": "Upload correto", "criteria": [{"id": "C1", "text": "cargos corretos"}, {"id": "C2", "text": "deploy"}],
+        "goal": "Upload correto", "criteria": [{"id": "C1", "text": "cargos corretos", "mandatory": True,
+            "probe": {"kind": "sql", "query": "SELECT correct FROM upload_result", "expect": {"scalar": 1}}}, {"id": "C2", "text": "captura complementar"}],
         "steps": ["Reparar"], "delivery_type": "report", "size": "P"}, author="worker", evidence={"source": "worker"})
+    assert delivery.run_probes(conn, task.id, task.current_run_id, criterion="C1")[0]["state"] == "FAIL"
     return kb.get_task(conn, task.id)
 
 
@@ -86,22 +96,23 @@ def test_blocked_parent_passes_its_question_to_the_child(board):
 def test_fail_cannot_be_rewritten_without_reclassification(board):
     with kb.connect_closing() as conn:
         task = _card(conn, board, 3)
-        delivery.save_report(conn, task.id, task.current_run_id, _report(board, "FAIL"))
+        delivery.save_report(conn, task.id, task.current_run_id, _report(board, "FAIL", "FAIL"))
         with pytest.raises(delivery.WorkflowError, match="reclassified"):
-            delivery.save_report(conn, task.id, task.current_run_id, _report(board, "NOT_RUN"))
-        delivery.save_report(conn, task.id, task.current_run_id, _report(board, "PASS", reclassified=[
-            {"id": "C1", "previous": "FAIL", "reason": "leitura anterior no ambiente errado", "evidence": ["proof.json"]}]))
+            delivery.save_report(conn, task.id, task.current_run_id, _report(board, "FAIL", "NOT_RUN"))
+        delivery.save_report(conn, task.id, task.current_run_id, _report(board, "FAIL", "PASS", reclassified=[
+            {"id": "C2", "previous": "FAIL", "reason": "leitura anterior no ambiente errado", "evidence": ["proof.json"]}]))
         assert delivery._artifact(conn, task.id, "report")["revision"] == 2
 
 
-def test_partial_completion_needs_a_valid_continuation(board):
+def test_partial_continuation_does_not_bypass_failed_mandatory_result(board):
     with kb.connect_closing() as conn:
         task = _card(conn, board, 4)
         delivery.save_report(conn, task.id, task.current_run_id, _report(board, "FAIL", partial_delivery=True))
         assert delivery.completion_evidence_check(conn, task.id) is None
         res = delivery.create_continuation(conn, task.id, requester=task.id)
         delivery.save_report(conn, task.id, task.current_run_id, _report(board, "FAIL", partial_delivery=True, continuation=res["task_id"]))
-        assert delivery.completion_evidence_check(conn, task.id) is not None
+        assert delivery.completion_evidence_check(conn, task.id) is None
+        assert delivery.mandatory_pending(conn, task.id)[0]["status"] == "FAIL"
         cons = delivery.chain_consumption(conn, res["task_id"])
         assert cons["chain"] == [task.id, res["task_id"]] and cons["runs"] >= 1
 
@@ -166,4 +177,3 @@ def test_concurrent_continuations_yield_one_child(board):
     assert len(set(results)) == 1, set(results)
     with kb.connect_closing() as conn:
         assert conn.execute("SELECT count(*) FROM nfos_continuations WHERE parent_id=?", (parent.id,)).fetchone()[0] == 1
-

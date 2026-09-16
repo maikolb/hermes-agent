@@ -1,4 +1,4 @@
-"""Distinct candidate/HML identities require a Principal evidence decision."""
+"""Automatic HML binding preserves identity and never approves stale evidence."""
 import json
 
 import pytest
@@ -17,13 +17,16 @@ def binding(conn, task, tmp_path):
                 'baseline_sha': 'e'*40, 'scope': 'limited_delta', 'criteria': ['AC1'], 'evidence': [str(proof)]}
     decision = d.ask_principal(conn, task.id, task.current_run_id, kind='homologation',
         question='Review limited delta and remaining baseline; not publication', context={'homologation': identity})
+    saved = d.get_decision(conn, decision)
+    assert saved['status'] == 'resolved' and saved['action'] == 'continue'
+    assert not d._approved(conn, task.id, d.get_workflow(conn, task.id)['spec_revision'])
     return decision, proof
 
 
 def test_distinct_shas_keep_real_hml_and_require_separate_release_review(delivery, tmp_path):
     conn, task = delivery
     decision, _ = binding(conn, task, tmp_path)
-    d.resolve_decision(conn, decision, action='continue', answer='Reviewed limited delta, baseline and evidence', author='Principal')
+    assert d._delivery_candidate(conn, task.id) == B
     d.release_project(conn, 'pilot', task.id, task.current_run_id)
     assert d.acquire_project(conn, 'pilot', task.id, task.current_run_id, B)
     pr = d.begin_effect(conn, task.id, task.current_run_id, operation='pr', target='pr1', candidate=B)
@@ -47,11 +50,12 @@ def test_distinct_shas_keep_real_hml_and_require_separate_release_review(deliver
 def test_equivalence_cannot_be_self_declared_or_approve_publication(delivery, tmp_path):
     conn, task = delivery
     decision, _ = binding(conn, task, tmp_path)
-    with pytest.raises(d.WorkflowError, match='review'):
+    with pytest.raises(d.WorkflowError, match='already resolved'):
         d.resolve_decision(conn, decision, action='approve', answer='Skip release review', author='Principal')
-    d.advance(conn, task.id, task.current_run_id, 'implement', next_action='Attempt unsupported binding', state={'candidate_sha': B})
+    assert not d._approved(conn, task.id, d.get_workflow(conn, task.id)['spec_revision'])
+    d.advance(conn, task.id, task.current_run_id, 'implement', next_action='Attempt unsupported binding', state={'candidate_sha': '9'*40})
     with pytest.raises(d.WorkflowError, match='homologation'):
-        d.begin_effect(conn, task.id, task.current_run_id, operation='pr', target='pr1', candidate=B)
+        d.begin_effect(conn, task.id, task.current_run_id, operation='pr', target='pr1', candidate='9'*40)
 
 
 def test_changed_evidence_cannot_receive_stale_acceptance(delivery, tmp_path):
@@ -59,24 +63,27 @@ def test_changed_evidence_cannot_receive_stale_acceptance(delivery, tmp_path):
     decision, proof = binding(conn, task, tmp_path)
     proof.write_text('Changed after review request')
     with pytest.raises(d.WorkflowError, match='evidence'):
-        d.resolve_decision(conn, decision, action='continue', answer='Accept old proof', author='Principal')
-    assert d.get_decision(conn, decision)['status'] == 'pending'
+        d._accept_homologation(conn, d.get_decision(conn, decision))
+    with pytest.raises(d.WorkflowError, match='evidence'):
+        d._delivery_candidate(conn, task.id)
 
 
-def test_new_spec_invalidates_pending_homologation(delivery, tmp_path):
+def test_new_spec_invalidates_automatically_accepted_homologation(delivery, tmp_path):
     conn, task = delivery
     decision, _ = binding(conn, task, tmp_path)
     spec = json.loads(d.get_spec(conn, task.id)['content'])
     spec['goal'] = 'Revised acceptance'
     d.save_spec(conn, task.id, task.current_run_id, spec, author='Claude TL', evidence={'session': 'new-spec'})
     with pytest.raises(d.WorkflowError, match='spec'):
-        d.resolve_decision(conn, decision, action='continue', answer='Accept stale revision', author='Principal')
+        d._accept_homologation(conn, d.get_decision(conn, decision))
+    with pytest.raises(d.WorkflowError, match='homologation'):
+        d._delivery_candidate(conn, task.id)
 
 
 def test_evidence_changed_after_acceptance_prevents_pr(delivery, tmp_path):
     conn, task = delivery
     decision, proof = binding(conn, task, tmp_path)
-    d.resolve_decision(conn, decision, action='continue', answer='Accepted recorded comparison', author='Principal')
+    assert d._delivery_candidate(conn, task.id) == B
     proof.write_text('Different evidence')
     with pytest.raises(d.WorkflowError, match='evidence'):
         d.begin_effect(conn, task.id, task.current_run_id, operation='pr', target='pr1', candidate=B)

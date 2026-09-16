@@ -1092,7 +1092,9 @@ def test_human_reply_pasted_by_the_principal_reaches_the_worker_whole(board, mon
         assert delivery.resume_after_answer(conn, task.id, answer=answer, source={"platform": "telegram", "actor": "Principal", "message_id": "4243"})
         context = delivery.case_context(conn, task.id)  # o Principal colou a resposta: continua sendo resposta humana, e passa do next_action
         assert "https://infotributos.15.229.99.10.nip.io" in context
-        assert context.split("Case context (this request):", 1)[1].lstrip().startswith("Answer to the destination escalation")
+        case = context.split("Case context (this request):", 1)[1]
+        assert case.lstrip().startswith("Original request (source, not a delivery claim):")
+        assert case.index("Answer to the destination escalation") > case.index("Registrar a validade do plano 61.")
 
 
 def test_case_context_hides_the_answer_of_an_older_wait(board, monkeypatch):

@@ -40,7 +40,8 @@ def _card(conn, tmp_path, destination):
     delivery.record_precheck(conn, task.id, task.current_run_id, {
         "checked": [{"target": "prod", "method": "ui", "result": "bug"}], "verdict": "not_delivered"})
     delivery.save_spec(conn, task.id, task.current_run_id, {
-        "goal": "Extração correta", "criteria": [{"id": "C1", "text": "ok"}], "steps": ["Corrigir"],
+        "goal": "Extração correta", "criteria": [{"id": "C1", "text": "extração correta", "mandatory": True,
+            "probe": {"kind": "sql", "query": "SELECT correct FROM extraction_checks", "expect": {"scalar": 1}}}], "steps": ["Corrigir"],
         "delivery_type": "code", "size": "P", "delivery_destination": destination},
         author="worker", evidence={"source": "worker"})
     wf = delivery.get_workflow(conn, task.id)

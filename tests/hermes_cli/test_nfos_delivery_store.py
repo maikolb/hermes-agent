@@ -126,16 +126,16 @@ def test_lost_external_response_requires_destination_read_before_retry(board):
     with kb.connect_closing(board) as conn:
         task=started(conn);spec(conn,task)
         first=delivery.begin_effect(conn,task.id,task.current_run_id,
-            operation='pr',target='repo:branch',candidate='a'*40)
+            operation='repair',target='audit:count',candidate='a'*40)
         assert first['execute'] is True
         again=delivery.begin_effect(conn,task.id,task.current_run_id,
-            operation='pr',target='repo:branch',candidate='a'*40)
+            operation='repair',target='audit:count',candidate='a'*40)
         assert again['execute'] is False
         assert again['reconcile'] is True
         delivery.reconcile_effect(conn,first['id'],found=True,
-            evidence={'readback':'github PR 80','url':'https://example.test/pull/80'})
+            evidence={'readback':'Reconciled count 31','url':'https://example.test/audit/80'})
         final=delivery.begin_effect(conn,task.id,task.current_run_id,
-            operation='pr',target='repo:branch',candidate='a'*40)
+            operation='repair',target='audit:count',candidate='a'*40)
         assert final['execute'] is False and final['reconcile'] is False
 
 
@@ -158,12 +158,12 @@ def test_done_requires_review_and_report_and_reports_need_no_pr(board):
 def test_readback_absence_allows_one_retry_and_confirmation_is_final(board):
     with kb.connect_closing(board) as conn:
         task=started(conn);spec(conn,task)
-        args=dict(operation='pr',target='repo:feature',candidate='b'*40)
+        args=dict(operation='repair',target='audit:count',candidate='b'*40)
         effect=delivery.begin_effect(conn,task.id,task.current_run_id,**args)
-        delivery.reconcile_effect(conn,effect['id'],found=False,evidence={'readback':'No matching PR at destination'})
+        delivery.reconcile_effect(conn,effect['id'],found=False,evidence={'readback':'No matching repair at destination'})
         assert delivery.begin_effect(conn,task.id,task.current_run_id,**args)['execute'] is True
         assert delivery.begin_effect(conn,task.id,task.current_run_id,**args)['execute'] is False
-        delivery.reconcile_effect(conn,effect['id'],found=True,evidence={'readback':'PR found','url':'https://example.test/pr/2'})
+        delivery.reconcile_effect(conn,effect['id'],found=True,evidence={'readback':'Reconciled count 31','url':'https://example.test/audit/2'})
         with pytest.raises(delivery.WorkflowError):
             delivery.reconcile_effect(conn,effect['id'],found=False,evidence={'readback':'stale empty lookup'})
 
