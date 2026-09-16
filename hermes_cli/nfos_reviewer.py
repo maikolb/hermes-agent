@@ -258,6 +258,7 @@ def analyse(case, memory, emit):
 def save_lessons(case, review, store, emit):
     refs = {r['ref'] for r in case['records']}
     saved = []
+    # Validate the complete extraction before making any memory mutation.
     for lesson in review.get('lessons', []):
         key = lesson.get('key', '')
         if (not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,79}', key)
@@ -266,6 +267,8 @@ def save_lessons(case, review, store, emit):
                 or not set(lesson['sources']) <= set(review.get('inspected_sources', []))
                 or any(not str(lesson.get(k,'')).strip() for k in ['when','lesson','because','limits'])):
             raise ValueError('Aprendizado sem estrutura ou fonte válida')
+    for lesson in review.get('lessons', []):
+        key=lesson['key']
         marker = f'[NFOS Revisor:{case["project"]}:{key}]'
         entry = (f'{marker} Tipo: {lesson["kind"]}. Quando: {lesson["when"]}. '
                  f'Aprendizado: {lesson["lesson"]}. Base: {lesson["because"]}. '
@@ -314,7 +317,8 @@ def run(day=None, boards=None, analyzer=analyse):
         if day:
             until = datetime.combine(datetime.fromisoformat(day).date()+timedelta(days=1),daytime(),tz)
         watermark = read(root()/'watermark.json', {})
-        since = until.timestamp()-86400 if day else watermark.get('until',until.timestamp()-86400)
+        initial_days = 7 if settings()['frequency']=='weekly' and not day else 1
+        since = until.timestamp()-86400 if day else watermark.get('until',until.timestamp()-86400*initial_days)
         state.update(since=since,until=until.timestamp())
         emit('started',since=since,until=until.timestamp())
         cfg = load_config().get('memory') or {}

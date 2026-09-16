@@ -93,3 +93,9 @@ def test_consolidate_same_key_and_reject_unread_sources(home):
     assert 'price propagation' in store.memory_entries[0]
     data['inspected_sources']=[]
     with pytest.raises(ValueError):reviewer.save_lessons(case,data,store,lambda *a,**k:None)
+
+
+def test_initial_weekly_review_covers_seven_days(home,monkeypatch):
+    monkeypatch.setattr(reviewer,'settings',lambda:{**reviewer.DEFAULTS,'frequency':'weekly'})
+    result=reviewer.run(boards=[],analyzer=judgment)
+    assert result['until']-result['since']==7*86400
