@@ -492,6 +492,21 @@ def test_escalation_requires_current_linked_evidence(task_context, monkeypatch):
     assert not review.worker_escalation(conn, task.id)
 
 
+def test_explicit_pin_supersedes_pending_dispatch_without_downgrade(task_context, monkeypatch):
+    monkeypatch.setattr('hermes_cli.nfos_runtime.previous_runs_termination_pending', lambda *a: False)
+    conn, task, _, artifact = task_context
+    _enable_escalation(monkeypatch); accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact, status='FAIL'); _reject_functional(conn,task,artifact)
+    with kb.write_txn(conn):
+        review.reclaim_escalation(conn,task.id)
+        conn.execute("UPDATE tasks SET model_override='gpt-6-astra',reasoning_effort='high',provider_override='openai-codex' WHERE id=?",(task.id,))
+    task=kb.claim_task(conn,task.id)
+    assert review.worker_model_args(task,conn) == ['-m','gpt-6-astra','--provider','openai-codex','--reasoning','high']
+    with kb.write_txn(conn): review.confirm_worker_dispatch(conn,task.id,task.current_run_id,'gpt-6-astra','high')
+    state=review.worker_escalation(conn,task.id)
+    assert state['status']=='applied' and state['model']=='gpt-6-astra' and state['reasoning_effort']=='high'
+
+
 def test_checkpoint_waits_for_active_tool_and_dispatch_confirms_actual_model(task_context, monkeypatch):
     monkeypatch.setattr('hermes_cli.nfos_runtime.previous_runs_termination_pending', lambda *a: False)
     from hermes_cli import nfos_tool

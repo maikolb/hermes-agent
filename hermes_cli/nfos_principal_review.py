@@ -198,7 +198,7 @@ def confirm_worker_dispatch(conn, task_id, run_id, model, reasoning):
         return
     task = d._kb().get_task(conn, task_id)
     if task.model_override and task.model_override != 'gpt-5.6-luna':
-        if model != task.model_override or reasoning != task.reasoning_effort:
+        if model != task.model_override or (task.reasoning_effort and reasoning != task.reasoning_effort):
             raise d.WorkflowError('Worker dispatch did not apply the explicit model pin')
         pending.update(model=model, reasoning_effort=reasoning,
                        reason='Explicit card model pin superseded the pending escalation')
