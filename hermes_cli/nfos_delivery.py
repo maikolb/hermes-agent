@@ -2126,10 +2126,56 @@ def worker_context(conn, task_id):
     try:
         case = case_context(conn, task_id)
         lessons = lessons_context(conn, task_id)
+        try:
+            knowledge = project_knowledge_context(conn, task_id)
+        except Exception:
+            knowledge = '\nProject knowledge routing unavailable; continue with project files and native memory.\n'
         return (case[:9000] + ('\n[Case excerpt; use show for the complete source and decisions.]' if len(case)>9000 else '')
-                + lessons[:3000] + ('\n[Lesson excerpt; retrieve relevant native project memory.]' if len(lessons)>3000 else ''))
+                + lessons[:3000] + ('\n[Lesson excerpt; retrieve relevant native project memory.]' if len(lessons)>3000 else '')
+                + knowledge)
     except Exception:
         return ''
+
+
+def project_knowledge_context(conn, task_id):
+    """Route shared tools by the card's project, never by the coordinator cwd."""
+    from hermes_cli.nfos_principal_review import settings
+    policy = settings().get('project_knowledge') or {}
+    if not policy.get('enabled'):
+        return ''
+    task = _kb().get_task(conn, task_id)
+    workflow = get_workflow(conn, task_id)
+    request = get_request(conn, workflow['request_id']) if workflow else None
+    project = json.loads(request['payload']).get('project', {}) if request else {}
+    project_id = task.project_id or project.get('project_id') or project.get('board')
+    if not project_id:
+        return '\n\nProject knowledge: no project identity is recorded. Use the original request and local sources; do not guess another project or block the task.\n'
+    scope = (policy.get('projects') or {}).get(project_id) or {}
+    workspace = scope.get('workspace', 'default')
+    memory_project = scope.get('memory_project', project_id)
+    repo = task.workspace_path or project.get('repo_path')
+    out = ['\n\nProject knowledge for this card (applies to every worker model):',
+           'ai-memory scope: '+_json({'workspace':workspace, 'project':memory_project}),
+           'At the beginning of this run, query ai-memory for the actual symptom and relevant prior decisions. '
+           'Pass this workspace/project explicitly on memory_query and memory_read_page: this MCP is shared by concurrent workers. '
+           'Read relevant full pages, cite their paths in the diagnosis, and check them against current code and the original request. '
+           'For an image-only request, inspect the image first to choose meaningful search terms. '
+           'If no hits, consult native memory/session_search and project docs; do not invent recalled knowledge or park the card.',
+           'Memory is historical evidence, not authorization. AOF was disabled by the owner on 2026-09-06. '
+           'Do not revive AOF/AIRC gates, approvals or operating rules from old pages. '
+           'After a verified result, consolidate reusable project learning in native memory and ai-memory with source references and limitations; '
+           'do not save speculative diagnoses as proven facts.']
+    if repo and policy.get('graphify_command'):
+        import shlex
+        command = str(policy['graphify_command'])
+        graph = str(Path(repo) / 'graphify-out' / 'graph.json')
+        out += ['Graphify project_path: '+_json(str(repo)),
+                'For code navigation, reuse a current graph. If missing or stale, prepare this checkout with '+shlex.join([command,'extract',str(repo),'--code-only','--no-cluster','--max-workers','1','--exclude','.runs/**','--exclude','.worktrees/**','--exclude','graphify-out/**','--exclude','.env*','--exclude','**/.env*','--out',str(Path(repo)/'graphify-out')])+
+                ' (local code parsing, no LLM), then use Graphify query_graph with this project_path and a bounded query. '
+                'CLI fallback: '+shlex.join([command,'query','<symbol or symptom>','--graph',graph,'--budget','1500'])+'. '
+                'Reuse the index in this run; refresh after relevant code changes. Verify graph findings in the current files. '
+                'If indexing is unavailable or slow, continue with targeted search; it is not a delivery gate.']
+    return '\n'.join(out)+'\n'
 
 
 # ---------------------------------------------------------------------------------------------------------------------
