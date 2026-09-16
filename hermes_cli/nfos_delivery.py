@@ -3450,15 +3450,55 @@ def save_report(conn, task_id, run_id, report):
             raise WorkflowError('Spec or workspace changed while evidence was checked; save the current report')
         _require_current_instruction_spec(conn,task_id)
         previous=_artifact(conn,task_id,'report');revision=(previous['revision'] if previous else 0)+1
+        from hermes_cli.nfos_principal_review import accepted
+        prior_review = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND kind='final_review' ORDER BY rowid DESC LIMIT 1", (task_id,)).fetchone()
+        prior_accepted = bool(previous and prior_review and prior_review['status']=='resolved'
+            and prior_review['author']=='Principal' and prior_review['action']=='continue'
+            and accepted(conn,task_id,'final_review'))
+        delta = {}; editorial = False
+        if previous and prior_review:
+            old_report = json.loads(previous['content'])
+            old_checks = json.loads(previous['evidence']).get('artifact_checks', [])
+            stable = lambda check: {k:v for k,v in check.items() if k!='checked_at'}
+            old_by_ref = {c['ref']:stable(c) for c in old_checks}
+            new_by_ref = {c['ref']:stable(c) for c in checks}
+            changed = sorted(k for k in old_by_ref.keys() | new_by_ref.keys() if old_by_ref.get(k)!=new_by_ref.get(k))
+            affected = {cid for c in old_checks+checks if c['ref'] in changed for cid in c.get('criteria',[])}
+            old_rows = {c['id']:c for c in old_report['criteria']}
+            new_rows = {c['id']:c for c in report['criteria']}
+            affected.update(cid for cid in old_rows.keys() | new_rows.keys() if old_rows.get(cid)!=new_rows.get(cid))
+            # Only leading/trailing whitespace in the existing summary is editorial.
+            # All other fields, evidence bytes and the accepted execution identity stay exact.
+            old_comparable = dict(old_report, summary=old_report['summary'].strip())
+            new_comparable = dict(report, summary=report['summary'].strip())
+            editorial = prior_accepted and old_comparable==new_comparable and not changed
+            delta = {'previous_decision_id':prior_review['id'], 'previous_report_revision':previous['revision'],
+                'previous_acceptance_current':prior_accepted,
+                'changed_fields':sorted(k for k in old_report.keys() | report.keys() if old_report.get(k)!=report.get(k)),
+                'changed_artifacts':changed, 'affected_criteria':sorted(affected),
+                'unchanged_criteria':sorted(cid for cid in old_rows.keys() & new_rows.keys() if cid not in affected),
+                'current_evidence':checks, 'previous_assessment':json.loads(prior_review['context']).get('assessment'),
+                'editorial_only':editorial}
         conn.execute('INSERT INTO nfos_artifacts(task_id,run_id,kind,revision,content,author,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)',
             (task_id,run_id,'report',revision,encoded,'worker',_json(evidence),int(time.time())))
         _event(conn,task_id,run_id,'nfos_report_saved',{'revision':revision,'spec_revision':spec['revision']})
         from hermes_cli.nfos_principal_review import required
         if required(conn,task_id):
-            ask_principal(conn,task_id,run_id,kind='final_review',
-                          question='Verify the requested outcome against the original source and saved evidence',context={})
+            decision_id = ask_principal(conn,task_id,run_id,kind='final_review',
+                question=('Review changed fields and affected criteria using report_delta; reuse unchanged verified evidence. '
+                          'Do not repeat operations or ask the owner to confirm valid observations.' if delta else
+                          'Verify the requested outcome against the original source and saved evidence'),
+                context={'report_delta':delta} if delta else {})
+            if editorial:
+                ctx = json.loads(get_decision(conn,decision_id)['context'])
+                ctx['assessment'] = json.loads(prior_review['context'])['assessment']
+                conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',author='Principal',answer=?,context=?,resolved_at=? WHERE id=?",
+                    (prior_review['answer'],_json(ctx),int(time.time()),decision_id))
+                _event(conn,task_id,run_id,'nfos_editorial_acceptance_reused',
+                    {'decision_id':decision_id,'previous_decision_id':prior_review['id'],'report_revision':revision})
             conn.execute("UPDATE nfos_workflows SET stage='report',next_action=?,updated_at=? WHERE task_id=?",
-                         ('Principal reviewing the saved result; address any requested changes on this card',int(time.time()),task_id))
+                         ('Accepted result preserved; continue completion' if editorial else
+                          'Principal reviewing the saved result; address any requested changes on this card',int(time.time()),task_id))
 
 
 def _result_review():
