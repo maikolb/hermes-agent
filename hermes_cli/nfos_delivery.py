@@ -3642,6 +3642,14 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
                 _event(conn,task_id,run_id,'nfos_principal_auto_continue',{'decision_id':decision_id,'kind':kind,'question':question,'answer':_auto})
                 return decision_id
         context=dict(context)
+        if kind == 'impediment':
+            from hermes_cli.nfos_principal_review import impediment_identity
+            context['impediment_identity'] = impediment_identity(conn, task_id, context)
+            for pending in conn.execute("SELECT id,question,context FROM nfos_decisions WHERE task_id=? AND run_id=? AND kind='impediment' AND status='pending'",
+                                        (task_id,run_id)).fetchall():
+                if (json.loads(pending['context']) == context
+                        and (context.get('cause') or pending['question'] == question)):
+                    return pending['id']
         if kind in {'spec_review','final_review'}:
             from hermes_cli.nfos_principal_review import identity
             _require_current_instruction_spec(conn,task_id)
@@ -3701,7 +3709,7 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
             decision_id='dec_'+uuid.uuid4().hex[:20]
         existing=conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND run_id=? AND kind=? AND question=? AND status='pending'",
                                (task_id,run_id,kind,question)).fetchone()
-        if existing and kind not in {'additional_tasks','homologation','spec_review','final_review'}:
+        if existing and kind not in {'additional_tasks','homologation','spec_review','final_review','impediment'}:
             return existing['id']
         revision=get_workflow(conn,task_id)['spec_revision']
         auto=_auto_continue_answer(kind,question)  # BLOCK_LESS_20260910

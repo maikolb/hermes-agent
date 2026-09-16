@@ -44,7 +44,7 @@ def worker_model_args(task, conn=None):
         effort = policy.get('worker_reasoning_effort') or task.reasoning_effort
     if conn is not None:
         escalation = worker_escalation(conn, task.id)
-        if escalation and model == 'gpt-5.6-luna' and provider in (None, 'openai-codex'):
+        if escalation and not task.model_override and model == 'gpt-5.6-luna' and provider in (None, 'openai-codex'):
             model, provider, effort = escalation['model'], 'openai-codex', escalation['reasoning_effort']
     args = ['-m', model] if model else []
     if model and provider:
@@ -61,55 +61,126 @@ def worker_escalation(conn, task_id):
     return json.loads(workflow['state_json']).get('worker_escalation', {}) if workflow else {}
 
 
+def impediment_identity(conn, task_id, context):
+    task = d._kb().get_task(conn, task_id)
+    spec = d.get_spec(conn, task_id)
+    state = json.loads(d.get_workflow(conn, task_id)['state_json'])
+    evidence = {}
+    refs = context.get('evidence') or []
+    refs = [refs] if isinstance(refs, str) else refs if isinstance(refs, list) else []
+    for ref in refs:
+        if not isinstance(ref, str):
+            continue
+        try:
+            if Path(ref).is_file():
+                evidence[ref] = hashlib.sha256(Path(ref).read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            continue  # Unavailable references remain in context; asking is still possible.
+    tool_evidence = None
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_tool_calls'").fetchone():
+        row = conn.execute('SELECT id,finished_at,status,returncode FROM nfos_tool_calls WHERE task_id=? AND finished_at IS NOT NULL ORDER BY rowid DESC LIMIT 1', (task_id,)).fetchone()
+        tool_evidence = dict(row) if row else None
+    return dict(instruction_revision=task.instruction_revision,
+                spec_revision=spec['revision'] if spec else None,
+                candidate={k:state.get(k) for k in ('candidate_sha','candidate_tree','integrated_sha','delivery_readback')},
+                evidence=evidence, tool_evidence=tool_evidence)
+
+
+def _stagnation_evidence(conn, decision, failure):
+    """Principal judgment backed by a correction and a subsequent native tool receipt."""
+    task_id = decision['task_id']
+    task = d._kb().get_task(conn, task_id)
+    context = json.loads(decision['context'])
+    prior = d.get_decision(conn, failure.get('prior_decision_id'))
+    if (not prior or prior['id'] == decision['id'] or prior['task_id'] != task_id
+            or prior['status'] != 'resolved' or prior['action'] != 'changes' or prior['author'] != 'Principal'
+            or prior['kind'] != decision['kind'] or prior['spec_revision'] != decision['spec_revision']
+            or task.current_run_id != decision['run_id']):
+        raise d.WorkflowError('Stagnation needs a prior Principal correction in the same scope and current attempt')
+    field = 'acceptance_identity' if decision['kind'] == 'spec_review' else 'impediment_identity'
+    current = identity(conn, task_id, 'spec_review') if field == 'acceptance_identity' else impediment_identity(conn, task_id, context)
+    prior_context = json.loads(prior['context'])
+    prior_scope = dict(prior_context.get(field) or {})
+    current_scope = dict(current)
+    # A new tool result is required after the correction; it changes evidence,
+    # not the instruction/spec/candidate scope against which it is judged.
+    prior_scope.pop('tool_evidence', None); current_scope.pop('tool_evidence', None)
+    if (context.get(field) != current or prior_scope != current_scope
+            or decision['kind'] == 'impediment' and prior_context.get('cause') != context.get('cause')):
+        raise d.WorkflowError('Stagnation scope or evidence changed; review the current attempt')
+    calls = failure.get('tool_call_ids')
+    if not isinstance(failure.get('reason'), str) or not failure['reason'].strip() or not isinstance(calls, list) or not calls:
+        raise d.WorkflowError('Stagnation needs a diagnosis and inspected native tool output')
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_tool_calls'").fetchone():
+        raise d.WorkflowError('Stagnation needs persisted native tool output')
+    for call_id in calls:
+        call = conn.execute('SELECT * FROM nfos_tool_calls WHERE id=? AND task_id=? AND run_id=?',
+                            (call_id,task_id,decision['run_id'])).fetchone()
+        if (not call or call['finished_at'] is None or call['created_at'] < prior['resolved_at']
+                or call['status'] not in ('succeeded','failed') or not conn.execute(
+                    'SELECT 1 FROM nfos_tool_chunks WHERE call_id=? AND length(content)>0', (call_id,)).fetchone()):
+            raise d.WorkflowError('Stagnation needs completed tool output from after the correction')
+
+
 def escalate_rework(conn, decision, assessment):
     """Principal classifies a current functional rejection, never local test FAILs."""
-    if settings().get('worker_escalation') is not True or decision['kind'] != 'final_review':
+    if settings().get('worker_escalation') is not True:
         return
     failure = (assessment or {}).get('failure')
-    if not isinstance(failure, dict) or failure.get('kind') != 'functional':
+    if not isinstance(failure, dict):
+        return
+    stagnation = (decision['kind'] in ('spec_review','impediment')
+                  and failure.get('kind') == 'stagnation' and failure.get('cause') == 'model_reasoning')
+    if not stagnation and (decision['kind'] != 'final_review' or failure.get('kind') != 'functional'):
         return
     task_id = decision['task_id']
-    current = identity(conn, task_id, 'final_review')
-    if json.loads(decision['context']).get('acceptance_identity') != current:
-        raise d.WorkflowError('Functional rejection requires the current report and instruction')
     reason = failure.get('reason')
-    rows = failure.get('criteria')
-    report = d._artifact(conn, task_id, 'report')
-    checks = json.loads(report['evidence']).get('artifact_checks', [])
-    if not isinstance(reason, str) or not reason.strip() or not isinstance(rows, list) or not rows:
-        raise d.WorkflowError('Functional rejection requires a reason, criteria and inspected evidence')
-    for row in rows:
-        refs = row.get('evidence') if isinstance(row, dict) else None
-        linked = [c for c in checks if row.get('id') in c.get('criteria', []) and c.get('status') == 'verified_local'] if isinstance(row, dict) else []
-        if not isinstance(refs, list) or not refs or any(not any(ref in (c['ref'], c.get('path')) for c in linked) for ref in refs):
-            raise d.WorkflowError('Functional rejection needs criterion-linked report evidence')
-        for check in linked:
-            actual = d._inspect_local_evidence(check['path'])
-            if any(actual[k] != check[k] for k in ('sha256', 'size_bytes')):
-                raise d.WorkflowError('Functional rejection evidence changed; review the current bytes')
+    report = None
+    if stagnation:
+        _stagnation_evidence(conn, decision, failure)
+    else:
+        current = identity(conn, task_id, 'final_review')
+        if json.loads(decision['context']).get('acceptance_identity') != current:
+            raise d.WorkflowError('Functional rejection requires the current report and instruction')
+        reason = failure.get('reason')
+        rows = failure.get('criteria')
+        report = d._artifact(conn, task_id, 'report')
+        checks = json.loads(report['evidence']).get('artifact_checks', [])
+        if not isinstance(reason, str) or not reason.strip() or not isinstance(rows, list) or not rows:
+            raise d.WorkflowError('Functional rejection requires a reason, criteria and inspected evidence')
+        for row in rows:
+            refs = row.get('evidence') if isinstance(row, dict) else None
+            linked = [c for c in checks if row.get('id') in c.get('criteria', []) and c.get('status') == 'verified_local'] if isinstance(row, dict) else []
+            if not isinstance(refs, list) or not refs or any(not any(ref in (c['ref'], c.get('path')) for c in linked) for ref in refs):
+                raise d.WorkflowError('Functional rejection needs criterion-linked report evidence')
+            for check in linked:
+                actual = d._inspect_local_evidence(check['path'])
+                if any(actual[k] != check[k] for k in ('sha256', 'size_bytes')):
+                    raise d.WorkflowError('Functional rejection evidence changed; review the current bytes')
     task = d._kb().get_task(conn, task_id)
     args = worker_model_args(task)
     model = args[args.index('-m')+1] if '-m' in args else None
     effort = args[args.index('--reasoning')+1] if '--reasoning' in args else None
     provider = args[args.index('--provider')+1] if '--provider' in args else None
-    if model != 'gpt-5.6-luna' or provider not in (None, 'openai-codex'):
+    if task.model_override or model != 'gpt-5.6-luna' or provider not in (None, 'openai-codex'):
         return  # Other model pins and already-higher models remain untouched.
     workflow = d.get_workflow(conn, task_id)
     state = json.loads(workflow['state_json'])
     old = state.get('worker_escalation') or {}
-    # A changed report from the same attempt cannot spend another escalation.
-    if old and (old.get('status') in {'pending', 'exhausted'} or old.get('source_run_id') == report['run_id']
-                or old.get('report_id') == report['id'] and old.get('report_revision') == report['revision']):
+    source_run_id = decision['run_id'] if stagnation else report['run_id']
+    # One tier per dispatched attempt, regardless of repeated questions/reports.
+    if old and (old.get('status') in {'pending', 'exhausted'} or old.get('source_run_id') == source_run_id
+                or report is not None and old.get('report_id') == report['id'] and old.get('report_revision') == report['revision']):
         return
     level = max(int(old.get('level', 0)), 1 if effort == 'max' else 0)
-    if old and old.get('run_id') != report['run_id']:
+    if old and old.get('run_id') != source_run_id:
         return  # Only a correction actually dispatched on this tier can fail it.
     level = min(2, level + 1)
     exhausted = bool(old and old.get('level') == 2)
     escalation = dict(level=level, model='gpt-5.6-luna' if level == 1 else 'gpt-6-astra',
                       reasoning_effort='max' if level == 1 else 'low', reason=reason,
-                      decision_id=decision['id'], report_id=report['id'], report_revision=report['revision'],
-                      source_run_id=report['run_id'], first_run_id=old.get('first_run_id', report['run_id']),
+                      decision_id=decision['id'], report_id=report['id'] if report else None, report_revision=report['revision'] if report else None,
+                      source_run_id=source_run_id, first_run_id=old.get('first_run_id', source_run_id),
                       status='exhausted' if exhausted else 'pending')
     if exhausted:
         escalation['run_id'] = old['run_id']

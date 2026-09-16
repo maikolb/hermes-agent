@@ -931,6 +931,11 @@ delivery attempt, never a local development test failure. When returning changes
 for a functional defect demonstrated by the CURRENT final report, include
 assessment.failure={"kind":"functional","reason":"Observed failure and correction",
 "criteria":[{"id":"C1","evidence":["inspected report artifact ref/path"]}]}.
+For spec_review/impediment stagnation under the SAME current scope identity, return changes with
+assessment.failure={"kind":"stagnation","cause":"model_reasoning","reason":"Inspected reasoning failure after correction",
+"prior_decision_id":"resolved Principal changes decision","tool_call_ids":["completed native nfos_tool call after that correction"]}.
+Read that correction and the persisted tool output first; elapsed time or repeated questions alone are not proof.
+This reuses the same ladder and preserves explicit model pins; billing, external access and CI obstacles do not qualify.
 Classify scope changes, missing documentation, billing and external CI problems
 with a different kind; they never escalate the worker. The runtime moves the same
 card from Luna high to Luna max, then Astra low only after a correction on that
