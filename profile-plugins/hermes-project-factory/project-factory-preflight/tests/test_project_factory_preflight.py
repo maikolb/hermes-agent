@@ -183,6 +183,22 @@ def test_actual_flat_tool_payload_and_other_profiles(tmp_path,monkeypatch):
     assert module._on_project_provisioned(profile='other') is None
 
 
+@pytest.mark.parametrize('new_runtime',[False,True])
+def test_registration_preserves_workers_using_the_previous_runtime(monkeypatch,new_runtime):
+    from hermes_cli import plugins
+    hooks={'transform_tool_result'} | ({'on_project_provisioned'} if new_runtime else set())
+    monkeypatch.setattr(plugins,'VALID_HOOKS',hooks)
+    monkeypatch.setattr(module,'_write_runtime_registration_marker',lambda profile:None)
+    class Context:
+        profile_name='hermes-project-factory'
+        def __init__(self):self.names=[]
+        def register_hook(self,name,callback):
+            assert name in hooks
+            self.names.append(name)
+    context=Context();module.register(context)
+    assert set(context.names)==hooks
+
+
 def test_human_topic_provisions_repository_and_native_nfos_config_idempotently(tmp_path,monkeypatch):
     from gateway.project_router import ProjectRouter
     from hermes_cli import config,lifecycle,nfos_runtime
