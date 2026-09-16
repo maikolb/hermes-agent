@@ -378,6 +378,7 @@ def reconcile_runtime(conn, *, worker_exit_grace_seconds=15):
     delivery.reconcile_human_answers(conn)
     reconcile_terminal_workers(conn,worker_exit_grace_seconds=worker_exit_grace_seconds)
     delivery.reconcile_owner_guidance(conn)
+    delivery.reconcile_incomplete_reviews(conn)
     delivery.reconcile_human_answers(conn)
     from hermes_cli.nfos_tool import reconcile_calls
     for call in reconcile_calls(conn):

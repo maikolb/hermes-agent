@@ -315,6 +315,57 @@ def test_partial_evidence_cannot_receive_final_acceptance(task_context, status):
         accept(conn, task, 'final_review', artifact)
 
 
+@pytest.mark.parametrize('status', ['FAIL', 'NOT_RUN'])
+def test_result_review_returns_incomplete_work_without_waiting_for_principal(task_context, monkeypatch, status):
+    conn, task, _, artifact = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact, status)
+    before = dict(d._artifact(conn, task.id, 'report'))
+    decision = ask(conn, task, 'final_review')
+    reply = d.wait_decision(conn, decision, timeout=0)
+    assert reply['status'] == 'resolved' and reply['action'] == 'changes'
+    assert reply['author'] == 'NFOS automation'
+    assert 'C1' in reply['answer'] and 'The count is 31' in reply['answer']
+    assert not d.pending_decisions(conn)
+    assert ask(conn, task, 'final_review') == decision
+    assert dict(d._artifact(conn, task.id, 'report')) == before
+    assert not review.accepted(conn, task.id, 'final_review')
+    assert not kb.complete_task(conn, task.id, result='Incomplete fixture')
+    save_report(conn, task, artifact, 'PASS')
+    pending = d.pending_decisions(conn)
+    assert len(pending) == 1 and pending[0]['kind'] == 'final_review'
+    accept(conn, task, 'final_review', artifact)
+    assert kb.complete_task(conn, task.id, result='Verified fixture')
+
+
+def test_dispatcher_recovers_existing_partial_review_with_dependent_continuation(task_context, monkeypatch):
+    from hermes_cli import nfos_runtime as runtime
+    conn, task, _, artifact = task_context
+    accept(conn, task, 'spec_review')
+    child_id = d.create_continuation(conn, task.id)['task_id']
+    kb.link_tasks(conn, task.id, child_id)
+    # Reproduce the saved legacy partial report and pending review. No live DB.
+    d.save_report(conn, task.id, task.current_run_id, {'summary': 'Partial fixture',
+        'criteria': [{'id': 'C1', 'status': 'NOT_RUN', 'evidence': [str(artifact)]}],
+        'artifacts': [str(artifact)], 'partial_delivery': True, 'continuation': child_id})
+    decision = ask(conn, task, 'final_review')
+    before = dict(d._artifact(conn, task.id, 'report'))
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    runtime.reconcile_runtime(conn)
+    reply = d.get_decision(conn, decision)
+    assert reply['status'] == 'resolved' and reply['action'] == 'changes'
+    assert child_id in reply['answer'] and 'depende deste card' in reply['answer']
+    workflow = d.get_workflow(conn, task.id)
+    assert workflow['stage'] == 'implement' and 'C1' in workflow['next_action']
+    assert kb.get_task(conn, child_id).status == 'todo'
+    assert kb.get_task(conn, task.id).status == 'running'
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 2
+    assert dict(d._artifact(conn, task.id, 'report')) == before
+    runtime.reconcile_runtime(conn)
+    assert d.get_decision(conn, decision) == reply
+
+
 def test_final_review_rejects_changed_candidate_and_wrong_evidence(task_context):
     conn, task, _, artifact = task_context
     accept(conn, task, 'spec_review')

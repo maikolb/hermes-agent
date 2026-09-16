@@ -1827,7 +1827,7 @@ def completion_refusal_note(conn, task_id):
     if report:
         try:
             content = json.loads(report['content']); opt = _optional_criteria(spec); pend_ids = {e['criterion'] for e in pending}
-            if str(content.get('disposition') or '') != 'cancelled_by_owner' and not _continuation_allows_partial(conn, task_id, content):
+            if str(content.get('disposition') or '') != 'cancelled_by_owner' and (_result_review() or not _continuation_allows_partial(conn, task_id, content)):
                 unmet = [c for c in (content.get('criteria') or []) if c.get('status') != 'PASS' and c.get('id') not in opt and c.get('id') not in pend_ids]
         except Exception:
             unmet = []
@@ -1846,7 +1846,9 @@ def completion_refusal_note(conn, task_id):
         ran = time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(e['ran_at'])) if e.get('ran_at') else 'não medido'
         lines.append(f"- {e['criterion']}: {e.get('text')}\n  esperado: {_json(e.get('expected'))[:400]}\n  observado: {_json(e.get('observed'))[:600]} ({e.get('state') or 'sem medição'}, {ran})\n  motivo: {e['why']}")
     for c in unmet:  # CLOSURE_RECOVERY_20260911
-        lines.append(f"- {c.get('id')}: {c.get('status')} (requisito não opcional): {str(c.get('text') or c.get('note') or '')[:200]}\n  execute e meça, ou salve partial_delivery=true com continuation=<filho aberto deste card>; optional só na primeira revisão com optional_reason.")
+        action = ('Conclua e comprove este requisito no mesmo card; o relatório parcial preserva o progresso, mas não encerra o pedido.'
+                  if _result_review() else 'execute e meça, ou salve partial_delivery=true com continuation=<filho aberto deste card>; optional só na primeira revisão com optional_reason.')
+        lines.append(f"- {c.get('id')}: {c.get('status')} (requisito não opcional): {str(c.get('text') or c.get('note') or '')[:200]}\n  {action}")
     if not pending and unmet:
         lines[0] = 'Fechamento recusado: requisito não opcional sem PASS; o pedido não está resolvido.'
     if mutation:
@@ -3459,6 +3461,57 @@ def _code_route_review(conn, task_id):
                         'com o readback do CI; se o CI falhar, corrija e repita; depois peça review de novo.')  # RECORD_MODE_TEXT_20260911
 
 
+def reconcile_incomplete_reviews(conn, task_id=None):
+    """Return mechanically incomplete results to work through the existing decision channel."""
+    if not _result_review():
+        return []
+    from hermes_cli.nfos_principal_review import accepted, identity
+    changed = []
+    with _kb().write_txn(conn, allow_nested=True):
+        rows = conn.execute("SELECT d.* FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
+                            "WHERE d.kind='final_review' AND d.status='pending' AND t.status NOT IN ('done','archived') "
+                            "AND (? IS NULL OR d.task_id=?)", (task_id, task_id)).fetchall()
+        for row in rows:
+            context = json.loads(row['context'])
+            spec = get_spec(conn, row['task_id'])
+            report = _artifact(conn, row['task_id'], 'report')
+            if not spec or not report:
+                continue
+            if context.get('acceptance_identity') != identity(conn, row['task_id'], 'final_review'):
+                continue
+            content = json.loads(report['content'])
+            results = _report_results(spec, content)
+            pending = [c for c in json.loads(spec['content'])['criteria'] if results[c['id']]['status'] != 'PASS']
+            if not pending:
+                continue
+            next_action = 'Concluir e comprovar neste card: ' + ', '.join(c['id'] for c in pending) + '.'
+            answer = next_action + '\n' + '\n'.join(
+                f"- {c['id']} ({results[c['id']]['status']}): {c['text']}" for c in pending)
+            answer += ('\nPreserve a spec aceita e os efeitos já confirmados. Execute somente o trabalho e a verificação '
+                       'que faltam dentro do escopo. Anexe evidência real, incluindo imagens nos critérios visuais. '
+                       'Salvar relatório parcial não conclui o pedido. Não crie outra continuação nem repita '
+                       'publicações ou revisão final com a mesma matriz incompleta. Se a execução exigir uma '
+                       'decisão técnica nova, informe o impedimento concreto ao Principal.')
+            child = content.get('continuation')
+            if child and conn.execute('SELECT 1 FROM task_links WHERE parent_id=? AND child_id=?',
+                                      (row['task_id'], child)).fetchone():
+                answer += (f'\nA continuação {child} depende deste card. Ela não pode ser pré-condição para '
+                           'concluir esta entrega; produza aqui as provas que ela aguardava. Seus artefatos já '
+                           'salvos podem ser lidos sem esperar seu encerramento.')
+            context['incomplete_result'] = [c['id'] for c in pending]
+            now = int(time.time())
+            conn.execute("UPDATE nfos_decisions SET status='resolved',action='changes',author='NFOS automation',"
+                         'answer=?,context=?,resolved_at=? WHERE id=?', (answer, _json(context), now, row['id']))
+            stage = 'implement' if accepted(conn, row['task_id'], 'spec_review') else 'spec'
+            conn.execute('UPDATE nfos_workflows SET stage=?,next_action=?,updated_at=? WHERE task_id=?',
+                         (stage, next_action, now, row['task_id']))
+            _event(conn, row['task_id'], row['run_id'], 'nfos_principal_resolved',
+                   {'decision_id': row['id'], 'action': 'changes', 'answer': answer, 'author': 'NFOS automation',
+                    'incomplete_result': context['incomplete_result']})
+            changed.append(row['id'])
+    return changed
+
+
 def ask_principal(conn, task_id, run_id, *, kind, question, context):
     if kind not in {'review','spec_review','final_review','impediment','additional_tasks','homologation','preparation'} or not question.strip():
         raise WorkflowError('A decision needs its kind and concrete question')
@@ -3509,8 +3562,11 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
                     _event(conn,task_id,run_id,'nfos_review_superseded',{'decision_id':pending['id'],'kind':kind})
             latest=conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',
                                 (task_id,kind)).fetchone()
-            if (latest and latest['status']=='pending'
+            if (latest and (latest['status']=='pending' or
+                            (latest['author']=='NFOS automation' and json.loads(latest['context']).get('incomplete_result')))
                     and json.loads(latest['context']).get('acceptance_identity')==context['acceptance_identity']):
+                if kind == 'final_review':
+                    reconcile_incomplete_reviews(conn, task_id)
                 return latest['id']
         if kind=='preparation' and _owner_mode():  # CODE_FAST_ROUTE_20260910: preparação sem decisão do principal
             _t=_kb().get_task(conn,task_id)
@@ -3566,6 +3622,8 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
             context['review_identity']=_review_identity(conn,task_id)
         conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
                      (decision_id,task_id,run_id,kind,question,_json(context),revision,int(time.time())))
+        if kind == 'final_review' and reconcile_incomplete_reviews(conn, task_id):
+            return decision_id
         _event(conn,task_id,run_id,'nfos_principal_requested',{'decision_id':decision_id,'kind':kind,'question':question})
         return decision_id
 
