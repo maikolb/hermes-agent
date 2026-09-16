@@ -80,7 +80,9 @@ def test_completed_with_result_keeps_result(board):
     )
 
 
-def test_spawn_prompt_carries_protocol(board, monkeypatch, tmp_path):
+@pytest.mark.parametrize('delivery_type', ['operation', 'code'])
+@pytest.mark.parametrize('priority', [10, 100])
+def test_spawn_prompt_carries_protocol(board, monkeypatch, tmp_path, delivery_type, priority):
     """The dispatcher spawn command must ship the protocol block."""
     captured = {}
 
@@ -96,7 +98,11 @@ def test_spawn_prompt_carries_protocol(board, monkeypatch, tmp_path):
     monkeypatch.setattr(kdb.subprocess, "Popen", _fake_popen)
     conn = kb.connect()
     try:
-        task_id = kb.create_task(conn, title="w", assignee="default")
+        task_id = kb.create_task(conn, title="w", assignee="default",
+            delivery_type=delivery_type, priority=priority,
+            workspace_kind='worktree' if delivery_type == 'code' else 'scratch',
+            requires_repo=delivery_type == 'code',
+            model_override='deepseek-v4.1-flash', provider_override='opencode-go')
         task = kb.get_task(conn, task_id)
     finally:
         conn.close()
@@ -106,21 +112,30 @@ def test_spawn_prompt_carries_protocol(board, monkeypatch, tmp_path):
     joined = " ".join(str(part) for part in captured["cmd"])
     assert dispatcher_worker_protocol() in joined
     assert "Worker Protocol (AOF)" not in joined
+    assert "Ask Claude TL" not in joined
+    assert "Reuse the current spec and checkpoint" in joined
+    assert "execute the existing supported mechanism directly" in joined
+    assert "assistance is necessary" in joined
+    assert "Do not launch an automatic Claude TL consultation" in joined
+    assert "explicit compatible model/provider pair" in joined
+    assert "Preserve explicit model/provider pins" in joined
+    assert ('-m', 'deepseek-v4.1-flash') in list(zip(captured['cmd'], captured['cmd'][1:]))
+    assert captured['cmd'][captured['cmd'].index('--provider')+1] == 'opencode-go'
 
 
-def test_protocol_requires_review_and_production_readback_for_code_delivery():
+def test_protocol_requires_review_and_requested_destination_readback():
     """The authorized workflow includes review, delivery and target evidence;
     reports without code retain their applicable non-deploy completion path."""
     text = dispatcher_worker_protocol()
     stages = [
         "Persist the versioned spec on the card before implementation",
-        "Use Codex implement/test/correct cycles with persisted progress",
-        "Validate the candidate in the project's homolog environment",
-        "Create or update the PR with spec and evidence, then request Principal review",
-        "Confirm the deployed version and functional production readback",
-        "spec, PR reference and evidence report on the card before kanban_complete",
+        "Use the selected model for implement/test/correct cycles with persisted progress",
+        "For code changes, run the applicable tests",
+        "and request Principal review",
+        "Verify the result at the requested destination",
+        "Save the spec, applicable PR reference and evidence report",
     ]
     offsets = [text.index(stage) for stage in stages]
     assert offsets == sorted(offsets)
-    assert "Principal can approve merge and deployment within the authorized scope" in text
-    assert "Reports and audits without code changes do not require a PR or deployment" in text
+    assert "TEST, HML, staging, preview or production are valid" in text
+    assert "reports and audits without code changes require no PR or deployment" in text
