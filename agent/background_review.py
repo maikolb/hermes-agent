@@ -1668,6 +1668,11 @@ def spawn_background_review_thread(
                      "in native memory, explicitly labeled with this project/board. Do not turn worker claims, "
                      "unverified hypotheses, temporary status or secrets into established facts. "
                      "Update an existing note when appropriate. No new task or stakeholder message is needed.")
+        prompt += ("\nEach NFOS closure must leave durable project learning. If saved_to_native_memory is true, "
+                   "the supplied learning is already persisted: consolidate only when useful, do not duplicate. "
+                   "Otherwise save the reviewed learning now; if memory is full, merge overlapping entries "
+                   "with the native memory tools and retry. Preserve explicit limitations as limitations, "
+                   "never turn an inconclusive finding into a verified fact. Do not ask the owner for closure approval.")
 
     focus = (focus or "").strip()
     if focus:

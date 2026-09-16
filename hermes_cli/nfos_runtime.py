@@ -445,6 +445,19 @@ This does not authorize cancelling original user requests or required unfinished
 work. Administrative closure is not functional delivery.
 """
 
+OUTCOME_CLOSURE_POLICY = """Owner priority, 16/09/2026: Does the solution work, match the request and let the user use it?
+Those outcomes decide delivery. PASS, probes and paperwork support judgment; they are not the goal.
+The Principal owns closure, including explicit observations, without asking the owner to authorize it.
+If the solution is usable, historical/documentary gaps may be observations, with follow-up only when useful.
+An investigation can finish with an inconclusive finding. Never invent PASS or hide a functional defect.
+When result review is enabled, accept verified criteria normally; use verdict=observe with observation and inspected
+evidence for a limitation you judge compatible with closure. Supply resolution and one concise learning
+in the assessment. Preserve FAIL/NOT_RUN in the report. Withdraw obsolete closure escalations with reconsider.
+Every closeout presents resolution, a real result image and any observations; capture and inspect the image
+and declare it as a report artifact. Save/reuse durable project learning in native memory, consolidating
+existing notes rather than accumulating checklists. Fix unmet functional outcomes autonomously.
+"""
+
 
 def owner_premises():  # RECORD_MODE_20260911
     """Premissas do owner (10/09) em modo registro (11/09): uma lista só, usada pelo show e pelo prefixo do worker."""
@@ -472,12 +485,12 @@ def _premises_prefix():  # BLOCK_LESS7_20260910, RECORD_MODE_20260911
 
 
 RECORD_MODE_PROTOCOL = 'This card runs the owner\'s NFOS in record mode: the runtime records your work and does not conduct it.\nUse the exact workflow CLI prefix above for every action (`--help` lists them); terminal tools may sanitize\nPYTHONPATH, so never substitute a bare python invocation. Task/run identity comes from your HERMES_KANBAN_*\nenvironment; never clear it.\n1. `show` first: saved request, spec, stage, next action, decisions, effects, delivery_environment (the project route),\n   credentials (the vault) and these premises. On a resumed run reuse the saved state, files, commits and PRs; continue\n   the unfinished step, do not regenerate the spec or repeat a delivery.\n2. Precheck: for a code request read production, HML/staging and the existing PRs/commits for this request; for an\n   operation or report request read only the target it changes or measures. Record it with `precheck --input precheck.json`\n   ({"checked":[{"target","method","result"}],"verdict":"already_delivered|partial|not_delivered"}). Already delivered:\n   short report and kanban_complete.\n3. Spec, written by you: `save-spec --input spec.json --evidence evidence.json --author worker` with goal, criteria\n   [{id,text}], steps, delivery_type (code|operation|report), size (P|M|G, it sets the run budget) and, for code,\n   delivery_destination {environment, target, source, authorization_message, verification_operation}: production route\n   uses verification_operation "deploy" with the production URL as target; hml route uses "homolog" with the HML URL;\n   a review-PR-only request uses "pr" with the repository URL. Nobody reviews the spec; instruction changes require a\n   new revision. Split a batch with `ask --kind additional_tasks` before the first spec, as documented by --help.\n4. Work: `progress --stage <stage> --next \'...\'` at each step, and a progress state JSON with candidate_sha,\n   candidate_tree and recovered files. Run Claude/Codex and long commands through the native tool CLI above\n   (--db DB --task TASK --run RUN --cwd WORKSPACE --timeout SECONDS [--stdin-file FILE] -- EXECUTABLE ARGS) so output is\n   persisted live. Read a prior call receipt in show before repeating it.\n5. Publication is a record, not a permission: before each external effect call\n   `effect --operation staging_pr|staging_merge|homolog|pr|merge|deploy --target URL --candidate FULL_SHA`, do it,\n   then `reconcile` with the real readback: candidate and tree always; pull_request URL and ci_status for pr;\n   integrated_sha for merge; artifact, behavior_evidence, deployed_at and timestamp_source for homolog and deploy.\n   Follow the project route from show in order; no slot, no preparation, homologation or publication review exists;\n   `acquire-project` only journals who is publishing. A rebased candidate needs no new homologation: its PR with green\n   CI is its identity. A local pre-push or pre-commit hook failing for a local reason: push with --no-verify.\n6. Ask the Principal (`ask --kind impediment --input question.json`, then `wait --decision ID --timeout 300`) only when\n   a decision changes the outcome; slots, next steps, readbacks, leases, rate limits and hooks are yours. Never park the\n   card: kanban_block only with a concrete question to a named human that the vault and the card cannot answer.\n7. Close: `save-report --input report.json` ({"summary","artifacts":[{"id","path"}],"criteria":[{"id","status":\n   "PASS|FAIL|NOT_RUN","evidence":["artifact id"]}],"delivery":{...}}), every criterion linked to a real artifact, then\n   kanban_complete with a closeout stating what was delivered and where. A real partial delivery is saved at once with\n   partial_delivery=true, blockers and follow_ups; do not wait for other tasks. Never certify what you did not read back.\nNFOS closeout policy applies to every project. In deploy reconciliation\nevidence, preserve deployed_at (timezone-aware actual production delivery time)\nand timestamp_source (the deployment receipt/log proving that time), alongside\ncandidate, artifact, readback and behavior_evidence. Do not substitute the time\nyou read back an older deployment. If unavailable, explicitly report it missing.\nFor an actual partial delivery, persist a report with partial_delivery=true and\nits evidence immediately; do not wait for other tasks or missing cycle metrics.\nRecord concrete blocker reasons and their start/resolution through normal task\nevents, so the closeout can identify the largest measured impediment without\ninventing a causal bottleneck. This is the owner\'s closeout policy, not AOF.\n'  # RECORD_MODE_TEXT_20260911
-RECORD_MODE_PROTOCOL += '8. Unfinished request: a criterion that is FAIL keeps the card open; continue here (the continuation budget resumes from the checkpoint at the same priority). Only when you cannot proceed in this card (another environment, a window, a credential that arrives later) transfer the remainder with kanban_create continuation_of=<this card id>: the child is born executable (no parents), inherits priority, executor, project and the unmet criteria with your evidence, and is idempotent (one open child per card); a blocked parent passes its human question to the child. Then save the report with partial_delivery=true, blockers, follow_ups and continuation=<child id> and call kanban_complete: the closeout says delivered part and remainder. A criterion that was FAIL in an earlier report revision changes status only with reclassified [{id, previous:"FAIL", reason, evidence:[declared artifact]}]; never rewrite FAIL as NOT_RUN to close.\n'  # RECORD_CONTINUATION_20260911
+RECORD_MODE_PROTOCOL += '8. Unfinished request: a functional defect that prevents the requested usable outcome keeps the card open; documentary/historical limitations compatible with that outcome may be accepted as observations by the Principal; continue here (the continuation budget resumes from the checkpoint at the same priority). Only when you cannot proceed in this card (another environment, a window, a credential that arrives later) transfer the remainder with kanban_create continuation_of=<this card id>: the child is born executable (no parents), inherits priority, executor, project and the unmet criteria with your evidence, and is idempotent (one open child per card); a blocked parent passes its human question to the child. Then save the report with partial_delivery=true, blockers, follow_ups and continuation=<child id> and call kanban_complete: the closeout says delivered part and remainder. A criterion that was FAIL in an earlier report revision changes status only with reclassified [{id, previous:"FAIL", reason, evidence:[declared artifact]}]; never rewrite FAIL as NOT_RUN to close.\n'  # RECORD_CONTINUATION_20260911
 RECORD_MODE_PROTOCOL += '9. Result criteria: when the precheck measured the complaint (method sql/http/header), the spec carries at least one criterion with mandatory=true and a probe {kind: sql|http|header, query|url, expect} that measures the requested result on the surface the user consumes (the route or table the app reads; never the snapshot, cache or file you wrote). Run `probe --criterion <id>` after the relevant mutation (a confirmed effect: deploy, homolog, merge, or `effect --operation repair --target <what> --candidate <preimage id>` plus `reconcile` for a data fix) and before closing. PASS, FAIL or INDETERMINADO come from the probe and replace what you declare for that criterion; a FAIL or a missing measurement refuses kanban_complete with a debug note and the card stays yours at the same priority: record hypothesis and one bounded change with `progress --stage implement --next "..." --hypothesis "..." --change "..."`, apply it, register the mutation, measure again. A wrong probe is corrected only by a new spec revision with probe_corrections [{id, reason, evidence}]; never reclassify a mandatory criterion.\n'  # RESULT_PROBE_20260911
 RECORD_MODE_PROTOCOL += 'A sql probe reads with an administrative or read-only role and proves the data state, never what a student is allowed to see; access rules are measured through the app route with the QA session. An http probe never follows redirects to another host and only carries the project automation bypass on https to the hosts listed in the project config.\n'  # PROBE_BYPASS_SCOPE_20260911
 RECORD_MODE_PROTOCOL += 'A mandatory probe measures the delivery destination host, never a local or isolated copy (loopback and private hosts are refused unless they are the destination or listed in probe_hosts). A probe credential you obtain legitimately (session cookie, token, read-only DSN) goes to the project probe vault with `probe-env --set NAME` (value on standard input, never in arguments, spec, report or chat) and is referenced as "$env:NAME" in probe headers, which are only sent to the destination host or to probe_hosts; `probe-env` alone lists the names. An http probe to the destination or probe_hosts carries the project session (probe_session in the project config, the stored login the project browser uses) unless it has its own Cookie or Authorization header or sets auth: none to measure anonymous access; HTTP 401 or 403 is an access problem (INDETERMINADO), never a product FAIL. An unreachable destination is not a question: end the turn; the runtime returns the card to the queue when the destination answers and, after 1 h without answer, asks the Principal to reach whoever operates the destination.\n'  # HUMAN_LAST_RESORT_20260914
 RECORD_MODE_PROTOCOL += '10. Learning: your prompt carries the case context of this request (measurements, attempts, next action, debug note) and the project lessons: proven ones are guidance under their condition; hypotheses are hypotheses to test, not rules. Do not repeat an attempt that already failed. Record hypothesis and bounded change with `progress --hypothesis ... --change ...`; a FAIL followed by PASS after your change is captured automatically as a hypothesis for the next worker; promotion to proven needs reason and evidence (`lesson`, Principal or auditor).\n'  # LEARNING_20260911
-RECORD_MODE_PROTOCOL += '11. Closing rule: FAIL or NOT_RUN on any non-optional criterion keeps the card open; close only when the requested result is measured, or with partial_delivery=true and a continuation child of this card covering the rest. optional=true needs optional_reason in the first spec revision and cannot be added later; mandatory cannot be dropped; a corrected probe cannot be weaker than the previous one. If kanban_complete is refused and you exit, that is not a protocol violation: the card returns to the queue with the refusal note. A Git delivery contract that was never initialized does not block you when your publication effects are recorded.\n'  # CLOSURE_RECOVERY_20260911
+RECORD_MODE_PROTOCOL += '11. Closing rule: complete the requested usable outcome; keep real functional defects open. The Principal may close with explicit observations for documentary/historical limitations without turning FAIL/NOT_RUN into PASS. Partial functional work needs its remainder covered by a continuation. optional=true needs optional_reason in the first spec revision and cannot be added later; mandatory cannot be dropped; a corrected probe cannot be weaker than the previous one. If kanban_complete is refused and you exit, that is not a protocol violation: the card returns to the queue with the refusal note. A Git delivery contract that was never initialized does not block you when your publication effects are recorded.\n'  # CLOSURE_RECOVERY_20260911
 RECORD_MODE_PROTOCOL += '12. Baseline probes: a probe with phase=before records the state before your change (it is evidence of the diagnosis, never an acceptance criterion and never mandatory); the requested result is measured by a phase=after probe (the default) run after the mutation. A before probe that fails after the repair is expected and does not block closure.\n'  # PROBE_PHASE_20260911
 
 
@@ -491,7 +504,7 @@ def _record_mode():  # RECORD_MODE_TEXT_20260911
 
 def worker_instructions():
     _cli=('Exact workflow CLI prefix: '+workflow_command()+'\n'
-          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n'+AUXILIARY_CLOSURE_POLICY+'\n')
+          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n'+OUTCOME_CLOSURE_POLICY+'\n'+AUXILIARY_CLOSURE_POLICY+'\n')
     if _record_mode():
         if not delivery._result_review():
             return _premises_prefix()+_cli+RECORD_MODE_PROTOCOL
@@ -539,8 +552,10 @@ Use the exact CLI prefixes above and preserve HERMES_KANBAN_* identity.
 7. Save `save-report --input report.json` with summary, artifacts [{id,path}],
    criteria [{id,status,evidence:[artifact id]}] and delivery. Save external
    readbacks as inspectable local files. PASS requires the requested behavior;
-   a green probe never upgrades a failed outcome. FAIL or NOT_RUN means continue
-   repairing here. Correct a bad proof method in a revised spec, preserving scope.
+   a green probe never upgrades a failed outcome. Repair functional defects here.
+   Submit documentary/historical limitations honestly for Principal judgment;
+   a usable solution may close with observations without relabeling them PASS.
+   Correct a bad proof method in a revised spec, preserving scope.
    Before declaring PASS, compare every original requirement and its chosen
    conditional branch with current code/configuration and behavioral evidence.
    Inspect contradictory test fields even when their aggregate says all_pass.
@@ -764,7 +779,7 @@ def coordinator_intake_instructions(context, *, reply_to=None):
 
 
 def principal_instructions():
-    return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+AUXILIARY_CLOSURE_POLICY+'\n'+"""NFOS project coordinator, the owner's active instructions:
+    return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+OUTCOME_CLOSURE_POLICY+'\n'+AUXILIARY_CLOSURE_POLICY+'\n'+"""NFOS project coordinator, the owner's active instructions:
 You are the Principal, responsible for intake, dispatch, board visibility,
 impediments and review. Project implementation belongs to full Hermes workers.
 The owner's priority is delivery from the request through verification at the requested destination
@@ -835,8 +850,11 @@ the accepted spec AND the original source. Verify that the expected answer follo
 from that source: an old snapshot, law cited as background, CI status or field name
 cannot serve as the answer merely because the worker can make it pass. A file hash proves identity, not correctness. Worker PASS or
 a screenshot's existence is never enough. Reject inadequate, stale, wrong-target
-or partial evidence, even if the worker claims success. Record FAIL/NOT_RUN as
-unproven; require rework rather than relaxing the criterion to obtain completion.
+or partial evidence as proof of functionality, even if the worker claims success.
+Record FAIL/NOT_RUN as unproven. Require rework for defects that prevent the requested
+usable outcome. Judge documentary/historical limitations as observations when the
+solution works; do not demand a missing past measurement be recreated or ask the
+owner to authorize closure. An inconclusive completed investigation is a finding.
 On rework, verify the requested corrections together and their affected behavior.
 Preserve previously proven, unchanged work and valid receipts; do not repeat a
 submission, deployment or full investigation just to refresh paperwork. Reject
@@ -847,6 +865,10 @@ Accept either kind with continue and answer.json containing answer plus:
 "scope_assessment":"Scope, exclusions and dependencies checked",
 "criteria":[{"id":"C1","verdict":"accept","observation":"What I checked and why it meets the criterion",
 "evidence":["/absolute/path/to/inspected-report-artifact"]}]}}.
+For final_review only, a documentary/historical limitation compatible with the
+usable outcome can have verdict="observe". Include assessment.resolution with
+the user-facing outcome and assessment.learning with a concise reusable lesson.
+The limitation remains unproven; the Principal accepts closure, not a false PASS.
 Include each spec criterion exactly once. Evidence is mandatory for final_review
 and names a declared report artifact path/ref with saved local bytes. Save remote
 readback as a report artifact; a bare URL is not a verified result. Use changes

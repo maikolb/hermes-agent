@@ -7223,6 +7223,22 @@ def complete_task(
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )
+    nfos_closeout = None
+    if delivery_enrolled:
+        from hermes_cli.nfos_principal_review import closeout_packet
+        nfos_closeout = closeout_packet(conn, task_id)
+        if nfos_closeout:
+            result = summary = nfos_closeout['resolution']
+            if nfos_closeout['observations']:
+                result += '\n\nObservações:\n' + '\n'.join(nfos_closeout['observations'])
+                summary = result
+            metadata = dict(metadata or {})
+            metadata['nfos_closeout'] = nfos_closeout
+            existing = metadata.get('artifacts')
+            metadata['artifacts'] = list(existing) if isinstance(existing, (list, tuple)) else []
+            for path in nfos_closeout['images']:
+                if path not in metadata['artifacts']:
+                    metadata['artifacts'].append(path)
     # This is the single completion authority for tools, CLI, dashboard and
     # direct domain callers. Re-query remote PR/check/ref evidence on every
     # eligible worktree completion attempt; the transaction below still
@@ -7577,6 +7593,9 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
+    if nfos_closeout:
+        from hermes_cli.nfos_principal_review import persist_closeout_learning
+        persist_closeout_learning(conn, task_id, nfos_closeout)
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the

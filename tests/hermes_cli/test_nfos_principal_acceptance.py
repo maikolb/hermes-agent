@@ -344,7 +344,7 @@ def test_partial_evidence_cannot_receive_final_acceptance(task_context, status):
 
 
 @pytest.mark.parametrize('status', ['FAIL', 'NOT_RUN'])
-def test_result_review_returns_incomplete_work_without_waiting_for_principal(task_context, monkeypatch, status):
+def test_result_review_leaves_incomplete_findings_for_principal_judgment(task_context, monkeypatch, status):
     conn, task, _, artifact = task_context
     monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
     accept(conn, task, 'spec_review')
@@ -352,10 +352,8 @@ def test_result_review_returns_incomplete_work_without_waiting_for_principal(tas
     before = dict(d._artifact(conn, task.id, 'report'))
     decision = ask(conn, task, 'final_review')
     reply = d.wait_decision(conn, decision, timeout=0)
-    assert reply['status'] == 'resolved' and reply['action'] == 'changes'
-    assert reply['author'] == 'NFOS automation'
-    assert 'C1' in reply['answer'] and 'The count is 31' in reply['answer']
-    assert not d.pending_decisions(conn)
+    assert reply['status'] == 'pending' and reply['action'] is None
+    assert len(d.pending_decisions(conn)) == 1
     assert ask(conn, task, 'final_review') == decision
     assert dict(d._artifact(conn, task.id, 'report')) == before
     assert not review.accepted(conn, task.id, 'final_review')
@@ -382,10 +380,9 @@ def test_dispatcher_recovers_existing_partial_review_with_dependent_continuation
     monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
     runtime.reconcile_runtime(conn)
     reply = d.get_decision(conn, decision)
-    assert reply['status'] == 'resolved' and reply['action'] == 'changes'
-    assert child_id in reply['answer'] and 'depende deste card' in reply['answer']
+    assert reply['status'] == 'pending' and reply['action'] is None
     workflow = d.get_workflow(conn, task.id)
-    assert workflow['stage'] == 'implement' and 'C1' in workflow['next_action']
+    assert workflow['stage'] == 'report'
     assert kb.get_task(conn, child_id).status == 'todo'
     assert kb.get_task(conn, task.id).status == 'running'
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 2
