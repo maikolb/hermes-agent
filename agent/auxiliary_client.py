@@ -2723,6 +2723,56 @@ def _resolve_xai_oauth_for_aux() -> Optional[Tuple[str, str]]:
     return api_key, base_url
 
 
+
+def _read_codex_reserve_access_token(exclude_tokens: Optional[set[str]] = None) -> Optional[str]:
+    """Use an eligible reserve only after every account's normal quota is empty."""
+    import httpx
+    from hermes_cli.auth import _codex_usage_probe_url, _decode_jwt_claims
+
+    pool = load_pool("openai-codex")
+    entries = list(pool._entries)
+    if not entries:
+        return None
+    candidates = []
+    for entry in entries:
+        if entry.last_status == "dead":
+            continue
+        if pool._entry_needs_refresh(entry):
+            entry = pool._refresh_entry(entry, force=False)
+            if entry is None:
+                return None
+        token = entry.runtime_api_key
+        if not token:
+            return None
+        try:
+            headers = dict(_codex_cloudflare_headers(token))
+            headers["Authorization"] = "Bearer " + token
+            account_id = (_decode_jwt_claims(token).get("https://api.openai.com/auth") or {}).get("chatgpt_account_id")
+            if account_id:
+                headers["ChatGPT-Account-Id"] = account_id
+            response = httpx.get(
+                _codex_usage_probe_url(entry.runtime_base_url),
+                headers=headers, timeout=15,
+            )
+            response.raise_for_status()
+            usage = response.json()
+        except Exception:
+            logger.warning("Codex reserve: account quota could not be verified")
+            return None
+        normal = usage.get("rate_limit") or {}
+        if normal.get("allowed") is not False or normal.get("limit_reached") is not True:
+            return None
+        for limit in usage.get("additional_rate_limits") or []:
+            reserve = limit.get("rate_limit") or {}
+            if (limit.get("limit_name") == "gpt-reserve"
+                    and limit.get("normal_model_slug") == "gpt-5.6-luna"
+                    and reserve.get("allowed") is True
+                    and reserve.get("limit_reached") is False
+                    and token not in (exclude_tokens or set())):
+                candidates.append(token)
+                break
+    return candidates[0] if candidates else None
+
 def _read_codex_access_token() -> Optional[str]:
     """Read a valid, non-expired Codex OAuth access token from Hermes auth store.
 
@@ -3822,12 +3872,18 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
         )
         return None, None
     pool_present, entry = _select_pool_entry("openai-codex")
-    if pool_present:
+    if model == "gpt-reserve":
+        codex_token = _read_codex_reserve_access_token()
+        if not codex_token:
+            return None, None
+        base_url = _CODEX_AUX_BASE_URL
+    elif pool_present:
         codex_token = _pool_runtime_api_key(entry)
         if codex_token:
             base_url = _pool_runtime_base_url(entry, _CODEX_AUX_BASE_URL) or _CODEX_AUX_BASE_URL
         else:
-            codex_token = _read_codex_access_token()
+            codex_token = (_read_codex_reserve_access_token()
+                           if model == "gpt-reserve" else _read_codex_access_token())
             if not codex_token:
                 return None, None
             base_url = _CODEX_AUX_BASE_URL

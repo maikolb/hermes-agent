@@ -14,20 +14,20 @@ def settings():
 
 
 def required(conn, task_id):
+    # Record mode removes orchestration gates, not the Principal's judgment of
+    # scope and outcome. Both reviews use the existing decisions on this card.
     workflow = d.get_workflow(conn, task_id)
     if not workflow:
         return False
+    if settings().get('result_review') is True:
+        return True
     if settings().get('principal_validation') is False:
-        # BLOCK_LESS_20260910 (premissa do owner, 10/09): desligado no perfil vale para toda spec,
-        # inclusive as que gravam delivery_destination.
         return False
     spec = d.get_spec(conn, task_id)
     if spec and json.loads(spec['content']).get('delivery_destination'):
         return True
     request = d.get_request(conn, workflow['request_id'])
     project = json.loads(request['payload']).get('project', {}) if request else {}
-    # The profile switch applies to retained cards too. A request cannot opt
-    # out of the profile policy with a false value in its saved payload.
     return settings().get('principal_validation') is True or project.get('principal_validation') is True
 
 

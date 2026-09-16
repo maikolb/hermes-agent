@@ -11,6 +11,63 @@ from run_agent import AIAgent
 _REAL_THREAD = threading.Thread
 
 
+def test_kanban_review_saves_native_memory_for_next_worker_without_acknowledging_parent(tmp_path, monkeypatch):
+    import json
+    from gateway.wake import current_notify_receipt
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from tools.memory_tool import MemoryStore, memory_tool
+    from agent.turn_checkpoint import initialize_agent_turn_checkpoint
+
+    class LearningReview(FakeReviewAgent):
+        def run_conversation(self, **kwargs):
+            initialize_agent_turn_checkpoint(self, turn_id='review', user_content=kwargs['user_message'], messages=[])
+            assert 'fixture-project' in kwargs['user_message']
+            result = json.loads(memory_tool(action='add', content='[project:fixture-project] The verified export uses UTF-8.', store=self._memory_store))
+            assert result.get('success') is True
+
+    home = set_hermes_home_override(str(tmp_path))
+    receipt = {'db_path':str(tmp_path/'must-not-be-created.db'), 'delivery_id':'parent',
+               'completed_worker':{'board':'fixture-project','task_id':'T1'}}
+    token = current_notify_receipt.set(receipt)
+    try:
+        monkeypatch.setattr(run_agent_module, 'AIAgent', LearningReview)
+        monkeypatch.setattr(run_agent_module.threading, 'Thread', ImmediateThread)
+        agent = _bare_agent()
+        agent._memory_store = MemoryStore(memory_enabled=True, user_profile_enabled=False)
+        agent._memory_store.load_from_disk()
+        AIAgent._spawn_background_review(agent, messages_snapshot=[{'role':'assistant','content':'Verified export encoding: UTF-8.'}], review_memory=True)
+        fresh = MemoryStore(memory_enabled=True, user_profile_enabled=False)
+        fresh.load_from_disk()
+        assert '[project:fixture-project]' in (fresh.format_for_system_prompt('memory') or '')
+        assert current_notify_receipt.get() is receipt
+        assert not (tmp_path/'must-not-be-created.db').exists()
+    finally:
+        current_notify_receipt.reset(token)
+        reset_hermes_home_override(home)
+
+
+def test_worker_completion_triggers_native_learning_before_ten_turns(monkeypatch):
+    from gateway.wake import current_notify_receipt
+    from agent.turn_finalizer import finalize_turn
+    from tests.agent.test_skip_background_review import _make_agent, _stub_agent_for_finalize
+    agent = _make_agent()
+    _stub_agent_for_finalize(agent)
+    agent._skill_nudge_interval = 0
+    agent._memory_enabled = True
+    agent._memory_store = object()
+    agent.valid_tool_names = {'memory'}
+    token = current_notify_receipt.set({'completed_worker':{'board':'fixture-project','task_id':'T1'}})
+    try:
+        finalize_turn(agent, final_response='Reviewed delivery', api_call_count=1, interrupted=False, failed=False,
+                      messages=[{'role':'assistant','content':'Reviewed delivery'}], conversation_history=[],
+                      effective_task_id='T1', turn_id='turn', user_message='Worker completed', original_user_message='Worker completed',
+                      _should_review_memory=False, _turn_exit_reason='text_response(1)')
+        agent._spawn_background_review.assert_called_once()
+        assert agent._spawn_background_review.call_args.kwargs['review_memory'] is True
+    finally:
+        current_notify_receipt.reset(token)
+
+
 class _TurnBoundaryReached(Exception):
     """Stop a live turn exactly when it reaches turn-context construction."""
 

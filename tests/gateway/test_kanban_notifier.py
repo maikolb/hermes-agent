@@ -102,6 +102,46 @@ def _make_runner(adapter):
     return runner
 
 
+def test_portal_decision_reaches_bound_principal_without_chat_post(tmp_path, monkeypatch):
+    monkeypatch.setattr(kb, "_resolve_executable_assignee", lambda value: value)
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "portal.db"))
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Portal guidance", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="portal", chat_id="project",
+                          thread_id="sineta", notifier_profile="default", delivery_mode="notify+wake")
+        kb._append_event(conn, tid, kind="nfos_principal_requested", payload={"decision_id": "decision"})
+        before = kb.list_notify_subs(conn)[0]["last_event_id"]
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"kanban": {"agent_wake_on_events": True}})
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    monkeypatch.setattr(runner, "_active_profile_name", lambda: "default")
+    monkeypatch.setattr(runner, "_kanban_board_display_targets", lambda profiles: {
+        kb.DEFAULT_BOARD: [{"platform": "telegram", "chat_id": "project-chat", "thread_id": "41",
+                            "notifier_profile": "default"}]})
+    wakes = []
+    async def wake(adapter, **kwargs):
+        wakes.append(kwargs)
+        return len(wakes) > 1
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert len(wakes) == 1
+    with kb.connect_closing() as conn:
+        assert kb.list_notify_subs(conn)[0]["last_event_id"] == before
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert len(wakes) == 2
+    assert wakes[-1]["source"].chat_id == "project-chat"
+    assert wakes[-1]["source"].thread_id == "41"
+    assert tid in wakes[-1]["text"]
+    assert wakes[-1]["receipt"]["db_path"] == str(tmp_path / "portal.db")
+    assert adapter.sent == []
+    with kb.connect_closing() as conn:
+        subs = kb.list_notify_subs(conn)
+        assert len(subs) == 1 and subs[0]["platform"] == "portal"
+        assert subs[0]["last_event_id"] > before
+
+
 def _create_completed_subscription(summary="done once"):
     conn = kb.connect()
     try:

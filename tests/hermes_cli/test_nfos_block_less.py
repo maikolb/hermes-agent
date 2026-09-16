@@ -38,6 +38,21 @@ def test_unknown_impediment_and_reviews_still_go_to_the_principal():
     assert d._auto_continue_answer("spec_review", "slot occupied") is None
 
 
+@pytest.mark.parametrize("question", [
+    "O próximo passo é o readback HML pós-PR #62, mas o ambiente de execução está falhando antes de qualquer comando: "
+    "RTK/nfos_tool não consegue criar temporários em /tmp (No such file or directory), e a tentativa de restaurar permissões foi recusada pelo host.",
+    "Next step is readback, but the runner cannot create /tmp/hermes_sandbox: No such file or directory.",
+    "What is the next authorized action for t_123? The deployment failed and the previous release is unavailable.",
+])
+def test_next_step_words_do_not_auto_resolve_actual_failures(question):
+    assert d._auto_continue_answer("impediment", question) is None
+
+
+@pytest.mark.parametrize("question", ["Qual o próximo passo?", "What is the next step?", "What should I do next?"])
+def test_bare_next_step_questions_remain_autonomous(question):
+    assert d._auto_continue_answer("impediment", question).startswith("CONTINUE")
+
+
 def test_homologation_is_automatic():
     assert d._auto_continue_answer("homologation", "Accept exact candidate e13c87d for HML publication?").startswith("CONTINUE")
 

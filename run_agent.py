@@ -1187,6 +1187,23 @@ class AIAgent:
         except Exception:
             pass
 
+
+    def _record_worker_fallback_notice(self, message: str) -> None:
+        """Route a headless worker switch through the existing Kanban notifier."""
+        task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+        db_path = os.environ.get("HERMES_KANBAN_DB", "").strip()
+        raw_run = os.environ.get("HERMES_KANBAN_RUN_ID", "").strip()
+        if not (task_id and db_path and raw_run):
+            return
+        from hermes_cli import kanban_db as kb
+        with kb.connect_closing(db_path=Path(db_path)) as conn:
+            task = kb.get_task(conn, task_id)
+            if task is None or task.current_run_id != int(raw_run):
+                return
+            with kb.write_txn(conn):
+                kb._append_event(conn, task_id, "model_fallback",
+                                 {"message": message}, run_id=int(raw_run))
+
     def _emit_pending_fallback_notice(self) -> None:
         """Surface the one-shot fallback-switch notice on successful recovery.
 
@@ -1209,6 +1226,7 @@ class AIAgent:
                 for item in notices:
                     try:
                         self._emit_status(str(item))
+                        self._record_worker_fallback_notice(str(item))
                     except Exception:
                         # A single surface callback failure must not hide later
                         # switches from the same fallback chain.

@@ -3363,14 +3363,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                         task_id, profile, status,
                         claim_lock, claim_expires, worker_pid,
                         max_runtime_seconds, last_heartbeat_at,
-                        started_at
-                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)
+                        started_at, metadata
+                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"], row["assignee"], row["claim_lock"],
                         row["claim_expires"], row["worker_pid"],
                         row["max_runtime_seconds"], row["last_heartbeat_at"],
-                        started,
+                        started, _stamped_run_metadata(),
                     ),
                 )
                 # CAS: only install the pointer if nothing else claimed
@@ -5374,6 +5374,26 @@ def recover_interrupted_task(
         return True
 
 
+def reopen_completed_task(conn: sqlite3.Connection, task_id: str, *, expected_completed_at: int,
+                          actor: str, reason: str) -> bool:
+    """Resume an owner-requested recheck without replacing its task or history."""
+    with write_txn(conn, allow_nested=True):
+        task = get_task(conn, task_id)
+        if not task or task.status != 'done' or task.completed_at != expected_completed_at:
+            return False
+        if task.workspace_kind == 'worktree' and task.requires_repo:
+            _invalidate_worktree_for_terminal_reopen(conn, task_id)
+        status = _landing_status_after_parents(conn, task_id)
+        if status == 'ready':
+            _ensure_ready_assignee(conn, task_id)
+        conn.execute("UPDATE tasks SET status=?,completed_at=NULL,result=NULL,current_run_id=NULL,"
+                     "claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,worker_started_at=NULL,"
+                     "consecutive_failures=0,last_failure_error=NULL WHERE id=?", (status, task_id))
+        _append_event(conn, task_id, 'status', {'status':status,'previous_status':'done',
+                      'reason':reason,'actor':actor,'previous_completed_at':expected_completed_at})
+        return True
+
+
 def update_task_instruction(
     conn: sqlite3.Connection, task_id: str, *, body: str, author: str,
     expected_revision: int,
@@ -5381,7 +5401,7 @@ def update_task_instruction(
     """Record an explicit operator correction on the existing card."""
     if not body.strip():
         raise ValueError("current instruction cannot be empty")
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         task = get_task(conn, task_id)
         if task is None or task.instruction_revision != expected_revision:
             raise ValueError("instruction changed; read the current card before updating")
@@ -5412,6 +5432,20 @@ def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
         "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
     return int(row["current_run_id"]) if row and row["current_run_id"] else None
+
+
+def _stamped_run_metadata(metadata=None):
+    """Serialize run metadata carrying the runtime identity (Entrega 1B).
+
+    Returns the JSON string to store in ``task_runs.metadata``. Degrades to
+    the caller's own metadata (or NULL) if identification fails: a run that
+    cannot be identified is a gap in the audit trail, never a blocked claim.
+    """
+    try:
+        from hermes_cli.runtime_identity import stamp_metadata
+        return json.dumps(stamp_metadata(metadata), ensure_ascii=False)
+    except Exception:
+        return json.dumps(metadata, ensure_ascii=False) if metadata else None
 
 
 def _synthesize_ended_run(
@@ -5458,7 +5492,7 @@ def _synthesize_ended_run(
             task_id, profile, step_key,
             outcome, outcome,
             summary, error,
-            json.dumps(metadata, ensure_ascii=False) if metadata else None,
+            _stamped_run_metadata(metadata),
             now, now,
         ),
     )
@@ -5753,8 +5787,8 @@ def claim_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, metadata
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -5764,6 +5798,7 @@ def claim_task(
                 expires,
                 trow["max_runtime_seconds"] if trow else None,
                 now,
+                _stamped_run_metadata(),
             ),
         )
         run_id = run_cur.lastrowid
@@ -5854,8 +5889,8 @@ def claim_review_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, metadata
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -5865,6 +5900,7 @@ def claim_review_task(
                 expires,
                 trow["max_runtime_seconds"] if trow else None,
                 now,
+                _stamped_run_metadata(),
             ),
         )
         run_id = run_cur.lastrowid
@@ -7434,6 +7470,9 @@ def complete_task(
             )
         if cur.rowcount != 1:
             return False
+        if delivery_enrolled:
+            conn.execute("UPDATE nfos_workflows SET stage='done',next_action='',updated_at=? WHERE task_id=?",
+                         (now, task_id))
         if delivery is not None and bool(delivery["required"]) and not _contract_waived:  # CLOSURE_RECOVERY_20260911: sem recibo não há obrigação de limpeza selada
             owner_pid = (
                 int(prior["worker_pid"])
@@ -8547,9 +8586,11 @@ def edit_completed_task_result(
                 (handoff_summary, run_id),
             )
             if metadata is not None:
+                from hermes_cli.runtime_identity import merge_run_metadata
                 conn.execute(
                     "UPDATE task_runs SET metadata = ? WHERE id = ?",
-                    (json.dumps(metadata, ensure_ascii=False), run_id),
+                    (json.dumps(merge_run_metadata(conn, run_id, metadata),
+                                ensure_ascii=False), run_id),
                 )
         _ev_lines = (handoff_summary or "").strip().splitlines()
         ev_summary = _ev_lines[0][:400] if _ev_lines else ""

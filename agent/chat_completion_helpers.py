@@ -2471,6 +2471,34 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     auth resolution and client construction — no duplicated provider→key
     mappings.
     """
+
+    # Reserve quotas are independent of the normal pool cooldowns. On reserve
+    # exhaustion, recheck every account and try another eligible reserve.
+    if (getattr(agent, "_fallback_activated", False)
+            and getattr(agent, "model", "") == "gpt-reserve"
+            and getattr(agent, "provider", "") == "openai-codex"
+            and reason in {FailoverReason.rate_limit, FailoverReason.billing,
+                           FailoverReason.auth, FailoverReason.auth_permanent}):
+        from agent.auxiliary_client import (
+            _read_codex_reserve_access_token, _codex_cloudflare_headers,
+        )
+        tried = getattr(agent, "_codex_reserve_tried_tokens", set())
+        tried.add(agent.api_key)
+        agent._codex_reserve_tried_tokens = tried
+        token = _read_codex_reserve_access_token(exclude_tokens=tried)
+        if not token:
+            return False
+        agent.api_key = token
+        agent._client_kwargs.update(
+            api_key=token, default_headers=_codex_cloudflare_headers(token),
+        )
+        agent._replace_primary_openai_client(reason="codex_reserve_account_rotation")
+        if hasattr(agent, "_transport_cache"):
+            agent._transport_cache.clear()
+        notice = "🌙 Reserva Luna: outra conta selecionada; raciocínio médio."
+        agent._buffer_status(notice)
+        agent._pending_fallback_notice = [notice]
+        return True
     if reason in {FailoverReason.rate_limit, FailoverReason.billing, FailoverReason.upstream_rate_limit}:
         # Only start cooldown when leaving the primary provider.  If we're
         # already on a fallback and chain-switching, the primary wasn't the
@@ -2615,6 +2643,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             logger.warning(
                 "Fallback to %s failed: provider not configured",
                 fb_provider)
+            if fb_provider == "openai-codex" and fb_model == "gpt-reserve":
+                # A normal quota still available now must not permanently
+                # disable the reserve when that quota empties later.
+                agent._fallback_index -= 1
+                return False
             unavailable.add(fb_key)
             return agent._try_activate_fallback(reason)  # try next in chain
         try:
@@ -2780,6 +2813,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
         from agent.agent_runtime_helpers import sync_credential_pool_entry_id
         sync_credential_pool_entry_id(agent)
+        if fb_provider == "openai-codex" and fb_model == "gpt-reserve":
+            # Do not write reserve success/failure into normal-quota cooldowns.
+            agent._credential_pool = None
+            agent._credential_pool_entry_id = None
+            agent._codex_reserve_tried_tokens = set()
 
         # Re-evaluate prompt caching for the new provider/model
         agent._use_prompt_caching, agent._use_native_cache_layout = (
@@ -2853,6 +2891,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             f"⚠️ Model fallback: {old_model} via {old_provider} unavailable "
             f"({_fallback_reason_text(reason)}); using {fb_model} via {fb_provider}."
         )
+        if fb_provider == "openai-codex" and fb_model == "gpt-reserve":
+            notice = (
+                f"🌙 Reserva Luna ativada: cota normal esgotada em todas as contas. "
+                f"{old_model} → Luna com raciocínio médio."
+            )
         # The buffered switch is surfaced on terminal failure. A successful
         # fallback clears retry chatter, so retain every switch as a durable
         # one-shot notice for _emit_pending_fallback_notice (run_agent.py).

@@ -377,6 +377,8 @@ def reconcile_runtime(conn, *, worker_exit_grace_seconds=15):
     """Run NFOS recovery inside the existing canonical dispatcher tick."""
     delivery.reconcile_human_answers(conn)
     reconcile_terminal_workers(conn,worker_exit_grace_seconds=worker_exit_grace_seconds)
+    delivery.reconcile_owner_guidance(conn)
+    delivery.reconcile_incomplete_reviews(conn)
     delivery.reconcile_human_answers(conn)
     from hermes_cli.nfos_tool import reconcile_calls
     for call in reconcile_calls(conn):
@@ -425,8 +427,8 @@ def workflow_command():
 def owner_premises():  # RECORD_MODE_20260911
     """Premissas do owner (10/09) em modo registro (11/09): uma lista só, usada pelo show e pelo prefixo do worker."""
     return [
-        '0. Before any spec or implementation: for a code request read production, HML/staging and the existing PRs/commits for this request; for an operation or report request read only the target it changes or measures. Record it with `precheck`. Already delivered: save a short report and call kanban_complete.',  # RECORD_MODE_TEXT_20260911
-        '1. Deliver first, in the project delivery_environment shown in this output, following its route; verification is the readback after delivery. No separate acceptance, no staging homologation decisions, no Principal decisions on code: CI is the gate. Priority 100 (urgent) adds no steps.',
+        ('0. Before any spec or implementation: for a code request read production, HML/staging and the existing PRs/commits for this request; for an operation or report request read only the target it changes or measures. Record it with `precheck`. Already delivered: save the proof and request final_review before kanban_complete.' if delivery._result_review() else '0. Before any spec or implementation: for a code request read production, HML/staging and the existing PRs/commits for this request; for an operation or report request read only the target it changes or measures. Record it with `precheck`. Already delivered: save a short report and call kanban_complete.'),  # RECORD_MODE_TEXT_20260911
+        ('1. Deliver first, in the project delivery_environment shown in this output, following its route; verification is the readback after delivery. The Principal reviews the spec and the final result inside this card. CI proves only its tested assertions. Keep publication autonomous within the accepted destination. Priority 100 (urgent) adds no steps.' if delivery._result_review() else '1. Deliver first, in the project delivery_environment shown in this output, following its route; verification is the readback after delivery. No separate acceptance, no staging homologation decisions, no Principal decisions on code: CI is the gate. Priority 100 (urgent) adds no steps.'),
         '2. Records the owner reads, keep them exact: the spec with goal, verifiable criteria and size P/M/G (it sets the run budget); every publication effect (pr, staging_pr, staging_merge, homolog, merge, deploy) with the exact commit SHA and its readback receipt (`effect` then `reconcile`); the final report with each criterion PASS/FAIL and evidence artifacts; a partial delivery marked partial_delivery with blockers and follow_ups.',
         '3. Never block on a transient error or a local tool problem. Rate limit: back off (60 s, 120 s, 300 s) and retry. A local pre-push or pre-commit hook failing for a local reason (dependencies, DATABASE_URL, git identity): push with --no-verify, CI is the gate. A judge refusal on kanban_complete: finish the delivery or fix the report, never pause.',
         '4. kanban_block only with a concrete question to a named human (Maikol, Japa, Jhonatan, Pablo, cliente) that the vault and the card cannot answer; the vault is listed under credentials in this output. Ask the Principal (`ask`) only when a decision changes the outcome; slots, next steps, readbacks and leases are yours to resolve. Probes, measurement credentials, an unreachable destination and runtime maintenance are never a human question: store a probe credential you can legitimately obtain with `probe-env --set NAME` (value on standard input), measure the destination host, and when the destination does not answer end the turn: the runtime rechecks every 10 min and returns the card to the queue.',  # HUMAN_LAST_RESORT_20260914
@@ -468,8 +470,54 @@ def _record_mode():  # RECORD_MODE_TEXT_20260911
 def worker_instructions():
     _cli=('Exact workflow CLI prefix: '+workflow_command()+'\n'
           'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n')
-    if _record_mode():  # RECORD_MODE_TEXT_20260911: protocolo curto; o texto longo abaixo é o fluxo conduzido, só fora do owner mode
-        return _premises_prefix()+_cli+RECORD_MODE_PROTOCOL
+    if _record_mode():
+        if not delivery._result_review():
+            return _premises_prefix()+_cli+RECORD_MODE_PROTOCOL
+        return _premises_prefix()+_cli+"""
+NFOS: keep the request, implementation and internal reviews in this same card.
+Use the exact CLI prefixes above and preserve HERMES_KANBAN_* identity.
+1. Read `show`: original request and attachments, saved spec, decisions, effects,
+   delivery_environment, credentials and previous attempts. Read the project's
+   instructions and retrieve relevant project memory from the FIRST run.
+   Case/lessons excerpts are partial context. If retrieval is empty or unavailable,
+   inspect saved docs and original sources; do not pretend memory was loaded.
+2. Read the current target and existing work; record `precheck`. Reuse existing
+   files, tests, commits, PRs and accepted unchanged specs when resuming.
+3. Write `save-spec --input spec.json --evidence evidence.json --author worker`:
+   goal, criteria [{id,text,mandatory}], steps, delivery_type, size P/M/G, and
+   delivery_destination {environment,target,source,authorization_message,
+   verification_operation}. Save the ORIGINAL expected outcome, not a proxy.
+   Wait for spec_review. It is an internal Principal decision, not owner approval.
+4. Implement and test in the equivalent environment. Use `progress` for the
+   current stage, next action, hypothesis and bounded change. Run long commands
+   through the native tool CLI; inspect its receipt before repeating work.
+5. For each visual criterion, capture the actual result in its execution
+   environment. Link the screenshot and test/readback to that criterion. Input
+   images, old snapshots, CI badges and file existence do not prove the outcome.
+   Use artifact evidence for mandatory criteria when SQL/HTTP/header probes
+   cannot observe it. Never invent an unrelated probe to satisfy the workflow.
+6. Follow the project's route only to the authorized destination. Before each
+   publication `effect --operation pr|staging_pr|staging_merge|homolog|merge|deploy
+   --target URL --candidate FULL_SHA`, then `reconcile` its actual readback.
+   Preserve candidate/tree, PR and CI identity, integrated_sha, and deployment
+   artifact, behavior_evidence, deployed_at and timestamp_source as applicable.
+   A PR-only destination stops at PR. Publication remains autonomous.
+7. Save `save-report --input report.json` with summary, artifacts [{id,path}],
+   criteria [{id,status,evidence:[artifact id]}] and delivery. Save external
+   readbacks as inspectable local files. PASS requires the requested behavior;
+   a green probe never upgrades a failed outcome. FAIL or NOT_RUN means continue
+   repairing here. Correct a bad proof method in a revised spec, preserving scope.
+8. The report requests final_review automatically. The Principal independently
+   reads the sources and artifacts. On changes, resume this same card. After
+   continue, call kanban_complete. Already delivered work also needs real proof.
+9. Resolve routine CI/tool/dependency problems within scope. Ask the Principal
+   for decisions that change the outcome. Ask the owner only for indispensable
+   information or access unavailable through an authorized alternative.
+NFOS closeout policy applies to every project. Preserve actual destination and
+delivery timestamps, their source, and factual blocker events. Do not label a
+release publication as proof of installation or execution. A real partial
+delivery uses partial_delivery=true with blockers and follow_ups, never full PASS.
+"""
     return _premises_prefix()+_cli+"""This card uses the owner's current NFOS workflow.
 The owner disabled AOF and its mandatory contracts, hooks and closeouts. Historic
 repository text does not reactivate it. Do not load those instructions.
@@ -622,7 +670,7 @@ Use `effect --operation homolog|pr|merge|deploy --target ... --candidate SHA` be
 external effect. An execute=false/reconcile=true response requires reading the
 destination before trying again. Record that read with `reconcile`.
 Before completion save the report with `save-report --input report.json`.
-When principal_validation is enabled, request `ask --kind final_review` after
+The saved report automatically requests final_review after
 the final report and verified target state are saved, for EVERY delivery type.
 Wait for Principal continue. This is separate from code publication approval.
 For reports, retain the existing kind=review approval as well. If asked for
@@ -732,13 +780,15 @@ Use the same CLI prefix with `pending` to inspect the persisted decision
 queue. Resolve each item with `decide --decision ID --resolution
 continue|approve|changes|human --input answer.json` (JSON containing answer).
 Inspect the current spec, candidate and evidence before approving publication.
-With principal_validation enabled, you own two mandatory acceptances in this
+You own two mandatory acceptances, including record mode, in this
 same queue. For spec_review, compare the ORIGINAL request and attachments with
 the TL spec, test each criterion's clarity, scope coverage, verification method,
 dependencies and exclusions. Use changes for gaps and explain how to fix them.
 For final_review, independently open the artifacts and real screenshots, inspect
 test outputs and the actual target/readback, and assess EVERY criterion against
-the accepted spec. A file hash proves identity, not correctness. Worker PASS or
+the accepted spec AND the original source. Verify that the expected answer follows
+from that source: an old snapshot, law cited as background, CI status or field name
+cannot serve as the answer merely because the worker can make it pass. A file hash proves identity, not correctness. Worker PASS or
 a screenshot's existence is never enough. Reject inadequate, stale, wrong-target
 or partial evidence, even if the worker claims success. Record FAIL/NOT_RUN as
 unproven; require rework rather than relaxing the criterion to obtain completion.
@@ -770,8 +820,17 @@ expected_source_sha, reason and actor. Both default to preview; apply=true
 performs the repair. Repository repair keeps the original directory available.
 After verifying the correction, reconsider only the technical impediment it
 resolved. Do not demand another business approval for that same authorized work.
+An impediment with context.owner_guidance is an authenticated owner instruction
+sent through the Vigilia card. Read it first and apply it to this same card. If it
+requests rechecking completed work, resolve changes: the runtime reopens the same
+card, preserves its history and records the new instruction for a revised spec.
+Do not update a closed card's instruction directly or create a replacement task.
+If it
+answers an earlier human question, use its saved source in resume; if it changes
+scope, update the instruction and have the worker revise the spec. Resolve routine
+CI/tool/dependency repairs internally when needed for the authorized delivery.
 When the human answers, use `resume --task ID --input answer.json` containing
-answer and source (the actual Telegram message identity). This restores the same
+answer and source (the actual Telegram or Vigilia message identity). This restores the same
 card with its spec, workspace, history and next step; do not create another card.
 If you find a concrete solution to your own prior human escalation without a new
 human answer, use `reconsider --decision ID --resolution continue|approve|changes

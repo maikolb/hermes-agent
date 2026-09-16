@@ -402,9 +402,18 @@ WAKE_GROUP_RULE = (  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913: instru�
 )
 
 _CLIENT_SILENT_KINDS = frozenset({  # CLIENT_CHAT_20260913: no chat do cliente nenhuma mensagem passiva do notificador
-    "completed", "blocked", "gave_up", "crashed", "timed_out", "model_fallback", "claimed", "status",
+    "blocked", "gave_up", "crashed", "timed_out", "model_fallback", "claimed", "status",
     "nfos_principal_requested", "block_loop_detected", "review_requested",
 })
+
+# CLIENT_DELIVERY_20260915: "completed" saiu da lista acima. O contrato de
+# 13/09 quis tirar ruído do grupo do cliente (claimed, status, blocked,
+# crashed) e levou junto a CONCLUSÃO do pedido dele. Efeito medido em 15/09:
+# todo card fechado emitia client_publication_suppressed e o cliente nunca era
+# avisado — a causa literal de nenhuma entrega ter endosso. A conclusão do
+# pedido não é mensagem passiva do notificador: é a resposta ao que o cliente
+# pediu, e sem ela não existe aceite, só card fechado.
+_CLIENT_DELIVERY_KINDS = frozenset({"completed"})
 
 
 def _client_source_for_board(board):
@@ -435,6 +444,70 @@ def _is_client_chat(board, sub):
     return (str(src.get("platform") or "").lower() == str(sub.get("platform") or "").lower()
             and str(src.get("chat_id") or "") == str(sub.get("chat_id") or "")
             and str(src.get("thread_id") or "") == str(sub.get("thread_id") or ""))
+
+
+def _client_delivery_message(board, task_id):
+    """CLIENT_DELIVERY_20260915: o que o cliente lê quando o pedido dele fecha.
+
+    Usa o mesmo veredito honesto da barra (``_progress_outcome``): "entregue"
+    só com relatório e todos os critérios não opcionais em PASS, "parcial"
+    com pendência, "encerrado" quando cancelado pelo dono, "concluído" quando
+    o card fechou sem relatório legível. Nunca afirma entrega que o relatório
+    não sustenta, e nunca publica detalhe interno (spec, sonda, worker, run).
+    """
+    outcome = _progress_outcome(board, task_id)
+    resumo = ""
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.connect_closing(board=board) as conn:
+            row = conn.execute("SELECT result, title FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row:
+                resumo = str(row["result"] or row["title"] or "").strip()
+    except Exception:
+        logger.debug("kanban notifier: client delivery summary failed for %s", task_id, exc_info=True)
+    if len(resumo) > 900:
+        resumo = resumo[:900].rsplit(" ", 1)[0] + "…"
+    cabecalho = {
+        "entregue": "Resolvido",
+        "parcial": "Resolvido em parte",
+        "encerrado": "Encerrado",
+    }.get(outcome, "Concluído")
+    corpo = f"{cabecalho}: {resumo}" if resumo else cabecalho
+    # CLIENT_ACK_20260915: pede confirmação UMA vez, na própria devolutiva, e
+    # só quando há resultado que o cliente possa conferir. Um pedido a cada
+    # fechamento interno transformaria o grupo em fila de validação, que é
+    # exatamente o que o contrato de 13/09 quis evitar.
+    if outcome in ("entregue", "parcial"):
+        corpo += "\n\nPode conferir? Responda a esta mensagem confirmando se resolveu."
+    return corpo
+
+
+def _record_client_delivery(board, task_id, send_res, sub):
+    """CLIENT_ACK_20260915: registra a devolutiva publicada e fica aguardando confirmação.
+
+    Guarda o ``message_id`` da mensagem enviada ao cliente. Uma resposta direta
+    a ela é o único vínculo que permite registrar aceite: mesma thread e
+    proximidade de horário não provam a qual entrega o cliente se referia,
+    ainda mais com vários cards fechando perto no tempo.
+    """
+    message_id = getattr(send_res, "message_id", None) if send_res is not None else None
+    if not message_id:
+        logger.warning("kanban notifier: devolutiva de %s publicada sem message_id; aceite não poderá ser vinculado", task_id)
+        return
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.connect_closing(board=board) as conn:
+            with _kb.write_txn(conn):
+                _kb._append_event(conn, task_id, "nfos_client_delivery_published", {
+                    "message_id": str(message_id),
+                    "platform": sub.get("platform"),
+                    "chat_id": str(sub.get("chat_id") or ""),
+                    "thread_id": str(sub.get("thread_id") or ""),
+                    "outcome": _progress_outcome(board, task_id),
+                    "ack": "awaiting",
+                })
+    except Exception:
+        logger.debug("kanban notifier: registro da devolutiva falhou para %s", task_id, exc_info=True)
 
 
 def _record_client_suppression(board, task_id, kind, sub):
@@ -3066,6 +3139,17 @@ class GatewayKanbanWatchersMixin:
                                             )
                                             continue
                                     platform = (sub.get("platform") or "").lower()
+                                    if platform == "portal":
+                                        # Portal has no chat adapter. Reuse the project's
+                                        # persisted Principal route for internal decisions;
+                                        # keep the portal receipt/cursor as their authority.
+                                        targets = [target for target in board_targets
+                                                   if target.get("notifier_profile") == (owner_profile or notifier_profile)
+                                                   and target.get("platform") in active_platforms]
+                                        if len(targets) != 1:
+                                            continue
+                                        sub["_principal_target"] = targets[0]
+                                        platform = targets[0]["platform"]
                                     if platform not in active_platforms:
                                         logger.debug(
                                             "kanban notifier: subscription for %s on %s skipped; adapter not connected",
@@ -3090,7 +3174,7 @@ class GatewayKanbanWatchersMixin:
                                         platform=sub["platform"],
                                         chat_id=sub["chat_id"],
                                         thread_id=sub.get("thread_id") or "",
-                                        kinds=CLAIM_KINDS,
+                                        kinds=("nfos_principal_requested", "completed") if sub.get("_principal_target") else CLAIM_KINDS,
                                         claim_token=claim_token,
                                     )
                                     if not events:
@@ -3218,7 +3302,9 @@ class GatewayKanbanWatchersMixin:
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
-                    platform_str = (sub["platform"] or "").lower()
+                    principal_target = sub.get("_principal_target")
+                    route = principal_target or sub
+                    platform_str = (route["platform"] or "").lower()
                     try:
                         plat = _Platform(platform_str)
                     except ValueError:
@@ -3262,7 +3348,7 @@ class GatewayKanbanWatchersMixin:
                         sub["task_id"], sub["platform"],
                         sub["chat_id"], sub.get("thread_id") or "",
                     )
-                    mode = sub.get("delivery_mode") or "notify"
+                    mode = "wake" if principal_target else sub.get("delivery_mode") or "notify"
                     wake_agent = mode in ("notify+wake", "wake")
                     send_passive = mode != "wake"
                     # Worker handoff carried into the synthetic wake turn below
@@ -3279,6 +3365,10 @@ class GatewayKanbanWatchersMixin:
                         _pb_metadata["thread_id"] = sub["thread_id"]
                     for ev in d["events"]:
                         kind = ev.kind
+                        if principal_target:
+                            # The card is the response surface. No passive chat post
+                            # or progress bubble belongs to this internal wake.
+                            continue
                         try:
                             _pb_handled = await _kanban_progress_bar(kind, sub, board_slug, adapter, _pb_metadata)
                         except Exception as _pb_err:
@@ -3420,6 +3510,7 @@ class GatewayKanbanWatchersMixin:
                                 ),
                             )
                         _client_chat = kind in _CLIENT_SILENT_KINDS and _is_client_chat(board_slug, sub)  # CLIENT_CHAT_20260913
+                        _client_delivery = kind in _CLIENT_DELIVERY_KINDS and _is_client_chat(board_slug, sub)  # CLIENT_DELIVERY_20260915
                         if _client_chat:
                             sub["_model_fallback_notices"] = []
                         if sub.get("_model_fallback_notices"):
@@ -3475,6 +3566,18 @@ class GatewayKanbanWatchersMixin:
                             if _client_chat:  # CLIENT_CHAT_20260913: nada publicado no chat do cliente; recibo e wake seguem
                                 _send_res = None
                                 await asyncio.to_thread(_record_client_suppression, board_slug, sub["task_id"], kind, sub)
+                            elif _client_delivery:  # CLIENT_DELIVERY_20260915: o cliente é avisado do resultado do pedido dele
+                                _client_msg = await asyncio.to_thread(
+                                    _client_delivery_message, board_slug, sub["task_id"])
+                                _send_res = await adapter.send(
+                                    sub["chat_id"], _client_msg, metadata=metadata,
+                                )
+                                # CLIENT_ACK_20260915: guarda a identidade desta mensagem para
+                                # que uma resposta DIRETA a ela possa ser reconhecida como
+                                # aceite. Sem isso o aceite teria de ser inferido por thread e
+                                # proximidade de horário, que não é vínculo.
+                                await asyncio.to_thread(
+                                    _record_client_delivery, board_slug, sub["task_id"], _send_res, sub)
                             else:
                                 _send_res = await adapter.send(
                                     sub["chat_id"], msg, metadata=metadata,
@@ -3608,6 +3711,9 @@ class GatewayKanbanWatchersMixin:
                             )
                             # WAKE_SILENCE_20260910 (ordem do Maikol): a regra de silêncio vai no próprio wake
                             _synth += "\n\n" + WAKE_GROUP_RULE  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913
+                            if principal_target:
+                                _synth += ("\nOrigem: card do portal/Vigília. Registre a resposta no próprio card por `decide`; "
+                                           "não publique mensagem no chat. A rota do projeto serve apenas para acordar o Principal.")
                             if "nfos_principal_requested" in _wake_kinds:
                                 from hermes_cli.nfos_runtime import workflow_command
                                 _synth += (f"\nNFOS: consulte `{workflow_command()} pending` "
@@ -3672,22 +3778,26 @@ class GatewayKanbanWatchersMixin:
                             # handle_message() get_or_create_session's the
                             # target, so a mismatch only ever degrades to a
                             # fresh session, never an exception.
-                            _chat_type = _sub_chat_type(sub, platform_str)  # DM_NEG_CHAT_20260910
+                            _chat_type = _sub_chat_type(route, platform_str)  # DM_NEG_CHAT_20260910
                             _source = SessionSource(
                                 platform=plat,
-                                chat_id=sub["chat_id"],
+                                chat_id=route["chat_id"],
                                 chat_type=_chat_type,
-                                thread_id=sub.get("thread_id") or None,
-                                user_id=sub.get("user_id"),
-                                user_id_alt=sub.get("user_id_alt"),
+                                thread_id=route.get("thread_id") or None,
+                                user_id=route.get("user_id"),
+                                user_id_alt=route.get("user_id_alt"),
                                 profile=sub_profile or None,
-                                scope_id=_wake_scope_id(adapter, sub),
+                                scope_id=_wake_scope_id(adapter, route),
                             )
                             # deliver_wake preserves the synthetic
                             # MessageEvent/handle_message path for
                             # push-capable adapters (the non-push /
                             # self-post branch is handled BEFORE the
                             # cursor advance above).
+                            if 'completed' in _wake_kinds:
+                                sub['_notify_receipt']['completed_worker'] = {
+                                    'board': board_slug, 'task_id': sub['task_id'],
+                                }
                             accepted = await deliver_wake(
                                 adapter,
                                 text=_synth,
