@@ -93,10 +93,11 @@ def test_preexisting_authentic_receipt_uses_instruction_event_order(board, stale
 
 
 @pytest.mark.parametrize("referenced", [True, False])
-def test_owner_changes_hml_destination_then_current_spec_binds_the_message(board, referenced, monkeypatch):
+@pytest.mark.parametrize('text', ['Esse é direto pra produção. Esse é urgente!',
+    'Não é somente em hml, esse é direto em prod', 'Pode atender no ambiente que combinamos.'])
+def test_owner_changes_hml_destination_then_current_spec_binds_the_message(board, referenced, monkeypatch, text):
     with kb.connect_closing() as conn:
         task = _code_card(conn, board, "Corrigir licença.", environment="hml")
-        text = "Esse é direto pra produção. Esse é urgente!"
         guidance(conn, task, text, "owner-destination-change")
         content = json.loads(delivery.get_spec(conn, task.id)["content"])
         content["delivery_destination"].update(environment="production",
@@ -167,3 +168,22 @@ def test_owner_destination_arrives_before_first_spec(board, monkeypatch):
     with kb.connect_closing() as conn:
         task = _code_card(conn, board, "Corrigir licença.")
         assert effect(conn, task)["execute"]
+
+
+@pytest.mark.parametrize('text', ['Não é somente em hml, esse é direto em prod',
+    'Não é somente em hml, esse é direto em produção', 'Publique em prod'])
+def test_authenticated_prod_abbreviation_authorizes(board, text):
+    with kb.connect_closing() as conn:
+        task = _code_card(conn, board, 'Corrigir recuperação de senha.')
+        guidance(conn, task, text)
+        assert effect(conn, task)['execute']
+
+
+@pytest.mark.parametrize('restriction', ['Não publique em prod', 'Somente HML'])
+def test_later_restriction_revokes_prod_authorization(board, restriction):
+    with kb.connect_closing() as conn:
+        task = _code_card(conn, board, 'Corrigir recuperação de senha.')
+        guidance(conn, task, 'Não é somente em hml, esse é direto em prod')
+        guidance(conn, task, restriction, 'owner-2')
+        with pytest.raises(delivery.WorkflowError, match='delivers in HML'):
+            effect(conn, task)

@@ -4265,7 +4265,7 @@ def _accept_homologation(conn, decision):
 
 _PRODUCTION_ORDER_RX = re.compile(  # DELIVERY_ENV_20260911
     r"(subir|sobe|suba|publicar|publique|liberar|libere|promover|promova|deploy|mesclar|mescle|merge|mergear|integrar|integre)"
-    r"\W{0,24}(em|para|pra|na|no|to|in|on)?\W{0,12}(produ[cç][aã]o|\bprd\b|production|\bmain\b)", re.I)
+    r"\W{0,24}(em|para|pra|na|no|to|in|on)?\W{0,12}(produ[cç][aã]o|\bprod\b|\bprd\b|production|\bmain\b)", re.I)
 
 
 def _express_production_order(text):
@@ -4275,14 +4275,15 @@ def _express_production_order(text):
 
 def _production_guidance_intent(text):
     """Return an explicit destination decision, or None for unrelated guidance."""
-    production = r'\b(produ[cç][aã]o|production|prd|main)\b'
+    production = r'\b(produ[cç][aã]o|production|prod|prd|main)\b'
     for clause in re.split(r'[,;.!?\n]', text):
         if re.search(production, clause, re.I) and re.search(r'\b(n[aã]o|not|never)\b', clause, re.I):
             return False
-    if re.search(r'\b(s[oó]|somente|apenas|only)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', text, re.I):
-        return False
+        hml_only = re.search(r'\b(s[oó]|somente|apenas|only)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', clause, re.I)
+        if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', clause[:hml_only.start()], re.I):
+            return False
     if _express_production_order(text) or re.search(
-            r'\b(direto|diretamente)\s+(para|pra|em)\s+(produ[cç][aã]o|production|prd)\b', text, re.I):
+            r'\b(direto|diretamente)\s+(para|pra|em)\s+(produ[cç][aã]o|production|prod|prd)\b', text, re.I):
         return True
     return None
 
@@ -4297,7 +4298,16 @@ def _owner_guidance_production_order(conn, task, scope):
         "WHERE e.task_id=? AND e.kind='nfos_principal_requested' "
         "AND json_extract(e.payload,'$.owner_guidance')=1 ORDER BY e.id DESC",
         (task.id,)).fetchall()
-    receipt = next((row for row in receipts if _production_guidance_intent(
+    from hermes_cli.nfos_principal_review import accepted
+    spec_review = conn.execute("SELECT status,action,author FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (task.id,)).fetchone()
+    semantic_acceptance = bool(spec_review and spec_review['status']=='resolved'
+        and spec_review['action']=='continue' and spec_review['author']=='Principal'
+        and accepted(conn,task.id,'spec_review'))
+    def bound_message(row):
+        ctx = json.loads(row['context']); message_id = str((ctx.get('source') or {}).get('message_id') or '')
+        return bool(scope and message_id and message_id in scope.get('source','')
+            and scope.get('authorization_message') == ctx.get('owner_guidance'))
+    receipt = next((row for row in receipts if bound_message(row) or _production_guidance_intent(
         json.loads(row['context']).get('owner_guidance') or '') is not None), None)
     if not receipt:
         return None
@@ -4314,8 +4324,6 @@ def _owner_guidance_production_order(conn, task, scope):
                            (payload.get('comment_id'),task.id)).fetchone()
     if not comment or comment['author'] != source['actor'] or comment['body'] != text:
         return False
-    if not _production_guidance_intent(text):
-        return False
     if not scope or scope.get('environment') != 'production' or scope.get('verification_operation') != 'deploy':
         return False
     revision = context.get('received_instruction_revision')
@@ -4324,6 +4332,10 @@ def _owner_guidance_production_order(conn, task, scope):
                                 (task.id,receipt['receipt_id'])).fetchone()
         revision = json.loads(previous['payload']).get('revision',0) if previous else 0
     if revision != task.instruction_revision:
+        return False
+    if semantic_acceptance and bound_message(receipt):
+        return True
+    if not _production_guidance_intent(text):
         return False
     original = context.get('received_destination')
     if 'received_destination' not in context:
