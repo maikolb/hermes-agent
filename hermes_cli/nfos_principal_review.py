@@ -401,6 +401,58 @@ def require_spec(conn, task_id):
         raise d.WorkflowError('Principal spec acceptance is pending; ask kind=spec_review and wait before implementation')
 
 
+def complete_accepted(conn, decision_id):
+    """Finalize the accepted run through the normal closure fences, not another model turn."""
+    from hermes_cli import kanban_db as kb
+    decision = d.get_decision(conn, decision_id)
+    if (not decision or decision['kind'] != 'final_review'
+            or decision['status'] != 'resolved' or decision['action'] != 'continue'
+            or decision['author'] != 'Principal'):
+        return False
+    task = kb.get_task(conn, decision['task_id'])
+    if (not task or task.status == 'done' or task.current_run_id is None
+            or task.current_run_id != decision['run_id']
+            or not accepted(conn, task.id, 'final_review')):
+        return False
+    report = d._artifact(conn, task.id, 'report')
+    content = json.loads(report['content'])
+    summary = str(content.get('summary') or '').strip()
+    if not summary:
+        return False
+    # complete_task rechecks current evidence, destination, human decisions,
+    # Git receipt and run ownership. It also preserves native cleanup/history.
+    return kb.complete_task(conn, task.id, expected_run_id=task.current_run_id,
+        result=summary, summary=summary, metadata={
+            'completion_actor': 'Principal dispatcher',
+            'principal_decision_id': decision_id,
+            'report_revision': report['revision'],
+        })
+
+
+def complete_accepted_deliveries(conn):
+    """Existing dispatch tick owns this work; Principal admission never waits on Git/hooks."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_decisions'").fetchone():
+        return []
+    rows = conn.execute("""
+        SELECT d.id, d.task_id FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id
+        WHERE d.kind='final_review' AND d.status='resolved' AND d.action='continue'
+          AND d.author='Principal' AND t.status IN ('running','blocked','review')
+          AND t.current_run_id=d.run_id
+          AND NOT EXISTS (SELECT 1 FROM nfos_decisions newer
+              WHERE newer.task_id=d.task_id AND newer.kind='final_review' AND newer.rowid>d.rowid)
+        ORDER BY t.priority DESC, d.resolved_at ASC, d.rowid ASC
+    """).fetchall()
+    completed = []
+    for row in rows:
+        try:
+            if complete_accepted(conn, row['id']):
+                completed.append(row['task_id'])
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('Accepted delivery completion deferred for %s', row['task_id'])
+    return completed
+
+
 def final_assessment(conn, task_id):
     """Only the current, independently accepted result may authorize closure."""
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_decisions'").fetchone():

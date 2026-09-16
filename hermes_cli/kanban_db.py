@@ -14233,6 +14233,8 @@ def _dispatch_once_locked(
     # reap_worker_zombies() for the full rationale.
     reap_worker_zombies()
     if not dry_run:
+        from hermes_cli.nfos_principal_review import complete_accepted_deliveries
+        complete_accepted_deliveries(conn)
         from hermes_cli.nfos_runtime import reconcile_runtime
         reconcile_runtime(conn)
         _prune_tool_chunks(conn)
