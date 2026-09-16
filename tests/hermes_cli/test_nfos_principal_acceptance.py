@@ -161,7 +161,7 @@ def test_old_spec_review_is_not_a_current_resume_instruction(task_context, monke
     decision = ask(conn, task, 'spec_review')
     d.resolve_decision(conn, decision, action='changes', answer='OLD CORRECTION superseded by new spec', author='Principal')
     spec['criteria'][0]['mandatory'] = True
-    d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={})
+    d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'session':'synthetic-revision'})
     context = d.worker_context(conn, task.id)
     assert 'OLD CORRECTION' not in context
     assert 'pending' in context
