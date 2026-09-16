@@ -16,8 +16,9 @@ def test_new_worker_gets_explicit_project_scope_and_its_own_checkout(tmp_path, m
             claim=d.reserve_request(conn,capacity=3)
             task=d.bootstrap_card(conn,rid,claim['claim_token'],pid=os.getpid())
             checkout=str(tmp_path/project/'worktree with space')
-            conn.execute('UPDATE tasks SET workspace_path=?, model_override=?, provider_override=? WHERE id=?',
-                         (checkout,'deepseek-v4.1-flash' if n==0 else 'gpt-5.6-luna','opencode-go' if n==0 else 'openai-codex',task.id))
+            # Project Ops canonicalizes the public slug to an internal p_* id.
+            conn.execute('UPDATE tasks SET project_id=?, workspace_path=?, model_override=?, provider_override=? WHERE id=?',
+                         ('p_d6db79b9' if n==0 else 'p_36f32ce1',checkout,'deepseek-v4.1-flash' if n==0 else 'gpt-5.6-luna','opencode-go' if n==0 else 'openai-codex',task.id))
             conn.commit()
             prompt=d.worker_context(conn,task.id)
             assert f'"project":"{scope}"' in prompt

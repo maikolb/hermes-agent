@@ -2147,7 +2147,8 @@ def project_knowledge_context(conn, task_id):
     workflow = get_workflow(conn, task_id)
     request = get_request(conn, workflow['request_id']) if workflow else None
     project = json.loads(request['payload']).get('project', {}) if request else {}
-    project_id = task.project_id or project.get('project_id') or project.get('board')
+    # Project Ops stores p_* ids on tasks; intake retains the public project slug.
+    project_id = project.get('project_id') or project.get('board') or task.project_id
     if not project_id:
         return '\n\nProject knowledge: no project identity is recorded. Use the original request and local sources; do not guess another project or block the task.\n'
     scope = (policy.get('projects') or {}).get(project_id) or {}
