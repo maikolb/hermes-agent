@@ -20988,6 +20988,9 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         return
 
     max_turns = task.goal_max_turns or _DEF_TURNS
+    from hermes_cli.nfos_principal_review import escalation_usage
+    with _kb.connect_closing() as budget_conn:
+        max_turns = max(1, max_turns - escalation_usage(budget_conn, task_id, worker_run_id)['turns'])
 
     def _run_turn(prompt: str) -> str:
         result = cli.agent.run_conversation(
@@ -21006,6 +21009,8 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         return resp or ""
 
     def _task_status() -> "str | None":
+        if getattr(cli.agent, '_nfos_escalation_yield', False):
+            return 'escalation_checkpoint'
         c = _kb.connect()
         try:
             return _kb.goal_run_status(c, task_id, worker_run_id)
@@ -21617,7 +21622,8 @@ def main(
                         # out (→ sticky block). Gated on the env vars the
                         # dispatcher sets in `_default_spawn`; a no-op for every
                         # normal worker and every non-kanban `-q` run.
-                        if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1":
+                        if (os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1"
+                                and not getattr(cli.agent, '_nfos_escalation_yield', False)):
                             try:
                                 _run_kanban_goal_loop_q(cli, response)
                             except Exception as _goal_exc:

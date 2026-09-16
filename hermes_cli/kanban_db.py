@@ -12090,6 +12090,10 @@ def enforce_max_runtime(
         # intentionally records the first time a task ever started, so retries
         # must be measured from the active task_runs row when present.
         elapsed = now - int(row["active_started_at"])
+        from hermes_cli.nfos_principal_review import escalation_usage, worker_escalation
+        if worker_escalation(conn, row['id']):
+            active = get_task(conn, row['id'])
+            elapsed += escalation_usage(conn, row['id'], active.current_run_id)['seconds']
         if elapsed < int(row["max_runtime_seconds"]):
             continue
 
@@ -12628,6 +12632,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             if _pid_alive(row["worker_pid"]):
                 continue
 
+            from hermes_cli.nfos_principal_review import reclaim_escalation
+            if reclaim_escalation(conn, row['id']):
+                continue
             pid = int(row["worker_pid"])
             kind, code = _classify_worker_exit(pid)
             interrupted = _interrupted_by_gateway_restart(row, kind, _gw_start)  # INTERRUPTED_20260910
@@ -15419,7 +15426,8 @@ def _default_spawn(
                 cmd.extend(["--skills", sk])
     if delivery_worker:
         from hermes_cli.nfos_principal_review import worker_model_args
-        cmd.extend(worker_model_args(task))
+        with connect_closing(board=board) as model_conn:
+            cmd.extend(worker_model_args(task, model_conn))
     elif task.model_override:
         cmd.extend(["-m", task.model_override])
         # Pin the provider too when the override names one, so the worker

@@ -2116,6 +2116,13 @@ def run_conversation(
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
 
+        if os.environ.get('HERMES_KANBAN_TASK'):
+            from hermes_cli.nfos_principal_review import worker_checkpoint
+            if worker_checkpoint(agent, turn_id):
+                interrupted = True
+                _turn_exit_reason = 'nfos_worker_escalation'
+                break
+
         # Check for interrupt request (e.g., user sent new message)
         if agent._interrupt_requested:
             interrupted = True

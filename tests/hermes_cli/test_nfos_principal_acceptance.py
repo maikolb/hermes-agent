@@ -59,7 +59,8 @@ def accept(conn, task, kind, artifact=None):
 
 def save_report(conn, task, artifact, status='PASS'):
     d.save_report(conn, task.id, task.current_run_id, {'summary': 'Count verified',
-        'criteria': [{'id': 'C1', 'status': status, 'evidence': [str(artifact)]}], 'artifacts': [str(artifact)]})
+        'criteria': [{'id': 'C1', 'status': status, 'evidence': [str(artifact)]}],
+        'artifacts': [{'id': 'count', 'path': str(artifact)}]})
 
 
 def test_spec_requires_principal_and_reuses_pending_decision(task_context):
@@ -408,6 +409,117 @@ def test_config_applies_to_retained_tasks_without_changing_card_overrides(task_c
     assert task.model_override is None
     assert review.required(conn, task.id)
     assert review.worker_model_args(task) == ['-m', 'gpt-5.6-luna', '--provider', 'openai-codex', '--reasoning', 'high']
+
+
+def _enable_escalation(monkeypatch):
+    monkeypatch.setattr(review, 'settings', lambda: dict(principal_validation=True, worker_escalation=True,
+        worker_model='gpt-5.6-luna', worker_provider='openai-codex', worker_reasoning_effort='high'))
+
+
+def _reject_functional(conn, task, artifact, kind='functional'):
+    decision = ask(conn, task, 'final_review')
+    d.resolve_decision(conn, decision, action='changes', answer='Correct the observed count', author='Principal',
+        assessment={'failure': {'kind': kind, 'reason': 'Requested 31; observed 30',
+                               'criteria': [{'id': 'C1', 'evidence': [str(artifact)]}]}})
+    return decision
+
+
+def test_escalation_two_attempts_then_exhausted_retains_history(task_context, monkeypatch):
+    monkeypatch.setattr('hermes_cli.nfos_runtime.previous_runs_termination_pending', lambda *a: False)
+    conn, task, _, artifact = task_context
+    _enable_escalation(monkeypatch)
+    accept(conn, task, 'spec_review')
+    artifact.write_text('count=30\n')
+    runs = []
+    for level, model, effort in [(1, 'gpt-5.6-luna', 'max'), (2, 'gpt-6-astra', 'low')]:
+        runs.append(task.current_run_id)
+        save_report(conn, task, artifact, status='FAIL')
+        decision = _reject_functional(conn, task, artifact)
+        pending = review.worker_escalation(conn, task.id)
+        assert (pending['level'], pending['status']) == (level, 'pending')
+        assert kb.get_task(conn, task.id).current_run_id == task.current_run_id
+        assert kb.get_task(conn, task.id).status == 'running'
+        assert review.worker_model_args(task, conn) == ['-m', model, '--provider', 'openai-codex', '--reasoning', effort]
+        # Another review/report of this same attempt cannot spend the next tier.
+        d.resolve_decision(conn, decision, action='changes', answer='Correct the observed count', author='Principal')
+        save_report(conn, task, artifact, status='FAIL')
+        _reject_functional(conn, task, artifact)
+        assert review.worker_escalation(conn, task.id) == pending
+        with kb.write_txn(conn):
+            assert review.reclaim_escalation(conn, task.id)
+        task = kb.claim_task(conn, task.id)
+        assert task and task.workspace_path == str(artifact.parent)
+        with kb.write_txn(conn):
+            review.confirm_worker_dispatch(conn, task.id, task.current_run_id, model, effort)
+        assert review.worker_escalation(conn, task.id)['status'] == 'applied'
+    save_report(conn, task, artifact, status='FAIL')
+    _reject_functional(conn, task, artifact)
+    assert review.worker_escalation(conn, task.id)['status'] == 'exhausted'
+    assert review.worker_model_args(task, conn)[1] == 'gpt-6-astra'
+    assert kb.get_task(conn, task.id).status == 'running'
+    assert conn.execute("SELECT count(*) FROM nfos_decisions WHERE status='human'").fetchone()[0] == 0
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
+    assert [r[0] for r in conn.execute('SELECT id FROM task_runs ORDER BY id')] == runs + [task.current_run_id]
+    assert artifact.read_text() == 'count=30\n'
+
+
+@pytest.mark.parametrize('kind', ['scope_change', 'billing', 'external_ci', 'documentation'])
+def test_nonfunctional_rejections_do_not_escalate(task_context, monkeypatch, kind):
+    conn, task, _, artifact = task_context
+    _enable_escalation(monkeypatch); accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact, status='FAIL')
+    assert not review.worker_escalation(conn, task.id)  # Saving FAIL alone never escalates.
+    _reject_functional(conn, task, artifact, kind)
+    assert not review.worker_escalation(conn, task.id)
+
+
+@pytest.mark.parametrize('model,provider,effort', [('deepseek-v4.1-flash','opencode-go','max'),
+    ('gpt-6-astra','openai-codex','medium'), ('another-model','other','high')])
+def test_explicit_model_pins_survive_policy(task_context, monkeypatch, model, provider, effort):
+    conn, task, _, artifact = task_context
+    _enable_escalation(monkeypatch)
+    task.model_override, task.provider_override, task.reasoning_effort = model, provider, effort
+    assert review.worker_model_args(task) == ['-m',model,'--provider',provider,'--reasoning',effort]
+
+
+def test_escalation_requires_current_linked_evidence(task_context, monkeypatch):
+    conn, task, _, artifact = task_context
+    _enable_escalation(monkeypatch); accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact, status='FAIL')
+    artifact.write_text('changed after review requested')
+    with pytest.raises(d.WorkflowError, match='evidence changed'):
+        _reject_functional(conn, task, artifact)
+    assert not review.worker_escalation(conn, task.id)
+
+
+def test_checkpoint_waits_for_active_tool_and_dispatch_confirms_actual_model(task_context, monkeypatch):
+    monkeypatch.setattr('hermes_cli.nfos_runtime.previous_runs_termination_pending', lambda *a: False)
+    from hermes_cli import nfos_tool
+    conn, task, _, artifact = task_context
+    _enable_escalation(monkeypatch); accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact, status='FAIL'); _reject_functional(conn, task, artifact)
+    conn.executescript(nfos_tool.SCHEMA)
+    conn.execute('INSERT INTO nfos_tool_calls(id,task_id,run_id,argv_json,cwd,status,created_at,timeout_seconds) VALUES(?,?,?,?,?,?,?,?)',
+                 ('active',task.id,task.current_run_id,'[]',str(artifact.parent),'running',1,60)); conn.commit()
+    monkeypatch.setenv('HERMES_KANBAN_TASK', task.id)
+    monkeypatch.setenv('HERMES_KANBAN_RUN_ID', str(task.current_run_id))
+    monkeypatch.setenv('HERMES_KANBAN_CLAIM_LOCK', task.claim_lock)
+    agent = SimpleNamespace(model='gpt-5.6-luna',reasoning_config={'effort':'high'})
+    assert review.worker_checkpoint(agent) is False
+    conn.execute("UPDATE nfos_tool_calls SET status='completed'"); conn.commit()
+    assert review.worker_checkpoint(agent) is True
+    assert kb.get_task(conn,task.id).current_run_id == task.current_run_id
+    with kb.write_txn(conn): review.reclaim_escalation(conn,task.id)
+    task = kb.claim_task(conn,task.id)
+    monkeypatch.setenv('HERMES_KANBAN_RUN_ID', str(task.current_run_id))
+    monkeypatch.setenv('HERMES_KANBAN_CLAIM_LOCK', task.claim_lock)
+    with pytest.raises(d.WorkflowError, match='did not apply'):
+        review.worker_checkpoint(agent)
+    assert review.worker_escalation(conn,task.id)['status'] == 'pending'
+    agent.reasoning_config={'effort':'max'}
+    assert review.worker_checkpoint(agent) is False
+    applied=review.worker_escalation(conn,task.id)
+    assert applied['status']=='applied' and applied['run_id']==task.current_run_id
 
 
 def test_worker_spawn_uses_role_policy(task_context, monkeypatch):
