@@ -3699,6 +3699,12 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
                     _event(conn,task_id,run_id,'nfos_review_superseded',{'decision_id':pending['id'],'kind':kind})
             latest=conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',
                                 (task_id,kind)).fetchone()
+            from hermes_cli.nfos_principal_review import accepted
+            if (latest and latest['status']=='resolved' and latest['author']=='Principal'
+                    and latest['action']=='continue'
+                    and json.loads(latest['context']).get('acceptance_identity')==context['acceptance_identity']
+                    and accepted(conn,task_id,kind)):
+                return latest['id']
             if (latest and (latest['status']=='pending' or
                             (latest['author']=='NFOS automation' and json.loads(latest['context']).get('incomplete_result')))
                     and json.loads(latest['context']).get('acceptance_identity')==context['acceptance_identity']):

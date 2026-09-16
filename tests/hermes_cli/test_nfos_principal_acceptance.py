@@ -63,6 +63,46 @@ def save_report(conn, task, artifact, status='PASS'):
         'artifacts': [{'id': 'count', 'path': str(artifact)}]})
 
 
+@pytest.mark.parametrize('kind', ['spec_review', 'final_review'])
+def test_record_mode_reuses_current_accepted_review(task_context, monkeypatch, kind):
+    conn, task, _, artifact = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    first = accept(conn, task, 'spec_review')
+    if kind == 'final_review':
+        save_report(conn, task, artifact)
+        first = accept(conn, task, kind, artifact)
+    count = conn.execute('SELECT count(*) FROM nfos_decisions WHERE task_id=?', (task.id,)).fetchone()[0]
+    assert review.accepted(conn, task.id, kind)
+    assert ask(conn, task, kind) == first
+    assert review.accepted(conn, task.id, kind)
+    assert conn.execute('SELECT count(*) FROM nfos_decisions WHERE task_id=?', (task.id,)).fetchone()[0] == count
+
+
+@pytest.mark.parametrize('change', ['spec', 'instruction', 'report', 'evidence'])
+def test_record_mode_changed_acceptance_requires_new_review(task_context, monkeypatch, change):
+    conn, task, spec, artifact = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    kind = 'spec_review' if change in {'spec', 'instruction'} else 'final_review'
+    first = accept(conn, task, 'spec_review')
+    if kind == 'final_review':
+        save_report(conn, task, artifact)
+        first = accept(conn, task, kind, artifact)
+    if change in {'spec', 'instruction'}:
+        if change == 'instruction':
+            kb.update_task_instruction(conn, task.id, body='Verify the new requested count', author='Maikol', expected_revision=task.instruction_revision)
+        spec['goal'] = 'Verify updated count'
+        spec['criteria'][0]['mandatory'] = True
+        d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'source': 'updated request'})
+    else:
+        if change == 'evidence':
+            artifact.write_text('count=32\n')
+        save_report(conn, task, artifact)
+    second = ask(conn, task, kind)
+    assert second != first
+    assert d.get_decision(conn, second)['status'] == 'pending'
+    assert not review.accepted(conn, task.id, kind)
+
+
 def test_spec_requires_principal_and_reuses_pending_decision(task_context):
     conn, task, _, _ = task_context
     assert len(d.pending_decisions(conn)) == 1
