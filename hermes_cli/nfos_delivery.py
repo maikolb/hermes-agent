@@ -3561,6 +3561,34 @@ def _code_route_review(conn, task_id):
                         'com o readback do CI; se o CI falhar, corrija e repita; depois peça review de novo.')  # RECORD_MODE_TEXT_20260911
 
 
+def _open_human_escalation_root(conn, row):
+    """Follow persisted review lineage, never infer duplicate causes from prose."""
+    current = row
+    seen = {row['id']}
+    depth = 0
+    while True:
+        parent_id = json.loads(current['context'] or '{}').get('closure_reconsideration_of')
+        if not parent_id:
+            return (current if depth and current['status'] == 'human' else None), depth
+        if parent_id in seen:
+            return None, depth
+        parent = get_decision(conn, parent_id)
+        if not parent or parent['task_id'] != row['task_id']:
+            return None, depth
+        seen.add(parent_id)
+        current = parent
+        depth += 1
+
+
+def _consolidate_human_escalation_review(conn, row, root):
+    context = json.loads(row['context'] or '{}')
+    context.update(superseded_by=root['id'], superseded_reason='human_escalation_review')
+    conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?",
+                 (_json(context), row['id']))
+    _event(conn, row['task_id'], row['run_id'], 'nfos_human_escalation_reviewed',
+           {'decision_id': row['id'], 'human_decision_id': root['id'], 'previous_status': row['status']})
+
+
 def reconcile_incomplete_reviews(conn, task_id=None):
     """Recover old mechanical refusals; incomplete findings need Principal judgment."""
     if not _result_review():
@@ -3586,12 +3614,21 @@ def reconcile_incomplete_reviews(conn, task_id=None):
         # Revisit legacy escalations once through the normal Principal channel.
         # The model decides whether this is closure housekeeping or indispensable
         # missing input; this migration neither supplies a human answer nor closes a card.
+        reviews = conn.execute("SELECT d.* FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
+                               "WHERE d.status IN ('human','pending') AND t.status NOT IN ('done','archived') "
+                               "AND (? IS NULL OR d.task_id=?) "
+                               "AND json_extract(d.context,'$.closure_reconsideration_of') IS NOT NULL",
+                               (task_id, task_id)).fetchall()
+        for row in reviews:
+            root, depth = _open_human_escalation_root(conn, row)
+            if root and (row['status'] == 'human' or depth > 1):
+                _consolidate_human_escalation_review(conn, row, root)
         humans=conn.execute("SELECT d.* FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
                             "WHERE d.status='human' AND t.status NOT IN ('done','archived') "
                             "AND (? IS NULL OR d.task_id=?) AND EXISTS (SELECT 1 FROM nfos_artifacts a WHERE a.task_id=d.task_id AND a.kind='report')",(task_id,task_id)).fetchall()
         for row in humans:
             context=json.loads(row['context'])
-            if context.get('autonomous_closure_review'):
+            if context.get('autonomous_closure_review') or context.get('closure_reconsideration_of'):
                 continue
             question=('Review the saved human escalation under the owner closure delegation. '
                       'If it only asks permission to close or accept an observation, decide internally: '
@@ -4067,6 +4104,11 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                 raise WorkflowError('Review needs the saved report')
         conn.execute('UPDATE nfos_decisions SET status=?,answer=?,author=?,action=?,resolved_at=? WHERE id=?',
                      ('human' if action=='human' else 'resolved',answer,author,action,int(time.time()),decision_id))
+        if action == 'human':
+            root, _ = _open_human_escalation_root(conn, row)
+            if root:
+                _consolidate_human_escalation_review(conn, get_decision(conn, decision_id), root)
+                return  # Keep the original blocker; do not notify or block again.
         _event(conn,row['task_id'],row['run_id'],'nfos_principal_resolved',
                {'decision_id':decision_id,'action':action,'answer':answer,
                 'asked_spec_revision':row['spec_revision'],'resolved_spec_revision':current_spec_revision})

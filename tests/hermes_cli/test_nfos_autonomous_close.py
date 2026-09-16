@@ -77,3 +77,78 @@ def test_memory_failure_does_not_return_closure_to_owner(task_context,monkeypatc
     row=conn.execute("select payload from task_events where task_id=? and kind='nfos_learning_pending'",(task.id,)).fetchone()
     assert 'Preservar o recibo' in row['payload']
     assert kb.get_task(conn,task.id).status=='done'
+
+
+def test_retained_financial_escalation_has_one_open_question(task_context, monkeypatch):
+    conn, task, _, _ = prepare(task_context, monkeypatch)
+    root = d.ask_principal(conn, task.id, task.current_run_id, kind='impediment',
+        question='GitHub billing prevents the required CI from running', context={})
+    original = 'Maikol, can you regularize GitHub billing and confirm when CI is available?'
+    d.resolve_decision(conn, root, action='human', answer=original, author='Principal')
+    before = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (task.id,)).fetchone())
+    d.reconcile_incomplete_reviews(conn)
+    review_id = json.loads(d.get_decision(conn, root)['context'])['autonomous_closure_review']
+    answer = 'The original billing question remains indispensable; do not send it again.'
+    d.resolve_decision(conn, review_id, action='human', answer=answer, author='Principal')
+    count = conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0]
+    for _ in range(3):
+        d.reconcile_incomplete_reviews(conn)
+        d.resolve_decision(conn, review_id, action='human', answer=answer, author='Principal')
+    assert conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0] == count
+    assert [r['id'] for r in conn.execute("SELECT id FROM nfos_decisions WHERE status='human'")] == [root]
+    assert d.get_decision(conn, root)['answer'] == original
+    reviewed = d.get_decision(conn, review_id)
+    assert reviewed['answer'] == answer and reviewed['author'] == 'Principal'
+    assert json.loads(reviewed['context'])['superseded_by'] == root
+    assert dict(conn.execute('SELECT * FROM tasks WHERE id=?', (task.id,)).fetchone()) == before
+    events = [json.loads(r[0]) for r in conn.execute("SELECT payload FROM task_events WHERE kind='nfos_principal_resolved'")]
+    assert not any(e['decision_id'] == review_id for e in events), 'No duplicate human notification'
+
+
+def test_reconciliation_consolidates_legacy_review_chain_without_unblocking(task_context, monkeypatch):
+    conn, task, _, _ = prepare(task_context, monkeypatch)
+    root = d.ask_principal(conn, task.id, task.current_run_id, kind='impediment',
+        question='GitHub billing prevents CI', context={})
+    d.resolve_decision(conn, root, action='human', answer='Owner, can you fix billing?', author='Principal')
+    d.reconcile_incomplete_reviews(conn)
+    child = json.loads(d.get_decision(conn, root)['context'])['autonomous_closure_review']
+    # Persist the state produced by the old reconciler, without invoking the fix.
+    ctx = json.loads(d.get_decision(conn, child)['context'])
+    ctx['autonomous_closure_review'] = 'legacy-grandchild'
+    conn.execute("UPDATE nfos_decisions SET status='human',action='human',author='Principal',answer='Billing still requires the owner',context=? WHERE id=?", (json.dumps(ctx), child))
+    conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,'impediment','Review of the review',?,?,1)",
+        ('legacy-grandchild', task.id, task.current_run_id, json.dumps({'closure_reconsideration_of': child}), d.get_workflow(conn, task.id)['spec_revision']))
+    conn.commit()
+    before = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (task.id,)).fetchone())
+    d.reconcile_incomplete_reviews(conn)
+    assert d.get_decision(conn, root)['status'] == 'human'
+    assert d.get_decision(conn, child)['status'] == 'superseded'
+    assert d.get_decision(conn, child)['answer'] == 'Billing still requires the owner'
+    assert d.get_decision(conn, 'legacy-grandchild')['status'] == 'superseded'
+    assert dict(conn.execute('SELECT * FROM tasks WHERE id=?', (task.id,)).fetchone()) == before
+    count = conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0]
+    d.reconcile_incomplete_reviews(conn)
+    assert conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0] == count
+
+
+def test_distinct_human_causes_are_not_merged(task_context, monkeypatch):
+    conn, task, _, _ = prepare(task_context, monkeypatch)
+    causes = [('GitHub billing prevents CI', 'Owner, can you regularize billing?'),
+              ('Destination account is unavailable', 'Owner, which account should receive access?')]
+    questions = [d.ask_principal(conn, task.id, task.current_run_id, kind='impediment', question=question, context={})
+                 for question, _ in causes]
+    for did, (_, answer) in zip(questions, causes):
+        d.resolve_decision(conn, did, action='human', answer=answer, author='Principal')
+    d.reconcile_incomplete_reviews(conn)
+    assert {r['id'] for r in conn.execute("SELECT id FROM nfos_decisions WHERE status='human'")} == set(questions)
+    assert all(json.loads(d.get_decision(conn, did)['context']).get('autonomous_closure_review') for did in questions)
+
+
+def test_escalation_lineage_rejects_missing_cross_card_and_cyclic_links(task_context, monkeypatch):
+    conn, task, _, _ = prepare(task_context, monkeypatch)
+    root = d.ask_principal(conn, task.id, task.current_run_id, kind='impediment', question='Billing prevents CI', context={})
+    d.resolve_decision(conn, root, action='human', answer='Owner, can you regularize billing?', author='Principal')
+    for task_id, parent in [(task.id, 'missing'), ('different-card', root), (task.id, 'test-review')]:
+        row = {'id': 'test-review', 'task_id': task_id, 'context': json.dumps({'closure_reconsideration_of': parent})}
+        assert d._open_human_escalation_root(conn, row)[0] is None
+    assert d.get_decision(conn, root)['status'] == 'human'
