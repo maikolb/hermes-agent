@@ -490,8 +490,8 @@ def _record_mode():  # RECORD_MODE_TEXT_20260911
 
 
 def worker_instructions():
-    _cli=(AUXILIARY_CLOSURE_POLICY+'\nExact workflow CLI prefix: '+workflow_command()+'\n'
-          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n')
+    _cli=('Exact workflow CLI prefix: '+workflow_command()+'\n'
+          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n'+AUXILIARY_CLOSURE_POLICY+'\n')
     if _record_mode():
         if not delivery._result_review():
             return _premises_prefix()+_cli+RECORD_MODE_PROTOCOL
@@ -764,7 +764,7 @@ def coordinator_intake_instructions(context, *, reply_to=None):
 
 
 def principal_instructions():
-    return AUXILIARY_CLOSURE_POLICY+'\nExact workflow CLI prefix: '+workflow_command()+'\n\n'+"""NFOS project coordinator, the owner's active instructions:
+    return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+AUXILIARY_CLOSURE_POLICY+'\n'+"""NFOS project coordinator, the owner's active instructions:
 You are the Principal, responsible for intake, dispatch, board visibility,
 impediments and review. Project implementation belongs to full Hermes workers.
 The owner's priority is delivery from the request through verification at the requested destination
