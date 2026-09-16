@@ -424,6 +424,17 @@ def coordinator_wake_accepted(conn, receipt):
     return False
 
 
+def coordinator_retry_at(coordination):
+    """Bound legacy hour-long deferrals without shortening an active claim."""
+    retry_at=coordination.get('next_attempt_at',0)
+    attempts=int(coordination.get('attempts',0))
+    if retry_at and attempts>=3 and 'last_attempt_at' not in coordination:
+        # Older runtimes always deferred these unaccepted inputs by one hour.
+        delay=60 if not coordination.get('last_error') else min(300,5*2**min(attempts-1,6))
+        retry_at=retry_at-3600+delay
+    return max(coordination.get('claim_until',0),retry_at)
+
+
 def claim_coordinator_input(conn, request_id):
     row=get_request(conn,request_id)
     if row is None or coordinator_wake_accepted(conn,_coordinator_receipt(conn,row)):
@@ -434,7 +445,7 @@ def claim_coordinator_input(conn, request_id):
             return None
         payload=json.loads(row['payload']);coordination=payload.setdefault('coordination',{})
         now=time.time()
-        if coordination.get('wake_accepted') or max(coordination.get('claim_until',0),coordination.get('next_attempt_at',0))>now:
+        if coordination.get('wake_accepted') or coordinator_retry_at(coordination)>now:
             return None
         coordination.update(claim_token=uuid.uuid4().hex,claim_until=now+60,
                             attempts=int(coordination.get('attempts',0))+1)
@@ -453,9 +464,8 @@ def retry_coordinator_input(conn, receipt, *, error=None):
         from agent.redact import redact_sensitive_text
         attempts=int(coordination.get('attempts',1))
         delay=60 if error is None else min(300,5*2**min(attempts-1,6))
-        if attempts>=3:
-            delay=max(delay,3600)  # patch local 10/09/2026 (Maikol): sem teto, a mesma mensagem era reinjetada a cada 5 s ate 16x por dia
-        coordination.update(claim_until=0,next_attempt_at=time.time()+delay,
+        now=time.time()
+        coordination.update(claim_until=0,last_attempt_at=now,next_attempt_at=now+delay,
                             last_error=redact_sensitive_text(str(error),force=True,redact_url_credentials=True)[:500] if error else None)
         conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(payload),row['id']))
 

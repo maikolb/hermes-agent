@@ -131,3 +131,38 @@ async def test_historical_replay_without_platform_id_does_not_send_false_reply(i
     row = stored()
     assert row['acknowledged_at'] is None
     assert row['payload']['source']['message_id'] == 'retained-session-row:304858'
+
+
+@pytest.mark.parametrize('error', [None, 'temporary startup failure'])
+def test_unaccepted_input_retries_within_five_minutes_after_third_attempt(inbox, error):
+    root, clock, source = inbox
+    with kb.connect_closing() as conn:
+        request_id = delivery.receive_request(conn, source={
+            'platform':'telegram','chat_id':'-1000','thread_id':'8','message_id':'13170','profile':'default'},
+            text='Confira a imagem.', project={}, defer_to_principal=True)
+        for _ in range(4):
+            receipt = delivery.claim_coordinator_input(conn, request_id)
+            assert receipt is not None
+            delivery.retry_coordinator_input(conn, receipt, error=error)
+            coordination = json.loads(delivery.get_request(conn, request_id)['payload'])['coordination']
+            delay = coordination['next_attempt_at'] - clock[0]
+            assert 0 < delay <= 300
+            assert delivery.claim_coordinator_input(conn, request_id) is None
+            clock[0] += delay + 1
+
+
+@pytest.mark.parametrize('active_claim', [False, True])
+def test_existing_hour_backoff_recovers_through_normal_scan_and_claim(inbox, active_claim):
+    root, clock, source = inbox
+    runner = Runner(adapter=SimpleNamespace())
+    with kb.connect_closing() as conn:
+        request_id = delivery.receive_request(conn, source={
+            'platform':'telegram','chat_id':'-1000','thread_id':'8','message_id':'13170','profile':'default'},
+            text='Confira a imagem.', project={}, defer_to_principal=True)
+        payload = json.loads(delivery.get_request(conn, request_id)['payload'])
+        payload['coordination'].update(attempts=3, claim_until=clock[0]+30 if active_claim else 0,
+            next_attempt_at=clock[0]+3500, last_error=None)
+        conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(json.dumps(payload),request_id))
+        candidates = runner._nfos_receipt_candidates({'default'},board='default',coordination=True)
+        assert bool(candidates) is not active_claim
+        assert (delivery.claim_coordinator_input(conn,request_id) is not None) is not active_claim

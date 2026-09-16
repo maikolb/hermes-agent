@@ -1301,6 +1301,7 @@ class GatewayKanbanWatchersMixin:
     def _nfos_receipt_candidates(self, profiles, board=None, request_id=None, limit=20, *, coordination=False):
         """Read pending obligations even when their worker has no card yet."""
         from hermes_cli import kanban_db as kb
+        from hermes_cli.nfos_delivery import coordinator_retry_at
         boards=[{'slug':board}] if board else kb.list_boards(include_archived=False)
         seen=set();pending=[]
         for meta in boards:
@@ -1325,7 +1326,8 @@ class GatewayKanbanWatchersMixin:
                     if not all(source.get(key) for key in ('chat_id','thread_id','message_id')):continue
                     receipt=payload.get('coordination' if coordination else 'receipt') or {};now=time.time()
                     if coordination and receipt.get('wake_accepted'):continue
-                    if max(receipt.get('claim_until',0),receipt.get('next_attempt_at',0))>now:continue
+                    retry_at=coordinator_retry_at(receipt) if coordination else max(receipt.get('claim_until',0),receipt.get('next_attempt_at',0))
+                    if retry_at>now:continue
                     if coordination:payload['_request_part']=json.loads(row['source_key'])[-1]
                     pending.append((path,row['id'],payload))
                     if len(pending)>=limit:return pending
