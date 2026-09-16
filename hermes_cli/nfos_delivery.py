@@ -3925,7 +3925,10 @@ def receive_owner_guidance(conn, task_id, *, text, source):
                 raise WorkflowError('This message id already names a different instruction')
             return {'decision_id':decision_id,'duplicate':True}
         now = int(time.time())
-        context = {'owner_guidance':text.strip(),'source':source}
+        from hermes_cli.nfos_destination import destination
+        context = {'owner_guidance':text.strip(),'source':source,
+                   'received_instruction_revision':task.instruction_revision,
+                   'received_destination':destination(conn,task_id)}
         question = 'Orientação de '+source['actor']+' neste card: '+text.strip()
         run_id = task.current_run_id or 0
         conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -4270,6 +4273,73 @@ def _express_production_order(text):
     return bool(_PRODUCTION_ORDER_RX.search(str(text or '')))
 
 
+def _production_guidance_intent(text):
+    """Return an explicit destination decision, or None for unrelated guidance."""
+    production = r'\b(produ[cç][aã]o|production|prd|main)\b'
+    for clause in re.split(r'[,;.!?\n]', text):
+        if re.search(production, clause, re.I) and re.search(r'\b(n[aã]o|not|never)\b', clause, re.I):
+            return False
+    if re.search(r'\b(s[oó]|somente|apenas|only)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', text, re.I):
+        return False
+    if _express_production_order(text) or re.search(
+            r'\b(direto|diretamente)\s+(para|pra|em)\s+(produ[cç][aã]o|production|prd)\b', text, re.I):
+        return True
+    return None
+
+
+def _owner_guidance_production_order(conn, task, scope):
+    """Use the last explicit owner destination decision, preserving unrelated guidance."""
+    # The receipt event and its comment are produced by the operator entry point,
+    # not by a worker supplying an owner_guidance-shaped decision context.
+    receipts = conn.execute(
+        "SELECT e.id AS receipt_id,e.payload,d.* FROM task_events e JOIN nfos_decisions d "
+        "ON d.id=json_extract(e.payload,'$.decision_id') AND d.task_id=e.task_id "
+        "WHERE e.task_id=? AND e.kind='nfos_principal_requested' "
+        "AND json_extract(e.payload,'$.owner_guidance')=1 ORDER BY e.id DESC",
+        (task.id,)).fetchall()
+    receipt = next((row for row in receipts if _production_guidance_intent(
+        json.loads(row['context']).get('owner_guidance') or '') is not None), None)
+    if not receipt:
+        return None
+    if receipt['status'] != 'resolved' or receipt['author'] != 'Principal' or receipt['action'] not in {'continue','changes'}:
+        return False
+    context = json.loads(receipt['context'])
+    source = context.get('source') or {}
+    payload = json.loads(receipt['payload'])
+    text = context.get('owner_guidance') or ''
+    expected_id = 'dec_' + hashlib.sha256(_json([task.id,source]).encode()).hexdigest()[:24]
+    if payload.get('decision_id') != expected_id or not source.get('actor') or not source.get('message_id'):
+        return False
+    comment = conn.execute('SELECT author,body FROM task_comments WHERE id=? AND task_id=?',
+                           (payload.get('comment_id'),task.id)).fetchone()
+    if not comment or comment['author'] != source['actor'] or comment['body'] != text:
+        return False
+    if not _production_guidance_intent(text):
+        return False
+    if not scope or scope.get('environment') != 'production' or scope.get('verification_operation') != 'deploy':
+        return False
+    revision = context.get('received_instruction_revision')
+    if revision is None:  # Receipts persisted before revision binding was explicit.
+        previous = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='instruction_updated' AND id<? ORDER BY id DESC LIMIT 1",
+                                (task.id,receipt['receipt_id'])).fetchone()
+        revision = json.loads(previous['payload']).get('revision',0) if previous else 0
+    if revision != task.instruction_revision:
+        return False
+    original = context.get('received_destination')
+    if 'received_destination' not in context:
+        spec = conn.execute("SELECT content FROM nfos_artifacts WHERE task_id=? AND kind='spec' AND revision=?",
+                            (task.id,receipt['spec_revision'])).fetchone()
+        original = json.loads(spec['content']).get('delivery_destination') if spec else None
+    if original and all(original.get(key) == scope.get(key) for key in ('environment','target','verification_operation')):
+        return True
+    # A newly accepted spec may bind an early instruction or an HML -> production change.
+    # It must cite this exact authenticated message, not worker or Principal prose.
+    return bool((original is None or original.get('environment') == 'hml')
+        and get_workflow(conn,task.id)['spec_revision'] > receipt['spec_revision']
+        and re.search(r'(?<![\w-])'+re.escape(str(source['message_id']))+r'(?![\w-])', scope.get('source',''))
+        and scope.get('authorization_message') == text)
+
+
 def _project_delivery_environment(conn, task_id):
     """DELIVERY_ENV_20260911: delivery_environment do projeto do card (config), padrão production."""
     try:
@@ -4440,8 +4510,10 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             scope=destination(conn,task_id)
             if review_only(scope) and operation != 'pr':
                 raise WorkflowError('This delivery ends at the review PR; merge, homolog and deploy are outside its scope')
-            if operation in {'merge','deploy'} and _project_delivery_environment(conn,task_id)=='hml' and not _express_production_order(task.body):  # DELIVERY_ENV_20260911
-                raise WorkflowError('This project delivers in HML: staging PR, HML deploy and HML readback close the card. Production (merge or deploy on main) only with the owner express order in the card body')
+            if operation in {'merge','deploy'} and _project_delivery_environment(conn,task_id)=='hml':  # DELIVERY_ENV_20260911
+                order = _owner_guidance_production_order(conn,task,scope)
+                if not (order if order is not None else _express_production_order(task.body)):
+                    raise WorkflowError('This project delivers in HML: staging PR, HML deploy and HML readback close the card. Production (merge or deploy on main) only with the owner express order in the card body or authenticated guidance for the current instruction and destination')
             if _owner_mode():  # RECORD_MODE_20260911: o runtime registra a publicação (task, run, operação, alvo, SHA) e não conduz
                 preparation=_record_mode_effect_checks(conn,task_id,candidate)
             else:
