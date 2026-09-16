@@ -139,6 +139,34 @@ def test_result_review_prompt_is_selected_without_reactivating_legacy_policy(mon
     assert 'spec_review' not in prompt
 
 
+def test_worker_resume_gets_resolved_corrections_instead_of_obsolete_wait(task_context, monkeypatch):
+    conn, task, _, _ = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    decision = ask(conn, task, 'spec_review')
+    d.resolve_decision(conn, decision, action='changes', answer='Keep the validated install. Wire navigation or use the allowed empty sections.', author='Principal')
+    conn.execute('UPDATE nfos_workflows SET next_action=? WHERE task_id=?',
+                 ('Wait for Principal spec acceptance; revise the spec if changes are requested',task.id))
+    before = conn.total_changes
+    context = d.worker_context(conn, task.id)
+    assert 'Wire navigation or use the allowed empty sections.' in context
+    assert 'resolved/changes' in context
+    assert 'Verify the count' in context
+    assert 'Recorded next action: Wait for Principal' not in context
+    assert conn.total_changes == before, 'context assembly must not mutate the card'
+
+
+def test_old_spec_review_is_not_a_current_resume_instruction(task_context, monkeypatch):
+    conn, task, spec, _ = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})
+    decision = ask(conn, task, 'spec_review')
+    d.resolve_decision(conn, decision, action='changes', answer='OLD CORRECTION superseded by new spec', author='Principal')
+    spec['criteria'][0]['mandatory'] = True
+    d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'session':'synthetic-revision'})
+    context = d.worker_context(conn, task.id)
+    assert 'OLD CORRECTION' not in context
+    assert 'pending' in context
+
+
 def test_record_mode_still_requires_real_spec_review(task_context, monkeypatch):
     conn, task, _, _ = task_context
     monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': True})

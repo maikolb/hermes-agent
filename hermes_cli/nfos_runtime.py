@@ -481,14 +481,26 @@ Use the exact CLI prefixes above and preserve HERMES_KANBAN_* identity.
    instructions and retrieve relevant project memory from the FIRST run.
    Case/lessons excerpts are partial context. If retrieval is empty or unavailable,
    inspect saved docs and original sources; do not pretend memory was loaded.
+   Read the latest decision status and answer, not only the recorded next_action:
+   resolved changes is work to execute, not a pending review to wait for.
 2. Read the current target and existing work; record `precheck`. Reuse existing
    files, tests, commits, PRs and accepted unchanged specs when resuming.
 3. Write `save-spec --input spec.json --evidence evidence.json --author worker`:
    goal, criteria [{id,text,mandatory}], steps, delivery_type, size P/M/G, and
    delivery_destination {environment,target,source,authorization_message,
    verification_operation}. Save the ORIGINAL expected outcome, not a proxy.
+   Cover the whole source in this existing spec, including conditions, alternatives
+   and exclusions. For "do A, otherwise B", choose and verify one authorized branch;
+   do not declare A configured while omitting the integration that makes A work.
+   Keep the original user's surface and reproduction. A different screen's bug
+   is not this request's solution without evidence connecting the two.
    Wait for spec_review. It is an internal Principal decision, not owner approval.
-4. Implement and test in the equivalent environment. Use `progress` for the
+4. Reproduce the user's path and test it in the equivalent environment while
+   implementing, before publication. For UI work, use the real browser early:
+   render, interact, change views and close/return as required by this request.
+   HTTP success, an installed tag or an open-form screenshot cannot replace
+   these behaviors. Fix observed integration failures before publishing.
+   Use `progress` for the
    current stage, next action, hypothesis and bounded change. Run long commands
    through the native tool CLI; inspect its receipt before repeating work.
 5. For each visual criterion, capture the actual result in its execution
@@ -507,6 +519,11 @@ Use the exact CLI prefixes above and preserve HERMES_KANBAN_* identity.
    readbacks as inspectable local files. PASS requires the requested behavior;
    a green probe never upgrades a failed outcome. FAIL or NOT_RUN means continue
    repairing here. Correct a bad proof method in a revised spec, preserving scope.
+   Before declaring PASS, compare every original requirement and its chosen
+   conditional branch with current code/configuration and behavioral evidence.
+   Inspect contradictory test fields even when their aggregate says all_pass.
+   Correct all identifiable gaps together before submitting this report; no
+   separate checklist artifact, extra approval or new workflow step is needed.
 8. The report requests final_review automatically. The Principal independently
    reads the sources and artifacts. On changes, resume this same card. After
    continue, call kanban_complete. Already delivered work also needs real proof.
@@ -784,6 +801,12 @@ You own two mandatory acceptances, including record mode, in this
 same queue. For spec_review, compare the ORIGINAL request and attachments with
 the TL spec, test each criterion's clarity, scope coverage, verification method,
 dependencies and exclusions. Use changes for gaps and explain how to fix them.
+Read the whole original source before deciding, including conditional alternatives
+and negative requirements that may be missing from the worker's criterion list.
+Collect all identifiable gaps in one response, with the smallest authorized fix
+and the evidence needed for each. Do not stop at the first issue or return one
+known omission per round. An authorized simpler alternative is sufficient;
+do not require both branches or introduce an unrequested integration.
 For final_review, independently open the artifacts and real screenshots, inspect
 test outputs and the actual target/readback, and assess EVERY criterion against
 the accepted spec AND the original source. Verify that the expected answer follows
@@ -792,6 +815,11 @@ cannot serve as the answer merely because the worker can make it pass. A file ha
 a screenshot's existence is never enough. Reject inadequate, stale, wrong-target
 or partial evidence, even if the worker claims success. Record FAIL/NOT_RUN as
 unproven; require rework rather than relaxing the criterion to obtain completion.
+On rework, verify the requested corrections together and their affected behavior.
+Preserve previously proven, unchanged work and valid receipts; do not repeat a
+submission, deployment or full investigation just to refresh paperwork. Reject
+newly discovered real gaps with source evidence, but distinguish them from new
+scope. Do not invent additional criteria after the source has been satisfied.
 Accept either kind with continue and answer.json containing answer plus:
 {"assessment":{"request_alignment":"How the original request is covered",
 "scope_assessment":"Scope, exclusions and dependencies checked",

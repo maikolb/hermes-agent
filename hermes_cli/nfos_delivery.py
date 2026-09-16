@@ -2011,6 +2011,26 @@ def case_context(conn, task_id):
         return ''
     st = json.loads(wf['state_json'] or '{}') or {}
     parts = []
+    reviews = []
+    if _spec_matches_instruction(conn, task_id):
+        reviews = [dict(r) for r in conn.execute(
+            "SELECT * FROM nfos_decisions WHERE rowid IN (SELECT max(rowid) FROM nfos_decisions "
+            "WHERE task_id=? AND spec_revision=? AND kind IN ('spec_review','final_review') GROUP BY kind) ORDER BY rowid DESC",
+            (task_id, wf['spec_revision']))]
+    for decision in reviews:
+        answer = str(decision.get('answer') or '')
+        parts.append(f"Current {decision['kind']} {decision['id']}: {decision['status']}/{decision.get('action') or 'pending'}\n"
+                     + answer[:2400] + ('\n[Answer excerpt; read the full decision in show.]' if len(answer)>2400 else ''))
+    if reviews:
+        parts.append('Resolved changes means apply these corrections in this card; do not wait for another approval to revise a rejected spec. Preserve evidence for unchanged, already verified work.')
+    request = get_request(conn, wf['request_id'])
+    if request:
+        payload = json.loads(request['payload'])
+        text = str(payload.get('text') or '')
+        parts.append('Original request (source, not a delivery claim):\n'+text[:4000]
+                     + ('\n[Request excerpt; read the complete original in show before fixing scope.]' if len(text)>4000 else ''))
+        if payload.get('attachments'):
+            parts.append('Original attachments: read their contents from the preserved references in show before interpreting the request.')
     escalation_answer = _destination_escalation_answer(conn, task_id)  # HUMAN_LAST_RESORT revisões 7 e 8: primeiro, antes do corte do worker_context
     if escalation_answer:
         parts.append(escalation_answer)
@@ -2028,7 +2048,12 @@ def case_context(conn, task_id):
             else:
                 lines.append(f"- {when}: {a.get('criterion')} FAIL, observed {_json(a.get('observed'))[:160]}")
         parts.append('Attempts already made on this request (do not repeat what failed):\n' + '\n'.join(lines))
-    if wf.get('next_action'):
+    resolved_wait = any(r['status']=='resolved' and r['action'] in {'continue','changes'}
+                        and r['kind']=={'spec':'spec_review','report':'final_review'}.get(wf['stage']) for r in reviews)
+    obsolete_wait = resolved_wait and wf.get('next_action') in {
+        'Wait for Principal spec acceptance; revise the spec if changes are requested',
+        'Principal reviewing the saved result; address any requested changes on this card'}
+    if wf.get('next_action') and not obsolete_wait:
         parts.append('Recorded next action: ' + str(wf['next_action'])[:400])  # HUMAN_LAST_RESORT revisão 7: o mesmo limite gravado
     note = completion_refusal_note(conn, task_id)
     if note:
@@ -2089,7 +2114,10 @@ def lessons_context(conn, task_id, limit=8):
 def worker_context(conn, task_id):
     """Texto anexado ao prompt do worker no spawn e exposto no show."""
     try:
-        return (case_context(conn, task_id) + lessons_context(conn, task_id))[:12000]
+        case = case_context(conn, task_id)
+        lessons = lessons_context(conn, task_id)
+        return (case[:9000] + ('\n[Case excerpt; use show for the complete source and decisions.]' if len(case)>9000 else '')
+                + lessons[:3000] + ('\n[Lesson excerpt; retrieve relevant native project memory.]' if len(lessons)>3000 else ''))
     except Exception:
         return ''
 
