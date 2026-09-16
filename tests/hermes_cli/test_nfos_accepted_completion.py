@@ -102,6 +102,7 @@ def test_urgent_accepted_delivery_closes_before_older_normal(task_context):
     assert [r[0] for r in conn.execute("SELECT task_id FROM task_events WHERE kind='completed' ORDER BY id")] == [urgent.id, normal.id]
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='Run the gateway dispatcher timing on its deployed Linux platform')
 def test_gateway_real_dispatch_tick_completes_after_acceptance(task_context, monkeypatch, tmp_path):
     import asyncio
     import time
@@ -114,6 +115,7 @@ def test_gateway_real_dispatch_tick_completes_after_acceptance(task_context, mon
                          'max_spawn': 0, 'auto_decompose': False,
                          'delivery': {'principal_validation': True}}}
     monkeypatch.setattr('hermes_cli.config.load_config', lambda: config)
+    monkeypatch.setattr('gateway.kanban_watchers._kanban_dispatch_allowed', lambda: True)
     monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path / 'home'))
     monkeypatch.setattr(kb, 'list_boards', lambda **kwargs: [{'slug': 'default'}])
     first_tick = []
