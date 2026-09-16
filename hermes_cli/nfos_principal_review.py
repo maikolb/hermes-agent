@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from pathlib import Path
 
 from hermes_cli import nfos_delivery as d
 
@@ -94,6 +95,70 @@ def require_spec(conn, task_id):
         raise d.WorkflowError('Principal spec acceptance is pending; ask kind=spec_review and wait before implementation')
 
 
+def final_assessment(conn, task_id):
+    """Only the current, independently accepted result may authorize closure."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_decisions'").fetchone():
+        return {}
+    row = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND kind='final_review' ORDER BY rowid DESC LIMIT 1", (task_id,)).fetchone()
+    if not row or row['status'] != 'resolved' or row['action'] != 'continue' or row['author'] != 'Principal':
+        return {}
+    context=json.loads(row['context'])
+    try:
+        if context.get('acceptance_identity') != identity(conn, task_id, 'final_review'):
+            return {}
+    except d.WorkflowError:
+        return {}
+    return context.get('assessment', {})
+
+
+def observed_criteria(conn, task_id):
+    return {row['id'] for row in final_assessment(conn, task_id).get('criteria', [])
+            if row.get('verdict') == 'observe'}
+
+
+def closeout_packet(conn, task_id):
+    """Project Ops persists this reviewed resolution and its actual image files."""
+    assessment = final_assessment(conn, task_id)
+    report = d._artifact(conn, task_id, 'report')
+    if not assessment or not report:
+        return None
+    content = json.loads(report['content'])
+    observations = [r['id'] + ': ' + r['observation'] for r in assessment['criteria'] if r.get('verdict') == 'observe']
+    images = [c['path'] for c in json.loads(report['evidence']).get('artifact_checks', [])
+              if c.get('status') == 'verified_local' and Path(c.get('path', '')).suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'}]
+    return {'resolution': assessment.get('resolution') or content.get('summary') or assessment['request_alignment'],
+            'observations': observations, 'images': list(dict.fromkeys(images)),
+            'learning': assessment.get('learning') or assessment.get('resolution') or assessment['scope_assessment'],
+            'fully_proven': not observations}
+
+
+def persist_closeout_learning(conn, task_id, packet):
+    """Use Hermes' native memory store; failure is recorded, never a human gate."""
+    from tools.memory_tool import MemoryStore
+    from hermes_cli.config import load_config
+    task = d._kb().get_task(conn, task_id)
+    wf = d.get_workflow(conn, task_id)
+    request = d.get_request(conn, wf['request_id'])
+    project = json.loads(request['payload']).get('project', {}) if request else {}
+    board = project.get('board') or task.project_id or 'project'
+    entry = f"[{board}] {packet['learning']}"
+    if packet['observations']:
+        entry += ' Limitations: ' + '; '.join(packet['observations'])
+    entry += f' (NFOS {task_id})'
+    try:
+        config = (load_config() or {}).get('memory') or {}
+        store = MemoryStore(memory_char_limit=config.get('memory_char_limit', 2200))
+        store.load_from_disk()
+        result = store.add('memory', entry)
+    except Exception as exc:
+        result = {'success': False, 'error': str(exc)}
+    with d._kb().write_txn(conn, allow_nested=True):
+        d._event(conn, task_id, task.current_run_id, 'nfos_learning_saved' if result.get('success') else 'nfos_learning_pending',
+                 {'native_memory': True, 'entry': entry,
+                  'result': {key: result[key] for key in ('success', 'error') if key in result}})
+    return result
+
+
 def assess(conn, decision, assessment):
     """Validate coverage and current bytes, never infer semantic truth from prose."""
     if os.environ.get('HERMES_KANBAN_TASK'):
@@ -114,14 +179,18 @@ def assess(conn, decision, assessment):
     if (not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows)
             or len(rows) != len(expected) or {r.get('id') for r in rows} != expected):
         raise d.WorkflowError('Principal must assess every spec criterion exactly once')
-    if any(r.get('verdict') != 'accept' or not isinstance(r.get('observation'), str)
+    allowed = {'accept', 'observe'} if kind == 'final_review' else {'accept'}
+    if any(r.get('verdict') not in allowed or not isinstance(r.get('observation'), str)
            or not r['observation'].strip() for r in rows):
         raise d.WorkflowError('Each accepted criterion needs an explicit verdict and observation; otherwise request changes')
     if kind == 'final_review':
         require_spec(conn, task_id)
         report = d._artifact(conn, task_id, 'report')
         results = d._report_results(spec, json.loads(report['content']))
-        if any(r['status'] != 'PASS' for r in results.values()):
+        observed = {r['id'] for r in rows if r['verdict'] == 'observe'}
+        if observed and not str(assessment.get('resolution') or '').strip():
+            raise d.WorkflowError('Closure with observations needs the Principal resolution; do not ask the owner to decide closure')
+        if any(r['status'] != 'PASS' and cid not in observed for cid, r in results.items()):
             raise d.WorkflowError('Unproven criteria cannot receive final acceptance')
         checks = json.loads(report['evidence']).get('artifact_checks', [])
         for row in rows:

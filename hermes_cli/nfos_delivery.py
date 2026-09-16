@@ -1824,7 +1824,9 @@ def completion_refusal_note(conn, task_id):
     spec = get_spec(conn, task_id)
     if not spec or get_workflow(conn, task_id) is None:
         return None
-    pending = mandatory_pending(conn, task_id, spec)
+    from hermes_cli.nfos_principal_review import observed_criteria
+    observed = observed_criteria(conn, task_id)
+    pending = [p for p in mandatory_pending(conn, task_id, spec) if p['criterion'] not in observed]
     # MANDATORY_RESULT_20260915: validar só em save_spec deixaria passar toda
     # spec antiga já salva, e são 70% delas. A mesma invariante vale aqui: sem
     # critério obrigatório não existe aceite, existe card fechado.
@@ -1838,7 +1840,7 @@ def completion_refusal_note(conn, task_id):
         try:
             content = json.loads(report['content']); opt = _optional_criteria(spec); pend_ids = {e['criterion'] for e in pending}
             if str(content.get('disposition') or '') != 'cancelled_by_owner' and (_result_review() or not _continuation_allows_partial(conn, task_id, content)):
-                unmet = [c for c in (content.get('criteria') or []) if c.get('status') != 'PASS' and c.get('id') not in opt and c.get('id') not in pend_ids]
+                unmet = [c for c in (content.get('criteria') or []) if c.get('status') != 'PASS' and c.get('id') not in opt and c.get('id') not in pend_ids and c.get('id') not in observed]
         except Exception:
             unmet = []
     if not pending and not unmet and not _sem_obrigatorio:
@@ -3394,7 +3396,7 @@ def save_report(conn, task_id, run_id, report):
             (task_id,run_id,'report',revision,encoded,'worker',_json(evidence),int(time.time())))
         _event(conn,task_id,run_id,'nfos_report_saved',{'revision':revision,'spec_revision':spec['revision']})
         from hermes_cli.nfos_principal_review import required
-        if required(conn,task_id) and all(r['status'] == 'PASS' for r in _report_results(spec, report).values()):
+        if required(conn,task_id):
             ask_principal(conn,task_id,run_id,kind='final_review',
                           question='Verify the requested outcome against the original source and saved evidence',context={})
             conn.execute("UPDATE nfos_workflows SET stage='report',next_action=?,updated_at=? WHERE task_id=?",
@@ -3500,53 +3502,52 @@ def _code_route_review(conn, task_id):
 
 
 def reconcile_incomplete_reviews(conn, task_id=None):
-    """Return mechanically incomplete results to work through the existing decision channel."""
+    """Recover old mechanical refusals; incomplete findings need Principal judgment."""
     if not _result_review():
         return []
-    from hermes_cli.nfos_principal_review import accepted, identity
+    from hermes_cli.nfos_principal_review import identity
     changed = []
     with _kb().write_txn(conn, allow_nested=True):
         rows = conn.execute("SELECT d.* FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
-                            "WHERE d.kind='final_review' AND d.status='pending' AND t.status NOT IN ('done','archived') "
-                            "AND (? IS NULL OR d.task_id=?)", (task_id, task_id)).fetchall()
+                            "WHERE d.kind='final_review' AND d.author='NFOS automation' "
+                            "AND d.status='resolved' AND t.status NOT IN ('done','archived') "
+                            "AND (? IS NULL OR d.task_id=?) "
+                            "AND d.rowid=(SELECT max(x.rowid) FROM nfos_decisions x WHERE x.task_id=d.task_id AND x.kind='final_review')",
+                            (task_id, task_id)).fetchall()
         for row in rows:
             context = json.loads(row['context'])
-            spec = get_spec(conn, row['task_id'])
-            report = _artifact(conn, row['task_id'], 'report')
-            if not spec or not report:
+            if not context.get('incomplete_result') or context.get('acceptance_identity') != identity(conn,row['task_id'],'final_review'):
                 continue
-            if context.get('acceptance_identity') != identity(conn, row['task_id'], 'final_review'):
-                continue
-            content = json.loads(report['content'])
-            results = _report_results(spec, content)
-            pending = [c for c in json.loads(spec['content'])['criteria'] if results[c['id']]['status'] != 'PASS']
-            if not pending:
-                continue
-            next_action = 'Concluir e comprovar neste card: ' + ', '.join(c['id'] for c in pending) + '.'
-            answer = next_action + '\n' + '\n'.join(
-                f"- {c['id']} ({results[c['id']]['status']}): {c['text']}" for c in pending)
-            answer += ('\nPreserve a spec aceita e os efeitos já confirmados. Execute somente o trabalho e a verificação '
-                       'que faltam dentro do escopo. Anexe evidência real, incluindo imagens nos critérios visuais. '
-                       'Salvar relatório parcial não conclui o pedido. Não crie outra continuação nem repita '
-                       'publicações ou revisão final com a mesma matriz incompleta. Se a execução exigir uma '
-                       'decisão técnica nova, informe o impedimento concreto ao Principal.')
-            child = content.get('continuation')
-            if child and conn.execute('SELECT 1 FROM task_links WHERE parent_id=? AND child_id=?',
-                                      (row['task_id'], child)).fetchone():
-                answer += (f'\nA continuação {child} depende deste card. Ela não pode ser pré-condição para '
-                           'concluir esta entrega; produza aqui as provas que ela aguardava. Seus artefatos já '
-                           'salvos podem ser lidos sem esperar seu encerramento.')
-            context['incomplete_result'] = [c['id'] for c in pending]
-            now = int(time.time())
-            conn.execute("UPDATE nfos_decisions SET status='resolved',action='changes',author='NFOS automation',"
-                         'answer=?,context=?,resolved_at=? WHERE id=?', (answer, _json(context), now, row['id']))
-            stage = 'implement' if accepted(conn, row['task_id'], 'spec_review') else 'spec'
-            conn.execute('UPDATE nfos_workflows SET stage=?,next_action=?,updated_at=? WHERE task_id=?',
-                         (stage, next_action, now, row['task_id']))
-            _event(conn, row['task_id'], row['run_id'], 'nfos_principal_resolved',
-                   {'decision_id': row['id'], 'action': 'changes', 'answer': answer, 'author': 'NFOS automation',
-                    'incomplete_result': context['incomplete_result']})
+            context['superseded_automatic_refusal'] = row['answer']
+            context.pop('incomplete_result', None)
+            conn.execute("UPDATE nfos_decisions SET status='pending',author=NULL,answer=NULL,action=NULL,resolved_at=NULL,context=? WHERE id=?", (_json(context),row['id']))
+            _event(conn,row['task_id'],row['run_id'],'nfos_principal_requested',{'decision_id':row['id'],'kind':'final_review','question':'Judge closure, resolution and observations autonomously; do not ask the owner to authorize closure.'})
             changed.append(row['id'])
+        # Revisit legacy escalations once through the normal Principal channel.
+        # The model decides whether this is closure housekeeping or indispensable
+        # missing input; this migration neither supplies a human answer nor closes a card.
+        humans=conn.execute("SELECT d.* FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
+                            "WHERE d.status='human' AND t.status NOT IN ('done','archived') "
+                            "AND (? IS NULL OR d.task_id=?) AND EXISTS (SELECT 1 FROM nfos_artifacts a WHERE a.task_id=d.task_id AND a.kind='report')",(task_id,task_id)).fetchall()
+        for row in humans:
+            context=json.loads(row['context'])
+            if context.get('autonomous_closure_review'):
+                continue
+            question=('Review the saved human escalation under the owner closure delegation. '
+                      'If it only asks permission to close or accept an observation, decide internally: '
+                      'use reconsider on '+row['id']+' to withdraw the escalation, review the current report, '
+                      'and close with resolution, actual image and explicit observations. '
+                      'Do not invent PASS. Retain a human question only for indispensable factual input/access, '
+                      'never for closure judgment. Original question: '+row['question'])
+            # This is coordinator recovery, not a worker action: the worker is
+            # suspended precisely because the old decision awaits a human.
+            did='dec_'+uuid.uuid4().hex[:20]
+            conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
+                         (did,row['task_id'],row['run_id'],'impediment',question,
+                          _json({'closure_reconsideration_of':row['id']}),get_workflow(conn,row['task_id'])['spec_revision'],int(time.time())))
+            _event(conn,row['task_id'],row['run_id'],'nfos_principal_requested',{'decision_id':did,'kind':'impediment','question':question})
+            context['autonomous_closure_review']=did
+            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?',(_json(context),row['id']))
     return changed
 
 
@@ -4432,9 +4433,11 @@ def completion_evidence_check(conn, task_id):
         strict=not _owner_mode()  # BLOCK_LESS4/BLOCK_LESS8_20260910: fora do owner mode a prova completa continua exigida
         _optional=_optional_criteria(spec)  # CLOSURE_RECOVERY_20260911
         _cancelled=str(content.get('disposition') or '')=='cancelled_by_owner'
-        _fails=[c for c,row in results.items() if ((row['status']!='PASS') if strict else (row['status']!='PASS' and c not in _optional and not _cancelled))]
+        from hermes_cli.nfos_principal_review import observed_criteria
+        observed = observed_criteria(conn, task_id)
+        _fails=[c for c,row in results.items() if c not in observed and ((row['status']!='PASS') if strict else (row['status']!='PASS' and c not in _optional and not _cancelled))]
         _partial_ok=(not strict) and bool(_fails) and _continuation_allows_partial(conn,task_id,content)  # RECORD_CONTINUATION_20260911
-        if not strict and str(content.get('disposition') or '')!='cancelled_by_owner' and mandatory_pending(conn,task_id,spec):  # RESULT_PROBE_20260911
+        if not strict and str(content.get('disposition') or '')!='cancelled_by_owner' and any(p['criterion'] not in observed for p in mandatory_pending(conn,task_id,spec)):
             return None
         if _fails and not _partial_ok:
             return None
@@ -4454,7 +4457,7 @@ def completion_evidence_check(conn, task_id):
                 proved.update(check.get('criteria',[]))
             elif check.get('status')!='external_unchecked':
                 return None
-        if any(((row['status']!='PASS') if strict else (row['status']!='PASS' and criterion not in _optional and not _cancelled and not _partial_ok)) or (strict and criterion not in proved) for criterion,row in results.items()):  # BLOCK_LESS2/BLOCK_LESS4_20260910, CLOSURE_RECOVERY_20260911
+        if any((criterion not in observed and ((row['status']!='PASS') if strict else (row['status']!='PASS' and criterion not in _optional and not _cancelled and not _partial_ok))) or (strict and criterion not in proved) for criterion,row in results.items()):
             return None
         return {'report_id':report['id'],'report_revision':report['revision'],
                 'report_sha256':digest,'spec_revision':spec['revision'],

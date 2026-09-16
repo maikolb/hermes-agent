@@ -156,12 +156,12 @@ def test_o_registro_guarda_quem_confirmou_e_o_texto():
         assert campo in fonte, campo
 
 
-def test_a_devolutiva_pede_confirmacao_uma_vez_e_so_quando_ha_o_que_conferir(monkeypatch):
+def test_a_devolutiva_nao_pede_autorizacao_de_fechamento(monkeypatch):
     from gateway import kanban_watchers as kw
     monkeypatch.setattr(kw, "_progress_outcome", lambda b, t: "entregue")
     msg = kw._client_delivery_message("b", "t_x")
-    assert "Responda a esta mensagem" in msg
-    assert msg.count("Responda a esta mensagem") == 1
+    assert "Responda a esta mensagem" not in msg
+    assert "Pode conferir?" not in msg
 
     monkeypatch.setattr(kw, "_progress_outcome", lambda b, t: "encerrado")
     assert "Responda a esta mensagem" not in kw._client_delivery_message("b", "t_x"), (
@@ -176,7 +176,7 @@ def test_a_devolutiva_registra_o_message_id_para_permitir_vinculo():
     fonte = inspect.getsource(kw._record_client_delivery)
     assert "message_id" in fonte
     assert "nfos_client_delivery_published" in fonte
-    assert "awaiting" in fonte
+    assert "not_required" in fonte
 
 
 def test_devolutiva_sem_message_id_avisa_em_vez_de_fingir(monkeypatch):

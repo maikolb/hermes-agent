@@ -471,19 +471,16 @@ def _client_delivery_message(board, task_id):
         "entregue": "Resolvido",
         "parcial": "Resolvido em parte",
         "encerrado": "Encerrado",
+        "concluído com observações": "Concluído com observações",
     }.get(outcome, "Concluído")
     corpo = f"{cabecalho}: {resumo}" if resumo else cabecalho
-    # CLIENT_ACK_20260915: pede confirmação UMA vez, na própria devolutiva, e
-    # só quando há resultado que o cliente possa conferir. Um pedido a cada
-    # fechamento interno transformaria o grupo em fila de validação, que é
-    # exatamente o que o contrato de 13/09 quis evitar.
-    if outcome in ("entregue", "parcial"):
-        corpo += "\n\nPode conferir? Responda a esta mensagem confirmando se resolveu."
+    # Closure is the Principal's judgment. The owner receives the resolution,
+    # real evidence images and observations, never an approval request.
     return corpo
 
 
 def _record_client_delivery(board, task_id, send_res, sub):
-    """CLIENT_ACK_20260915: registra a devolutiva publicada e fica aguardando confirmação.
+    """Record the published resolution; feedback can be linked but is not required.
 
     Guarda o ``message_id`` da mensagem enviada ao cliente. Uma resposta direta
     a ela é o único vínculo que permite registrar aceite: mesma thread e
@@ -504,10 +501,24 @@ def _record_client_delivery(board, task_id, send_res, sub):
                     "chat_id": str(sub.get("chat_id") or ""),
                     "thread_id": str(sub.get("thread_id") or ""),
                     "outcome": _progress_outcome(board, task_id),
-                    "ack": "awaiting",
+                    "ack": "not_required",
                 })
     except Exception:
         logger.debug("kanban notifier: registro da devolutiva falhou para %s", task_id, exc_info=True)
+
+
+def _completed_memory_context(board, task_id):
+    context = {'board': board, 'task_id': task_id}
+    try:
+        from hermes_cli import kanban_db as kb
+        with kb.connect_closing(board=board) as conn:
+            row = conn.execute("SELECT kind,payload FROM task_events WHERE task_id=? AND kind IN ('nfos_learning_saved','nfos_learning_pending') ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+            if row:
+                context.update(learning=json.loads(row['payload']).get('entry'),
+                               saved_to_native_memory=row['kind']=='nfos_learning_saved')
+    except Exception:
+        logger.debug('Completed learning context unavailable for %s', task_id, exc_info=True)
+    return context
 
 
 def _record_client_suppression(board, task_id, kind, sub):
@@ -537,6 +548,9 @@ def _progress_outcome(board, task_id):
                 return "concluído"
             if str(content.get("disposition") or "") == "cancelled_by_owner":
                 return "encerrado"
+            from hermes_cli.nfos_principal_review import observed_criteria
+            if observed_criteria(conn, task_id):
+                return "concluído com observações"
             partial = content.get("partial_delivery") is True or (isinstance(content.get("delivery"), dict) and content["delivery"].get("partial_delivery") is True)
             criteria = [c for c in (content.get("criteria") or []) if isinstance(c, dict)]
             if partial or any(c.get("status") != "PASS" and not c.get("optional") for c in criteria):
@@ -3797,9 +3811,8 @@ class GatewayKanbanWatchersMixin:
                             # self-post branch is handled BEFORE the
                             # cursor advance above).
                             if 'completed' in _wake_kinds:
-                                sub['_notify_receipt']['completed_worker'] = {
-                                    'board': board_slug, 'task_id': sub['task_id'],
-                                }
+                                sub['_notify_receipt']['completed_worker'] = await asyncio.to_thread(
+                                    _completed_memory_context, board_slug, sub['task_id'])
                             accepted = await deliver_wake(
                                 adapter,
                                 text=_synth,
