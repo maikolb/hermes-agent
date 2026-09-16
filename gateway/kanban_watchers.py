@@ -548,13 +548,16 @@ def _progress_outcome(board, task_id):
                 return "concluído"
             if str(content.get("disposition") or "") == "cancelled_by_owner":
                 return "encerrado"
-            from hermes_cli.nfos_principal_review import observed_criteria
-            if observed_criteria(conn, task_id):
-                return "concluído com observações"
             partial = content.get("partial_delivery") is True or (isinstance(content.get("delivery"), dict) and content["delivery"].get("partial_delivery") is True)
-            criteria = [c for c in (content.get("criteria") or []) if isinstance(c, dict)]
-            if partial or any(c.get("status") != "PASS" and not c.get("optional") for c in criteria):
+            if partial:
                 return "parcial"
+            from hermes_cli.nfos_principal_review import observed_criteria
+            observed = observed_criteria(conn, task_id)
+            criteria = [c for c in (content.get("criteria") or []) if isinstance(c, dict)]
+            if any(c.get("status") != "PASS" and not c.get("optional") and c.get("id") not in observed for c in criteria):
+                return "parcial"
+            if observed:
+                return "concluído com observações"
             return "entregue" if criteria else "concluído"
     except Exception:
         logger.debug("kanban progress bar: outcome of %s unreadable", task_id, exc_info=True)
