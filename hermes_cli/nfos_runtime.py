@@ -457,7 +457,11 @@ Every closeout presents resolution, a real result image and any observations; ca
 and declare it as a report artifact. Save/reuse durable project learning in native memory, consolidating
 existing notes rather than accumulating checklists. Fix unmet functional outcomes autonomously.
 Choose evidence that explains both the result and WHY it meets the original request. Identify the
-authoritative source of the expected behavior (for example an owner requirement, document, business
+expected usable behavior and how to verify it before implementing, so evidence collection follows
+the work and reduces rework. Prioritize the working solution in production within the authorized
+destination/scope. Explanatory captures, highlights and captions are reporting improvements, never
+a publication or closure prerequisite; complement them afterward when that avoids delaying delivery.
+Identify the authoritative source of the expected behavior (for example an owner requirement, document, business
 rule or source record). When understanding the conclusion depends on that source, especially when
 the outcome challenges the initial assumption, show its decisive passage or state beside the actual
 result, with a short caption connecting them. For a document, render the relevant original page and
