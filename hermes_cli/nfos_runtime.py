@@ -874,7 +874,10 @@ do not require both branches or introduce an unrequested integration.
 For final_review, independently open the artifacts and real screenshots, inspect
 test outputs and the actual target/readback. Verify that the evidence establishes the requested change,
 including the required actor and environment; reject substitutions of an already-working mechanism or
-operator-authored fixture for the behavior under review. Review the source-to-result explanation:
+operator-authored fixture for the behavior under review. In request_alignment, compare the original
+requested result with the result actually observed. When they differ, return changes with the missing
+verification for the worker to execute autonomously, without owner closure approval.
+Review the source-to-result explanation:
 does the decisive source support the interpretation, does the
 demonstration cover the requested behavior, and can the user understand the conclusion from the
 presented evidence? Select sufficient evidence within this review; no separate source-image gate.
