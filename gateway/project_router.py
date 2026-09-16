@@ -743,7 +743,10 @@ class ProjectRouter:
             return provisioned
 
         try:
-            return self._transaction(operation)
+            result = self._transaction(operation)
+            created_workspace = None  # The committed binding now owns this workspace.
+            self._finish_project_onboarding(result)
+            return result
         except BaseException:
             if created_workspace is not None:
                 try:
@@ -818,7 +821,10 @@ class ProjectRouter:
             return replace(project_context, workdir=resolved_workdir)
 
         try:
-            return self._transaction(operation)
+            result = self._transaction(operation)
+            created_workspace = None
+            self._finish_project_onboarding(result)
+            return result
         except BaseException:
             if created_workspace is not None:
                 try:
@@ -843,6 +849,22 @@ class ProjectRouter:
             name=project_context.slug,
             default_workdir=str(project_context.workdir) if project_context.workdir else None,
         )
+        self._finish_project_onboarding(project_context)
+
+    def _finish_project_onboarding(self, project) -> None:
+        if project.is_management or project.platform != 'telegram' or not project.workdir:
+            return
+        from hermes_cli.lifecycle import has_hook, invoke_hook
+        if not has_hook('on_project_provisioned'):
+            return
+        results = invoke_hook('on_project_provisioned', profile=self.profile,
+            project={'id': project.slug, 'name': project.slug, 'workdir': str(project.workdir)},
+            workspace=str(project.workdir), board_slug=project.board_slug,
+            source={'platform': project.platform, 'chat_id': project.chat_id,
+                    'thread_id': project.thread_id, 'profile': self.profile})
+        for result in results:
+            if isinstance(result, dict) and result.get('success') is False:
+                raise RuntimeError(result.get('error') or 'Project onboarding is incomplete')
 
     def bind_topic(
         self,

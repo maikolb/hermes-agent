@@ -95,9 +95,9 @@ def _encode_result(payload: dict[str, Any], was_string: bool) -> Any:
 def _project_fields(payload: Mapping[str, Any]) -> tuple[str, str, Path]:
     project = payload.get("project")
     project = project if isinstance(project, Mapping) else {}
-    project_id = str(project.get("id") or "").strip()
+    project_id = str(project.get("id") or payload.get('slug') or "").strip()
     name = str(project.get("name") or project_id).strip()
-    workspace_raw = str(payload.get("workspace") or project.get("workdir") or "").strip()
+    workspace_raw = str(payload.get("workspace") or project.get("workdir") or payload.get('workdir') or "").strip()
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?", project_id):
         raise PreflightError("project_topic_create returned an invalid project id")
     if not name:
@@ -190,16 +190,24 @@ def _ensure_repo(payload: Mapping[str, Any], settings: Mapping[str, Any]) -> dic
     owner = str(settings["owner"])
     profile = str(settings["profile"])
     root = Path(str(settings["workspace_root"]))
-    workflow_factory = Path(str(settings["workflow_factory"]))
     _validate_workspace(workspace, root)
-    if not workflow_factory.is_file() or not os.access(workflow_factory, os.X_OK):
-        raise PreflightError("Workflow Factory executable is unavailable")
-
-    doctor = json.loads(_run([str(workflow_factory), "doctor"], timeout=60))
-    if not isinstance(doctor, dict) or doctor.get("ok") is not True:
-        raise PreflightError("Workflow Factory doctor is not green")
-
     repository = f"{owner}/{slug}"
+    existing = _gh_repo(repository)
+    expected_remote = f"https://github.com/{repository}.git"
+    if existing is not None:
+        # A Topic may reference a repository created earlier. Reuse its real
+        # history instead of creating an unrelated local root and pushing it.
+        if not (workspace / '.git').exists():
+            if any(workspace.iterdir()):
+                raise PreflightError('existing repository requires reconciling the non-empty local workspace')
+            _run(['git', 'clone', expected_remote, str(workspace)], timeout=180)
+        current_remote = _run(['git', 'remote', 'get-url', 'origin'], cwd=workspace)
+        if current_remote.rstrip('/').removesuffix('.git').lower() != expected_remote.removesuffix('.git').lower():
+            raise PreflightError('existing origin points to a different repository')
+        return {'status': 'repository_ready', 'repository': repository,
+                'url': str(existing.get('url') or _REPOSITORY_URL.format(repository=repository)),
+                'visibility': 'PRIVATE' if existing.get('isPrivate') else 'PUBLIC',
+                'reused': True}
     workflow_dir = workspace / ".workflow-factory"
     workflow_dir.mkdir(parents=True, exist_ok=True)
     contract_path = workflow_dir / "project.json"
@@ -230,9 +238,6 @@ def _ensure_repo(payload: Mapping[str, Any], settings: Mapping[str, Any]) -> dic
     if staged:
         _run(["git", "commit", "-m", "Initialize Project Factory preflight"], cwd=workspace)
 
-    existing = _gh_repo(repository)
-    if existing is not None and existing.get("isPrivate") is not True:
-        raise PreflightError(f"existing repository is not private: {repository}")
     remotes = _run(["git", "remote"], cwd=workspace).splitlines()
     expected_remote = f"https://github.com/{repository}.git"
     if "origin" in remotes:
@@ -277,7 +282,11 @@ def _transform_tool_result(tool_name: str = "", result: Any = None, status: str 
     if not payload or payload.get("success") is not True:
         return None
     try:
-        preflight = _ensure_repo(payload, _settings())
+        settings = _settings()
+        outcome = _on_project_provisioned(**dict(payload, profile=settings.get('profile', _DEFAULT_PROFILE)))
+        if outcome.get('success') is not True:
+            raise PreflightError(outcome.get('error') or 'Project onboarding is incomplete')
+        preflight = outcome['preflight']
         payload["preflight"] = preflight
         payload["readiness"] = "repository_ready"
     except Exception as exc:
@@ -290,6 +299,59 @@ def _transform_tool_result(tool_name: str = "", result: Any = None, status: str 
             "repository_ready": False,
         }
     return _encode_result(payload, was_string)
+
+
+def _on_project_provisioned(profile: str = '', **payload: Any) -> dict[str, Any] | None:
+    settings = _settings()
+    if profile != settings.get('profile', _DEFAULT_PROFILE):
+        return None
+    from filelock import FileLock
+    from hermes_cli.config import get_config_path
+    try:
+        # The gateway and a tool call can observe the same Topic concurrently.
+        # Serialize provisioning and reload configuration inside this lock.
+        path = get_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(path) + '.project-onboarding.lock', timeout=240):
+            return _onboard_project(payload, settings, profile)
+    except Exception as exc:
+        return {'success': False, 'error': f'Project onboarding incomplete: {type(exc).__name__}: {str(exc)[:600]}'}
+
+
+def _onboard_project(payload, settings, profile):
+    try:
+        from hermes_cli import config
+        board = str(payload.get('board_slug') or '').strip()
+        if not board:
+            # Compatibility with older tool payloads. The canonical router
+            # supplies the board and source for delivery enrollment.
+            return {'success': True, 'preflight': _ensure_repo(payload, settings)}
+        cfg = config.load_config_readonly() or {}
+        projects = cfg.setdefault('kanban', {}).setdefault('delivery', {}).setdefault('projects', {})
+        previous = projects.get(board)
+        if isinstance(previous, dict) and previous.get('onboarding_repository'):
+            return {'success': True, 'preflight': previous['onboarding_repository']}
+        receipt = _ensure_repo(payload, settings)
+        if previous is None:
+            slug, _, workspace = _project_fields(payload)
+            source = dict(payload.get('source') or {})
+            for key in ('platform', 'chat_id', 'thread_id'):
+                source.setdefault(key, payload.get(key) or ('telegram' if key == 'platform' else None))
+            source.setdefault('profile', profile)
+            projects[board] = {'enabled': True, 'profile': profile, 'project_id': slug,
+                'workers': 4, 'max_runtime_seconds': 7200, 'delivery_type': 'code',
+                'repo_path': str(workspace), 'source': source,
+                'onboarding_repository': receipt}
+        else:
+            projects[board] = dict(previous, onboarding_repository=receipt)
+        config.save_config({'kanban': {'delivery': {'projects': {board: projects[board]}}}},
+                           merge_existing=True)
+        # Explicit existing destinations, disabled projects and profile policy
+        # remain authoritative. Onboarding never republishes an application.
+        return {'success': True, 'preflight': receipt}
+    except Exception as exc:
+        logger.exception('Project onboarding failed')
+        return {'success': False, 'error': f'Project onboarding incomplete: {type(exc).__name__}: {str(exc)[:600]}'}
 
 
 def _write_runtime_registration_marker(profile_name: str) -> None:
@@ -309,5 +371,6 @@ def _write_runtime_registration_marker(profile_name: str) -> None:
 
 
 def register(ctx: Any) -> None:
+    ctx.register_hook("on_project_provisioned", _on_project_provisioned)
     ctx.register_hook("transform_tool_result", _transform_tool_result)
     _write_runtime_registration_marker(str(getattr(ctx, "profile_name", "") or "unknown"))
