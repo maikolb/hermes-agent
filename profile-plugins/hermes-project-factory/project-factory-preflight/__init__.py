@@ -371,6 +371,8 @@ def _write_runtime_registration_marker(profile_name: str) -> None:
 
 
 def register(ctx: Any) -> None:
-    ctx.register_hook("on_project_provisioned", _on_project_provisioned)
+    from hermes_cli.plugins import VALID_HOOKS
+    if 'on_project_provisioned' in VALID_HOOKS:
+        ctx.register_hook("on_project_provisioned", _on_project_provisioned)
     ctx.register_hook("transform_tool_result", _transform_tool_result)
     _write_runtime_registration_marker(str(getattr(ctx, "profile_name", "") or "unknown"))
