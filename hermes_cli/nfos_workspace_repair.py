@@ -10,6 +10,83 @@ from hermes_cli import kanban_db as kb, nfos_delivery as delivery
 from hermes_cli.nfos_workspaces import _git
 
 
+def maintenance_pause_pending(conn, task_id):
+    return conn.execute("SELECT 1 FROM task_runs WHERE task_id=? "
+                        "AND json_type(metadata,'$.maintenance_pause')='object' "
+                        "AND json_extract(metadata,'$.maintenance_pause.repaired_at') IS NULL LIMIT 1",
+                        (task_id,)).fetchone() is not None
+
+
+def _finish_maintenance_pause(conn, task_id, *, actor, repair_kind):
+    """Release the native claim hold only in the successful repair transaction."""
+    rows = conn.execute("SELECT id,metadata FROM task_runs WHERE task_id=? "
+                        "AND json_type(metadata,'$.maintenance_pause')='object' "
+                        "AND json_extract(metadata,'$.maintenance_pause.repaired_at') IS NULL", (task_id,)).fetchall()
+    for row in rows:
+        metadata = json.loads(row['metadata'])
+        metadata['maintenance_pause'].update(repaired_at=time.time(), repaired_by=actor, repair_kind=repair_kind)
+        conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (delivery._json(metadata), row['id']))
+
+
+def pause_for_repair(conn, task_id, *, expected_run_id, expected_claim, expected_pid,
+                     expected_started_at, actor, reason, apply=False):
+    """Principal maintenance pause, using Project Ops and its native exit cleanup."""
+    from agent.delegation_context import is_dispatcher_owned_worker_context
+    if (os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT')
+            or not is_dispatcher_owned_worker_context()):
+        raise delivery.WorkflowError('Only the Principal maintainer can pause for repair')
+    if not actor or not reason or not expected_claim or not expected_pid or expected_started_at is None:
+        raise delivery.WorkflowError('Specify actor, reason and the observed run/claim/process identity')
+    identity = dict(run_id=expected_run_id, claim=expected_claim, pid=expected_pid, started_at=expected_started_at)
+
+    def observed():
+        task = kb.get_task(conn, task_id)
+        run = conn.execute('SELECT * FROM task_runs WHERE task_id=? AND id=?', (task_id, expected_run_id)).fetchone()
+        if not task or not run or not delivery.get_workflow(conn, task_id):
+            raise delivery.WorkflowError('Card or worker identity changed before maintenance')
+        metadata = json.loads(run['metadata'] or '{}')
+        saved = metadata.get('maintenance_pause', {})
+        if (task.status == 'blocked' and task.current_run_id is None and run['ended_at'] is not None
+                and saved.get('identity') == identity):
+            return saved
+        if (task.status != 'running' or run['ended_at'] is not None
+                or (task.current_run_id, task.claim_lock, task.worker_pid, task.worker_started_at)
+                != (expected_run_id, expected_claim, expected_pid, expected_started_at)
+                or run['worker_pid'] != expected_pid or run['claim_lock'] != expected_claim):
+            raise delivery.WorkflowError('Card or worker identity changed before maintenance')
+        if kb._pid_alive(expected_pid):
+            started_at = kb._process_start_time(expected_pid)
+            if started_at is None or abs(started_at - expected_started_at) >= .01:
+                raise delivery.WorkflowError('Worker process identity changed before maintenance')
+        return None
+
+    saved = observed()
+    if saved:
+        return dict(saved, paused=True, already_paused=True, run_id=expected_run_id, apply=apply)
+    if not apply:
+        return dict(identity=identity, actor=actor, reason=reason, paused=False, apply=False)
+    with kb.write_txn(conn):
+        saved = observed()
+        if saved:
+            return dict(saved, paused=True, already_paused=True, run_id=expected_run_id, apply=True)
+        now = time.time()
+        pause = dict(identity=identity, actor=actor, reason=reason, at=now)
+        cleanup = dict(worker_pid=expected_pid, worker_started_at=expected_started_at,
+                       status='waiting', grace_seconds=15, not_before=now+15,
+                       descendants_json='[]', requested_at=now)
+        from hermes_cli.nfos_tool import _descendants
+        cleanup['descendants_json'] = json.dumps(_descendants(cleanup, include_group=True))
+        # _end_run merges this receipt before clearing the task/run PID pointers.
+        kb._end_run(conn, task_id, outcome='reclaimed', status='reclaimed', summary=reason,
+                    metadata={'maintenance_pause': pause, 'nfos_cleanup': cleanup})
+        conn.execute("UPDATE tasks SET status='blocked',block_kind='awaiting_principal',"
+                     "claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,worker_started_at=NULL WHERE id=?", (task_id,))
+        kb._append_event(conn, task_id, 'nfos_maintenance_paused', pause, run_id=expected_run_id)
+    # The existing dispatcher cleans this closed run. Claims and repair_card keep
+    # rejecting the old process/descendants until its exit receipt is confirmed.
+    return dict(pause, paused=True, already_paused=False, run_id=expected_run_id, apply=True)
+
+
 def repair_card(conn, task_id, *, board, delivery_type, expected_delivery_type,
                 expected_spec_revision, expected_instruction_revision,
                 reason, actor, use_canonical_repo=False, apply=False):
@@ -74,13 +151,15 @@ def repair_card(conn, task_id, *, board, delivery_type, expected_delivery_type,
         conn.execute('UPDATE task_git_delivery SET required=0 WHERE task_id=?',(task_id,))
         conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?',(delivery._json(state),task_id))
         kb._append_event(conn,task_id,'nfos_card_repaired',proposed)
+        _finish_maintenance_pause(conn, task_id, actor=actor, repair_kind='card')
     return dict(proposed, apply=True)
 
 
 def _idle(conn, task_id):
     task = kb.get_task(conn, task_id)
     if not task or task.status not in {'blocked', 'ready', 'todo', 'review'} or task.current_run_id:
-        raise delivery.WorkflowError('Workspace repair requires an idle existing card')
+        raise delivery.WorkflowError('Workspace repair requires an idle existing card; the Principal can use '
+                                     'pause-for-repair, await native worker cleanup, then retry the repair')
     if task.worker_pid and kb._pid_alive(task.worker_pid):
         raise delivery.WorkflowError('Workspace repair cannot interrupt a live executor')
     from hermes_cli.nfos_runtime import previous_runs_termination_pending
@@ -212,6 +291,7 @@ def repair_workspace(conn, task_id, *, board, repo_path, base_sha, expected_work
                              dict(source=str(source), workspace=str(target), base_sha=base_sha,
                                   actor=actor, reason=reason, previous_status=task.status,
                                   previous_ownership_fingerprint=(dict(previous_delivery).get('ownership_fingerprint') if previous_delivery else None)))
+            _finish_maintenance_pause(conn, task_id, actor=actor, repair_kind='workspace')
         kb._release_worktree_creation_lock(target, plan)
         return dict(state['workspace_repair'], already_applied=False)
     finally:

@@ -5709,6 +5709,9 @@ def claim_task(
         from hermes_cli.nfos_delivery import active_suspension
         if active_suspension(conn, task_id):
             return None
+        from hermes_cli.nfos_workspace_repair import maintenance_pause_pending
+        if maintenance_pause_pending(conn, task_id):
+            return None
         retained = conn.execute("SELECT json_extract(state_json,'$.retained_workspace') FROM nfos_workflows WHERE task_id=?", (task_id,)).fetchone()
         if retained and retained[0] and not json.loads(retained[0]).get('restored_at'):
             return None

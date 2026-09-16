@@ -9,7 +9,7 @@ import yaml
 
 from hermes_cli import kanban_db as kb, nfos_delivery as delivery
 from hermes_cli.nfos_runtime import adopt_existing_tasks
-from hermes_cli.nfos_workspace_repair import repair_workspace, repair_card
+from hermes_cli.nfos_workspace_repair import repair_workspace, repair_card, maintenance_pause_pending
 
 
 def git(repo, *args):
@@ -17,6 +17,24 @@ def git(repo, *args):
                              '-c', 'commit.gpgsign=false', *args)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
+
+
+def test_workspace_repair_releases_maintenance_hold_only_after_apply(broken):
+    conn, tid, _, _, args = broken
+    assert kb.unblock_task(conn, tid)
+    task = kb.claim_task(conn, tid)
+    assert task is not None
+    assert kb.reclaim_task(conn, tid, reason='Fixture maintenance pause')
+    with kb.write_txn(conn):
+        row = conn.execute('SELECT metadata FROM task_runs WHERE id=?', (task.current_run_id,)).fetchone()
+        metadata = json.loads(row[0] or '{}')
+        metadata['maintenance_pause'] = {'identity': {'run_id': task.current_run_id}, 'actor': 'Principal'}
+        conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (json.dumps(metadata), task.current_run_id))
+    assert maintenance_pause_pending(conn, tid)
+    repair_workspace(conn, tid, **args)
+    assert maintenance_pause_pending(conn, tid)
+    repair_workspace(conn, tid, **args, apply=True)
+    assert not maintenance_pause_pending(conn, tid)
 
 
 @pytest.fixture
