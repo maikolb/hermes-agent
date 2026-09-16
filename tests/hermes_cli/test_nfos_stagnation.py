@@ -30,6 +30,20 @@ def test_question_without_explicit_cause_and_changed_context_are_not_swallowed(t
     assert ask(conn,task,'Question one?',{'observed':'new evidence'})!=first
 
 
+@pytest.mark.parametrize('value',[None,'missing-ref',[None,{},'missing-ref']])
+def test_unavailable_evidence_does_not_prevent_question(task_context,monkeypatch,value):
+    conn,task,_,_=task_context
+    monkeypatch.setattr(review.Path,'is_file',lambda self: (_ for _ in ()).throw(OSError('unavailable')))
+    assert ask(conn,task,context={'cause':'diagnosis','evidence':value})
+
+
+def test_principal_receives_executable_stagnation_contract():
+    from hermes_cli.nfos_runtime import principal_instructions
+    prompt=principal_instructions()
+    for key in ('"kind":"stagnation"','"cause":"model_reasoning"','"prior_decision_id"','"tool_call_ids"','SAME current scope identity'):
+        assert key in prompt
+
+
 def attempt(conn,task,artifact):
     # Real subprocess/tool output in the existing board, not fabricated receipts.
     db=conn.execute('PRAGMA database_list').fetchone()[2]

@@ -66,9 +66,16 @@ def impediment_identity(conn, task_id, context):
     spec = d.get_spec(conn, task_id)
     state = json.loads(d.get_workflow(conn, task_id)['state_json'])
     evidence = {}
-    for ref in context.get('evidence', []):
-        if isinstance(ref, str) and Path(ref).is_file():
-            evidence[ref] = hashlib.sha256(Path(ref).read_bytes()).hexdigest()
+    refs = context.get('evidence') or []
+    refs = [refs] if isinstance(refs, str) else refs if isinstance(refs, list) else []
+    for ref in refs:
+        if not isinstance(ref, str):
+            continue
+        try:
+            if Path(ref).is_file():
+                evidence[ref] = hashlib.sha256(Path(ref).read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            continue  # Unavailable references remain in context; asking is still possible.
     tool_evidence = None
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_tool_calls'").fetchone():
         row = conn.execute('SELECT id,finished_at,status,returncode FROM nfos_tool_calls WHERE task_id=? AND finished_at IS NOT NULL ORDER BY rowid DESC LIMIT 1', (task_id,)).fetchone()
