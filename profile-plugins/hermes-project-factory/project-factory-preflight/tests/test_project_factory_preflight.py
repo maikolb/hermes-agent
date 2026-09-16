@@ -183,6 +183,44 @@ def test_actual_flat_tool_payload_and_other_profiles(tmp_path,monkeypatch):
     assert module._on_project_provisioned(profile='other') is None
 
 
+def test_configured_project_never_reonboards_its_repository(tmp_path,monkeypatch):
+    from hermes_cli import config
+    saved={'kanban':{'delivery':{'projects':{'dovcrm':{'enabled':True,'repo_path':'/srv/projects/next-crm','delivery_environment':'hml'}}}}}
+    original=json.dumps(saved,sort_keys=True)
+    monkeypatch.setattr(config,'load_config_readonly',lambda:saved)
+    monkeypatch.setattr(config,'get_config_path',lambda:tmp_path/'config.yaml')
+    monkeypatch.setattr(module,'_settings',lambda:{'profile':'hermes-project-factory'})
+    def forbidden(*args,**kwargs):pytest.fail('Existing project must not run repository initialization or rewrite config')
+    monkeypatch.setattr(module,'_ensure_repo',forbidden)
+    monkeypatch.setattr(config,'save_config',forbidden)
+    result=module._on_project_provisioned(profile='hermes-project-factory',board_slug='dovcrm',slug='dovcrm',workdir='/srv/projects/next-crm')
+    assert result['success']
+    assert json.dumps(saved,sort_keys=True)==original
+
+
+def test_local_repository_origin_outranks_topic_slug_and_preserves_branch(tmp_path,monkeypatch):
+    workspace=tmp_path/'dovcrm';workspace.mkdir()
+    module._run(['git','init','-b','feature/existing'],cwd=workspace)
+    module._run(['git','config','user.name','Original'],cwd=workspace)
+    module._run(['git','config','user.email','original@example.invalid'],cwd=workspace)
+    (workspace/'application.txt').write_text('existing')
+    module._run(['git','add','.'],cwd=workspace);module._run(['git','commit','-m','Original'],cwd=workspace)
+    module._run(['git','remote','add','origin','https://github.com/Project-Factory-26/next-crm.git'],cwd=workspace)
+    before=module._run(['git','rev-parse','HEAD'],cwd=workspace)
+    queried=[]
+    def lookup(repo):
+        queried.append(repo)
+        return {'isPrivate':True,'url':f'https://github.com/{repo}'} if repo=='Project-Factory-26/next-crm' else None
+    monkeypatch.setattr(module,'_gh_repo',lookup)
+    result=module._ensure_repo({'slug':'dovcrm','workdir':str(workspace)},
+        {'owner':'Project-Factory-26','profile':'hermes-project-factory','workspace_root':str(tmp_path)})
+    assert result['repository']=='Project-Factory-26/next-crm' and result['reused']
+    assert queried==['Project-Factory-26/next-crm']
+    assert module._run(['git','rev-parse','HEAD'],cwd=workspace)==before
+    assert module._run(['git','branch','--show-current'],cwd=workspace)=='feature/existing'
+    assert not (workspace/'.workflow-factory').exists()
+
+
 @pytest.mark.parametrize('new_runtime',[False,True])
 def test_registration_preserves_workers_using_the_previous_runtime(monkeypatch,new_runtime):
     from hermes_cli import plugins
