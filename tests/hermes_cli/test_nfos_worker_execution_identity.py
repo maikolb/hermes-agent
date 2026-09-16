@@ -1,5 +1,6 @@
 """Effective run identity is recorded by the initialized worker, never inferred."""
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -41,7 +42,7 @@ def test_stale_or_delegated_worker_cannot_publish_identity(task_context, monkeyp
     bind_env(monkeypatch,task)
     if fence=='claim':monkeypatch.setenv('HERMES_KANBAN_CLAIM_LOCK','wrong')
     elif fence=='run':monkeypatch.setenv('HERMES_KANBAN_RUN_ID',str(task.current_run_id+1))
-    else:monkeypatch.setattr('agent.delegation_context.is_delegated_child_context',lambda:True)
+    else:monkeypatch.setattr('agent.delegation_context.is_dispatcher_owned_worker_context',lambda:False)
     agent=SimpleNamespace(model='gpt-6-astra',provider='openai-codex',reasoning_config={'effort':'medium'},session_id='delegated')
     assert review.worker_checkpoint(agent) is False
     assert 'worker_execution' not in metadata(conn,task.current_run_id)
@@ -60,6 +61,7 @@ def test_shared_session_and_fallback_preserve_each_run_history(task_context, mon
         kb._end_run(conn,task.id,outcome='reclaimed',status='reclaimed')
         conn.execute("UPDATE tasks SET status='ready',worker_pid=NULL,claim_lock=NULL,claim_expires=NULL WHERE id=?",(task.id,))
     task=kb.claim_task(conn,task.id)
+    kb._set_worker_pid(conn, task.id, os.getpid())
     bind_env(monkeypatch,task)
     agent.model='gpt-6-astra';agent.reasoning_config={'effort':'low'}
     review.worker_checkpoint(agent)
