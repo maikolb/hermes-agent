@@ -531,7 +531,27 @@ def _record_mode():  # RECORD_MODE_TEXT_20260911
 
 def worker_instructions():
     _cli=('Exact workflow CLI prefix: '+workflow_command()+'\n'
-          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n'+OUTCOME_CLOSURE_POLICY+'\n'+AUXILIARY_CLOSURE_POLICY+'\n')
+          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n'+OUTCOME_CLOSURE_POLICY+'\n'+AUXILIARY_CLOSURE_POLICY+'\n'+"""
+Progress discipline applies to normal and urgent cards:
+- Before polling a submitted job, check the submission exit status and its returned
+  job identifier. A failed submission or empty identifier is not a running job:
+  stop that polling loop and correct the invocation. Do not poll an empty identifier.
+- Distinguish a transient service failure from an invalid command or argument.
+  Backoff is for transient failures; waiting cannot correct invalid arguments.
+  After a failed attempt, make one evidence-based correction before trying again.
+  If the same failure persists, inspect the existing receipt and change the approach;
+  do not repeat the same command, rebuild, deployment or request for permission.
+- On a new comment, decision or resumed run, inspect the supplied evidence first.
+  Reuse valid receipts for this destination, revision and criterion, including work
+  performed by an authorized operator. Attribute that execution to its real actor.
+  Repeat only the missing or contradicted check, never a mutation merely to obtain
+  your own copy of an existing proof. Existing useful work keeps the card's urgency.
+- Run `probe --criterion` only when that criterion has a configured probe in the
+  saved spec. Otherwise attach the actual behavioral evidence to the report;
+  absence of a configured probe does not call for an unrelated probe or a new spec.
+- Sanitize screenshots and verify timestamps before submitting the final report.
+  After final acceptance, do not rewrite accepted artifacts merely to restate them.
+""")
     if _record_mode():
         if not delivery._result_review():
             return _premises_prefix()+_cli+RECORD_MODE_PROTOCOL
@@ -590,7 +610,11 @@ Use the exact CLI prefixes above and preserve HERMES_KANBAN_* identity.
    separate checklist artifact, extra approval or new workflow step is needed.
 8. The report requests final_review automatically. The Principal independently
    reads the sources and artifacts. On changes, resume this same card. After
-   continue, call kanban_complete. Already delivered work also needs real proof.
+   continue, read the current status: the runtime completes an eligible accepted
+   delivery automatically. If done, stop. If still open, inspect the completion
+   refusal and address that specific remainder before kanban_complete; do not
+   restart the delivery or rewrite an accepted report. Already delivered work
+   also needs real proof.
 9. Resolve routine CI/tool/dependency problems within scope. Ask the Principal
    for decisions that change the outcome. Ask the owner only for indispensable
    information or access unavailable through an authorized alternative.
