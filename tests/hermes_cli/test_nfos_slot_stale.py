@@ -37,12 +37,12 @@ def _card(conn, tmp_path, n):
     return delivery.bootstrap_card(conn, rid, request["claim_token"], pid=os.getpid())
 
 
-def test_local_hook_failure_is_answered_automatically():
+def test_local_hook_question_is_not_blindly_answered():
     answer = delivery._auto_continue_answer(
         "impediment", "How to publish the clean three-file staging candidate while the repository pre-push hook fails on unrelated baseline build code?")
-    assert answer and "--no-verify" in answer
+    assert answer is None
     answer = delivery._auto_continue_answer("impediment", "Build failed: DATABASE_URL missing in the temporary clone during lefthook typecheck")
-    assert answer and "--no-verify" in answer
+    assert answer is None
 
 
 def test_stale_slot_holder_is_preempted_in_owner_mode(board):

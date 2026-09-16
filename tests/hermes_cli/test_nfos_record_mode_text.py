@@ -36,4 +36,4 @@ def test_auto_answers_do_not_force_main_or_skip_staging():
     assert "PR em main" not in delivery._CODE_ROUTE_PREPARATION
     assert "só se o corpo do card pedir" not in delivery._CODE_ROUTE_PREPARATION
     answer = delivery._auto_continue_answer("impediment", "The canonical staging slot is occupied by another task")
-    assert "acquire-project` só registra" in answer or "só registra quem publica" in answer
+    assert answer is None

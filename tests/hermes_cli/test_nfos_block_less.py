@@ -28,8 +28,8 @@ def test_profile_flag_true_keeps_validation(monkeypatch):
     "What is the next authorized action for t_9ce8e0e3?",
     "RateLimitError repeated on run 5; usage limit reached for the provider",
 ])
-def test_known_impediments_get_automatic_continue(question):
-    assert d._auto_continue_answer("impediment", question).startswith("CONTINUE (automático")
+def test_impediment_text_requires_principal_judgment(question):
+    assert d._auto_continue_answer("impediment", question) is None
 
 
 def test_unknown_impediment_and_reviews_still_go_to_the_principal():
@@ -49,8 +49,8 @@ def test_next_step_words_do_not_auto_resolve_actual_failures(question):
 
 
 @pytest.mark.parametrize("question", ["Qual o próximo passo?", "What is the next step?", "What should I do next?"])
-def test_bare_next_step_questions_remain_autonomous(question):
-    assert d._auto_continue_answer("impediment", question).startswith("CONTINUE")
+def test_free_text_next_step_does_not_authorize_an_effect(question):
+    assert d._auto_continue_answer("impediment", question) is None
 
 
 def test_homologation_is_automatic():

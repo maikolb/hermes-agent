@@ -113,21 +113,21 @@ def _reachable(value):
 
 # --- perguntas a humano ---------------------------------------------------------------------------------------------------------------
 
-def test_product_words_are_not_rate_limits_and_probe_questions_get_the_route():
+def test_free_text_does_not_auto_resolve_probe_or_rate_limit_questions():
     auto = lambda q: delivery._auto_continue_answer("impediment", q)  # noqa: E731
     question = ("A prova funcional composta foi executada: login normal + profile-summary HTTP 200 confirma cliente/pacote/cota. "
                 "O fechamento continua bloqueado porque sua sonda HTTP recebeu 401/INDETERMINADO.")
     answer = auto(question)
-    assert answer and "rate limit" not in answer and "probe-env" in answer and "host do destino" in answer
-    assert "rate limit" in auto("A API devolveu HTTP 429 Too Many Requests")
-    assert "rate limit" in auto("cota excedida no provedor de modelo")
+    assert answer is None
+    assert auto("A API devolveu HTTP 429 Too Many Requests") is None
+    assert auto("cota excedida no provedor de modelo") is None
     assert auto("Qual cargo exato está afetado, cota do cliente 12?") is None
     assert auto("O plano grátis tem limite de uso de 10 consultas por mês; mantenho?") is None
     assert auto("O probe_env do projeto já está certo para o AC-02?") is None
-    assert "probe-env" in auto("O projeto não tem probe_env configurado para carregar o cookie")
+    assert auto("O projeto não tem probe_env configurado para carregar o cookie") is None
 
 
-def test_question_part_classifies_runtime_config_and_owner_measurement_but_lets_operator_actions_through():
+def test_question_words_do_not_classify_maintenance():
     refused = [
         "PERGUNTA para Maikol:\nprecisa configurar o probe_env?",
         "PERGUNTA para Maikol: pode configurar no contexto Hermes Runtime o probe_env do Infotributos?\nBLOCK.",
@@ -142,7 +142,7 @@ def test_question_part_classifies_runtime_config_and_owner_measurement_but_lets_
         "PERGUNTA para Jhonatan: o servidor do TEST foi desligado e qual é o endereço atual?",
     ]
     for text in refused:
-        assert delivery._human_is_maintenance(text), text
+        assert not delivery._human_is_maintenance(text), text
     for text in allowed:
         assert not delivery._human_is_maintenance(text), text
 
@@ -155,14 +155,14 @@ def test_human_about_the_runtime_is_refused_but_a_business_question_is_not(board
         _worker_gone(conn, task, monkeypatch)
         with pytest.raises(delivery.WorkflowError, match="HUMAN_LAST_RESORT_20260914"):
             delivery.resolve_decision(conn, decision, action="human", author="Principal",
-                answer="PERGUNTA para Maikol: pode configurar no contexto Hermes Runtime o probe_env do Infotributos?\nBLOCK por configuração externa.")
+                answer="PERGUNTA para Maikol: pode configurar no contexto Hermes Runtime o probe_env do Infotributos?\nBLOCK por configuração externa.", assessment={"failure":{"kind":"runtime_maintenance"}})
         assert delivery.get_decision(conn, decision)["status"] == "pending"
         delivery.resolve_decision(conn, decision, action="human", author="Principal",
                                   answer="PERGUNTA para Jhonatan: qual plano Hotmart conta como pago?")
         assert kb.get_task(conn, task.id).status == "blocked"
 
 
-def test_stuck_probe_question_goes_back_to_the_principal_and_leaves_the_block(board, monkeypatch):
+def test_legacy_human_question_is_preserved_without_structured_assessment(board, monkeypatch):
     with kb.connect_closing() as conn:
         task = _card(conn, 2)
         decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind="impediment",
@@ -178,17 +178,11 @@ def test_stuck_probe_question_goes_back_to_the_principal_and_leaves_the_block(bo
         delivery.reconcile_human_answers(conn)
 
         old = delivery.get_decision(conn, decision)
-        assert old["status"] == "superseded" and json.loads(old["context"])["superseded_reason"] == "human_last_resort"
-        pending = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status='pending'", (task.id,)).fetchall()
-        assert len(pending) == 1
-        assert "HUMAN_LAST_RESORT_20260914" in pending[0]["question"] and "probe_env" in pending[0]["question"]
-        assert kb.get_task(conn, task.id).status == "ready"
-        wakes = [json.loads(r[0]) for r in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'", (task.id,))]
-        assert any(w.get("decision_id") == pending[0]["id"] for w in wakes)
-        assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_human_question_refused'", (task.id,)).fetchone()[0] == 1
-
-        delivery.reconcile_human_answers(conn)  # idempotente: nada novo no segundo tick
-        assert conn.execute("SELECT count(*) FROM nfos_decisions WHERE task_id=? AND status='pending'", (task.id,)).fetchone()[0] == 1
+        assert old["status"] == "human"
+        assert kb.get_task(conn, task.id).status == "blocked"
+        assert not conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='pending'", (task.id,)).fetchone()
+        delivery.reconcile_human_answers(conn)
+        assert delivery.get_decision(conn, decision)["status"] == "human"
 
 
 # --- cofre da sonda e escopo ----------------------------------------------------------------------------------------------------------
@@ -473,7 +467,7 @@ def test_second_wait_on_the_same_card_follows_the_recurrence_block(board, monkey
 # --- revisão 3 (rejulgamento 7e702b57) --------------------------------------------------------------------------------------------------
 
 def test_question_part_keeps_the_whole_first_line_when_it_already_asks():
-    assert delivery._human_is_maintenance("PERGUNTA para Maikol: você pode me ajudar? A credencial da sonda de medição não está no cofre")
+    assert not delivery._human_is_maintenance("PERGUNTA para Maikol: você pode me ajudar? A credencial da sonda de medição não está no cofre")
     assert not delivery._human_is_maintenance("PERGUNTA para Jhonatan: pode religar a VPS do TEST?\nA sonda do NFOS e o probe_env seguem como estão.")
 
 
@@ -576,12 +570,12 @@ def _confirmed_up(conn, task_id):
     _shift(conn, task_id, next_check_at=0, up_at=int(time.time()) - delivery.DESTINATION_CONFIRM_SECONDS - 1)
 
 
-def test_leading_markers_do_not_hide_who_is_asked():
-    assert delivery._human_is_maintenance("- PERGUNTA para Maikol: credencial da sonda?")
-    assert delivery._human_is_maintenance("> **PERGUNTA para Maikol**: a sonda precisa de cookie?")
-    assert delivery._human_is_maintenance("1. PERGUNTA para Maikol: credencial da sonda?")
-    assert delivery._human_is_maintenance("1 - PERGUNTA para Maikol: credencial da sonda?")
-    assert delivery._human_is_maintenance("2: PERGUNTA para Maikol: a sonda precisa de cookie?")
+def test_marked_question_text_does_not_determine_maintenance():
+    assert not delivery._human_is_maintenance("- PERGUNTA para Maikol: credencial da sonda?")
+    assert not delivery._human_is_maintenance("> **PERGUNTA para Maikol**: a sonda precisa de cookie?")
+    assert not delivery._human_is_maintenance("1. PERGUNTA para Maikol: credencial da sonda?")
+    assert not delivery._human_is_maintenance("1 - PERGUNTA para Maikol: credencial da sonda?")
+    assert not delivery._human_is_maintenance("2: PERGUNTA para Maikol: a sonda precisa de cookie?")
     assert not delivery._human_is_maintenance("1. PERGUNTA para Jhonatan: pode religar a VPS do TEST?")
 
 
@@ -1255,7 +1249,7 @@ def test_escalation_reminder_never_auto_continues_the_question(board, monkeypatc
         _shift(conn, task.id, since=int(time.time()) - delivery.DESTINATION_ESCALATE_SECONDS - 60, criterion="sonda HTTP: login")
         assert (task.id, "escalated") in delivery.sweep_destination_waits(conn)
         asked = _state(conn, task.id)["destination_wait"]["escalation_decision"]
-        assert delivery._auto_continue_answer("impediment", delivery.get_decision(conn, asked)["question"])  # a pergunta casaria com uma classe automática
+        assert delivery._auto_continue_answer("impediment", delivery.get_decision(conn, asked)["question"]) is None  # a pergunta casaria com uma classe automática
         conn.execute("UPDATE nfos_decisions SET created_at=? WHERE id=?", (int(time.time()) - delivery.DECISION_REMINDER_AFTER - 5, asked))
         conn.commit()
         delivery.sweep_destination_waits(conn)

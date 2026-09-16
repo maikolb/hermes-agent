@@ -2306,12 +2306,9 @@ def _human_addressee(answer):
 
 
 def _human_is_maintenance(answer):
-    """Revisão 2: classifica a pergunta inteira (até o primeiro '?'), não a primeira linha. Configuração do runtime em qualquer pergunta, ou
-    medição e manutenção numa pergunta ao dono ou à manutenção. Pergunta a quem opera o destino (religar, endereço novo) passa."""
-    question = _human_question_part(answer)
-    if _RUNTIME_CONFIG_RX.search(question):
-        return True
-    return bool(_OWNER_ADDRESSEE_RX.match(_human_addressee(question)) and _MEASUREMENT_RX.search(question))
+    """Only a Principal's structured assessment identifies internal maintenance."""
+    failure = answer.get('failure') if isinstance(answer, dict) else None
+    return isinstance(failure, dict) and failure.get('kind') == 'runtime_maintenance'
 
 
 def review_maintenance_human_decisions(conn):
@@ -2325,7 +2322,7 @@ def review_maintenance_human_decisions(conn):
             ctx = json.loads(row.get('context') or '{}') or {}
         except Exception:
             ctx = {}
-        if not isinstance(ctx, dict) or ctx.get('human_reply') or not _human_is_maintenance(row.get('answer')):
+        if not isinstance(ctx, dict) or ctx.get('human_reply') or not _human_is_maintenance(ctx.get('assessment')):
             continue
         task = _kb().get_task(conn, row['task_id'])
         wf = get_workflow(conn, row['task_id'])
@@ -3464,41 +3461,6 @@ def save_report(conn, task_id, run_id, report):
                          ('Principal reviewing the saved result; address any requested changes on this card',int(time.time()),task_id))
 
 
-_AUTO_CONTINUE = [  # BLOCK_LESS_20260910: classes de impedimento que o principal respondeu 'continue' em 223 de 302 casos (7 dias)
-    (r'(probe_env|probe_hosts|probe_database_url|probe-env).{0,120}(sem |n[aã]o tem|ausente|missing|has no|configur|vazio|empty|cookie|credencia|401|403)|'
-     r'(sem |n[aã]o tem|ausente|missing|has no|configur).{0,120}(probe_env|probe_database_url)|'
-     r'\bsonda\b.{0,120}(401|403|cookie|credencia|sess[aã]o|login|dsn|database_url|mssql|sql server|t-sql|sem resposta|timed out|recusad)|'
-     r'(401|403|cookie|credencia|dsn|database_url|mssql|sql server|t-sql).{0,120}\bsonda\b|\bprobe\b.{0,120}(401|403|cookie|credential|session|login|dsn|mssql|sql server|timed out|refused)|'
-     r'verificador.{0,80}(mssql|sql server|t-sql)',  # HUMAN_LAST_RESORT_20260914: medição não é pergunta a humano
-     'CONTINUE (automático, HUMAN_LAST_RESORT_20260914): medição não é pergunta a humano. Credencial da sonda: faça login legítimo ou use um acesso '
-     'que já existe (cofre do projeto, EnvironmentFile do serviço no destino) e grave com `probe-env --set NOME` (valor pela entrada padrão; nunca '
-     'em argumento, spec, relatório ou chat); a sonda lê "$env:NOME" nos headers e PROBE_DATABASE_URL no SQL. A sonda obrigatória mede o host do '
-     'destino (delivery_destination), nunca cópia local ou isolada. A sonda SQL lê PostgreSQL e sqlite; SQL Server se mede pela superfície HTTP do '
-     'destino. Destino sem resposta: encerre o turno; o runtime confere a cada 10 min e devolve o card sozinho. Se nada disso cabe agora, feche '
-     'como entrega parcial com continuação.'),
-    (r'pre-?push|pre-?commit|lefthook|husky|no-verify|build:local|DATABASE_URL|\bhooks?\b.{0,80}(fail|block|barr|falh|imped)|(fail|block|barr|falh|imped).{0,80}\bhooks?\b',  # HOOK_AUTO_20260911
-     'CONTINUE (automático, premissa do owner 10/09): hook local de pre-push/pre-commit não é gate. Faça o push agora com --no-verify; o CI do PR é o gate. Não instale dependências nem configure ambiente só para satisfazer o hook; não reconcilie ambiente de build; não pergunte de novo.'),
-    (r'slot|acquire-project|acquired.{0,4}false|hml (window|remains|slot)|janela (de )?hml|occupied|ocupad',
-     'CONTINUE (automático, premissa do owner 10/09): em modo registro não há slot de publicação; `acquire-project` só registra quem publica. Siga a rota do projeto mostrada no show; não pergunte de novo.'),  # RELEASE_FLOW_20260911, RECORD_MODE_TEXT_20260911
-    (r'readback.{0,40}inconsisten|inconsisten.{0,40}readback|release receipt',
-     'CONTINUE (automático): faça a releitura (`reconcile`) do alvo e siga com o que a releitura mostrar; não bloqueie.'),
-    (r'stale lease|retained lease|partial hml delivery',
-     'CONTINUE (automático): trate o lease retido com `repair-workspace`/`reconcile` e siga no mesmo card.'),
-    # Only a bare request for the next step is routine. A description of a
-    # failed next step must reach the Principal, not be silently resolved.
-    (r'\A\s*(?:what is the next (?:authorized action|step)|what should i do next|'
-     r'qual (?:[eé] )?[oa] pr[oó]xim[oa] (?:passo|a[cç][aã]o))'
-     r'(?: (?:for|para) (?:card )?t_[a-z0-9]+)?\s*\?\s*\Z',
-     'CONTINUE (automático): siga a próxima etapa da spec salva. O principal não decide passo a passo.'),
-    (r'reavaliar o impedimento registrado|retomar o mesmo card se resolv|impediment registered in the history',  # BLOCK_LESS2_20260910
-     'CONTINUE (automático): o histórico de impedimentos foi tratado na triagem de 10/09. Retome o mesmo card do estado salvo e entregue; se algo só um humano pode fornecer, bloqueie com a pergunta e o destinatário no motivo.'),
-    (r'contrato git|git delivery|delivery_contract|policy_json|contract (not|nao|não) initiali|contrato .{0,20}(nao|não) inicializ',  # CLOSURE_RECOVERY_20260911
-     'CONTINUE (automático): contrato Git não inicializado é tratado no fechamento pelo registro NFOS (efeitos pr/merge/deploy/homolog confirmados); chame kanban_complete de novo e leia o motivo se recusar. Não é impedimento do mantenedor.'),
-    (r'rate.?limit|\b429\b|usage limit|too many requests|quota (exceeded|exhausted|reached)|(exceeded|exhausted).{0,20}quota|cota (excedida|esgotada|estourada|atingida)|limite de (taxa|requisi[cç][oõ]es)',  # HUMAN_LAST_RESORT_20260914: a "cota" do produto (pacote/cota do cliente) não é rate limit
-     'CONTINUE (automático): rate limit é transitório. Aguarde com backoff (60 s, 120 s, 300 s) e repita; não bloqueie o card.'),
-]
-
-
 def _result_review():
     from hermes_cli.nfos_principal_review import settings
     return settings().get('result_review') is True
@@ -3514,15 +3476,9 @@ def _owner_mode():
 
 
 def _auto_continue_answer(kind, question):
-    """BLOCK_LESS_20260910: resposta automática do principal para perguntas que não mudam o resultado."""
+    """Typed workflow operations may proceed; free-text impediments need judgment."""
     if kind=='homologation':
         return 'CONTINUE (automático, premissa do owner 10/09): candidato exato aceito para publicação em HML; publique, valide e siga.'
-    if kind!='impediment':
-        return None
-    q=(question or '').lower()
-    for rx,ans in _AUTO_CONTINUE:
-        if re.search(rx,q):
-            return ans
     return None
 
 
@@ -4030,7 +3986,7 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
         raise WorkflowError('The Principal resolves reviews in its own coordinator session')
     if action not in {'continue','approve','changes','human'} or not answer.strip() or author!='Principal':
         raise WorkflowError('Principal decision requires its concrete answer and action')
-    if action=='human' and _human_is_maintenance(answer):  # HUMAN_LAST_RESORT_20260914
+    if action=='human' and _human_is_maintenance(assessment):
         raise WorkflowError(HUMAN_MAINTENANCE_REFUSAL)
     initial=get_decision(conn,decision_id)
     assessed=None
