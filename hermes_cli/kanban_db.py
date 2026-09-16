@@ -12975,6 +12975,7 @@ def _budget_continuation(
     release_claim: bool,
     end_run: bool,
     event_payload_extra: Optional[dict] = None,
+    worker_claim: Optional[tuple[int, str]] = None,
 ) -> bool:
     """BUDGET_CONTINUE_20260910 (ordem do Maikol): run que esgotou o orçamento (iterações ou
     max_runtime) com progresso persistido volta para a fila sem contar falha nem acordar o
@@ -13020,6 +13021,10 @@ def _budget_continuation(
     if used >= cap:
         return False
     with write_txn(conn):
+        if worker_claim is not None:
+            from hermes_cli.nfos_principal_review import _owned_worker_run
+            if _owned_worker_run(conn, task_id, *worker_claim) is None:
+                return False
         if release_claim:
             retry_status = _retry_status_for_run(conn, task_id, row["current_run_id"])
             conn.execute(
@@ -13060,6 +13065,7 @@ def _record_task_failure(
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
+    worker_claim: Optional[tuple[int, str]] = None,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -13107,12 +13113,17 @@ def _record_task_failure(
     if _budget_continuation(  # BUDGET_CONTINUE_20260910
         conn, task_id, error, outcome=outcome, release_claim=release_claim,
         end_run=end_run, event_payload_extra=event_payload_extra,
+        worker_claim=worker_claim,
     ):
         return False
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     blocked = False
     with write_txn(conn):
+        if worker_claim is not None:
+            from hermes_cli.nfos_principal_review import _owned_worker_run
+            if _owned_worker_run(conn, task_id, *worker_claim) is None:
+                return False
         row = conn.execute(
             "SELECT consecutive_failures, status, max_retries, current_run_id "
             "FROM tasks WHERE id = ?", (task_id,),
