@@ -14,8 +14,8 @@ from tests.gateway.test_kanban_notifier import _make_runner, _run_one_notifier_t
 from tests.gateway.test_kanban_notifier_durable import RealAdapter
 
 
-def waiting_card(label, priority):
-    with kb.connect_closing() as conn:
+def waiting_card(label, priority, board=None):
+    with kb.connect_closing(board=board) as conn:
         rid = delivery.receive_request(conn,
             source={'platform': 'telegram', 'chat_id': 'project', 'thread_id': '8',
                     'message_id': label, 'chat_type': 'group'},
@@ -46,6 +46,50 @@ def test_pending_decisions_prioritize_newer_urgent_card(waiting):
     normal, urgent = waiting
     with kb.connect_closing() as conn:
         assert [r['id'] for r in delivery.pending_decisions(conn)] == [urgent[1], normal[1]]
+
+
+def test_real_adapter_prioritizes_urgent_from_second_board(tmp_path, monkeypatch):
+    """Per-board SQL ordering cannot prioritize across separate subscriptions."""
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    monkeypatch.delenv('HERMES_KANBAN_DB', raising=False)
+    monkeypatch.delenv('HERMES_KANBAN_BOARD', raising=False)
+    monkeypatch.setattr('hermes_cli.config.load_config', lambda: {'kanban': {'agent_wake_on_events': True}})
+    normal = waiting_card('normal-first-board', 0, 'a-normal')
+    urgent = waiting_card('urgent-second-board', 100, 'z-urgent')
+    assert [b['slug'] for b in kb.list_boards() if b['slug'] != 'default'] == ['a-normal', 'z-urgent']
+    started = []
+
+    async def run():
+        adapter = RealAdapter(PlatformConfig(), Platform.TELEGRAM)
+        adapter.config.typing_indicator = False
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def principal(event):
+            row = urgent if urgent[0].id in event.text else normal
+            started.append(row[0].id)
+            agent = SimpleNamespace(session_id='principal-two-boards', _session_db=SimpleNamespace(db_path=tmp_path/'state.db'))
+            await asyncio.to_thread(initialize_agent_turn_checkpoint, agent,
+                                    turn_id=row[1], user_content=event.text, messages=[])
+            entered.set()
+            await release.wait()
+
+        adapter._message_handler = principal
+        runner = _make_runner(adapter)
+        try:
+            await _run_one_notifier_tick(monkeypatch, runner)
+            await asyncio.wait_for(entered.wait(), 3)
+            assert started == [urgent[0].id]
+            assert len(adapter._active_sessions) == 1
+            with kb.connect_closing(board='a-normal') as conn:
+                assert delivery.get_decision(conn, normal[1])['status'] == 'pending'
+                assert conn.execute('SELECT wake_accepted FROM kanban_notify_claims WHERE task_id=?', (normal[0].id,)).fetchone()[0] == 0
+        finally:
+            tasks = list(adapter._session_tasks.values())
+            release.set()
+            await asyncio.gather(*tasks)
+
+    asyncio.run(run())
 
 
 def test_real_adapter_admits_urgent_first_and_worker_consumes_without_losing_normal(waiting, tmp_path, monkeypatch):
