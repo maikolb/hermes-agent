@@ -56,7 +56,9 @@ def test_unaccepted_or_stale_delivery_does_not_close(task_context, state):
         if state == 'stale_evidence':
             artifact.write_text('count=32\n')
         else:
-            save_report(conn, task, artifact)
+            report = json.loads(d._artifact(conn, task.id, 'report')['content'])
+            report['summary'] = 'Count verification changed: an additional source needs reconciliation'
+            d.save_report(conn, task.id, task.current_run_id, report)
     tick(conn)
     assert kb.get_task(conn, task.id).status != 'done'
 
