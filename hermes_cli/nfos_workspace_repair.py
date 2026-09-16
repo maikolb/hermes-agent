@@ -158,7 +158,8 @@ def repair_card(conn, task_id, *, board, delivery_type, expected_delivery_type,
 def _idle(conn, task_id):
     task = kb.get_task(conn, task_id)
     if not task or task.status not in {'blocked', 'ready', 'todo', 'review'} or task.current_run_id:
-        raise delivery.WorkflowError('Workspace repair requires an idle existing card')
+        raise delivery.WorkflowError('Workspace repair requires an idle existing card; the Principal can use '
+                                     'pause-for-repair, await native worker cleanup, then retry the repair')
     if task.worker_pid and kb._pid_alive(task.worker_pid):
         raise delivery.WorkflowError('Workspace repair cannot interrupt a live executor')
     from hermes_cli.nfos_runtime import previous_runs_termination_pending
