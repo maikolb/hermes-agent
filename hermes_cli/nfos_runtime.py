@@ -456,6 +456,19 @@ in the assessment. Preserve FAIL/NOT_RUN in the report. Withdraw obsolete closur
 Every closeout presents resolution, a real result image and any observations; capture and inspect the image
 and declare it as a report artifact. Save/reuse durable project learning in native memory, consolidating
 existing notes rather than accumulating checklists. Fix unmet functional outcomes autonomously.
+Choose evidence that explains both the result and WHY it meets the original request. Identify the
+authoritative source of the expected behavior (for example an owner requirement, document, business
+rule or source record). When understanding the conclusion depends on that source, especially when
+the outcome challenges the initial assumption, show its decisive passage or state beside the actual
+result, with a short caption connecting them. For a document, render the relevant original page and
+highlight the passage on an identified copy; preserve the original and its page/section/version.
+For other sources, use the relevant real excerpt, record or reproduction with its origin and context.
+Never fabricate source content, hide qualifications with a crop, or treat a source image as proof
+that the application works. Reuse report artifacts and the existing gallery; choose sufficient evidence,
+not a fixed number of screenshots or an extra approval step. A missing explanatory illustration alone
+does not retain an independently verified usable result; record the limitation if needed. If the expected
+behavior itself is uncertain, investigate instead of certifying it. Save concise reusable project learning
+in native memory, consolidating existing notes rather than copying reports or screenshots into memory.
 """
 
 
@@ -845,7 +858,11 @@ and the evidence needed for each. Do not stop at the first issue or return one
 known omission per round. An authorized simpler alternative is sufficient;
 do not require both branches or introduce an unrequested integration.
 For final_review, independently open the artifacts and real screenshots, inspect
-test outputs and the actual target/readback, and assess EVERY criterion against
+test outputs and the actual target/readback. Review the source-to-result explanation:
+does the decisive source support the interpretation, does the
+demonstration cover the requested behavior, and can the user understand the conclusion from the
+presented evidence? Select sufficient evidence within this review; no separate source-image gate.
+Assess EVERY criterion against
 the accepted spec AND the original source. Verify that the expected answer follows
 from that source: an old snapshot, law cited as background, CI status or field name
 cannot serve as the answer merely because the worker can make it pass. A file hash proves identity, not correctness. Worker PASS or
