@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 from hermes_cli import nfos_delivery as d
@@ -144,6 +145,22 @@ def worker_checkpoint(agent, turn_id=None):
             return False
         if task.claim_lock != os.environ.get('HERMES_KANBAN_CLAIM_LOCK'):
             return False
+        execution = {'model': agent.model, 'provider': getattr(agent, 'provider', None),
+                     'reasoning_effort': (agent.reasoning_config or {}).get('effort'),
+                     'session_id': getattr(agent, 'session_id', None), 'source': 'agent_pre_request'}
+        with d._kb().write_txn(conn):
+            row = conn.execute("SELECT r.metadata FROM task_runs r JOIN tasks t ON t.current_run_id=r.id "
+                               "WHERE t.id=? AND r.id=? AND t.claim_lock=? AND t.status='running' AND r.ended_at IS NULL",
+                               (task_id, int(run_id), task.claim_lock)).fetchone()
+            if row is None:
+                return False
+            metadata = json.loads(row['metadata'] or '{}')
+            previous = metadata.get('worker_execution', {})
+            if any(previous.get(k) != v for k, v in execution.items()):
+                execution['recorded_at'] = int(time.time())
+                metadata['worker_execution'] = execution
+                conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (d._json(metadata), int(run_id)))
+                d._event(conn, task_id, int(run_id), 'nfos_worker_execution', execution)
         if not pending and settings().get('worker_escalation') is not True:
             return False
         budget = getattr(agent, 'iteration_budget', None)
