@@ -1384,6 +1384,29 @@ class GatewayKanbanWatchersMixin:
             conn.execute('UPDATE nfos_requests SET payload=?,acknowledged_at=? WHERE id=?',
                          (json.dumps(payload,ensure_ascii=False),int(time.time()) if success else None,request_id))
 
+    def _nfos_schedule_receipt_retry(self):
+        """Keep one bounded receipt batch off the internal decision wake path."""
+        if not self._running:
+            return
+        active = getattr(self, '_nfos_receipt_retry_task', None)
+        if active is not None and not active.done():
+            return
+        background = getattr(self, '_background_tasks', None)
+        if background is None:
+            background = self._background_tasks = set()
+        task = asyncio.create_task(self._nfos_retry_receipts(), name='nfos-receipt-retry')
+        self._nfos_receipt_retry_task = task
+        background.add(task)
+
+        def finished(completed):
+            background.discard(completed)
+            if self._nfos_receipt_retry_task is completed:
+                self._nfos_receipt_retry_task = None
+            if not completed.cancelled() and completed.exception():
+                logger.warning('NFOS receipt retry failed; obligations remain pending')
+
+        task.add_done_callback(finished)
+
     async def _nfos_retry_receipts(self, *, board=None, request_id=None):
         """One bounded send per claim; failed/unknown results remain durable.
 
@@ -2899,7 +2922,7 @@ class GatewayKanbanWatchersMixin:
             try:
                 # Requests may owe a receipt before any card/subscription exists.
                 await self._nfos_retry_coordinator_inputs()
-                await self._nfos_retry_receipts()
+                self._nfos_schedule_receipt_retry()
                 _gc_due = time.monotonic() >= _gc_next_at
                 _gc_retention_days = 30
                 if _gc_due:
