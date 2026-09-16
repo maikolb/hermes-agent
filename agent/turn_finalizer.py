@@ -66,6 +66,10 @@ def _record_kanban_budget_exhausted(
     """Record a terminal ``timed_out`` outcome for a kanban worker that
     exhausted its iteration budget.
 
+    Only the dispatcher-owned process may terminate its run. Inherited task
+    environment variables do not authorize an auxiliary process to do so.
+    Ownership is checked again inside the terminal write transaction.
+
     This is a bounded fallback (#87096): the CAS invariant in ``_end_run``
     (``WHERE ended_at IS NULL``) guarantees idempotence — if another path
     already closed the run this is a no-op — so it is safe to call from
@@ -73,8 +77,16 @@ def _record_kanban_budget_exhausted(
     """
     try:
         from hermes_cli import kanban_db as _kb
+        from hermes_cli.nfos_principal_review import _owned_worker_run
+        run_id = os.environ.get("HERMES_KANBAN_RUN_ID")
+        claim = os.environ.get("HERMES_KANBAN_CLAIM_LOCK")
+        if not run_id or not claim:
+            return
+        worker_claim = (int(run_id), claim)
         _conn = _kb.connect()
         try:
+            if _owned_worker_run(_conn, kanban_task, *worker_claim) is None:
+                return
             _kb._record_task_failure(
                 _conn,
                 kanban_task,
@@ -87,6 +99,7 @@ def _record_kanban_budget_exhausted(
                 outcome="timed_out",
                 release_claim=True,
                 end_run=True,
+                worker_claim=worker_claim,
                 event_payload_extra={
                     "budget_used": api_call_count,
                     "budget_max": max_iterations,
