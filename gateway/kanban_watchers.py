@@ -383,10 +383,11 @@ def _capacity_only(results) -> bool:
 
 
 def _coalesce_notify_events(events):
-    """Keep model switches even when completion arrives in the same poll."""
+    """Converge progress without dropping the Principal's required wake."""
     notices = [str((event.payload or {}).get("message") or "")
                for event in events[:-1] if event.kind == "model_fallback"]
-    return events[-1:], [notice for notice in notices if notice]
+    retained = [event for event in events[:-1] if event.kind == "nfos_principal_requested"]
+    return retained + events[-1:], [notice for notice in notices if notice]
 
 
 WAKE_GROUP_RULE = (  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913: instrução e filtro alinhados
