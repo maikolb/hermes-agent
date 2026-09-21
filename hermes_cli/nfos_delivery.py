@@ -3054,9 +3054,28 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         raise WorkflowError('Record the actual TL/Codex/worker execution evidence')
     if author=='Codex' and not evidence.get('fallback_reason'):
         raise WorkflowError('Codex spec fallback needs the Claude unavailability reason')
+    from hermes_cli import nfos_jev
+    jev = nfos_jev.spec_decisions(conn, task_id, run_id, spec)
+    spec = dict(spec)  # Never mutate the caller's candidate.
     with _kb().write_txn(conn):
         task=_owned(conn,task_id,run_id)
         wf=get_workflow(conn,task_id)
+        jev = {k: v for k, v in jev.items() if v and v['identity'] == nfos_jev.identity(conn, task_id)}
+        budget = jev.get('budget')
+        limit = None
+        if budget and budget['answers']['size']['choice'] in SPEC_SIZE_BUDGET:
+            selected = budget['answers']['size']['choice']
+            current_limit = task.max_runtime_seconds
+            proposed_limit = SPEC_SIZE_BUDGET[selected]
+            limit = min(proposed_limit, current_limit) if current_limit else proposed_limit
+            run = conn.execute('SELECT started_at FROM task_runs WHERE id=?', (run_id,)).fetchone()
+            elapsed = max(0, time.time() - float(run[0])) if run and run[0] else 0
+            if limit <= elapsed:
+                limit = current_limit  # Do not expire an active run by lowering its estimate.
+            spec['size'] = selected
+            _event(conn,task_id,run_id,'nfos_jev_budget_applied',
+                   {'estimated_size':selected,'estimate_seconds':proposed_limit,'limit_seconds':limit,
+                    'previous_limit_seconds':current_limit,'elapsed_seconds':elapsed,'model_pin_preserved':True})
         from hermes_cli.nfos_principal_review import settings as _settings
         if _settings().get('principal_validation') is False and not wf['spec_revision']:  # BLOCK_LESS7_20260910: modo das premissas
             _pc=(json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') or {}
@@ -3066,8 +3085,8 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                 raise WorkflowError('Spec needs size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class')
         _size=str(spec.get('size') or '').strip().upper()  # BLOCK_LESS9_20260910: quem escreve a spec define o orçamento
         if _size in SPEC_SIZE_BUDGET:
-            conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?',(SPEC_SIZE_BUDGET[_size],task_id))
-            _event(conn,task_id,run_id,'nfos_spec_size',{'size':_size,'max_runtime_seconds':SPEC_SIZE_BUDGET[_size]})
+            conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?',(limit if limit is not None else SPEC_SIZE_BUDGET[_size],task_id))
+            _event(conn,task_id,run_id,'nfos_spec_size',{'size':_size,'max_runtime_seconds':limit if limit is not None else SPEC_SIZE_BUDGET[_size]})
         if spec.get('delivery_type')!=task.delivery_type:
             # The project default is provisional until TL has analyzed the
             # request. An audit must not inherit a Git delivery requirement.
@@ -3096,7 +3115,10 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         from hermes_cli.nfos_principal_review import required
         if required(conn,task_id):
             ask_principal(conn,task_id,run_id,kind='spec_review',
-                          question='Validate the saved spec against the original request before implementation',context={})
+                          question=('Validate the saved spec against the original request before implementation. '
+                                    'Inspect jev_spec_check gaps and correct material omissions in this card; it is advisory, not approval.'
+                                    if jev.get('spec') else 'Validate the saved spec against the original request before implementation'),
+                          context={'jev_spec_check':jev['spec']['feedback']} if jev.get('spec') else {})
             conn.execute('UPDATE nfos_workflows SET next_action=? WHERE task_id=?',
                          ('Wait for Principal spec acceptance; revise the spec if changes are requested',task_id))
     return revision
@@ -3433,6 +3455,8 @@ def save_report(conn, task_id, run_id, report):
     if not spec:
         raise WorkflowError('No persisted spec')
     _require_current_instruction_spec(conn,task_id)
+    from hermes_cli.nfos_jev import collect_missing_probe
+    collect_missing_probe(conn, task_id, run_id, use='evidence', reason='Collect missing evidence for the current report')
     report=json.loads(_json(report))
     # Report versions retain the previous result. The Principal assesses the
     # new evidence; a second reclassification form is not a separate gate.
