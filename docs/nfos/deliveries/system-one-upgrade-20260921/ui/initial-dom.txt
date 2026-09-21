@@ -1,0 +1,89 @@
+Revisor
+aprendizado e decisões
+Decisões online
+
+Escolhas rotineiras durante a execução. O aceite final permanece no fluxo nativo.
+
+Configurado: Desligado · Motor em configuração: Laya
+
+Modo
+Desligado
+Observação (shadow)
+Ativo
+Motor em configuração
+Laya
+Jev
+Tempo limite (segundos)
+Decisões por execução
+
+O motor online não é consultado.
+
+A hashtag do card seleciona o motor; tarefas sem tag continuam desligadas. O modelo do worker é independente.
+
+Classes de decisão
+Orçamento
+Elegível
+Impedimentos
+Elegível
+Seleção de evidências
+Elegível
+Revisão de SPEC
+Indisponível no modo ativo · Sem validação para revisão primária de SPEC
+
+SALVAR POLÍTICA ONLINE
+
+Disponibilidade · Laya
+Configuração
+Presente
+Autenticação
+Não verificada
+Teste de inferência
+Pendente
+Disponibilidade
+local_service_unavailable
+Provedor
+Laya local
+Modelo
+convaiinnovations/laya-multilingual
+Revisão do modelo
+052592a15d198d9ad47da779604259b10b47b7aa
+Revisão da fonte
+42626c348753fbb17572a813127df2278a1ec527
+Resultado das decisões
+
+Quadro atual · até 5.000 eventos mais recentes
+
+0
+Oportunidades
+0
+Consultas ao motor
+0
+Decisões aplicadas
+0
+Chamadas do Principal poupadas
+0
+Retornos ao fluxo nativo
+0
+Observações sem autoridade
+0
+Retrabalhos
+Revisão retrospectiva
+
+Agenda e cobertura do aprendizado com entregas, retrabalhos e decisões de todos os projetos.
+
+Revisão automática
+Frequência
+Todos os dias
+Semanal
+Horário de São Paulo
+SALVAR CONFIGURAÇÃO
+
+Revisão automática pausada
+
+Execução
+Nenhuma execução registrada
+ATUALIZAR
+
+O histórico aparecerá aqui após a primeira execução e continuará disponível ao encerrar.
+
+Todo o histórico · 0 registros carregados

@@ -12,7 +12,7 @@ INPUT_KEYS = {'state', 'objective', 'stage', 'budget_remaining', 'recent_result'
               'constraints', 'evidence_refs'}
 FORBIDDEN_INPUT_KEYS = {'outcome', 'verified_outcome', 'reviewer_label', 'preferred_option',
                         'labels', 'verification', 'future_result', 'executed_action'}
-SECRET_KEYS = re.compile(r'(?i)(password|senha|secret|api[_-]?key|access[_-]?token|credential|cookie)')
+SECRET_KEYS = re.compile(r'(?i)(password|senha|secret|api[_-]?key|(?:^|[_-])token(?:$|[_-])|authorization|credential|cookie)')
 
 
 def canonical(value):
@@ -30,8 +30,10 @@ def redact(value):
     if isinstance(value, list):
         return [redact(v) for v in value]
     if isinstance(value, str):
+        value = re.sub(r'-----BEGIN ([A-Z ]*PRIVATE KEY)-----.*?-----END \1-----',
+                       '[PRIVATE KEY REDACTED]', value, flags=re.S)
         value = re.sub(r'(https?://)[^/\s@]+@', r'\1[REDACTED]@', value)
-        value = re.sub(r'(?i)\b(?:Bearer\s+|sk-)[A-Za-z0-9_.~-]+', '[REDACTED]', value)
+        value = re.sub(r'(?i)\b(?:(?:Bearer|Basic)\s+|sk-)[A-Za-z0-9_./=+~-]+', '[REDACTED]', value)
         value = re.sub(r'(?i)((?:api[_-]?key|token|password|secret)\s*[=:]\s*)[^\s&,;]+', r'\1[REDACTED]', value)
         value = re.sub(r'\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b', '[EMAIL]', value)
         value = re.sub(r'\b\d{3}\.\d{3}\.\d{3}-\d{2}\b', '[CPF]', value)
@@ -203,7 +205,8 @@ def build_dataset(cases, reviews=None, *, train_before=None, test_after=None):
                        and payload(r).get('opportunity_id') == oid]
             outcome_records = [r for r in related if float(r['data'].get('created_at') or 0) >= at
                                and payload(r).get('run_id', r['data'].get('run_id')) == run_id]
-            outcome_records.sort(key=lambda r: (float(r['data'].get('created_at') or 0), r['ref']))
+            outcome_records.sort(key=lambda r: (float(r['data'].get('created_at') or 0),
+                int(r['data'].get('id') or 0), r['ref']))
             outcome = dict(data) if legacy else {}
             for outcome_record in outcome_records:
                 outcome.update(payload(outcome_record))

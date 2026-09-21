@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "VisibleWindows": 0,
+  "output": "{\"args\": [\"C:/Users/maiko/AppData/Local/hermes/cache/nfos-jev/implementation/test-venv/Scripts/python.exe\", \"-m\", \"pytest\", \"-q\", \"tests/hermes_cli/test_nfos_reviewer.py\", \"tests/hermes_cli/test_nfos_system_one_dataset.py\", \"tests/hermes_cli/test_nfos_system_one_prepare.py\"], \"cwd\": \"C:/Users/maiko/Projetos/NFOS-Jev-Integration/hermes-agent\", \"exit\": 0, \"stdout\": \"......................                                                   [100%]\\r\\n22 passed in 9.67s\\r\\n\", \"stderr\": \"\"}\n{\"args\": [\"C:/Users/maiko/AppData/Local/hermes/cache/nfos-jev/implementation/test-venv/Scripts/python.exe\", \"-m\", \"ruff\", \"check\", \"scripts/nfos_system_one_prepare.py\", \"hermes_cli/nfos_reviewer.py\", \"hermes_cli/nfos_system_one_dataset.py\", \"tests/hermes_cli/test_nfos_system_one_prepare.py\", \"tests/hermes_cli/test_nfos_system_one_dataset.py\", \"tests/hermes_cli/test_nfos_reviewer.py\"], \"cwd\": \"C:/Users/maiko/Projetos/NFOS-Jev-Integration/hermes-agent\", \"exit\": 0, \"stdout\": \"All checks passed!\\n\", \"stderr\": \"\"}\n"
+}

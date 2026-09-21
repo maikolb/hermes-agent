@@ -66,7 +66,9 @@ def _validate_system_one(raw):
 def configure_system_one(policy):
     from hermes_cli.config import save_config
     cfg = _validate_system_one(policy)
-    save_config({'kanban': {'delivery': {'system_one': cfg}}}, merge_existing=True)
+    # The edited engine owns its classes; changing Laya must not disable Jev SPEC.
+    save_config({'kanban': {'delivery': {'system_one': cfg,
+        cfg['engine']: {'uses': cfg['classes']}}}}, merge_existing=True)
     if system_one_policy() != cfg:
         raise ValueError('System One policy is managed or was not persisted')
     return system_one_status()
@@ -76,12 +78,17 @@ def system_one_status():
     policy = system_one_policy()
     providers = {}
     bindings = {}
+    try:
+        declared = _delivery_settings()
+    except Exception:
+        declared = {}
     for engine in ('laya', 'jev'):
         cfg = settings(engine=engine)
         key_present = bool(_provider_key(cfg.get('api_key_env')))
         providers[engine] = {k: cfg.get(k) for k in
-            ('provider', 'model', 'model_revision', 'source_revision', 'api_key_env')}
-        providers[engine].update(configured=not cfg.get('error') and (engine == 'laya' or key_present),
+            ('provider', 'model', 'model_revision', 'source_revision', 'api_key_env', 'uses')}
+        providers[engine].update(configured=not cfg.get('error') and engine in declared,
+            credential_present=key_present,
             authenticated=False, inference_tested=False,
             availability='local_service_not_probed' if engine == 'laya' else 'key_present_not_verified' if key_present else 'missing_key')
         bindings[engine] = _digest([cfg.get('provider'), cfg.get('model'), _provider_key(cfg.get('api_key_env')) or ''])
@@ -172,8 +179,8 @@ def settings(conn=None, task_id=None, *, engine=None):
         if policy is not None:
             result.update(decision_mode=policy['mode'], policy_revision=_digest(policy),
                           max_decisions_per_run=policy['max_decisions_per_run'])
-            result['uses'] = [use for use in uses if use in policy['classes']
-                and not (engine == 'laya' and use == 'spec' and policy['mode'] != 'shadow')]
+            result['uses'] = [use for use in uses
+                if not (engine == 'laya' and use == 'spec' and policy['mode'] != 'shadow')]
             result['timeout_seconds'] = min(timeout, policy['timeout_seconds'])
         if selection:
             result['enabled'] = engine in (delivery.get('decision_engines') or {}).get('allowed', [])

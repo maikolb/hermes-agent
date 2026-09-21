@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "VisibleWindows": 0,
+  "output": "{\"args\": [\"C:/Users/maiko/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe\", \"-m\", \"pytest\", \"modules/vigilia/tests/test_suporte.py::test_reviewer_schedule_and_permanent_history_through_internal_bridge\", \"-q\", \"--tb=short\"], \"cwd\": \"C:/Users/maiko/Projetos/NFOS-Jev-Integration/nexa-factory-os\", \"exit\": 0, \"stdout\": \".                                                                        [100%]\\r\\n1 passed in 12.23s\\r\\n\", \"stderr\": \"\"}\n{\"args\": [\"C:/Program Files/nodejs/node.exe\", \"--check\", \"modules/vigilia/src/nexa_vigilia/public/lux/reviewer.js\"], \"cwd\": \"C:/Users/maiko/Projetos/NFOS-Jev-Integration/nexa-factory-os\", \"exit\": 0, \"stdout\": \"\", \"stderr\": \"\"}\n{\"args\": [\"git\", \"diff\", \"--check\"], \"cwd\": \"C:/Users/maiko/Projetos/NFOS-Jev-Integration/nexa-factory-os\", \"exit\": 0, \"stdout\": \"\", \"stderr\": \"warning: in the working copy of 'modules/vigilia/src/nexa_vigilia/public/lux/reviewer.js', LF will be replaced by CRLF the next time Git touches it\\n\"}\n"
+}

@@ -1,0 +1,125 @@
+{
+  "/srv/hermes/releases/system-one-preparation-check-b087eae99354.json": {
+    "action": "check",
+    "at": 1789997452.0065901,
+    "drift": {
+      "files": [
+        {
+          "actual": "25377ffbf979971aac339d1f85c3ac9361cc8e218e09bec05b06aac7d5984cde",
+          "backup": "25377ffbf979971aac339d1f85c3ac9361cc8e218e09bec05b06aac7d5984cde",
+          "expected": "25377ffbf979971aac339d1f85c3ac9361cc8e218e09bec05b06aac7d5984cde",
+          "matches": true,
+          "name": "config",
+          "path": "/srv/hermes/profiles/hermes-project-factory/config.yaml"
+        },
+        {
+          "actual": "cf330dc0b51e8467564f842ac251b37320a7f7b19c6448f21633774c547c7df4",
+          "backup": "cf330dc0b51e8467564f842ac251b37320a7f7b19c6448f21633774c547c7df4",
+          "expected": "cf330dc0b51e8467564f842ac251b37320a7f7b19c6448f21633774c547c7df4",
+          "matches": true,
+          "name": "entrypoint",
+          "path": "/usr/local/bin/hermes"
+        },
+        {
+          "actual": "1f927c481eecd2295c12e6c6d58054a1833e72e9f1ebb74fe23cdf2cc02768f2",
+          "backup": "1f927c481eecd2295c12e6c6d58054a1833e72e9f1ebb74fe23cdf2cc02768f2",
+          "expected": "1f927c481eecd2295c12e6c6d58054a1833e72e9f1ebb74fe23cdf2cc02768f2",
+          "matches": true,
+          "name": "laya_unit",
+          "path": "/etc/systemd/system/nfos-laya.service"
+        },
+        {
+          "actual": "8fdda6aedafb8193b41f6b759f64e504ee169e05308413a8c908c3410fd41f94",
+          "expected": "8fdda6aedafb8193b41f6b759f64e504ee169e05308413a8c908c3410fd41f94",
+          "matches": true,
+          "name": "hermes-gateway@hermes-project-factory.service"
+        },
+        {
+          "actual": "3bd3a3d246f43c7a189200d1b51d7c5cd61595b05be498e4a917bc76d9bca6eb",
+          "expected": "3bd3a3d246f43c7a189200d1b51d7c5cd61595b05be498e4a917bc76d9bca6eb",
+          "matches": true,
+          "name": "nfos-laya.service"
+        },
+        {
+          "actual": "a297ce28470cc61f9b9c2db0ced95cc456f3731e087d4e5404131e472be8e59a",
+          "expected": "a297ce28470cc61f9b9c2db0ced95cc456f3731e087d4e5404131e472be8e59a",
+          "matches": true,
+          "name": "suporte.service"
+        }
+      ],
+      "matches": true
+    },
+    "productive_mutations": false,
+    "proposed_order": [
+      "fresh master HOLD review and exact SHA confirmation",
+      "fresh baseline/rollout readback and designated deployment lock",
+      "immutable artifacts and proportional current backups",
+      "Laya isolated service identity and warm readiness",
+      "NFOS profile-only pointer/config and worker-preserving native drain",
+      "Suporte consumer alignment without changing its source package",
+      "Vigilia only if its separately reviewed companion UI is included",
+      "native target readback, preserved workers/state, final receipt"
+    ],
+    "status": "PREPARED_ONLY"
+  },
+  "/srv/hermes/releases/system-one-preparation-rehearsal-b087eae99354.json": {
+    "action": "rehearsal",
+    "added": {
+      "module": "/opt/nfos-laya/preparation/9e2d5b1adaf17668e82a9faf1c46729597101491/hermes_cli/kanban_db.py",
+      "phase": "candidate",
+      "run": 2,
+      "task": "t_e9ed27ac"
+    },
+    "after": {
+      "config": "fa84e9177e8838c9f62b4a660ff041a9fab4ce8b961f0b26a7728bb7370a89d8",
+      "runtime": "cf330dc0b51e8467564f842ac251b37320a7f7b19c6448f21633774c547c7df4"
+    },
+    "at": 1789997452.8058913,
+    "before": {
+      "config": "25377ffbf979971aac339d1f85c3ac9361cc8e218e09bec05b06aac7d5984cde",
+      "runtime": "cf330dc0b51e8467564f842ac251b37320a7f7b19c6448f21633774c547c7df4"
+    },
+    "credentials": "synthetic marker only; productive credentials untouched",
+    "native_home": "isolated minimal executor fixture; productive config copied only for rollback comparison",
+    "new_project_preserved": true,
+    "old_runtime_readback": {
+      "additive_events_read": true,
+      "kanban_module": "/usr/local/lib/hermes-agent.git-6381c19b79/hermes_cli/kanban_db.py",
+      "mode": "sqlite-ro",
+      "reviewer_cases": 2,
+      "reviewer_module": "/usr/local/lib/hermes-agent.git-6381c19b79/hermes_cli/nfos_reviewer.py",
+      "runs": [
+        1,
+        2
+      ],
+      "tasks": [
+        "t_3fe0781b",
+        "t_e9ed27ac"
+      ]
+    },
+    "original": {
+      "module": "/usr/local/lib/hermes-agent.git-6381c19b79/hermes_cli/kanban_db.py",
+      "phase": "baseline",
+      "run": 1,
+      "task": "t_3fe0781b"
+    },
+    "preserved_sha256": {
+      "credential": "0f6a36ea0305ee0879e938d55f85b783861059e30e0005f5f1b0f98c29c2ad92",
+      "memory": "57f401e6811d2e0186acaf53b8cd4c1053d3f3f1824539f394a77455fc152cc3",
+      "sqlite": "a3503c2252e15ae4487f34862e542c5e031894b5ee843ac02730b6a693e502af"
+    },
+    "productive_mutations": false,
+    "rehearsal": "PASS",
+    "runtime_config_restored": true,
+    "scoped_config_keys": [
+      "system_one",
+      "laya",
+      "jev",
+      "decision_engines"
+    ],
+    "sqlite_restored": false,
+    "state_preserved": true,
+    "status": "PREPARED_ONLY",
+    "workspace": "/srv/hermes/releases/system-one-rehearsal-b087eae99354"
+  }
+}

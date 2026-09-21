@@ -146,3 +146,9 @@ def test_provider_key_uses_canonical_protected_file(task_context, monkeypatch):
     path.write_text('OPENROUTER_API_KEY=synthetic-key-only-for-test\n')
     assert engine._provider_key('OPENROUTER_API_KEY') == 'synthetic-key-only-for-test'
     assert 'synthetic-key-only-for-test' not in json.dumps(engine.system_one_status())
+
+
+def test_editing_laya_classes_preserves_jev_four_uses(task_context):
+    configure(classes=['budget', 'evidence'])
+    assert engine.settings(engine='laya')['uses'] == ['budget', 'evidence']
+    assert set(engine.settings(engine='jev')['uses']) == {'budget','spec','impediment','evidence'}

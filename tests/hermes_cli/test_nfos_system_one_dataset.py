@@ -2,6 +2,8 @@ import copy
 import json
 
 from hermes_cli import nfos_system_one_dataset as dataset
+from tests.hermes_cli.test_nfos_jev import http_fixture  # noqa: F401 -- pytest fixture
+from tests.hermes_cli.test_nfos_principal_acceptance import task_context  # noqa: F401 -- pytest fixture
 
 
 def case(project='one', at=10, lineage=None, task='t1'):
@@ -11,7 +13,7 @@ def case(project='one', at=10, lineage=None, task='t1'):
                    'input': {'objective': 'Leia somente. Não apague. contato owner@example.com token=private123',
                              'stage': 'impediment', 'budget_remaining': 8,
                              'recent_result': 'read failed', 'options': [{'id': 'read'}, {'id': 'fallback'}],
-                             'constraints': {'target': 'synthetic-target', 'authorization': 'read-only'},
+                             'constraints': {'target': 'synthetic-target', 'access': 'read-only'},
                              'evidence_refs': ['prior-read']},
                    'versions': {'policy': 'p1', 'model': 'multilingual', 'tokenizer': 'r1',
                                 'head': 'h1', 'schema': '1', 'action_catalog': 'native-probes-v1'}}
@@ -42,7 +44,7 @@ def test_snapshot_redaction_no_outcome_leak_and_no_reviewer_success():
     result = build([c], {'one/t1': review})
     row = result['examples'][0]
     assert 'Não apague' in row['inputs']['objective']
-    assert row['inputs']['constraints']['authorization'] == 'read-only'
+    assert row['inputs']['constraints']['access'] == 'read-only'
     assert 'private123' not in dataset.canonical(result) and 'owner@example.com' not in dataset.canonical(result)
     assert row['labels']['reviewer_preference']['option'] == 'read'
     assert row['labels']['policy_validity'] == 'VALID'
@@ -188,3 +190,32 @@ def test_actual_native_question_and_probe_artifact_format():
     bad_measurement = {**measured, 'probe': {**probe, 'url': 'https://other.invalid/health'}}
     wrong['records'][3]['data']['content'] = json.dumps(bad_measurement)
     assert build([wrong])['examples'][0]['labels']['verified_outcome'] == 'NOT_PROVEN'
+
+
+def test_legacy_secret_shapes_redacted_without_erasing_tokenizer_revision():
+    value = {'token': 'synthetic-token', 'refresh_token': 'synthetic-refresh',
+             'Authorization': 'Basic c3ludGhldGljOm9ubHk=', 'tokenizer': 'revision-052592',
+             'state': '-----BEGIN OPENSSH PRIVATE KEY-----\nSYNTHETIC-NOT-A-KEY\n-----END OPENSSH PRIVATE KEY-----',
+             'header_text': 'Authorization: Basic c3ludGhldGljOm9ubHk='}
+    cleaned = dataset.redact(value)
+    assert cleaned['tokenizer'] == 'revision-052592'
+    text = dataset.canonical(cleaned)
+    assert all(secret not in text for secret in ['synthetic-token', 'synthetic-refresh', 'c3ludGhldGljOm9ubHk', 'SYNTHETIC-NOT-A-KEY'])
+
+
+def test_learning_consumes_actual_native_opportunity(task_context, http_fixture, monkeypatch):
+    from hermes_cli import nfos_reviewer
+    from tests.hermes_cli.test_nfos_system_one_online import test_native_batch_collects_registered_probe_without_principal_repeat
+    test_native_batch_collects_registered_probe_without_principal_repeat(task_context, http_fixture, monkeypatch)
+    conn, _, _, _ = task_context
+    db = conn.execute('PRAGMA database_list').fetchone()[2]
+    opportunity = json.loads(conn.execute("SELECT payload FROM task_events WHERE kind='nfos_system_one_opportunity'").fetchone()[0])
+    cases = nfos_reviewer.collect(db, opportunity['project_id'], 0, 9999999999)
+    result = dataset.build_dataset(cases, train_before=9999999999, test_after=10000000000)
+    rows = [r for r in result['examples'] if not r['provenance']['legacy']]
+    assert rows and rows[0]['inputs']['state']['purpose'] == 'registered_measurement_selection'
+    assert rows[0]['decision']['actual_engine'] == 'laya'
+    assert rows[0]['labels']['policy_validity'] == 'VALID'
+    assert rows[0]['labels']['verified_outcome'] == 'PASS'
+    assert rows[0]['provenance']['verification_sources']
+    assert dataset.replay(result)['inference_calls'] == 0
