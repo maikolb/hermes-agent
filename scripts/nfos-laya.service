@@ -9,6 +9,7 @@ ExecStart=/opt/nfos-laya/venv/bin/python /opt/nfos-laya/releases/REVIEWED_GIT_SH
 Environment=HF_HUB_OFFLINE=1
 Environment=TRANSFORMERS_OFFLINE=1
 Environment=TOKENIZERS_PARALLELISM=false
+Environment=PYTHONPATH=/opt/nfos-laya/compat5
 CPUQuota=200%
 AllowedCPUs=6-7
 MemoryMax=6G

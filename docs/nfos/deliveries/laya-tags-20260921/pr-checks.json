@@ -1,0 +1,330 @@
+{
+  "headRefOid": "c0033d81ae74ca2be43eef615384234afaa18fb3",
+  "mergeStateStatus": "UNSTABLE",
+  "number": 231,
+  "reviewDecision": "",
+  "state": "OPEN",
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:34Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314712457",
+      "name": "Detect affected areas",
+      "startedAt": "2026-09-21T11:26:25Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:33Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594052267/job/106314708618",
+      "name": "Detect affected areas",
+      "startedAt": "2026-09-21T11:26:24Z",
+      "status": "COMPLETED",
+      "workflowName": "Docker Build, Test, and Publish"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:36Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594052312/job/106314710061",
+      "name": "Detect affected areas",
+      "startedAt": "2026-09-21T11:26:25Z",
+      "status": "COMPLETED",
+      "workflowName": "Nix flake check"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594052312/job/106314778995",
+      "name": "nix flake check",
+      "startedAt": "2026-09-21T11:26:37Z",
+      "status": "QUEUED",
+      "workflowName": "Nix flake check"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:33Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594052267/job/106314762753",
+      "name": "build",
+      "startedAt": "2026-09-21T11:26:33Z",
+      "status": "COMPLETED",
+      "workflowName": "Docker Build, Test, and Publish"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:54Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314712780",
+      "name": "OSV scan / Scan lockfiles / osv-scan",
+      "startedAt": "2026-09-21T11:26:25Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:33Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594052267/job/106314763266",
+      "name": "publish",
+      "startedAt": "2026-09-21T11:26:33Z",
+      "status": "COMPLETED",
+      "workflowName": "Docker Build, Test, and Publish"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:27:08Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314862287",
+      "name": "OSV scan / Emit review status",
+      "startedAt": "2026-09-21T11:26:57Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770375",
+      "name": "Python tests / Run tests",
+      "startedAt": "2026-09-21T11:26:37Z",
+      "status": "IN_PROGRESS",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:33Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594052267/job/106314763534",
+      "name": "merge",
+      "startedAt": "2026-09-21T11:26:33Z",
+      "status": "COMPLETED",
+      "workflowName": "Docker Build, Test, and Publish"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:27:08Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770384",
+      "name": "Python tests / e2e",
+      "startedAt": "2026-09-21T11:26:38Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:27:16Z",
+      "conclusion": "FAILURE",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770470",
+      "name": "OS-specific tests / macOS-only tests",
+      "startedAt": "2026-09-21T11:26:44Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770413",
+      "name": "OS-specific tests / Windows-only tests",
+      "startedAt": "2026-09-21T11:26:39Z",
+      "status": "IN_PROGRESS",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770340",
+      "name": "Python lints / ruff + ty diff",
+      "startedAt": "2026-09-21T11:26:37Z",
+      "status": "IN_PROGRESS",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:48Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770311",
+      "name": "Python lints / ruff enforcement (blocking)",
+      "startedAt": "2026-09-21T11:26:38Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:27:00Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770333",
+      "name": "Python lints / Windows footguns (blocking)",
+      "startedAt": "2026-09-21T11:26:38Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:34Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314771255",
+      "name": "JS & TS checks",
+      "startedAt": "2026-09-21T11:26:35Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:34Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770773",
+      "name": "Installer tests",
+      "startedAt": "2026-09-21T11:26:35Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:34Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770611",
+      "name": "Rust tests",
+      "startedAt": "2026-09-21T11:26:35Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:34Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314771469",
+      "name": "Desktop E2E",
+      "startedAt": "2026-09-21T11:26:35Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:34Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314771758",
+      "name": "Docs Site",
+      "startedAt": "2026-09-21T11:26:35Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:27:06Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314769958",
+      "name": "Deny unrelated histories / check-common-ancestor",
+      "startedAt": "2026-09-21T11:26:37Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:27:06Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314769957",
+      "name": "Check contributors / check-attribution",
+      "startedAt": "2026-09-21T11:26:37Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:34Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770650",
+      "name": "Check uv.lock",
+      "startedAt": "2026-09-21T11:26:35Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:44Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314769983",
+      "name": "Check no committed infographics / check-no-committed-infographics",
+      "startedAt": "2026-09-21T11:26:38Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:34Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314771240",
+      "name": "package-lock.json diff",
+      "startedAt": "2026-09-21T11:26:35Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:34Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314771486",
+      "name": "Lint Docker scripts",
+      "startedAt": "2026-09-21T11:26:35Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:27:06Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314769915",
+      "name": "Supply-chain scan / Scan PR for critical supply chain risks",
+      "startedAt": "2026-09-21T11:26:37Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:35Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314771444",
+      "name": "Supply-chain scan / Check PyPI dependency upper bounds",
+      "startedAt": "2026-09-21T11:26:35Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:27:13Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314917321",
+      "name": "Supply-chain scan / Aggregate review statuses",
+      "startedAt": "2026-09-21T11:27:09Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:27:14Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314952983",
+      "name": "Review label gate",
+      "startedAt": "2026-09-21T11:27:14Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-21T11:26:49Z",
+      "conclusion": "NEUTRAL",
+      "detailsUrl": "https://github.com/maikolb/hermes-agent/runs/106314823883",
+      "name": "osv-scanner",
+      "startedAt": "2026-09-21T11:26:46Z",
+      "status": "COMPLETED",
+      "workflowName": ""
+    }
+  ],
+  "url": "https://github.com/maikolb/hermes-agent/pull/231"
+}

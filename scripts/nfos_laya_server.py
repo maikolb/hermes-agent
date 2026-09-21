@@ -59,6 +59,9 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.threads <= 2:
         parser.error('threads must be 1 or 2')
+    import transformers
+    if transformers.__version__ != '5.0.0':
+        raise RuntimeError('Pinned multilingual checkpoint requires transformers==5.0.0; older versions misread local RoPE')
     import torch
     torch.set_num_threads(args.threads)
     torch.set_num_interop_threads(1)
@@ -76,6 +79,7 @@ def main():
     warm_seconds = time.monotonic() - warm_started
     identity = {'engine': 'laya', 'model': MODEL, 'model_revision': MODEL_REVISION,
                 'source_revision': SOURCE_REVISION, 'device': 'cpu', 'threads': args.threads,
+                'transformers_version': transformers.__version__,
                 'max_len': agent.cfg['max_len'], 'head_max_len': agent.cfg['head_max_len'],
                 'encoder_max_positions': agent.model.encoder.config.max_position_embeddings,
                 'load_seconds': round(load_seconds, 4), 'cold_inference_seconds': round(warm_seconds, 4)}
