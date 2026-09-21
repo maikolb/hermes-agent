@@ -25,14 +25,19 @@ USES = {'budget', 'spec', 'impediment', 'evidence'}
 def settings(conn=None, task_id=None, *, engine=None):
     # Read-only, including doctor: do not initialize profiles, DBs or jobs.
     import yaml
-    from hermes_constants import get_hermes_home
+    from hermes_cli.config import _expand_env_vars, get_config_path, read_user_config_raw
+    from hermes_cli.managed_scope import apply_managed_overlay
     selection = None
     try:
         if conn is not None and task_id is not None:
             from hermes_cli import nfos_delivery as d
             selection = d.decision_engine_selection(conn, task_id)
         engine = (selection or {}).get('engine', engine or 'jev')
-        doc = yaml.safe_load((get_hermes_home() / 'config.yaml').read_text(encoding='utf-8')) or {}
+        # Opt-in depends on explicit key presence. Read uncached and fail closed
+        # on malformed configuration, without initializing a profile or using LKG.
+        config_path = get_config_path()
+        config_path.stat()
+        doc = apply_managed_overlay(_expand_env_vars(read_user_config_raw(config_path)))
         delivery = ((doc.get('kanban') or {}).get('delivery') or {})
         if engine not in {'jev', 'laya'}:
             raise ValueError('invalid engine')

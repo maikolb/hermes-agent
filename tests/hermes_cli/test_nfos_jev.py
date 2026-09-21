@@ -92,6 +92,29 @@ def questions():
             'score': {'type': 'score', 'instructions': 'Rate suitability', 'criteria': ['low', 'high']}}
 
 
+def test_settings_missing_home_is_readonly(monkeypatch, tmp_path):
+    home = tmp_path / 'missing-profile'
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    result = jev.settings()
+    assert result['enabled'] is False
+    assert result['error'] == 'missing_config'
+    assert not home.exists()
+
+
+def test_settings_rereads_corrupt_config_without_last_known_good(monkeypatch, tmp_path):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    enable(monkeypatch, ['spec'])
+    assert jev.settings()['enabled'] is True
+    path = tmp_path / 'config.yaml'
+    path.write_text('kanban: [', encoding='utf-8')
+    before = sorted(p.name for p in tmp_path.iterdir())
+    result = jev.settings()
+    assert result['enabled'] is False
+    assert result['error'] == 'invalid_config'
+    assert path.read_text(encoding='utf-8') == 'kanban: ['
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
 @pytest.mark.parametrize('provider,path,model,key', [
     ('vercel', '/typesafe/v1/systemone', 'typesafe-ai/jev', 'AI_GATEWAY_API_KEY'),
     ('openrouter', '/api/v1/systemone', 'jev-1.13', 'OPENROUTER_API_KEY'),
