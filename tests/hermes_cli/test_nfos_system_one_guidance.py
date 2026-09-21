@@ -30,6 +30,10 @@ def test_no_probe_spec_can_guide_and_trace_actual_next_tool(task_context, http_f
     assert receipt, 'A SPEC without probes must still receive a permitted native route'
     assert json.loads(receipt)['system_one']['route'] == 'acquire_context'
     assert calls[0][1]['route']['criteria'].keys() == {'acquire_context', 'continue_worker', 'escalate_existing'}
+    # A real worker first reads its native card state before reading the source.
+    bookkeeping = [{'role': 'tool', 'name': 'terminal', 'tool_call_id': 'show-card', 'content': '{"status":"running"}'}]
+    assert engine.worker_material_opportunity(agent, bookkeeping, 1) is None
+    assert agent._nfos_system_one_pending is not None
     messages = [{'role': 'assistant', 'tool_calls': [{'id': 'read-next', 'function': {
         'name': 'read_file', 'arguments': json.dumps({'path': str(artifact)})}}]},
         {'role': 'tool', 'name': 'read_file', 'tool_call_id': 'read-next', 'content': artifact.read_text()}]
@@ -38,6 +42,7 @@ def test_no_probe_spec_can_guide_and_trace_actual_next_tool(task_context, http_f
     assert rows[-1]['observation'] == 'matching_tool_succeeded'
     assert rows[-1]['enforced'] is False and rows[-1]['principal_calls_saved'] == 0
     assert rows[-1]['tool_call_id'] == 'read-next'
+    assert rows[-1]['observed_after_batches'] == 2
     assert len(calls) == 1  # ordinary reads do not create a new decision
 
 

@@ -767,11 +767,18 @@ def _observe_guidance(agent, conn, task, messages, num_tools):
         observed.append({'tool': name, 'tool_call_id': m.get('tool_call_id'),
                          'arguments_sha256': _digest(args), 'result_sha256': _digest(content),
                          'tool_failed': failed})
+    pending['batches_seen'] = pending.get('batches_seen', 0) + 1
+    if not stale and not observed and pending['batches_seen'] < 3:
+        # Native bookkeeping (show/heartbeat/SPEC) can precede the recommended
+        # read/check. Observe a bounded window, without repeating the inference.
+        agent._nfos_system_one_pending = pending
+        return
     with d._kb().write_txn(conn):
         d._owned(conn, task.id, task.current_run_id)
         d._event(conn, task.id, task.current_run_id, 'nfos_system_one_guidance_consumed', {
             'opportunity_id': pending['opportunity_id'], 'route': pending['route'],
             'binding': pending['binding'], 'enforced': False, 'principal_calls_saved': 0,
+            'observed_after_batches': pending['batches_seen'],
             'acknowledgment': 'implicit_tool_match' if observed and not stale else 'not_observed',
             'observation': 'stale' if stale else 'matching_tool_failed' if any(x['tool_failed'] for x in observed)
                 else 'matching_tool_succeeded' if observed else 'different_tool_or_no_action',
