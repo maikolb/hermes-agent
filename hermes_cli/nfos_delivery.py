@@ -4107,10 +4107,18 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             task=_kb().get_task(conn,row['task_id'])
             if task.delivery_type=='code':
                 from hermes_cli.nfos_destination import destination, review_only, verified
-                if review_only(destination(conn,task.id)):
+                scope=destination(conn,task.id)
+                if review_only(scope):
                     # The review PR with green CI is the verified destination itself.
                     if not verified(conn,task.id,json.loads(get_workflow(conn,task.id)['state_json'])):
                         raise WorkflowError('Review needs the confirmed review PR with CI for the accepted candidate')
+                elif scope and scope.get('verification_operation')=='homolog':
+                    # A tested-environment destination has no PR by design; the
+                    # confirmed homolog receipt is what this review approves.
+                    if not all(identity.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')):
+                        raise WorkflowError('Review needs the actual homologated candidate and evidence')
+                    if not verified(conn,task.id,json.loads(get_workflow(conn,task.id)['state_json'])):
+                        raise WorkflowError('Review needs the confirmed homolog receipt for this candidate')
                 else:
                     if not all(identity.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')):
                         raise WorkflowError('Review needs the actual homologated candidate and evidence')
