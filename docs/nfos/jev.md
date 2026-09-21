@@ -19,6 +19,7 @@ kanban:
       uses: [budget, spec, impediment, evidence]
       timeout_seconds: 2
       min_confidence: 0.8
+      spec_review_mode: auxiliary  # primary habilita revisão primária somente da SPEC
 ~~~
 
 Para escolher outro provider, substitua os três campos correspondentes:
@@ -37,7 +38,7 @@ Erros, ausência de chave e baixa confiança preservam o caminho anterior.
 ## Entradas efetivas
 
 - save_spec seleciona P/M/G, grava a estimativa no card e aplica o limite sem ultrapassar o teto corrente. Preserva modelo/provider/effort fixados e consumo acumulado. Se reduzir o prazo expiraria o run atual, conserva o limite corrente. Não renova tentativas.
-- save_spec envia checagem por critério ao spec_review já existente. O Principal recebe lacunas por ID e utiliza o fluxo existente de changes. Jev não aprova spec nem adiciona revisão no modo que não a exige.
+- save_spec em auxiliary envia checagem por critério ao spec_review existente. Em primary, Jev pode aceitar a SPEC ou devolver changes diretamente ao worker, com autoria Jev e recibo canônico. Não adiciona revisão no modo que não a exige.
 - block_task tenta uma coleta útil antes de abrir impedimento ao Principal, depois das verificações de dependência/decisão pendente. Somente sondas sql/http/header já presentes na spec atual e permitidas pelo executor são candidatas. Executa run_probes, registra recibo e responde ao worker com blocked=false, status=running e resultado da coleta. Isso não afirma resolução do impedimento. Sem ação aplicável, segue a rota anterior.
 - save_report pode coletar uma medição faltante antes da conferência de evidências existente. Origem, destino, prova e aceitação continuam sob as regras nativas. PASS/FAIL de uma sonda vem de seu executor, nunca de Jev.
 
@@ -77,3 +78,19 @@ Branch: codex/nfos-jev-integration. Ref de retorno: baseline/nfos-before-jev-202
 - https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe
 
 Corpo model/state/questions e resposta answers/model/usage. Não usa chat/completions ou um SDK adicional.
+
+## Revisão primária da SPEC (opt-in)
+
+Configure enabled: true, uses contendo spec e spec_review_mode: primary no mesmo bloco kanban.delivery.jev. O default permanece auxiliary e Jev globalmente OFF. Provider, chave, endpoint, timeout e comandos status/smoke continuam os mesmos. status expõe spec_review_mode. smoke --live valida conectividade por pergunta sintética; não certifica qualidade da revisão primária.
+
+O runtime envia o texto integral do pedido original, a instrução atual, a spec integral, destino, restrições e limites. Há uma verificação explícita de cobertura do pedido independente dos critérios já listados, além de escopo, destino, restrições e cada critério. Anexo sem conteúdo revisável, informação removida por sanitização, contexto acima do limite, resposta parcial/inconclusiva ou contraditória não permitem aceite primário: segue o Principal atual. URLs sem credenciais são preservadas para comparar o destino; segredos não são enviados.
+
+- Accept: grava decisão spec_review resolvida por Jev, com provider/modelo real, identidade e recibo. require_spec libera a implementação dentro da autorização existente; ask reutiliza esse aceite e não convoca Principal para a mesma revisão.
+- Changes: grava resposta nativa com códigos de lacuna/critério convertidos em instruções fixas de correção. save-spec retorna spec_review e o show/wait expõe a mesma decisão; tentar avançar devolve a correção. Worker corrige e salva nova spec no mesmo card/run, sem Principal repassando texto. Informação investigável fica com o executor existente.
+- Fallback: indisponibilidade, baixa confiança ou avaliação insuficiente geram a revisão pendente normal do Principal. Não criam pergunta humana nem bloqueio Jev.
+
+O aceite só vale para a spec/instrução/pedido/run/claim/configuração atuais, com evento de origem correspondente. Alterar payload, recibo, modelo/configuração, credencial, modo ou desabilitar Jev invalida o aceite Jev. Cache auxiliar não vira aceite primário; chamadas repetidas sobre a revisão já decidida reutilizam a decisão legítima. Não há novo parâmetro genérico para um worker passar author=Jev ou forjar assessment.
+
+final_review, completion_ready, complete_accepted e as autorizações de produção, destruição, gasto e pins mantêm suas regras. Aceitar a SPEC não certifica resultado ou concede permissão nova. Inferência live e ganho operacional continuam não comprovados.
+
+Retorno desta evolução: baseline/nfos-before-jev-primary-spec aponta para a55fcc01438e146f352d753e7d12c079f2731077; a baseline anterior 6381c19 permanece preservada. Evidências e bundle novos são versionados, sem substituir os artefatos da primeira entrega.

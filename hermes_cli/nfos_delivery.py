@@ -3113,7 +3113,8 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                      (revision,int(time.time()),task_id))
         _event(conn,task_id,run_id,'nfos_spec_saved',{'revision':revision,'author':author,'evidence':saved_evidence})
         from hermes_cli.nfos_principal_review import required
-        if required(conn,task_id):
+        primary = required(conn,task_id) and nfos_jev.primary_enabled()
+        if required(conn,task_id) and not primary:
             ask_principal(conn,task_id,run_id,kind='spec_review',
                           question=('Validate the saved spec against the original request before implementation. '
                                     'Inspect jev_spec_check gaps and correct material omissions in this card; it is advisory, not approval.'
@@ -3121,6 +3122,11 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                           context={'jev_spec_check':jev['spec']['feedback']} if jev.get('spec') else {})
             conn.execute('UPDATE nfos_workflows SET next_action=? WHERE task_id=?',
                          ('Wait for Principal spec acceptance; revise the spec if changes are requested',task_id))
+    if primary:
+        decision = nfos_jev.primary_spec_review(conn, task_id, run_id)
+        if decision is None:
+            ask_principal(conn, task_id, run_id, kind='spec_review',
+                          question='Review current spec: primary Jev evaluation was unavailable or inconclusive', context={})
     return revision
 
 
@@ -3728,11 +3734,17 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
             latest=conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',
                                 (task_id,kind)).fetchone()
             from hermes_cli.nfos_principal_review import accepted
-            if (latest and latest['status']=='resolved' and latest['author']=='Principal'
+            from hermes_cli.nfos_jev import primary_decision_current
+            if (latest and latest['status']=='resolved'
+                    and (latest['author']=='Principal' or (kind=='spec_review' and primary_decision_current(conn,latest)))
                     and latest['action']=='continue'
                     and json.loads(latest['context']).get('acceptance_identity')==context['acceptance_identity']
                     and accepted(conn,task_id,kind)):
                 return latest['id']
+            if latest and kind == 'spec_review' and latest['action'] == 'changes':
+                from hermes_cli.nfos_jev import primary_decision_current
+                if primary_decision_current(conn, latest):
+                    return latest['id']
             if (latest and (latest['status']=='pending' or
                             (latest['author']=='NFOS automation' and json.loads(latest['context']).get('incomplete_result')))
                     and json.loads(latest['context']).get('acceptance_identity')==context['acceptance_identity']):
@@ -4333,9 +4345,11 @@ def _owner_guidance_production_order(conn, task, scope):
         "AND json_extract(e.payload,'$.owner_guidance')=1 ORDER BY e.id DESC",
         (task.id,)).fetchall()
     from hermes_cli.nfos_principal_review import accepted
-    spec_review = conn.execute("SELECT status,action,author FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (task.id,)).fetchone()
+    from hermes_cli.nfos_jev import primary_decision_current
+    spec_review = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (task.id,)).fetchone()
     semantic_acceptance = bool(spec_review and spec_review['status']=='resolved'
-        and spec_review['action']=='continue' and spec_review['author']=='Principal'
+        and spec_review['action']=='continue'
+        and (spec_review['author']=='Principal' or primary_decision_current(conn,spec_review))
         and accepted(conn,task.id,'spec_review'))
     def bound_message(row):
         ctx = json.loads(row['context']); message_id = str((ctx.get('source') or {}).get('message_id') or '')
@@ -4953,6 +4967,10 @@ def main():
             result={'task_id':args.task,'status':'done','disposition':'cancelled_by_owner','functional_delivery':False}
         elif args.action=='save-spec':
             result={'revision':save_spec(conn,args.task,args.run,payload,author=args.author,evidence=evidence)}
+            from hermes_cli.nfos_jev import primary_decision_current
+            current_review = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (args.task,)).fetchone()
+            if current_review and primary_decision_current(conn, current_review):
+                result['spec_review'] = {k: current_review[k] for k in ('id','author','action','answer','status')}
         elif args.action=='save-report':
             save_report(conn,args.task,args.run,payload);result={'saved':True}
         elif args.action=='reconcile-spec':

@@ -390,14 +390,19 @@ def accepted(conn, task_id, kind):
     # A newer rejection/pending review revokes the former acceptance.
     row = conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',
                        (task_id, kind)).fetchone()
+    from hermes_cli.nfos_jev import primary_decision_current
     return bool(row and row['status'] == 'resolved' and row['action'] == 'continue'
-                and row['author'] == 'Principal'
+                and (row['author'] == 'Principal' or (kind == 'spec_review' and primary_decision_current(conn, row)))
                 and json.loads(row['context']).get('acceptance_identity') == current
                 and json.loads(row['context']).get('assessment'))
 
 
 def require_spec(conn, task_id):
     if not accepted(conn, task_id, 'spec_review'):
+        from hermes_cli.nfos_jev import primary_decision_current
+        row = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (task_id,)).fetchone()
+        if row and row['action'] == 'changes' and primary_decision_current(conn, row):
+            raise d.WorkflowError(row['answer'])
         raise d.WorkflowError('Principal spec acceptance is pending; ask kind=spec_review and wait before implementation')
 
 
