@@ -1,11 +1,45 @@
 """A worker's persisted question reaches the Principal without ending its run."""
 import asyncio
 import os
+import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import nfos_delivery as delivery
 from tests.gateway.test_kanban_notifier import _make_runner,_run_one_notifier_tick
 from tests.gateway.test_kanban_notifier_durable import RecordingAdapter
+
+
+@pytest.mark.parametrize('card_count', [1, 2])
+@pytest.mark.parametrize('request_review', [True, False])
+def test_principal_request_survives_progress_in_same_poll(tmp_path, monkeypatch, card_count, request_review):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'kanban.db'))
+    monkeypatch.setattr('hermes_cli.config.load_config', lambda: {'kanban': {'agent_wake_on_events': True}})
+    tasks = []
+    decisions = []
+    for index in range(card_count):
+      with kb.connect_closing() as conn:
+        rid = delivery.receive_request(conn, source={'platform': 'telegram', 'chat_id': 'test', 'thread_id': str(8 + index), 'message_id': str(1 + index), 'chat_type': 'group'},
+                                       text='Audit', project={'profile': 'default', 'delivery_type': 'report'})
+        request = delivery.reserve_request(conn, capacity=2)
+        task = delivery.bootstrap_card(conn, rid, request['claim_token'], pid=os.getpid())
+        delivery.save_spec(conn, task.id, task.current_run_id,
+                           {'goal': 'Audit', 'criteria': [{'id': 'C1', 'text': 'Check count'}], 'steps': ['Count'], 'delivery_type': 'report'},
+                           author='Claude TL', evidence={'session': 'synthetic-review-fixture'})
+        if request_review:
+            decisions.append(delivery.ask_principal(conn, task.id, task.current_run_id, kind='spec_review', question='Review the spec', context={}))
+        delivery._event(conn, task.id, task.current_run_id, 'nfos_progress', {'stage': 'analysis'})
+        tasks.append(task)
+    adapter = RecordingAdapter()
+    adapter.fail = False
+    asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
+    assert len(adapter.handled) == (card_count if request_review else 0)
+    assert all(' pending' in event.text for event in adapter.handled)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
+    assert len(adapter.handled) == (card_count if request_review else 0)
+    with kb.connect_closing() as conn:
+        assert all(delivery.get_decision(conn, decision)['status'] == 'pending' for decision in decisions)
+        assert all(kb.get_task(conn, task.id).worker_pid == os.getpid() for task in tasks)
 
 
 def test_principal_wake_survives_failed_acceptance_and_keeps_same_worker(tmp_path,monkeypatch):
