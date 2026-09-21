@@ -1,0 +1,31 @@
+{
+  "authorized_budget": "2.88",
+  "provider_response_billed": "0.001944012",
+  "key_usage_delta": "0.001944012",
+  "account_usage_delta": "0.001944012",
+  "remaining_authorized": "2.878055988",
+  "account_credit_remaining": "2.878489693",
+  "provider_requests": 35,
+  "initial": {
+    "key_usage": "0",
+    "key_limit": null,
+    "total_credits": "14",
+    "total_usage": "11.119566295"
+  },
+  "final": {
+    "key_usage": "0.001944012",
+    "key_limit": null,
+    "total_credits": "14",
+    "total_usage": "11.121510307"
+  },
+  "no_additional_inference": true,
+  "accounting_note": "One native harness attempt misrouted a Laya call to unavailable Windows loopback; no OpenRouter request for that entry. Its conservative reservation remains in raw ledger but is excluded from actual provider billing. The paid endpoint is now allowlisted before credential access and tested.",
+  "local_non_provider_entries": [
+    {
+      "label": "native-http-7",
+      "endpoint": "http://127.0.0.1:18991/systemone",
+      "http_status": null,
+      "reserved": "0.003688000"
+    }
+  ]
+}

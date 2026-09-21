@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "VisibleWindows": 0,
+  "output": "{\"args\": [\"C:/Users/maiko/AppData/Local/hermes/cache/nfos-jev/implementation/test-venv/Scripts/python.exe\", \"-B\", \"C:/Users/maiko/AppData/Local/hermes/cache/nfos-jev/implementation/jev-laya-evaluation/live_eval.py\", \"native\"], \"cwd\": \"C:/Users/maiko/Projetos/NFOS-Jev-Integration/hermes-agent\", \"exit\": 0, \"stdout\": \"{\\\"native\\\": \\\"valid\\\", \\\"route\\\": \\\"existing_principal_pending\\\", \\\"live_calls\\\": 1, \\\"accepted\\\": false}\\r\\n{\\\"native\\\": \\\"changes\\\", \\\"route\\\": \\\"same_worker_correct_spec\\\", \\\"live_calls\\\": 1, \\\"accepted\\\": false}\\r\\n{\\\"native\\\": \\\"inconclusive\\\", \\\"route\\\": \\\"existing_principal_pending\\\", \\\"live_calls\\\": 1, \\\"accepted\\\": false}\\r\\n{\\\"native\\\": \\\"untagged\\\", \\\"route\\\": \\\"existing_principal_pending\\\", \\\"live_calls\\\": 0, \\\"accepted\\\": false}\\r\\n{\\\"native\\\": \\\"laya_excluded\\\", \\\"route\\\": \\\"existing_principal_pending\\\", \\\"live_calls\\\": 0, \\\"accepted\\\": false}\\r\\n\", \"stderr\": \"\"}\n"
+}

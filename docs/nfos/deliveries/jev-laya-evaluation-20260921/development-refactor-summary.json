@@ -1,0 +1,943 @@
+{
+  "split": "development",
+  "rows": [
+    {
+      "id": "d_valid",
+      "expected": "accept",
+      "http_status": 200,
+      "seconds": 0.39,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1293,
+        "output_tokens": 256,
+        "cost": 5.4306e-05
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.93,
+        "scope": 0.98,
+        "destination": 1,
+        "constraints": 0.98,
+        "verdict": 0.75,
+        "criterion_0": 0.92
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "continue",
+        []
+      ],
+      "engine": "jev",
+      "input_sha256": "57d9b3a4084b3e058734d14a6d5543ad3f16d5dfa6509793b5df41c557780968",
+      "receipt": "development-refactor-d_valid-jev.json"
+    },
+    {
+      "id": "d_valid",
+      "expected": "accept",
+      "http_status": 200,
+      "seconds": 8.1315,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1715,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.1842,
+        "scope": 0.2567,
+        "destination": 0.2065,
+        "constraints": 0.2068,
+        "verdict": 0.3653,
+        "criterion_0": 0.2025
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "continue",
+        []
+      ],
+      "engine": "laya",
+      "input_sha256": "57d9b3a4084b3e058734d14a6d5543ad3f16d5dfa6509793b5df41c557780968",
+      "receipt": "development-refactor-d_valid-laya.json"
+    },
+    {
+      "id": "d_missing",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 0.421,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1261,
+        "output_tokens": 256,
+        "cost": 5.2962e-05
+      },
+      "choices": {
+        "coverage": "missing",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "changes",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.99,
+        "scope": 0.81,
+        "destination": 1,
+        "constraints": 0.47,
+        "verdict": 0.7,
+        "criterion_0": 0.8
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "changes",
+        [
+          {
+            "code": "coverage",
+            "text": "Inclua os requisitos omitidos do pedido original e da instrução atual na spec e em seus critérios."
+          }
+        ]
+      ],
+      "engine": "jev",
+      "input_sha256": "0b1b5cbda07293440531e1584dfb5dc7ac427753ec82419eaadb8d564f11eb7e",
+      "receipt": "development-refactor-d_missing-jev.json"
+    },
+    {
+      "id": "d_missing",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 3.9961,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1547,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.126,
+        "scope": 0.1411,
+        "destination": 0.0864,
+        "constraints": 0.0887,
+        "verdict": 0.3227,
+        "criterion_0": 0.0945
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "continue",
+        []
+      ],
+      "engine": "laya",
+      "input_sha256": "0b1b5cbda07293440531e1584dfb5dc7ac427753ec82419eaadb8d564f11eb7e",
+      "receipt": "development-refactor-d_missing-laya.json"
+    },
+    {
+      "id": "d_prohibition",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 0.375,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1276,
+        "output_tokens": 258,
+        "cost": 5.3592e-05
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "expansion",
+        "destination": "aligned",
+        "constraints": "conflict",
+        "verdict": "changes",
+        "criterion_0": "conflict"
+      },
+      "confidence": {
+        "coverage": 0.37,
+        "scope": 0.98,
+        "destination": 0.73,
+        "constraints": 1,
+        "verdict": 0.99,
+        "criterion_0": 0.95
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "changes",
+        [
+          {
+            "code": "scope",
+            "text": "Remova o trabalho que amplia o escopo solicitado."
+          },
+          {
+            "code": "constraints",
+            "text": "Corrija a spec para preservar as restrições e os limites do pedido."
+          },
+          {
+            "code": "conflict",
+            "criterion": "C1",
+            "text": "Corrija o conflito com o pedido em C1."
+          }
+        ]
+      ],
+      "engine": "jev",
+      "input_sha256": "bbc721a1d2d41120d77b5befa934e75f88e438c8e71c2170607e7adfdf73746d",
+      "receipt": "development-refactor-d_prohibition-jev.json"
+    },
+    {
+      "id": "d_prohibition",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 4.7522,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1601,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.1545,
+        "scope": 0.0668,
+        "destination": 0.0161,
+        "constraints": 0.115,
+        "verdict": 0.1834,
+        "criterion_0": 0.0527
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "continue",
+        []
+      ],
+      "engine": "laya",
+      "input_sha256": "bbc721a1d2d41120d77b5befa934e75f88e438c8e71c2170607e7adfdf73746d",
+      "receipt": "development-refactor-d_prohibition-laya.json"
+    },
+    {
+      "id": "d_destination",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 0.375,
+      "outcome": "changes",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1327,
+        "output_tokens": 259,
+        "cost": 5.5734e-05
+      },
+      "choices": {
+        "coverage": "missing",
+        "scope": "expansion",
+        "destination": "conflict",
+        "constraints": "conflict",
+        "verdict": "changes",
+        "criterion_0": "conflict"
+      },
+      "confidence": {
+        "coverage": 0.92,
+        "scope": 0.94,
+        "destination": 1,
+        "constraints": 0.96,
+        "verdict": 0.97,
+        "criterion_0": 0.96
+      },
+      "engine": "jev",
+      "input_sha256": "7babacbdac6c0fc599f36d618a951d147a9d8eafda65bf292b52a3ae63fd4186",
+      "receipt": "development-refactor-d_destination-jev.json"
+    },
+    {
+      "id": "d_destination",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 10.4128,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1979,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "conflict",
+        "constraints": "preserved",
+        "verdict": "changes",
+        "criterion_0": "unverifiable"
+      },
+      "confidence": {
+        "coverage": 0.0957,
+        "scope": 0.1766,
+        "destination": 0.0103,
+        "constraints": 0.0806,
+        "verdict": 0.0559,
+        "criterion_0": 0.0301
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "changes",
+        [
+          {
+            "code": "destination",
+            "text": "Corrija o destino da spec para corresponder ao pedido original."
+          },
+          {
+            "code": "unverifiable",
+            "criterion": "C1",
+            "text": "Defina um resultado verificável para C1."
+          }
+        ]
+      ],
+      "engine": "laya",
+      "input_sha256": "7babacbdac6c0fc599f36d618a951d147a9d8eafda65bf292b52a3ae63fd4186",
+      "receipt": "development-refactor-d_destination-laya.json"
+    },
+    {
+      "id": "d_negation",
+      "expected": "accept",
+      "http_status": 200,
+      "seconds": 0.406,
+      "outcome": "accept",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1284,
+        "output_tokens": 256,
+        "cost": 5.3928e-05
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.97,
+        "scope": 0.98,
+        "destination": 1,
+        "constraints": 0.99,
+        "verdict": 0.86,
+        "criterion_0": 0.98
+      },
+      "engine": "jev",
+      "input_sha256": "1101e5044cccf998a6b34b136c78a414e1551a9b4acc0f4fee34d81ccf647267",
+      "receipt": "development-refactor-d_negation-jev.json"
+    },
+    {
+      "id": "d_negation",
+      "expected": "accept",
+      "http_status": 200,
+      "seconds": 5.3241,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1679,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "unverifiable"
+      },
+      "confidence": {
+        "coverage": 0.143,
+        "scope": 0.1905,
+        "destination": 0.0035,
+        "constraints": 0.2834,
+        "verdict": 0.2162,
+        "criterion_0": 0.0846
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": null,
+      "engine": "laya",
+      "input_sha256": "1101e5044cccf998a6b34b136c78a414e1551a9b4acc0f4fee34d81ccf647267",
+      "receipt": "development-refactor-d_negation-laya.json"
+    },
+    {
+      "id": "d_incomplete",
+      "expected": "inconclusive",
+      "http_status": 200,
+      "seconds": 0.39,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1228,
+        "output_tokens": 261,
+        "cost": 5.1576e-05
+      },
+      "choices": {
+        "coverage": "partial",
+        "scope": "uncertain",
+        "destination": "aligned",
+        "constraints": "uncertain",
+        "verdict": "changes",
+        "criterion_0": "unverifiable"
+      },
+      "confidence": {
+        "coverage": 0.59,
+        "scope": 0.48,
+        "destination": 0.98,
+        "constraints": 0.43,
+        "verdict": 0.42,
+        "criterion_0": 0.92
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": null,
+      "engine": "jev",
+      "input_sha256": "ba4026e8a1e218250c29f1ca65e1afeb67bb4527f60a901a94b3814d7c558e13",
+      "receipt": "development-refactor-d_incomplete-jev.json"
+    },
+    {
+      "id": "d_incomplete",
+      "expected": "inconclusive",
+      "http_status": 200,
+      "seconds": 5.6403,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1361,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "uncertain",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "unverifiable"
+      },
+      "confidence": {
+        "coverage": 0.28,
+        "scope": 0.1036,
+        "destination": 0.0079,
+        "constraints": 0.1559,
+        "verdict": 0.2857,
+        "criterion_0": 0.0452
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": null,
+      "engine": "laya",
+      "input_sha256": "ba4026e8a1e218250c29f1ca65e1afeb67bb4527f60a901a94b3814d7c558e13",
+      "receipt": "development-refactor-d_incomplete-laya.json"
+    },
+    {
+      "id": "d_long",
+      "expected": "accept",
+      "http_status": 200,
+      "seconds": 0.422,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 3869,
+        "output_tokens": 256,
+        "cost": 0.000162498
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.92,
+        "scope": 0.93,
+        "destination": 1,
+        "constraints": 0.95,
+        "verdict": 0.66,
+        "criterion_0": 0.84
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "continue",
+        []
+      ],
+      "engine": "jev",
+      "input_sha256": "4675217d1fbc42f1cbd3ffaf81cdabe4faba50116b4ac5a3bb51b186bb048c22",
+      "receipt": "development-refactor-d_long-jev.json"
+    },
+    {
+      "id": "d_long",
+      "expected": "accept",
+      "http_status": 422,
+      "seconds": 0.0946,
+      "outcome": "inconclusive",
+      "reason": "context_too_large",
+      "engine": "laya",
+      "input_sha256": "4675217d1fbc42f1cbd3ffaf81cdabe4faba50116b4ac5a3bb51b186bb048c22",
+      "receipt": "development-refactor-d_long-laya.json"
+    },
+    {
+      "id": "d_original_counterexample",
+      "expected": "ler",
+      "http_status": 200,
+      "seconds": 0.422,
+      "outcome": "ler",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 342,
+        "output_tokens": 32,
+        "cost": 1.4364e-05
+      },
+      "choices": {
+        "acao": "ler"
+      },
+      "confidence": {
+        "acao": 1
+      },
+      "engine": "jev",
+      "input_sha256": "60e86fb5af5a22c9c9ec22f2b77ba121d58c26d52b29adf7588f75ff4bc9f5c1",
+      "receipt": "development-refactor-d_original_counterexample-jev.json"
+    },
+    {
+      "id": "d_original_counterexample",
+      "expected": "ler",
+      "http_status": 200,
+      "seconds": 0.3739,
+      "outcome": "apagar",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 51,
+        "output_tokens": 0
+      },
+      "choices": {
+        "acao": "apagar"
+      },
+      "confidence": {
+        "acao": 0.9227
+      },
+      "engine": "laya",
+      "input_sha256": "60e86fb5af5a22c9c9ec22f2b77ba121d58c26d52b29adf7588f75ff4bc9f5c1",
+      "receipt": "development-refactor-d_original_counterexample-laya.json"
+    }
+  ],
+  "cost": {
+    "budget": "2.88",
+    "initial": {
+      "key_usage": "0",
+      "key_limit": null,
+      "total_credits": "14",
+      "total_usage": "11.119566295"
+    },
+    "requests": [
+      {
+        "label": "first-systemone-smoke",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.003688000",
+        "before": {
+          "key_usage": "0",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119566295"
+        },
+        "pending": false,
+        "payload_sha256": "ff1fdc2b82b6f5f83a878ae4d7b895e5f6e6fc641700c5af20c7e755cea0daf7",
+        "after": {
+          "key_usage": "0",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119566295"
+        },
+        "billed": "1.4364e-05",
+        "http_status": 200
+      },
+      {
+        "label": "legacy-model-id-probe",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.003688000",
+        "before": {
+          "key_usage": "1.4364e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119580659"
+        },
+        "pending": false,
+        "payload_sha256": "5ada9251db64c11ea5acf8f405a94148f4db8d7e306453872c7495334743242b",
+        "after": {
+          "key_usage": "1.4364e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119580659"
+        },
+        "billed": "1.4364e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_valid-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "1.4364e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119580659"
+        },
+        "pending": false,
+        "payload_sha256": "2e6648b8ad62333881e03d9c40c37e22642b3248d1abdda22e878247b610fb59",
+        "after": {
+          "key_usage": "2.8728e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119595023"
+        },
+        "billed": "4.809e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_missing-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "2.8728e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119595023"
+        },
+        "pending": false,
+        "payload_sha256": "2d789968bcb2a092bb156c9549f0b62204e6fbb83cc24b2b8895fc9f1e77284b",
+        "after": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "billed": "4.6746e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_prohibition-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "pending": false,
+        "payload_sha256": "42ba3ef7f70585f3b7371cae9ab1d6aa9f3a28eb0a2d8bddc82e03c81c14e859",
+        "after": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "billed": "4.7376e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_destination-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "pending": false,
+        "payload_sha256": "686d8d2854f23a1b86cd9f9e075bfb009766ed37c2944d15c0e8c28a7e501e7a",
+        "after": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "billed": "4.9518e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_negation-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "pending": false,
+        "payload_sha256": "2f86ca23c16bba06c305407519fb7c1ce7e634ad618923813cf79fb0cb84e612",
+        "after": {
+          "key_usage": "0.000220458",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119786753"
+        },
+        "billed": "4.7712e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_incomplete-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.000220458",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119786753"
+        },
+        "pending": false,
+        "payload_sha256": "c082f59bdfc74704ebc19c58679f17604e6ce9179f7c1ee4f865a2353df65a58",
+        "after": {
+          "key_usage": "0.000220458",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119786753"
+        },
+        "billed": "4.536e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_long-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.000220458",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119786753"
+        },
+        "pending": false,
+        "payload_sha256": "900af19c449e259f8bf2e1f608efd32e8e47be643e79943e6ca905f2b8b97aea",
+        "after": {
+          "key_usage": "0.000220458",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119786753"
+        },
+        "billed": "0.000156282",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_original_counterexample-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.003688000",
+        "before": {
+          "key_usage": "0.00026817",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119834465"
+        },
+        "pending": false,
+        "payload_sha256": "ff1fdc2b82b6f5f83a878ae4d7b895e5f6e6fc641700c5af20c7e755cea0daf7",
+        "after": {
+          "key_usage": "0.00026817",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119834465"
+        },
+        "billed": "1.4364e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-refactor-d_valid-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.00026817",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119834465"
+        },
+        "pending": false,
+        "payload_sha256": "ccf7f17bb60d55ecc55240029a86b7cd0f283d72fc617f9991b6a2690ad27c2e",
+        "after": {
+          "key_usage": "0.000484176",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120050471"
+        },
+        "billed": "5.4306e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-refactor-d_missing-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.000484176",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120050471"
+        },
+        "pending": false,
+        "payload_sha256": "31e82c5286358eb99bb58515f7d22361b6fe29641e3650e64ae1d570223d5b2c",
+        "after": {
+          "key_usage": "0.000484176",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120050471"
+        },
+        "billed": "5.2962e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-refactor-d_prohibition-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.000484176",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120050471"
+        },
+        "pending": false,
+        "payload_sha256": "3bc61a2ee052321d7112e217b7332a9be442b71ee9256a70d005c60ecbfee85e",
+        "after": {
+          "key_usage": "0.000538482",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120104777"
+        },
+        "billed": "5.3592e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-refactor-d_destination-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.000538482",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120104777"
+        },
+        "pending": false,
+        "payload_sha256": "cf6450f03abc237aac9dc9b8e2ad06239d9d39f59afc1a8bcc8e28e7e8ad4faa",
+        "after": {
+          "key_usage": "0.000538482",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120104777"
+        },
+        "billed": "5.5734e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-refactor-d_negation-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.000538482",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120104777"
+        },
+        "pending": false,
+        "payload_sha256": "e778deeefb7326b2b70901c620acecc787d54665e1f344b118a59028caf8bc67",
+        "after": {
+          "key_usage": "0.00070077",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120267065"
+        },
+        "billed": "5.3928e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-refactor-d_incomplete-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.00070077",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120267065"
+        },
+        "pending": false,
+        "payload_sha256": "cd47d3a9ff4def4e3e7bb4772b5b14f03f9c50d6514f92f8e3eb477a30423855",
+        "after": {
+          "key_usage": "0.00070077",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120267065"
+        },
+        "billed": "5.1576e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-refactor-d_long-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.00070077",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120267065"
+        },
+        "pending": false,
+        "payload_sha256": "f74a77c5b4556f38e43a7802a41f14754bba566d642a603c72b0b3b87d1255d8",
+        "after": {
+          "key_usage": "0.00070077",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120267065"
+        },
+        "billed": "0.000162498",
+        "http_status": 200
+      },
+      {
+        "label": "development-refactor-d_original_counterexample-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.003688000",
+        "before": {
+          "key_usage": "0.00070077",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120267065"
+        },
+        "pending": false,
+        "payload_sha256": "ff1fdc2b82b6f5f83a878ae4d7b895e5f6e6fc641700c5af20c7e755cea0daf7",
+        "after": {
+          "key_usage": "0.000806274",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.120372569"
+        },
+        "billed": "1.4364e-05",
+        "http_status": 200
+      }
+    ],
+    "latest": {
+      "key_usage": "0.000806274",
+      "key_limit": null,
+      "total_credits": "14",
+      "total_usage": "11.120372569"
+    },
+    "response_billed_total": "0.000983136",
+    "key_usage_delta": "0.000806274",
+    "account_usage_delta": "0.000806274",
+    "remaining_authorized": "2.879016864"
+  }
+}

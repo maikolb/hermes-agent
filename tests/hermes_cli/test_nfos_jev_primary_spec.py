@@ -15,6 +15,19 @@ def latest(conn, task):
     return dict(conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (task.id,)).fetchone())
 
 
+def test_verified_inference_status_tracks_current_credential(task_context, http_fixture, monkeypatch):
+    conn, task, spec, _ = task_context
+    enable(monkeypatch, ['spec'], spec_review_mode='primary')
+    save(conn, task, spec)
+    provider = jev.system_one_status()['providers']['jev']
+    assert provider['authenticated'] and provider['inference_tested']
+    assert provider['availability'] == 'inference_verified'
+    monkeypatch.setenv('TYPESAFE_API_KEY', 'different-synthetic-credential')
+    provider = jev.system_one_status()['providers']['jev']
+    assert not provider['authenticated'] and not provider['inference_tested']
+    assert provider['availability'] == 'key_present_not_verified'
+
+
 def test_primary_accept_continues_without_principal(task_context, http_fixture, monkeypatch):
     conn, task, spec, _ = task_context
     enable(monkeypatch, ['spec'], spec_review_mode='primary')
