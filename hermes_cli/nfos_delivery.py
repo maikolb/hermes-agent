@@ -3072,6 +3072,8 @@ def lesson_command(conn, payload, *, author):
 
 
 def save_spec(conn, task_id, run_id, spec, *, author, evidence):
+    from hermes_cli.nfos_jev import require_worker_action
+    require_worker_action(conn, task_id)
     if 'delivery_destination' in spec:
         from hermes_cli.nfos_destination import validate
         validate(spec['delivery_destination'])
@@ -3181,6 +3183,8 @@ def _scope_needs_new_spec(workflow):
 
 
 def advance(conn, task_id, run_id, stage, *, next_action, state=None):
+    from hermes_cli.nfos_jev import require_worker_action
+    require_worker_action(conn, task_id)
     if stage not in {'analysis','implement','homolog','review','publish','verify','report'}:
         raise WorkflowError('Unknown delivery stage')
     with _kb().write_txn(conn):
@@ -3198,6 +3202,7 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
         updates.pop('task_partition',None)  # Only Principal decisions own this receipt.
         updates.pop('worker_escalation',None)  # Only reviewed rework and actual dispatch own the tier.
         updates.pop('decision_engine_selection',None)  # Only preserved user intake owns engine selection.
+        updates = {key: value for key, value in updates.items() if not key.startswith('system_one_')}
         saved=json.loads(wf['state_json']);saved.update(updates)
         if stage=='implement' and wf['stage'] in {'analysis','spec'} and not json.loads(wf['state_json']).get('task_partition'):
             partition=conn.execute("SELECT status,action FROM nfos_decisions WHERE task_id=? AND kind='additional_tasks' ORDER BY rowid DESC LIMIT 1",
@@ -3499,6 +3504,8 @@ def _check_reclassification(conn, task_id, report):
 
 
 def save_report(conn, task_id, run_id, report):
+    from hermes_cli.nfos_jev import require_worker_action
+    require_worker_action(conn, task_id, transition='report')
     if conn.in_transaction:
         raise WorkflowError('Report evidence must be read outside a write transaction')
     task=_owned(conn,task_id,run_id)
@@ -4592,6 +4599,8 @@ def _record_mode_effect_checks(conn, task_id, candidate):
     return None
 
 def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
+    from hermes_cli.nfos_jev import require_worker_action
+    require_worker_action(conn, task_id)
     if operation not in {'homolog','pr','merge','deploy','staging_pr','staging_merge','repair'} or not target or not candidate:  # RESULT_PROBE_20260911: repair = mutação de dado
         raise WorkflowError('External effect needs operation, destination and exact candidate')
     with _kb().write_txn(conn):

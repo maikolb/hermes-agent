@@ -836,6 +836,19 @@ def _run_agent_tool_execution_middleware(
         elif function_name == "skill_manage":
             agent._iters_since_skill = 0
 
+        # Shared sequential/concurrent boundary, after argument rewrites and
+        # native permissions, before any canonical tool side effect.
+        system_one_ticket = None
+        if os.environ.get('HERMES_KANBAN_TASK'):
+            from hermes_cli.nfos_jev import before_worker_tool
+            block_message, system_one_ticket = before_worker_tool(
+                agent, function_name, final_args, tool_call_id)
+            if block_message:
+                _advance_start_order()
+                state['blocked'] = True
+                state['dispatched'] = False
+                return json.dumps({'error': block_message, 'system_one_blocked': True})
+
         _advance_start_order(_begin)
 
         # Keep the gateway turn-inactivity watchdog from abandoning a turn
@@ -854,8 +867,15 @@ def _run_agent_tool_execution_middleware(
         )
         _hb_thread.start()
         try:
-            return execute(final_args)
+            result = execute(final_args)
+            if system_one_ticket:
+                from hermes_cli.nfos_jev import after_worker_tool
+                after_worker_tool(system_one_ticket, result)
+            return result
         except BaseException:
+            if system_one_ticket:
+                from hermes_cli.nfos_jev import after_worker_tool
+                after_worker_tool(system_one_ticket, None, failed=True)
             # The handler may have committed an external effect before
             # raising.  Persist uncertainty immediately; a hard process exit
             # leaves the pre-effect reservation for fresh-process restore.

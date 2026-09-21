@@ -12,42 +12,16 @@ from tests.hermes_cli.test_nfos_laya import select_laya
 
 
 def test_no_probe_spec_can_guide_and_trace_actual_next_tool(task_context, http_fixture, monkeypatch):
-    conn, task, spec, artifact = task_context
-    accept(conn, task, 'spec_review')
-    engine.configure_system_one({'mode': 'active', 'engine': 'laya',
-        'classes': ['budget', 'impediment', 'evidence'], 'max_decisions_per_run': 8})
-    select_laya(conn, task, http_fixture, ['budget', 'impediment', 'evidence'])
-    monkeypatch.setenv('HERMES_KANBAN_TASK', task.id)
-    calls = []
-    def reply(cfg, state, questions):
-        calls.append((state, questions))
-        return {'answers': {'route': {'type': 'choice', 'choice': 'acquire_context', 'confidence': .99}},
-                'model': cfg['model'], 'usage': {'input_tokens': 12, 'output_tokens': 3}, 'latency_ms': 1}
-    monkeypatch.setattr(engine, '_request', reply)
-    agent = SimpleNamespace(tools=[{'type': 'function', 'function': {'name': 'read_file'}}])
-    message = [{'role': 'tool', 'name': 'read_file', 'tool_call_id': 'first', 'content': '{"result":"context"}'}]
-    receipt = engine.worker_material_opportunity(agent, message, 1)
-    assert receipt, 'A SPEC without probes must still receive a permitted native route'
-    assert json.loads(receipt)['system_one']['route'] == 'acquire_context'
-    assert calls[0][1]['route']['criteria'].keys() == {'acquire_context', 'continue_worker', 'escalate_existing'}
-    opportunity = json.loads(conn.execute(
-        "SELECT payload FROM task_events WHERE kind='nfos_system_one_opportunity' ORDER BY id DESC LIMIT 1"
-    ).fetchone()[0])
-    assert opportunity['versions']['action_catalog'] == 'native-worker-routes-v1'
-    # A real worker first reads its native card state before reading the source.
-    bookkeeping = [{'role': 'tool', 'name': 'terminal', 'tool_call_id': 'show-card', 'content': '{"status":"running"}'}]
-    assert engine.worker_material_opportunity(agent, bookkeeping, 1) is None
-    assert agent._nfos_system_one_pending is not None
-    messages = [{'role': 'assistant', 'tool_calls': [{'id': 'read-next', 'function': {
-        'name': 'read_file', 'arguments': json.dumps({'path': str(artifact)})}}]},
-        {'role': 'tool', 'name': 'read_file', 'tool_call_id': 'read-next', 'content': artifact.read_text()}]
-    assert engine.worker_material_opportunity(agent, messages, 1) is None
-    rows = [json.loads(r[0]) for r in conn.execute("SELECT payload FROM task_events WHERE kind='nfos_system_one_guidance_consumed'")]
-    assert rows[-1]['observation'] == 'matching_tool_succeeded'
-    assert rows[-1]['enforced'] is False and rows[-1]['principal_calls_saved'] == 0
-    assert rows[-1]['tool_call_id'] == 'read-next'
-    assert rows[-1]['observed_after_batches'] == 2
-    assert len(calls) == 1  # ordinary reads do not create a new decision
+    from tests.hermes_cli.test_nfos_system_one_enforcement import selected_context, native_call
+    conn, task, artifact, agent = selected_context(task_context, http_fixture, monkeypatch)
+    requirement = engine._requirement(conn, task.id)
+    assert requirement['route'] == 'acquire_context' and requirement['enforced']
+    assert requirement['targets'].get(str(artifact))
+    native_call(monkeypatch, agent, 'read_file', {'path': str(artifact)}, lambda args: artifact.read_text())
+    completed = engine._requirement(conn, task.id)
+    assert completed['status'] == 'completed' and completed['typed_action_executed']
+    assert completed['principal_calls_saved'] == 0
+    assert completed['result_sha256'] == engine._digest(artifact.read_text())
 
 
 def test_phase_limits_reserve_lifecycle_capacity():
