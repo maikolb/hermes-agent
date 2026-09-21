@@ -30,6 +30,10 @@ def test_no_probe_spec_can_guide_and_trace_actual_next_tool(task_context, http_f
     assert receipt, 'A SPEC without probes must still receive a permitted native route'
     assert json.loads(receipt)['system_one']['route'] == 'acquire_context'
     assert calls[0][1]['route']['criteria'].keys() == {'acquire_context', 'continue_worker', 'escalate_existing'}
+    opportunity = json.loads(conn.execute(
+        "SELECT payload FROM task_events WHERE kind='nfos_system_one_opportunity' ORDER BY id DESC LIMIT 1"
+    ).fetchone()[0])
+    assert opportunity['versions']['action_catalog'] == 'native-worker-routes-v1'
     # A real worker first reads its native card state before reading the source.
     bookkeeping = [{'role': 'tool', 'name': 'terminal', 'tool_call_id': 'show-card', 'content': '{"status":"running"}'}]
     assert engine.worker_material_opportunity(agent, bookkeeping, 1) is None

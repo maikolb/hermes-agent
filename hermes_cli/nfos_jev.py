@@ -473,7 +473,9 @@ def evaluate(conn, task_id, run_id, use, state, questions, *, reuse=False):
                         'evidence_refs': ['request:' + str(wf['request_id']), 'spec:' + str(wf['spec_revision'])]},
                     'versions': {'policy': cfg['policy_revision'], 'model': cfg['model'],
                         'tokenizer': cfg.get('model_revision'), 'head': cfg.get('source_revision'),
-                        'schema': '1', 'action_catalog': 'native-probes-v1'},
+                        'schema': '1', 'action_catalog': (
+                            'native-worker-routes-v1' if state.get('purpose') == 'worker_guidance'
+                            else 'native-probes-v1')},
                     'selected_engine': cfg['engine'], 'decision_mode': cfg['decision_mode']})
             d._event(conn, task_id, run_id, 'nfos_jev', {'key': key, 'use': use, 'provider': cfg['provider'], 'selected_engine': cfg['engine'],
                       'model': cfg['model'], 'reason': 'started'})
