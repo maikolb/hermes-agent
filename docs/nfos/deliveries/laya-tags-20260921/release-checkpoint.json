@@ -1,0 +1,22 @@
+{
+  "implementation_sha": "877b9ce5786d9fb731b0168a79028cf5a1bf1bb5",
+  "base_main": "6381c19b79d69bcee07d41442c2466d70a1a2471",
+  "pr": "https://github.com/maikolb/hermes-agent/pull/231",
+  "guard_execution": {
+    "guard_verified": true,
+    "expected_exit": 1,
+    "actual_exit": 1,
+    "stderr": "Traceback (most recent call last):\n  File \"/opt/nfos-laya/final-version-guard-test/scripts/nfos_laya_server.py\", line 142, in <module>\n    main()\n  File \"/opt/nfos-laya/final-version-guard-test/scripts/nfos_laya_server.py\", line 64, in main\n    raise RuntimeError('Pinned multilingual checkpoint requires transformers==5.0.0; older versions misread local RoPE')\nRuntimeError: Pinned multilingual checkpoint requires transformers==5.0.0; older versions misread local RoPE\n",
+    "inference_started": false,
+    "service_changed": false
+  },
+  "VisibleWindows": 0,
+  "local_status_clean": true,
+  "rollback_ref": "baseline/nfos-laya-checkpoint-20260921",
+  "incremental_bundle": "C:\\Users\\maiko\\AppData\\Local\\hermes\\cache\\nfos-jev\\implementation\\laya-tags\\laya-tags-incremental.bundle",
+  "bundle_verified": true,
+  "bundle_requires": "044fcfc685089d46e2ad6e7ad53e49aac96a07d9",
+  "master_confirmation": false,
+  "production_activated": false,
+  "cleanup": "Only own full-history bundle process29596 and descendants were stopped; incremental bundle verified. No worker/app-server stopped."
+}
