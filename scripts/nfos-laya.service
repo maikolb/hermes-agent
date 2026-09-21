@@ -1,0 +1,21 @@
+[Unit]
+Description=NFOS Laya multilingual SystemOne (loopback CPU)
+After=network.target
+
+[Service]
+Type=simple
+# Replace the reviewed artifact path before installing this unit.
+ExecStart=/opt/nfos-laya/venv/bin/python /opt/nfos-laya/releases/REVIEWED_GIT_SHA/scripts/nfos_laya_server.py --model-dir /opt/nfos-laya/model --threads 2
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=TOKENIZERS_PARALLELISM=false
+CPUQuota=200%
+AllowedCPUs=6-7
+MemoryMax=6G
+TasksMax=64
+Nice=10
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

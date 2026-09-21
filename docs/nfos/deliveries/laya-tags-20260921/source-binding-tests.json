@@ -1,0 +1,29 @@
+{
+  "VisibleWindows": 0,
+  "commands": [
+    {
+      "args": [
+        "C:/Users/maiko/AppData/Local/hermes/cache/nfos-jev/implementation/test-venv/Scripts/python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_nfos_laya.py"
+      ],
+      "cwd": "C:\\Users\\maiko\\Projetos\\NFOS-Jev-Integration\\hermes-agent",
+      "exit": 0,
+      "stdout": ".............                                                            [100%]\r\n13 passed in 20.24s\r\n",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "cwd": "C:\\Users\\maiko\\Projetos\\NFOS-Jev-Integration\\hermes-agent",
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ]
+}

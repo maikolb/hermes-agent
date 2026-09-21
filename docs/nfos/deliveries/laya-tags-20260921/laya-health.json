@@ -1,0 +1,20 @@
+{
+  "source_receipt": "C:\\Users\\maiko\\AppData\\Local\\hermes\\cache\\nfos-jev\\implementation\\laya-tags\\health-result.json",
+  "health": {
+    "engine": "laya",
+    "model": "convaiinnovations/laya-multilingual",
+    "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+    "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+    "device": "cpu",
+    "threads": 2,
+    "max_len": 1024,
+    "head_max_len": 256,
+    "encoder_max_positions": 8192,
+    "load_seconds": 14.1697,
+    "cold_inference_seconds": 0.7814,
+    "ready": true,
+    "peak_rss_kib": 2356288
+  },
+  "systemd": "MainPID=1416548\nMemoryCurrent=2313023488\nMemoryPeak=2313285632\nCPUQuotaPerSecUSec=2s\nAllowedCPUs=6-7\nActiveState=active\n",
+  "VisibleWindows": 0
+}

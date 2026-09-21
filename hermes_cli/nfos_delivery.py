@@ -103,6 +103,23 @@ def get_workflow(conn, task_id):
     return _row(conn,'nfos_workflows','task_id',task_id)
 
 
+def decision_engine_selection(conn, task_id):
+    """Restore the intake-owned engine, including native continuation cards."""
+    seen = set()
+    while task_id and task_id not in seen:
+        seen.add(task_id)
+        workflow = get_workflow(conn, task_id)
+        if workflow:
+            selection = json.loads(workflow['state_json'] or '{}').get('decision_engine_selection')
+            if selection is not None:
+                return selection
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_continuations'").fetchone():
+            return None
+        parent = conn.execute('SELECT parent_id FROM nfos_continuations WHERE child_id=?', (task_id,)).fetchone()
+        task_id = parent[0] if parent else None
+    return None
+
+
 def get_decision(conn, decision_id):
     return _row(conn,'nfos_decisions','id',decision_id)
 
@@ -342,10 +359,23 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
         if settings().get('deepseek_worker_trial') is True:
             project = dict(project, model='deepseek-v4.1-flash',
                            provider='opencode-go', reasoning_effort='max')
+    selection = None
+    if source.get('platform') == 'telegram':
+        engines = {tag.lower() for tag in re.findall(r'(?<!\S)#(jev|laya)(?![\w-])', text, re.IGNORECASE)}
+        if len(engines) > 1:
+            raise WorkflowError('Conflicting decision engines: choose exactly one of #jev or #laya')
+        if engines:
+            from hermes_cli.nfos_jev import settings as engine_settings, _digest
+            engine = next(iter(engines))
+            config = {k: v for k, v in engine_settings(engine=engine).items() if k not in {'enabled', 'selection'}}
+            selection = {'engine': engine, 'source': 'user_hashtag',
+                         'revision': _digest(config), 'config': config}
     urgency=_urgency_doc(urgency)  # URGENCY_CONTEXT_20260914: só o julgamento do Principal marca urgência
     source_key=_json([str(source[k]) for k in required]+[str(part)])
     request_id='req_'+hashlib.sha256(source_key.encode()).hexdigest()[:24]
     payload={'source':source,'text':text,'project':project,'attachments':list(attachments)}
+    if selection is not None:
+        payload['decision_engine_selection'] = selection
     if urgency is not None:
         payload['urgent']=True
         payload['urgency']=urgency
@@ -647,8 +677,14 @@ def bootstrap_card(conn, request_id, token, *, pid):
         started_at=kb._process_start_time(pid)
         conn.execute('UPDATE tasks SET worker_pid=?,worker_started_at=? WHERE id=?',(pid,started_at,task_id))
         conn.execute('UPDATE task_runs SET worker_pid=? WHERE id=?',(pid,task.current_run_id))
-        conn.execute('INSERT INTO nfos_workflows(task_id,request_id,updated_at) VALUES(?,?,?)',
-                     (task_id,request_id,int(time.time())))
+        initial_state = {}
+        if payload.get('decision_engine_selection'):
+            initial_state['decision_engine_selection'] = payload['decision_engine_selection']
+        conn.execute('INSERT INTO nfos_workflows(task_id,request_id,state_json,updated_at) VALUES(?,?,?,?)',
+                     (task_id,request_id,_json(initial_state),int(time.time())))
+        if initial_state:
+            _event(conn,task_id,task.current_run_id,'nfos_decision_engine_selected',
+                   initial_state['decision_engine_selection'])
         # The owner's NFOS workflow owns review and verified delivery for this
         # enrolled card. Keep the legacy row, but do not require a second
         # reviewer process or an unrelated board-admin policy on this path.
@@ -3075,7 +3111,10 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
             spec['size'] = selected
             _event(conn,task_id,run_id,'nfos_jev_budget_applied',
                    {'estimated_size':selected,'estimate_seconds':proposed_limit,'limit_seconds':limit,
-                    'previous_limit_seconds':current_limit,'elapsed_seconds':elapsed,'model_pin_preserved':True})
+                    'previous_limit_seconds':current_limit,'elapsed_seconds':elapsed,'model_pin_preserved':True,
+                    'selected_engine':budget.get('selected_engine'),'used_engine':budget.get('used_engine'),
+                    'model':budget.get('model'),'model_revision':budget.get('model_revision'),
+                    'typed_action_executed':True,'principal_calls_saved':0})
         from hermes_cli.nfos_principal_review import settings as _settings
         if _settings().get('principal_validation') is False and not wf['spec_revision']:  # BLOCK_LESS7_20260910: modo das premissas
             _pc=(json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') or {}
@@ -3113,7 +3152,7 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                      (revision,int(time.time()),task_id))
         _event(conn,task_id,run_id,'nfos_spec_saved',{'revision':revision,'author':author,'evidence':saved_evidence})
         from hermes_cli.nfos_principal_review import required
-        primary = required(conn,task_id) and nfos_jev.primary_enabled()
+        primary = required(conn,task_id) and nfos_jev.primary_enabled(conn, task_id)
         if required(conn,task_id) and not primary:
             ask_principal(conn,task_id,run_id,kind='spec_review',
                           question=('Validate the saved spec against the original request before implementation. '
@@ -3126,7 +3165,7 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         decision = nfos_jev.primary_spec_review(conn, task_id, run_id)
         if decision is None:
             ask_principal(conn, task_id, run_id, kind='spec_review',
-                          question='Review current spec: primary Jev evaluation was unavailable or inconclusive', context={})
+                          question='Review current spec: primary decision engine was unavailable or inconclusive', context={})
     return revision
 
 
@@ -3153,6 +3192,7 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
         updates=dict(state or {})
         updates.pop('task_partition',None)  # Only Principal decisions own this receipt.
         updates.pop('worker_escalation',None)  # Only reviewed rework and actual dispatch own the tier.
+        updates.pop('decision_engine_selection',None)  # Only preserved user intake owns engine selection.
         saved=json.loads(wf['state_json']);saved.update(updates)
         if stage=='implement' and wf['stage'] in {'analysis','spec'} and not json.loads(wf['state_json']).get('task_partition'):
             partition=conn.execute("SELECT status,action FROM nfos_decisions WHERE task_id=? AND kind='additional_tasks' ORDER BY rowid DESC LIMIT 1",

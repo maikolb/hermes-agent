@@ -1,0 +1,146 @@
+{
+  "cases": [
+    {
+      "case": "ptbr_warm_1",
+      "http_status": 200,
+      "elapsed_ms": 213.49,
+      "response": {
+        "engine": "laya",
+        "model": "convaiinnovations/laya-multilingual",
+        "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+        "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+        "device": "cpu",
+        "threads": 2,
+        "max_len": 1024,
+        "head_max_len": 256,
+        "encoder_max_positions": 8192,
+        "load_seconds": 14.1697,
+        "cold_inference_seconds": 0.7814,
+        "answers": {
+          "acao": {
+            "type": "choice",
+            "choice": "apagar",
+            "probabilities": {
+              "ler": 0.0123,
+              "apagar": 0.9877
+            },
+            "confidence": 0.9042,
+            "action": {
+              "act_probability": 1.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 51,
+          "output_tokens": 0
+        },
+        "latency_ms": 190.898,
+        "token_lengths": {
+          "acao": 51
+        },
+        "peak_rss_kib": 2356288
+      }
+    },
+    {
+      "case": "ptbr_warm_2",
+      "http_status": 200,
+      "elapsed_ms": 148.99,
+      "response": {
+        "engine": "laya",
+        "model": "convaiinnovations/laya-multilingual",
+        "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+        "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+        "device": "cpu",
+        "threads": 2,
+        "max_len": 1024,
+        "head_max_len": 256,
+        "encoder_max_positions": 8192,
+        "load_seconds": 14.1697,
+        "cold_inference_seconds": 0.7814,
+        "answers": {
+          "acao": {
+            "type": "choice",
+            "choice": "apagar",
+            "probabilities": {
+              "ler": 0.0123,
+              "apagar": 0.9877
+            },
+            "confidence": 0.9042,
+            "action": {
+              "act_probability": 1.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 51,
+          "output_tokens": 0
+        },
+        "latency_ms": 147.25,
+        "token_lengths": {
+          "acao": 51
+        },
+        "peak_rss_kib": 2356288
+      }
+    },
+    {
+      "case": "overlong_state",
+      "http_status": 422,
+      "elapsed_ms": 12.11,
+      "response": {
+        "reason": "context_too_large",
+        "engine": "laya",
+        "model": "convaiinnovations/laya-multilingual",
+        "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+        "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+        "device": "cpu",
+        "threads": 2,
+        "max_len": 1024,
+        "head_max_len": 256,
+        "encoder_max_positions": 8192,
+        "load_seconds": 14.1697,
+        "cold_inference_seconds": 0.7814
+      }
+    },
+    {
+      "case": "overlong_question",
+      "http_status": 422,
+      "elapsed_ms": 3.19,
+      "response": {
+        "reason": "context_too_large",
+        "engine": "laya",
+        "model": "convaiinnovations/laya-multilingual",
+        "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+        "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+        "device": "cpu",
+        "threads": 2,
+        "max_len": 1024,
+        "head_max_len": 256,
+        "encoder_max_positions": 8192,
+        "load_seconds": 14.1697,
+        "cold_inference_seconds": 0.7814
+      }
+    },
+    {
+      "case": "mask_injection",
+      "http_status": 422,
+      "elapsed_ms": 0.74,
+      "response": {
+        "reason": "inconclusive",
+        "engine": "laya",
+        "model": "convaiinnovations/laya-multilingual",
+        "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+        "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+        "device": "cpu",
+        "threads": 2,
+        "max_len": 1024,
+        "head_max_len": 256,
+        "encoder_max_positions": 8192,
+        "load_seconds": 14.1697,
+        "cold_inference_seconds": 0.7814
+      }
+    }
+  ],
+  "resources": "MainPID=1416548\nMemoryCurrent=2355879936\nMemoryPeak=2356154368\nActiveState=active\n",
+  "gateway": "MainPID=4191054\nActiveState=active\n",
+  "memory": "               total        used        free      shared  buff/cache   available\nMem:           32094        9426         874         178       22439       22668\nSwap:              0           0           0\n"
+}

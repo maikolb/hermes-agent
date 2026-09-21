@@ -38,7 +38,10 @@ def http_fixture(monkeypatch):
                     selected = self.server.choices.get(key, next(iter(q['criteria'])))
                     answers[key] = {'type': 'choice', 'choice': selected, 'confidence': self.server.confidence,
                                    'probabilities': {c: float(c == selected) for c in q['criteria']}}
-            data = {'model': 'fixture/jev', 'answers': answers, 'usage': {'input_tokens': 21, 'output_tokens': 4, 'cost': .000001}}
+            data = {'model': getattr(self.server, 'model', 'fixture/jev'), 'answers': answers, 'usage': {'input_tokens': 21, 'output_tokens': 4, 'cost': .000001}}
+            if hasattr(self.server, 'model_revision'):
+                data['model_revision'] = self.server.model_revision
+                data['source_revision'] = getattr(self.server, 'source_revision', 'fixture-source')
             if self.server.malformed:
                 data = self.server.malformed
             self.send_response(self.server.code)

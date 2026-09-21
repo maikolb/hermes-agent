@@ -1,0 +1,32 @@
+{
+  "live_inference": false,
+  "blocker": "No configured supported provider/key in inspected NFOS profile, shared home, or initial gateway environment",
+  "inspection": {
+    "configs": [
+      {
+        "path": "/srv/hermes/config.yaml",
+        "decision_engines": null,
+        "jev": {}
+      },
+      {
+        "path": "/srv/hermes/profiles/hermes-project-factory/config.yaml",
+        "decision_engines": null,
+        "jev": {}
+      }
+    ],
+    "dotenv_presence": {
+      "/srv/hermes/.env": {
+        "AI_GATEWAY_API_KEY": false,
+        "OPENROUTER_API_KEY": false,
+        "TYPESAFE_API_KEY": false,
+        "VERCEL_API_KEY": false
+      },
+      "/srv/hermes/profiles/hermes-project-factory/.env": {
+        "AI_GATEWAY_API_KEY": false,
+        "OPENROUTER_API_KEY": false,
+        "TYPESAFE_API_KEY": false,
+        "VERCEL_API_KEY": false
+      }
+    }
+  }
+}
