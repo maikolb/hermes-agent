@@ -29,20 +29,21 @@ def prepare(task_context, http_fixture, monkeypatch, mode='active'):
     return conn, task
 
 
-def test_native_batch_collects_registered_probe_without_principal_repeat(task_context, http_fixture, monkeypatch):
+def test_native_batch_delivers_route_without_principal_repeat(task_context, http_fixture, monkeypatch):
     from agent import tool_executor
     conn, task = prepare(task_context, http_fixture, monkeypatch)
     before = conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0]
     messages = [{'role': 'tool', 'name': 'read_file', 'tool_call_id': 'synthetic', 'content': '{"result":"stage prepared"}'}]
-    agent = SimpleNamespace(_interrupt_requested=False, _apply_pending_steer_to_tool_results=lambda *a: None)
+    agent = SimpleNamespace(_interrupt_requested=False, _apply_pending_steer_to_tool_results=lambda *a: None,
+        tools=[{'function': {'name': 'read_file'}}])
     monkeypatch.setattr(tool_executor, '_budget_for_agent', lambda a: tool_executor.DEFAULT_BUDGET)
     monkeypatch.setattr(tool_executor, 'get_active_env', lambda *a: None)
     tool_executor.execute_tool_calls_segmented(agent, SimpleNamespace(tool_calls=[object()]), messages, 'isolated', segments=[])
-    assert http_fixture.probes == ['/count']
+    assert http_fixture.probes == []  # guidance is not an automatic duplicate probe
     assert 'system_one' in messages[-1]['content']
     assert conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0] == before
     assert kb.get_task(conn, task.id).current_run_id == task.current_run_id
-    rows = [json.loads(r[0]) for r in conn.execute("SELECT payload FROM task_events WHERE kind='nfos_jev_action'")]
+    rows = [json.loads(r[0]) for r in conn.execute("SELECT payload FROM task_events WHERE kind='nfos_system_one_guidance'")]
     assert rows[-1]['principal_calls_saved'] == 0
     count = len(http_fixture.calls)
     tool_executor._system_one_after_batch(agent, messages, 1)
@@ -69,13 +70,13 @@ def test_shadow_returns_before_http_and_never_executes(task_context, http_fixtur
 def test_material_failures_are_bounded_and_not_commands(task_context, http_fixture, monkeypatch):
     conn, task = prepare(task_context, http_fixture, monkeypatch)
     calls = []
-    monkeypatch.setattr(engine, 'collect_missing_probe', lambda *a, **kw: calls.append(kw))
+    monkeypatch.setattr(engine, '_guide_worker', lambda *a: calls.append(a))
     agent = SimpleNamespace(_nfos_system_one_seen={'stage:'+str(task.current_run_id): 'verify'})
     message = [{'role':'tool','name':'terminal','content':'{"exit_code":1,"error":"connection reset"}'}]
     for _ in range(5):
         engine.worker_material_opportunity(agent, message, 1)
-    assert [c['opportunity_trigger'] for c in calls] == ['recoverable_failure', 'stagnant_retry']
-    assert all('command' not in c for c in calls)
+    assert [c[4] for c in calls] == ['recoverable_failure', 'stagnant_retry']
+    assert all(c[5] == [('terminal', 'connection reset')] for c in calls)
 
 
 def test_off_and_interrupt_do_not_call_engine(task_context, http_fixture, monkeypatch):
@@ -101,7 +102,7 @@ def test_unvalidated_spec_excluded_and_policy_drift_fails_closed(task_context, h
 def test_permission_removed_before_model_selection(task_context, http_fixture, monkeypatch):
     conn, task = prepare(task_context, http_fixture, monkeypatch)
     monkeypatch.setattr(d, '_local_probe_problem', lambda *a, **kw: 'outside authorized target')
-    assert engine.worker_material_opportunity(SimpleNamespace(), [{'content':'ok'}], 1) is None
+    assert engine.collect_missing_probe(conn, task.id, task.current_run_id, use='evidence') is None
     assert not http_fixture.calls and not http_fixture.probes
 
 

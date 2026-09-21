@@ -8,6 +8,10 @@ import json
 import re
 
 
+class BudgetUnavailable(RuntimeError):
+    """A bounded operational reason safe to put in a decision receipt."""
+
+
 def amount(value):
     try:
         result = Decimal(str(value))
@@ -63,3 +67,76 @@ def safe_receipt(value):
     if re.search(r'sk-or-v1-[0-9a-f]{64}|Bearer\s+\S+', text, re.I):
         raise ValueError('Credential-like content cannot enter evidence')
     return text
+
+
+def guarded_call(cfg, payload, secret, send):
+    """Opt-in operational evaluator guard used by the native adapter, including CLI children.
+
+    One atomically reserved request at a time. Unknown charges keep their reserve;
+    timeout in the caller cannot free the in-flight reservation. No key or source
+    payload is stored. An existing ledger is required, never an implicit budget.
+    """
+    import hashlib
+    import os
+    from pathlib import Path
+    import time
+    import urllib.request
+    require_paid_endpoint(cfg['endpoint'])
+    policy = cfg['evaluation_budget']
+    path = Path(policy['ledger_path'])
+    if not path.is_absolute() or not path.is_file():
+        raise BudgetUnavailable('budget_ledger_missing')
+    # Exclusive create is portable and fails closed rather than queuing worker calls.
+    lock = path.with_suffix(path.suffix + '.lock')
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise BudgetUnavailable('budget_request_in_flight') from exc
+    row = None
+    def account():
+        values = {}
+        for endpoint in ('key', 'credits'):
+            req = urllib.request.Request('https://openrouter.ai/api/v1/' + endpoint,
+                headers={'Authorization': 'Bearer ' + secret})
+            with urllib.request.urlopen(req, timeout=cfg['timeout_seconds']) as response:
+                values[endpoint] = json.load(response)['data']
+        return {'key_usage': str(values['key']['usage']),
+                'total_credits': str(values['credits']['total_credits']),
+                'total_usage': str(values['credits']['total_usage'])}
+    def save():
+        temporary = path.with_suffix(path.suffix + '.pending')
+        handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, 'w', encoding='utf-8') as stream:
+            stream.write(safe_receipt(ledger))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    try:
+        ledger = json.loads(path.read_text(encoding='utf-8'))
+        current = account()
+        tariff = ledger['tariff']
+        try:
+            reserved = reservation(len(payload['questions']), tariff['pricing'], tariff['context_length'])
+            authorize(ledger['initial'], current, ledger['requests'], reserved, policy['limit_usd'])
+        except ValueError as exc:
+            raise BudgetUnavailable('budget_or_tariff_limit') from exc
+        row = {'label': 'native-' + str(time.time_ns()), 'endpoint': cfg['endpoint'],
+               'pending': True, 'reserved': str(reserved), 'before': current,
+               'question_count': len(payload['questions']),
+               'payload_sha256': hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(),
+               'pid': os.getpid(), 'started_at': time.time()}
+        ledger['requests'].append(row)
+        save()
+        response = send(cfg, payload, secret)
+        billed, state = charge_or_reserve({'data': response}, reserved)
+        row.update(pending=False, billed=str(billed), billing_state=state, ended_at=time.time())
+        save()
+        return response
+    except Exception:
+        if row is not None:
+            row.update(pending=False, billed=str(reserved), billing_state='RESERVED_UNKNOWN_BILLING', ended_at=time.time())
+            save()
+        raise
+    finally:
+        os.close(fd)
+        lock.unlink()
