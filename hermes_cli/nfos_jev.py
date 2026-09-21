@@ -856,7 +856,9 @@ def worker_material_opportunity(agent, messages, num_tools):
                 # Only a bounded error category reaches the decision state, never raw tool output.
                 from agent.display import _detect_tool_failure
                 failed, _ = _detect_tool_failure(message.get('name', ''), content)
-                match = re.search(r'timed out|timeout|connection reset|temporarily unavailable|HTTP (?:429|503)', content, re.I)
+                # A failed command can print source or CLI help containing testTimeout/--timeout.
+                # Require an actual failure phrase, not the bare configuration word.
+                match = re.search(r'\b(?:timed out|TimeoutError|ETIMEDOUT|(?:read|connect|request|operation) timeout|connection reset|temporarily unavailable|HTTP (?:429|503))\b', content, re.I)
                 if failed:
                     failures.append((message.get('name', 'tool'), match.group(0).lower() if match else 'tool_failed'))
             trigger = 'next_evidence' if wf['stage'] in {'verify', 'report'} and previous_stage != wf['stage'] else 'stage_start' if previous_stage != wf['stage'] else None

@@ -133,3 +133,27 @@ def test_native_budget_refuses_insufficient_headroom_without_inference(tmp_path,
     with pytest.raises(BudgetUnavailable, match='budget_or_tariff_limit'):
         guarded_call(cfg, {'questions': {'route': {}}}, 'fixture', lambda *a: pytest.fail('paid call'))
     assert len(json.loads(ledger.read_text())['requests']) == 1
+
+
+@pytest.mark.parametrize('output,exit_code,expected', [
+    ('setupFiles: []; testTimeout: 30000; missing file', 2, None),
+    ('usage: nfos-delivery [--timeout TIMEOUT]; command not found', 127, None),
+    ('Connection timed out while reading the authorized endpoint', 1, 'recoverable_failure'),
+    ('HTTP 503 Service Unavailable', 1, 'recoverable_failure'),
+])
+def test_transient_trigger_uses_failure_statement_not_config_or_cli_help(
+        task_context, http_fixture, monkeypatch, output, exit_code, expected):
+    conn, task, _, _ = task_context
+    accept(conn, task, 'spec_review')
+    engine.configure_system_one({'mode': 'active', 'engine': 'laya',
+        'classes': ['budget', 'impediment', 'evidence']})
+    select_laya(conn, task, http_fixture, ['budget', 'impediment', 'evidence'])
+    monkeypatch.setenv('HERMES_KANBAN_TASK', task.id)
+    triggers = []
+    monkeypatch.setattr(engine, '_guide_worker',
+        lambda agent, conn, task, wf, trigger, failures: triggers.append(trigger))
+    agent = SimpleNamespace(_nfos_system_one_seen={
+        'stage:' + str(task.current_run_id): d.get_workflow(conn, task.id)['stage']})
+    engine.worker_material_opportunity(agent, [{'role': 'tool', 'name': 'terminal',
+        'content': json.dumps({'output': output, 'exit_code': exit_code})}], 1)
+    assert triggers == ([expected] if expected else [])
