@@ -4862,7 +4862,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','probe','probe-env','lesson','rework','precheck','cancel','save-spec','save-report','progress','ask','decide',
-        'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','pause-for-repair','acquire-project','release-project','receive','urgent','resume','wait','reconsider'])
+        'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','pause-for-repair','grant-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -4942,6 +4942,9 @@ def main():
         elif args.action=='pause-for-repair':
             from hermes_cli.nfos_workspace_repair import pause_for_repair
             result=pause_for_repair(conn,args.task,**payload)
+        elif args.action=='grant-budget':
+            from hermes_cli.nfos_principal_review import grant_iteration_budget
+            result=grant_iteration_budget(conn,args.task,**payload)
         elif args.action=='rework':  # CLOSURE_RECOVERY_20260911
             result=request_rework(conn,args.task,criterion=payload.get('criterion'),reason=payload.get('reason'),evidence=payload.get('evidence') or [],author=payload.get('author') or 'Principal',title=payload.get('title'))
         elif args.action=='lesson':  # LEARNING_20260911
