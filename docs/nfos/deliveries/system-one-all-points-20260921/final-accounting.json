@@ -1,0 +1,14 @@
+{
+  "authorized_total": "2.88",
+  "previous_billed": "0.001944012",
+  "cumulative_provider_billed": "0.002434362",
+  "this_stage_billed": "0.000490350",
+  "cumulative_key_usage": "0.002434362",
+  "cumulative_account_usage": "0.002434362",
+  "remaining_authorized": "2.877565638",
+  "account_balance": "2.877999343",
+  "paid_requests_total": 53,
+  "paid_requests_previous": 35,
+  "paid_requests_this_stage": 18,
+  "no_budget_reset": true
+}

@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "VisibleWindows": 0,
+  "output": "{\"args\": [\"C:/Users/maiko/AppData/Local/hermes/cache/nfos-jev/implementation/test-venv/Scripts/python.exe\", \"-B\", \"C:/Users/maiko/AppData/Local/hermes/cache/nfos-jev/implementation/system-one-all-points/all_points.py\", \"budget_after\"], \"cwd\": \"C:/Users/maiko/Projetos/NFOS-Jev-Integration/hermes-agent\", \"exit\": 0, \"stdout\": \"{\\\"case\\\": \\\"budget_keep_proposed_g\\\", \\\"engine\\\": \\\"jev\\\", \\\"cap_before\\\": 1200, \\\"cap_after\\\": 1200, \\\"native_spec_accept\\\": false}\\r\\n{\\\"case\\\": \\\"budget_keep_proposed_g\\\", \\\"engine\\\": \\\"laya\\\", \\\"cap_before\\\": 1200, \\\"cap_after\\\": 1200, \\\"native_spec_accept\\\": false}\\r\\n\", \"stderr\": \"\"}\n"
+}

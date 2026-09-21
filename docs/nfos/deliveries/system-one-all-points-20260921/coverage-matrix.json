@@ -1,0 +1,507 @@
+[
+  {
+    "id": "budget",
+    "implemented": true,
+    "native_entrypoint": "nfos_delivery.save_spec -> spec_decisions",
+    "real_inference": "Jev e Laya; pequeno, incompleto e tamanho G com fallback",
+    "native_real_execution": "Cap1200 preservado após correção; pins/run preservados",
+    "fixture_tests": "keep/low-confidence/http503/missing-key; modo desligado preserva comportamento nativo anterior",
+    "limitations": "Não autoriza mais gasto ou workers. O clamp corrigido é restrito ao orçamento System One ativo.",
+    "evidence": [
+      "point-results.json",
+      "extras-results.json",
+      "extras-fixed-results.json",
+      "fix-regression-result.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "online_stage",
+    "implemented": true,
+    "native_entrypoint": "tool_executor._system_one_after_batch -> worker_material_opportunity",
+    "real_inference": {
+      "models": [
+        "jev",
+        "laya"
+      ],
+      "cases": [
+        {
+          "case": "online_stage",
+          "engine": "jev",
+          "real_inference_calls": 1,
+          "probes_executed": 1,
+          "measurements": [
+            "PASS"
+          ],
+          "worker_received_result": true,
+          "repeat_behavior": [
+            {
+              "get_delta": 0,
+              "worker_received_result": false
+            }
+          ],
+          "native_fallback_pending": false,
+          "inference_fallbacks": [],
+          "model_choices": [
+            {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.94
+              }
+            }
+          ],
+          "principal_calls_saved_synthetic": 0,
+          "elapsed_seconds": 1.9530000000086147,
+          "pins_preserved": true,
+          "same_run": true,
+          "final_review_accepted": false
+        },
+        {
+          "case": "online_stage",
+          "engine": "laya",
+          "real_inference_calls": 1,
+          "probes_executed": 1,
+          "measurements": [
+            "PASS"
+          ],
+          "worker_received_result": true,
+          "repeat_behavior": [
+            {
+              "get_delta": 0,
+              "worker_received_result": false
+            }
+          ],
+          "native_fallback_pending": false,
+          "inference_fallbacks": [],
+          "model_choices": [
+            {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.8656
+              }
+            }
+          ],
+          "principal_calls_saved_synthetic": 0,
+          "elapsed_seconds": 2.5160000000032596,
+          "pins_preserved": true,
+          "same_run": true,
+          "final_review_accepted": false
+        }
+      ]
+    },
+    "native_real_execution": "Sonda registrada e resultado anexado ao tool result quando executada com PASS",
+    "fixture_tests": "triggers, interrupção, limite/run e dispatcher lock",
+    "limitations": "Cobertura limitada a mudança de etapa; não há rota separada de investigação; não é orientação geral de todo o trabalho nem um loop autônomo.",
+    "evidence": [
+      "point-results.json",
+      "native-results.json",
+      "focused-result.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "online_failure",
+    "implemented": true,
+    "native_entrypoint": "tool_executor._system_one_after_batch -> worker_material_opportunity",
+    "real_inference": {
+      "models": [
+        "jev",
+        "laya"
+      ],
+      "cases": [
+        {
+          "case": "online_failure",
+          "engine": "jev",
+          "real_inference_calls": 1,
+          "probes_executed": 1,
+          "measurements": [
+            "PASS"
+          ],
+          "worker_received_result": true,
+          "repeat_behavior": [
+            {
+              "get_delta": 0,
+              "worker_received_result": false
+            }
+          ],
+          "native_fallback_pending": false,
+          "inference_fallbacks": [],
+          "model_choices": [
+            {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.95
+              }
+            }
+          ],
+          "principal_calls_saved_synthetic": 0,
+          "elapsed_seconds": 1.7339999999967404,
+          "pins_preserved": true,
+          "same_run": true,
+          "final_review_accepted": false
+        },
+        {
+          "case": "online_failure",
+          "engine": "laya",
+          "real_inference_calls": 1,
+          "probes_executed": 1,
+          "measurements": [
+            "PASS"
+          ],
+          "worker_received_result": true,
+          "repeat_behavior": [
+            {
+              "get_delta": 0,
+              "worker_received_result": false
+            }
+          ],
+          "native_fallback_pending": false,
+          "inference_fallbacks": [],
+          "model_choices": [
+            {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.8496
+              }
+            }
+          ],
+          "principal_calls_saved_synthetic": 0,
+          "elapsed_seconds": 2.7809999999881256,
+          "pins_preserved": true,
+          "same_run": true,
+          "final_review_accepted": false
+        }
+      ]
+    },
+    "native_real_execution": "Sonda registrada e resultado anexado ao tool result quando executada com PASS",
+    "fixture_tests": "triggers, interrupção, limite/run e dispatcher lock",
+    "limitations": "Cobertura limitada a primeiro erro transitório reconhecido; não é orientação geral de todo o trabalho nem um loop autônomo.",
+    "evidence": [
+      "point-results.json",
+      "native-results.json",
+      "focused-result.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "online_stagnant",
+    "implemented": true,
+    "native_entrypoint": "tool_executor._system_one_after_batch -> worker_material_opportunity",
+    "real_inference": {
+      "models": [
+        "jev",
+        "laya"
+      ],
+      "cases": [
+        {
+          "case": "online_stagnant",
+          "engine": "jev",
+          "real_inference_calls": 2,
+          "probes_executed": 1,
+          "measurements": [
+            "PASS"
+          ],
+          "worker_received_result": true,
+          "repeat_behavior": [
+            {
+              "get_delta": 0,
+              "worker_received_result": false
+            },
+            {
+              "get_delta": 0,
+              "worker_received_result": false
+            }
+          ],
+          "native_fallback_pending": false,
+          "inference_fallbacks": [
+            "low_confidence"
+          ],
+          "model_choices": [
+            {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.98
+              }
+            },
+            {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.3
+              }
+            }
+          ],
+          "principal_calls_saved_synthetic": 0,
+          "elapsed_seconds": 2.6719999999913853,
+          "pins_preserved": true,
+          "same_run": true,
+          "final_review_accepted": false
+        },
+        {
+          "case": "online_stagnant",
+          "engine": "laya",
+          "real_inference_calls": 2,
+          "probes_executed": 0,
+          "measurements": [],
+          "worker_received_result": false,
+          "repeat_behavior": [
+            {
+              "get_delta": 0,
+              "worker_received_result": false
+            },
+            {
+              "get_delta": 0,
+              "worker_received_result": false
+            }
+          ],
+          "native_fallback_pending": false,
+          "inference_fallbacks": [
+            "low_confidence",
+            "low_confidence"
+          ],
+          "model_choices": [
+            {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.075
+              }
+            },
+            {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.0305
+              }
+            }
+          ],
+          "principal_calls_saved_synthetic": 0,
+          "elapsed_seconds": 3.327999999979511,
+          "pins_preserved": true,
+          "same_run": true,
+          "final_review_accepted": false
+        }
+      ]
+    },
+    "native_real_execution": "Sonda registrada e resultado anexado ao tool result quando executada com PASS",
+    "fixture_tests": "triggers, interrupção, limite/run e dispatcher lock",
+    "limitations": "Cobertura limitada a segundo erro igual; terceiro não abre nova oportunidade; não é orientação geral de todo o trabalho nem um loop autônomo.",
+    "evidence": [
+      "point-results.json",
+      "native-results.json",
+      "focused-result.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "online_next",
+    "implemented": true,
+    "native_entrypoint": "tool_executor._system_one_after_batch -> worker_material_opportunity",
+    "real_inference": {
+      "models": [
+        "jev",
+        "laya"
+      ],
+      "cases": [
+        {
+          "case": "online_next",
+          "engine": "jev",
+          "real_inference_calls": 1,
+          "probes_executed": 1,
+          "measurements": [
+            "PASS"
+          ],
+          "worker_received_result": true,
+          "repeat_behavior": [
+            {
+              "get_delta": 0,
+              "worker_received_result": false
+            }
+          ],
+          "native_fallback_pending": false,
+          "inference_fallbacks": [],
+          "model_choices": [
+            {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.95
+              }
+            }
+          ],
+          "principal_calls_saved_synthetic": 0,
+          "elapsed_seconds": 1.8440000000118744,
+          "pins_preserved": true,
+          "same_run": true,
+          "final_review_accepted": false
+        },
+        {
+          "case": "online_next",
+          "engine": "laya",
+          "real_inference_calls": 1,
+          "probes_executed": 1,
+          "measurements": [
+            "PASS"
+          ],
+          "worker_received_result": true,
+          "repeat_behavior": [
+            {
+              "get_delta": 0,
+              "worker_received_result": false
+            }
+          ],
+          "native_fallback_pending": false,
+          "inference_fallbacks": [],
+          "model_choices": [
+            {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.9033
+              }
+            }
+          ],
+          "principal_calls_saved_synthetic": 0,
+          "elapsed_seconds": 2.7820000000065193,
+          "pins_preserved": true,
+          "same_run": true,
+          "final_review_accepted": false
+        }
+      ]
+    },
+    "native_real_execution": "Sonda registrada e resultado anexado ao tool result quando executada com PASS",
+    "fixture_tests": "triggers, interrupção, limite/run e dispatcher lock",
+    "limitations": "Cobertura limitada a entrada em verify/report; não é orientação geral de todo o trabalho nem um loop autônomo.",
+    "evidence": [
+      "point-results.json",
+      "native-results.json",
+      "focused-result.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "impediment",
+    "implemented": true,
+    "native_entrypoint": "kanban_db.block_task -> collect_missing_probe -> run_probes",
+    "real_inference": "Jev e Laya; PASS, FAIL, host não permitido, SQL DELETE",
+    "native_real_execution": "Jev mediu31 e manteve mesmo run; mediu29/FAIL e voltou ao Principal. Laya fez fallback nos casos completos. Denegados:0 chamadas/0 efeitos.",
+    "fixture_tests": "opção arbitrária, timeout, credencial ausente, perda de identidade",
+    "limitations": "Medição coletada não significa impedimento resolvido; nenhum comando inventado.",
+    "evidence": [
+      "point-results.json",
+      "native-results.json",
+      "fix-regression-result.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "evidence",
+    "implemented": true,
+    "native_entrypoint": "nfos_delivery.save_report -> collect_missing_probe -> run_probes",
+    "real_inference": "Ambos motores consultados; artefatos reais conforme escolhas/fallbacks registrados",
+    "native_real_execution": "Repetir report não repetiu sonda; SPEC nova invalidou aceite antigo; final_review continuou sem continue",
+    "fixture_tests": "proveniência/artefato ausente/inválido/stale e reclassificação nos testes nativos",
+    "limitations": "Seleção/coleta não são aceite semântico final. Revisão superseded/changes é diferente de aceite.",
+    "evidence": [
+      "point-results.json",
+      "native-results.json",
+      "evidence-diagnostic.json",
+      "fix-regression-result.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "spec",
+    "implemented": true,
+    "native_entrypoint": "nfos_delivery.save_spec -> primary_spec_review",
+    "real_inference": "Novo caso math: Jev real aceitou; literal fez fallback. Changes/fallback anteriores preservados.",
+    "native_real_execution": "Math chegou a implement e ask_principal redundante não criou decisão; nenhum worker/transport foi iniciado",
+    "fixture_tests": "injection, identidade/stale, permissões, contextos, resposta inválida",
+    "limitations": "Dois casos novos exploratórios congelados antes; não novo heldout. Laya continua excluído; nenhum limiar reduzido.",
+    "evidence": [
+      "extras-frozen.json",
+      "extras-results.json",
+      "extras-calls.json",
+      "screenshots-spec-accept/real-native-backend.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "learning",
+    "implemented": true,
+    "native_entrypoint": "nfos_reviewer.collect + nfos_system_one_dataset export/replay",
+    "real_inference": "Trajetórias de inferências reais anteriores; nenhum LLM narrativo chamado",
+    "native_real_execution": "28 trajetórias;54 candidatos exportados;12 PASS,3 FAIL,39 NOT_PROVEN;13 test,41 quarantine; dedupe estável",
+    "fixture_tests": "Revisor narrativo é fixture explícita; redaction, leakage, source mismatch e cron independência nos60 testes",
+    "limitations": "Não há treino de pesos nem partição de calibração implementada. Jev não publica tokenizer/head, registros incompletos ficam em quarentena.",
+    "evidence": [
+      "learning-summary.json",
+      "learning-cli-dataset.json",
+      "learning-cli-replay.json",
+      "focused-result.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "routing",
+    "implemented": true,
+    "native_entrypoint": "receive_request/bootstrap/reopen/retry",
+    "real_inference": "Modelos reais nos cards acima; seleção das axes validada deterministicamente",
+    "native_real_execution": "SQLite/HOME isolados; conflito atômico; pins e engine persistentes/cross-card",
+    "fixture_tests": "60 testes incluem hashtags, ausência, erro, busy429, timeout, contexto e low confidence",
+    "limitations": "Sem mensagem Telegram e sem geração DeepSeek paga; essa parte comprova roteamento/persistência.",
+    "evidence": [
+      "focused-result.json",
+      "native-results.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "ui",
+    "implemented": true,
+    "native_entrypoint": "Vigilia -> Suporte -> reviewer CLI",
+    "real_inference": "Status vinculado a recibo Jev real",
+    "native_real_execution": "Captura atual do aceite; controles/POSTs e rotação reusam evidências c6fc/091446 de código inalterado",
+    "fixture_tests": "online OFF/shadow/active e agenda independente",
+    "limitations": "UI candidata isolada; cron produtivo não alterado.",
+    "evidence": [
+      "screenshots-spec-accept/jev-real-native-status.png",
+      "screenshots-spec-accept/real-native-backend.json",
+      "ui-spec-accept-result.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "resources",
+    "implemented": true,
+    "native_entrypoint": "nfos_jev.evaluate/_request + persistent Laya endpoint",
+    "real_inference": "Somente chamadas sequenciais; latências completas em limits-summary",
+    "native_real_execution": "SQLite permitiu BEGIN IMMEDIATE durante HTTP; shadow retornou sem efeito; deadlines limitados",
+    "fixture_tests": "dispatcher lock/timeout e busy429; capacidade isolada9e2d5b1 anterior reutilizada",
+    "limitations": "Nenhuma alegação de10 workers. Busy429 real foi do servidor candidato isolado anterior, não do serviço persistente e69.",
+    "evidence": [
+      "limits-summary.json",
+      "point-results.json",
+      "focused-result.json",
+      "fix-regression-result.json"
+    ],
+    "production_activated": false
+  },
+  {
+    "id": "rollback",
+    "implemented": true,
+    "status": "BASELINE_ROLLBACK_VALIDATED_NOT_CURRENT_SHA",
+    "tested_sha": "2f2c0b990e666cd97184dcbe3dd2a3295ca1c652",
+    "current_sha_rehearsal": "NOT_REPEATED_NO_SCHEMA_CHANGE",
+    "production_activated": false,
+    "evidence": [
+      "previous package candidate-final-source.json",
+      "new manifest dry-run receipt"
+    ]
+  }
+]

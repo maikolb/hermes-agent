@@ -1,0 +1,43 @@
+{
+  "real_http_latency_by_engine": {
+    "jev": [
+      0.391,
+      0.39,
+      0.375,
+      0.422,
+      0.391,
+      0.359,
+      0.375,
+      0.422,
+      0.375,
+      0.343,
+      0.359,
+      0.36,
+      0.375,
+      0.484
+    ],
+    "laya": [
+      20.1328,
+      1.7118,
+      2.4889,
+      1.2041,
+      1.532,
+      3.8491,
+      0.9502,
+      0.812,
+      1.1049,
+      0.57,
+      0.6523,
+      0.6848,
+      3.8989
+    ]
+  },
+  "db_and_dispatch_locks_free_during_http": true,
+  "serial": true,
+  "concurrent_worker_capacity_not_claimed": true,
+  "prior_candidate_busy429_proof": "system-one-preparation/capacity-measured-deadline-result.json; isolated candidate9e2d5b1, not persistent e69 service",
+  "shadow_hook_seconds": {
+    "jev": 0.046000000002095476,
+    "laya": 0.030999999988125637
+  }
+}

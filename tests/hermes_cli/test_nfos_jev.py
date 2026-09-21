@@ -278,6 +278,31 @@ def test_missing_key_and_transaction_do_not_call_network(task_context, monkeypat
     assert jev.status()['state'] == 'unavailable'
 
 
+@pytest.mark.parametrize('fallback', ['keep', 'low_confidence', 'http503', 'missing_key'])
+def test_budget_fallback_preserves_cap_against_proposed_large_size(task_context, http_fixture, monkeypatch, fallback):
+    conn, task, spec, _ = task_context
+    enable(monkeypatch, ['budget'])
+    conn.execute('UPDATE tasks SET max_runtime_seconds=1200 WHERE id=?', (task.id,)); conn.commit()
+    before = kb.get_task(conn, task.id)
+    spec = dict(spec, size='G')
+    if fallback == 'keep': http_fixture.choices['size'] = 'keep'
+    elif fallback == 'low_confidence': http_fixture.confidence = .2
+    elif fallback == 'missing_key': monkeypatch.delenv('TYPESAFE_API_KEY')
+    else: http_fixture.code = 503
+    d.save_spec(conn, task.id, task.current_run_id, spec, author='worker', evidence={'fixture': True})
+    after = kb.get_task(conn, task.id)
+    assert after.max_runtime_seconds == 1200
+    assert (after.model_override, after.provider_override, after.reasoning_effort) == (before.model_override, before.provider_override, before.reasoning_effort)
+
+
+def test_disabled_budget_keeps_existing_native_size_behavior(task_context, monkeypatch):
+    conn, task, spec, _ = task_context
+    enable(monkeypatch, ['budget'], enabled=False)
+    conn.execute('UPDATE tasks SET max_runtime_seconds=1200 WHERE id=?', (task.id,)); conn.commit()
+    d.save_spec(conn, task.id, task.current_run_id, dict(spec, size='G'), author='worker', evidence={'fixture': True})
+    assert kb.get_task(conn, task.id).max_runtime_seconds == d.SPEC_SIZE_BUDGET['G']
+
+
 def test_context_secrets_are_redacted(http_fixture, monkeypatch):
     enable(monkeypatch, ['budget'])
     monkeypatch.setenv('FIXTURE_PASSWORD', 'private-fixture-value')

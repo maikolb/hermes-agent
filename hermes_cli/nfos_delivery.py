@@ -3092,13 +3092,18 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         raise WorkflowError('Codex spec fallback needs the Claude unavailability reason')
     from hermes_cli import nfos_jev
     jev = nfos_jev.spec_decisions(conn, task_id, run_id, spec)
+    budget_config = nfos_jev.settings(conn, task_id)
+    bounded_budget = (budget_config['enabled'] and 'budget' in budget_config['uses']
+                      and budget_config.get('decision_mode', 'active') == 'active')
     spec = dict(spec)  # Never mutate the caller's candidate.
     with _kb().write_txn(conn):
         task=_owned(conn,task_id,run_id)
         wf=get_workflow(conn,task_id)
         jev = {k: v for k, v in jev.items() if v and v['identity'] == nfos_jev.identity(conn, task_id)}
         budget = jev.get('budget')
-        limit = None
+        # An inconclusive/keep decision must not let the worker's proposed size
+        # bypass the same cap enforced for a confident System One estimate.
+        limit = task.max_runtime_seconds if bounded_budget else None
         if budget and budget['answers']['size']['choice'] in SPEC_SIZE_BUDGET:
             selected = budget['answers']['size']['choice']
             current_limit = task.max_runtime_seconds

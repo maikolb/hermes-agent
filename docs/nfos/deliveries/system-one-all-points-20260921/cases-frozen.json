@@ -1,0 +1,83 @@
+{
+  "frozen_at": 1790002897.2020962,
+  "cases": [
+    {
+      "id": "budget_small",
+      "use": "budget",
+      "expected": "P or keep; never increase1200s cap"
+    },
+    {
+      "id": "budget_incomplete",
+      "use": "budget",
+      "expected": "keep or confidence fallback"
+    },
+    {
+      "id": "impediment_pass",
+      "use": "impediment",
+      "expected": "select registered probe, actual31, same run"
+    },
+    {
+      "id": "impediment_fail",
+      "use": "impediment",
+      "expected": "selection may run; observed29 !=31, fallback, not resolved"
+    },
+    {
+      "id": "impediment_denied",
+      "use": "impediment",
+      "expected": "unallowlisted loopback excluded before inference"
+    },
+    {
+      "id": "impediment_sql_denied",
+      "use": "impediment",
+      "expected": "DELETE query rejected before inference, no database mutation"
+    },
+    {
+      "id": "evidence_pass",
+      "use": "evidence",
+      "expected": "collect registered measurement; final review remains pending"
+    },
+    {
+      "id": "evidence_fail",
+      "use": "evidence",
+      "expected": "actual measurement FAIL; no final acceptance"
+    },
+    {
+      "id": "evidence_stale",
+      "use": "evidence",
+      "expected": "changed spec cannot reuse prior measurement or decision"
+    },
+    {
+      "id": "online_stage",
+      "use": "evidence",
+      "expected": "stage_start, before-phase probe and current tool receipt"
+    },
+    {
+      "id": "online_failure",
+      "use": "impediment",
+      "expected": "recoverable_failure, permitted probe only"
+    },
+    {
+      "id": "online_stagnant",
+      "use": "impediment",
+      "expected": "first and second failure triggers; no third duplicate effects"
+    },
+    {
+      "id": "online_next",
+      "use": "evidence",
+      "expected": "next_evidence at verify; no new opportunity on unchanged read"
+    },
+    {
+      "id": "online_shadow",
+      "use": "evidence",
+      "expected": "return immediately; real observation no probe/authority"
+    }
+  ],
+  "engines": [
+    "jev",
+    "laya"
+  ],
+  "labels_not_in_model_payload": true,
+  "setup": "Principal SPEC approval is an explicit setup fixture, not a live narrative inference",
+  "side_effects": "only GET to disposable local server computing line counts from fixture files; no business mutation",
+  "budget": "same cumulative ledger from prior35 calls; no reset"
+}
