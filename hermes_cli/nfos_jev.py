@@ -20,6 +20,106 @@ PROVIDERS = {
     'typesafe': ('https://api.typesafe.ai/v1/systemone', 'jev-1.13.0', 'TYPESAFE_API_KEY'),
 }
 USES = {'budget', 'spec', 'impediment', 'evidence'}
+SYSTEM_ONE_DEFAULTS = {'mode': 'off', 'engine': 'laya',
+    'classes': ['budget', 'impediment', 'evidence'], 'timeout_seconds': 15,
+    'max_decisions_per_run': 4}
+_SHADOW_SLOT = threading.BoundedSemaphore(1)
+
+
+def _provider_key(name):
+    if not name:
+        return None
+    from hermes_cli.config import get_env_value
+    return get_env_value(name)
+
+
+def _delivery_settings():
+    from hermes_cli.config import _expand_env_vars, get_config_path, read_user_config_raw
+    from hermes_cli.managed_scope import apply_managed_overlay
+    path = get_config_path()
+    path.stat()
+    doc = apply_managed_overlay(_expand_env_vars(read_user_config_raw(path)))
+    return (doc.get('kanban') or {}).get('delivery') or {}
+
+
+def system_one_policy():
+    try:
+        raw = _delivery_settings().get('system_one')
+        return _validate_system_one(raw) if raw is not None else dict(SYSTEM_ONE_DEFAULTS)
+    except Exception:
+        return dict(SYSTEM_ONE_DEFAULTS)
+
+
+def _validate_system_one(raw):
+    if not isinstance(raw, dict) or set(raw) - set(SYSTEM_ONE_DEFAULTS):
+        raise ValueError('Unknown System One policy fields')
+    cfg = {**SYSTEM_ONE_DEFAULTS, **raw}
+    if (cfg['mode'] not in {'off', 'shadow', 'active'} or cfg['engine'] not in {'laya', 'jev'}
+            or not isinstance(cfg['classes'], list) or not set(cfg['classes']) <= USES
+            or not _number(cfg['timeout_seconds'], .1, 90)
+            or type(cfg['max_decisions_per_run']) is not int or not 1 <= cfg['max_decisions_per_run'] <= 20):
+        raise ValueError('Invalid System One mode, classes or bounds')
+    cfg['classes'] = sorted(set(cfg['classes']))
+    return cfg
+
+
+def configure_system_one(policy):
+    from hermes_cli.config import save_config
+    cfg = _validate_system_one(policy)
+    save_config({'kanban': {'delivery': {'system_one': cfg}}}, merge_existing=True)
+    if system_one_policy() != cfg:
+        raise ValueError('System One policy is managed or was not persisted')
+    return system_one_status()
+
+
+def system_one_status():
+    policy = system_one_policy()
+    providers = {}
+    bindings = {}
+    for engine in ('laya', 'jev'):
+        cfg = settings(engine=engine)
+        key_present = bool(_provider_key(cfg.get('api_key_env')))
+        providers[engine] = {k: cfg.get(k) for k in
+            ('provider', 'model', 'model_revision', 'source_revision', 'api_key_env')}
+        providers[engine].update(configured=not cfg.get('error') and (engine == 'laya' or key_present),
+            authenticated=False, inference_tested=False,
+            availability='local_service_not_probed' if engine == 'laya' else 'key_present_not_verified' if key_present else 'missing_key')
+        bindings[engine] = _digest([cfg.get('provider'), cfg.get('model'), _provider_key(cfg.get('api_key_env')) or ''])
+        if engine == 'laya' and cfg.get('model_revision') and cfg.get('source_revision'):
+            try:
+                with urllib.request.build_opener(_NoRedirect()).open(cfg['endpoint'].removesuffix('/systemone') + '/health', timeout=.5) as response:
+                    health = json.loads(response.read(4096))
+                ready = health.get('ready') is True and all(health.get(k) == cfg.get(k) for k in ('model', 'model_revision', 'source_revision'))
+                providers[engine].update(availability='ready' if ready else 'identity_mismatch', authenticated=None)
+            except Exception:
+                providers[engine]['availability'] = 'local_service_unavailable'
+    metrics = dict(opportunities=0, engine_calls=0, applied_decisions=0, fallbacks=0, principal_calls_saved=0, shadow=0, rework=0)
+    from hermes_cli import kanban_db as kb
+    import sqlite3
+    path = kb.kanban_db_path()
+    if path.is_file():
+        try:
+            with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
+                for kind, payload in conn.execute("SELECT kind,payload FROM task_events WHERE kind IN ('nfos_system_one_opportunity','nfos_jev','nfos_jev_action','nfos_jev_primary_spec','nfos_jev_budget_applied','nfos_rework_requested') ORDER BY id DESC LIMIT 5000"):
+                    row = json.loads(payload)
+                    metrics['opportunities'] += kind == 'nfos_system_one_opportunity'
+                    metrics['engine_calls'] += bool(row.get('inference_engine'))
+                    metrics['applied_decisions'] += bool(row.get('typed_action_executed') or kind == 'nfos_jev_primary_spec' and row.get('used_engine'))
+                    metrics['fallbacks'] += bool(row.get('fallback_reason'))
+                    metrics['principal_calls_saved'] += int(row.get('principal_calls_saved') or 0)
+                    metrics['shadow'] += row.get('decision_mode') == 'shadow'
+                    metrics['rework'] += kind == 'nfos_rework_requested'
+                    used = row.get('inference_engine')
+                    if used in providers and row.get('credential_binding') == bindings[used]:
+                        providers[used]['inference_tested'] = True
+                        providers[used]['authenticated'] = True if used == 'jev' else None
+        except (sqlite3.Error, ValueError, TypeError):
+            pass
+    return {'policy': policy, 'policy_revision': _digest(policy), 'providers': providers,
+        'metrics': metrics, 'metrics_scope': 'current_board_last_5000_events',
+        'eligibility': {engine: {use: {'eligible': not (engine == 'laya' and use == 'spec'),
+            'observation_eligible': True, 'reason': 'unvalidated_primary_spec' if engine == 'laya' and use == 'spec' else 'native_permission_filtered_choices'}
+            for use in sorted(USES)} for engine in ('laya', 'jev')}}
 
 
 def settings(conn=None, task_id=None, *, engine=None):
@@ -68,6 +168,13 @@ def settings(conn=None, task_id=None, *, engine=None):
                 'endpoint': endpoint, 'api_key_env': key_env, 'uses': uses,
                 'timeout_seconds': timeout, 'min_confidence': threshold, 'spec_review_mode': mode,
                 'model_revision': cfg.get('model_revision', ''), 'source_revision': cfg.get('source_revision', '')}
+        policy = _validate_system_one(delivery['system_one']) if 'system_one' in delivery else None
+        if policy is not None:
+            result.update(decision_mode=policy['mode'], policy_revision=_digest(policy),
+                          max_decisions_per_run=policy['max_decisions_per_run'])
+            result['uses'] = [use for use in uses if use in policy['classes']
+                and not (engine == 'laya' and use == 'spec' and policy['mode'] != 'shadow')]
+            result['timeout_seconds'] = min(timeout, policy['timeout_seconds'])
         if selection:
             result['enabled'] = engine in (delivery.get('decision_engines') or {}).get('allowed', [])
             result['spec_review_mode'] = 'primary'
@@ -82,6 +189,11 @@ def settings(conn=None, task_id=None, *, engine=None):
                 result['enabled'] = False
                 result['error'] = 'selection_config_changed'
             result['selection'] = selection
+        if policy is not None:
+            # A policy never opts an untagged card in, and shadow cannot accept a SPEC.
+            result['enabled'] = bool(result['enabled'] and selection and policy['mode'] != 'off')
+            if policy['mode'] == 'shadow':
+                result['spec_review_mode'] = 'auxiliary'
         return result
     except FileNotFoundError:
         return {'enabled': False, 'uses': [], 'engine': engine or 'jev', 'selection': selection, 'error': 'missing_config'}
@@ -202,7 +314,7 @@ def _parse(data, questions):
 
 
 def _request(cfg, state, questions):
-    key = os.environ.get(cfg['api_key_env']) if cfg['api_key_env'] else None
+    key = _provider_key(cfg['api_key_env'])
     if not key and cfg.get('engine') != 'laya':
         return {'reason': 'missing_key'}
     payload = {'model': cfg['model'], 'state': _sanitize(state, preserve_urls=state.get('purpose') == 'primary_spec_review'), 'questions': _sanitize(questions)}
@@ -223,10 +335,10 @@ def _request(cfg, state, questions):
             mailbox.put(result)
         except urllib.error.HTTPError as exc:
             reason = 'http_' + str(exc.code)
-            if cfg.get('engine') == 'laya' and exc.code == 422:
+            if cfg.get('engine') == 'laya' and exc.code in {422, 429}:
                 try:
                     body = json.loads(exc.read(4096))
-                    if body.get('reason') in {'context_too_large', 'unsupported_question', 'inconclusive'}:
+                    if body.get('reason') in {'context_too_large', 'unsupported_question', 'inconclusive', 'busy'}:
                         reason = body['reason']
                 except (ValueError, OSError):
                     pass
@@ -241,6 +353,7 @@ def _request(cfg, state, questions):
     except queue.Empty:
         result = {'reason': 'timeout'}
     result['latency_ms'] = round((time.monotonic() - started) * 1000, 2)
+    result['credential_binding'] = _digest([cfg['provider'], cfg['model'], key or ''])
     return result
 
 
@@ -281,7 +394,7 @@ def evaluate(conn, task_id, run_id, use, state, questions, *, reuse=False):
         d._owned(conn, task_id, run_id)
         before = identity(conn, task_id)
         key = _digest([cfg, use, _sanitize(state, preserve_urls=state.get('purpose') == 'primary_spec_review'), questions,
-                       _digest(os.environ.get(cfg['api_key_env'], ''))])
+                       _digest(_provider_key(cfg['api_key_env']) or '')])
         with d._kb().write_txn(conn):
             if identity(conn, task_id) != before:
                 return None
@@ -289,26 +402,96 @@ def evaluate(conn, task_id, run_id, use, state, questions, *, reuse=False):
                 "AND json_extract(payload,'$.key')=? ORDER BY id DESC LIMIT 1", (task_id, key)).fetchone()
             if row:
                 old = json.loads(row[0])
-                if reuse and old.get('answers') and not old.get('reason'):
+                if reuse and cfg.get('decision_mode') != 'shadow' and old.get('answers') and not old.get('reason'):
                     return dict(old, identity=before)
                 return None
+            if cfg.get('policy_revision'):
+                count = conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND run_id=? AND kind='nfos_system_one_opportunity'", (task_id, run_id)).fetchone()[0]
+                if count >= cfg['max_decisions_per_run']:
+                    d._event(conn, task_id, run_id, 'nfos_jev', {'use': use,
+                        'selected_engine': cfg['engine'], 'used_engine': None,
+                        'fallback_reason': 'decision_limit', 'reason': 'decision_limit',
+                        'principal_calls_saved': 0})
+                    return None
+                wf = d.get_workflow(conn, task_id)
+                safe_state = _sanitize(state)
+                if len(json.dumps(safe_state)) > 8192:
+                    safe_state = {'omitted': 'oversized_context', 'sha256': _digest(safe_state)}
+                d._event(conn, task_id, run_id, 'nfos_system_one_opportunity', {
+                    'opportunity_id': key, 'created_at': time.time(), 'task_id': task_id,
+                    'run_id': run_id, 'lineage_id': wf['request_id'],
+                    'project_id': str(d._kb().kanban_db_path().parent.name), 'use': use,
+                    'input': {'state': safe_state, 'options': _sanitize(questions),
+                        'evidence_refs': ['request:' + str(wf['request_id']), 'spec:' + str(wf['spec_revision'])]},
+                    'versions': {'policy': cfg['policy_revision'], 'model': cfg['model'],
+                        'tokenizer': cfg.get('model_revision'), 'head': cfg.get('source_revision'),
+                        'schema': '1', 'action_catalog': 'native-probes-v1'},
+                    'selected_engine': cfg['engine'], 'decision_mode': cfg['decision_mode']})
             d._event(conn, task_id, run_id, 'nfos_jev', {'key': key, 'use': use, 'provider': cfg['provider'], 'selected_engine': cfg['engine'],
                       'model': cfg['model'], 'reason': 'started'})
-        result = _request(cfg, state, questions)
+        if cfg.get('decision_mode') == 'shadow':
+            if not _SHADOW_SLOT.acquire(blocking=False):
+                _fallback(conn, task_id, run_id, use, cfg, 'shadow_busy')
+                return None
+            db_path = conn.execute('PRAGMA database_list').fetchone()[2]
+            def observe():
+                try:
+                    from pathlib import Path
+                    with d._kb().connect_closing(Path(db_path)) as shadow_conn:
+                        _execute_evaluation(shadow_conn, task_id, run_id, use, state, questions, cfg, key, before)
+                except Exception:
+                    pass
+                finally:
+                    _SHADOW_SLOT.release()
+            threading.Thread(target=observe, daemon=True, name='nfos-systemone-shadow').start()
+            return None
+        return _execute_evaluation(conn, task_id, run_id, use, state, questions, cfg, key, before)
+    except Exception:
+        # An optional decision must not prevent the canonical path from running.
+        return None
+
+
+def _execute_evaluation(conn, task_id, run_id, use, state, questions, cfg, key, before):
+    from hermes_cli import nfos_delivery as d
+    try:
+        if identity(conn, task_id) != before:
+            return None
+        request_cfg = dict(cfg)
+        task = d._owned(conn, task_id, run_id)
+        run = conn.execute('SELECT started_at FROM task_runs WHERE id=?', (run_id,)).fetchone()
+        if cfg.get('policy_revision') and task.max_runtime_seconds and run and run[0]:
+            remaining = task.max_runtime_seconds - max(0, time.time() - float(run[0]))
+            if remaining < .1:
+                _fallback(conn, task_id, run_id, use, cfg, 'run_budget_exhausted')
+                return None
+            request_cfg['timeout_seconds'] = min(cfg['timeout_seconds'], remaining)
+        result = _request(request_cfg, state, questions)
         inference_engine = cfg['engine'] if result.get('answers') else None
         if any(a.get('confidence', 1) < cfg['min_confidence'] for a in result.get('answers', {}).values()):
             result['inference_answers'] = result.pop('answers')
             result['reason'] = 'low_confidence'
         with d._kb().write_txn(conn):
-            if identity(conn, task_id) != before:
-                result = {'reason': 'stale', 'latency_ms': result.get('latency_ms')}
+            if identity(conn, task_id) != before or settings(conn, task_id) != cfg:
+                if cfg.get('decision_mode') == 'shadow':
+                    result['stale_at_completion'] = True  # Observation keeps its original input binding, never authority.
+                else:
+                    result = {'reason': 'stale', 'latency_ms': result.get('latency_ms')}
             receipt = dict(result, key=key, use=use, provider=cfg['provider'], requested_model=cfg['model'],
-                           selected_engine=cfg['engine'], used_engine=cfg['engine'] if result.get('answers') else None,
+                           selected_engine=cfg['engine'], used_engine=cfg['engine'] if result.get('answers') and cfg.get('decision_mode') != 'shadow' else None,
                            inference_engine=inference_engine,
+                           credential_binding=result.get('credential_binding'),
+                           decision_mode=cfg.get('decision_mode', 'active'),
                            model_revision=cfg.get('model_revision'), source_revision=cfg.get('source_revision'),
                            fallback_reason=result.get('reason'), principal_calls_saved=0)
             d._event(conn, task_id, run_id, 'nfos_jev', receipt)
-        return dict(receipt, identity=before) if result.get('answers') else None
+            if cfg.get('policy_revision'):
+                d._event(conn, task_id, run_id, 'nfos_system_one_outcome', {
+                    'opportunity_id': key, 'decision': result.get('answers', result.get('inference_answers')),
+                    'actual_engine': inference_engine, 'fallback_reason': result.get('reason'),
+                    'policy_validity': 'VALID' if result.get('answers') else 'NOT_PROVEN',
+                    'outcome': {'status': 'NOT_PROVEN', 'evidence_refs': [], 'verified_at': None},
+                    'decision_mode': cfg.get('decision_mode')})
+        return dict(receipt, identity=before) if result.get('answers') and cfg.get('decision_mode') != 'shadow' else None
     except Exception:
         # An optional decision must not prevent the canonical path from running.
         return None
@@ -366,7 +549,7 @@ def spec_decisions(conn, task_id, run_id, spec):
     return out
 
 
-def collect_missing_probe(conn, task_id, run_id, *, use, reason=''):
+def collect_missing_probe(conn, task_id, run_id, *, use, reason='', opportunity_trigger=None):
     """Select only an existing unmeasured probe; execute using the native executor."""
     cfg = settings(conn, task_id)
     if not cfg['enabled'] or use not in cfg['uses'] or conn.in_transaction:
@@ -380,12 +563,31 @@ def collect_missing_probe(conn, task_id, run_id, *, use, reason=''):
         row = d.get_spec(conn, task_id)
         spec = json.loads(row['content'])
         mutation = d._relevant_mutation(conn, task_id)
+        stage = d.get_workflow(conn, task_id)['stage']
         candidates = []
         for c in spec['criteria']:
             probe = c.get('probe')
             if not isinstance(probe, dict) or probe.get('kind') not in {'sql', 'http', 'header'}:
                 continue
-            d._validate_probe(c['id'], probe)
+            try:
+                d._validate_probe(c['id'], probe)
+                if probe['kind'] in {'http', 'header'}:
+                    host = d._host_of(probe.get('url'))
+                    if d._local_probe_problem(conn, task_id, host, spec):
+                        continue
+                    if any(str(v).startswith('$env:') for v in (probe.get('headers') or {}).values()) and not d._probe_in_scope(conn, task_id, host, spec):
+                        continue
+                else:
+                    env, vault_names = d._probe_env_sources(conn, task_id)
+                    name = 'PROBE_DATABASE_URL' if env.get('PROBE_DATABASE_URL') else 'DATABASE_URL'
+                    if not env.get(name) or name in vault_names and any(d._local_probe_problem(conn, task_id, host, spec) for host in d._dsn_hosts(env[name])):
+                        continue
+                if opportunity_trigger:
+                    phase = 'after' if stage in {'homolog', 'review', 'publish', 'verify', 'report'} else 'before'
+                    if probe.get('phase', 'after') != phase:
+                        continue
+            except (ValueError, TypeError, d.WorkflowError):
+                continue
             previous = d._artifact(conn, task_id, 'probe:' + c['id'])
             if previous:
                 measured = json.loads(previous['content'])
@@ -395,7 +597,10 @@ def collect_missing_probe(conn, task_id, run_id, *, use, reason=''):
         if not candidates or len(candidates) > 254:
             _fallback(conn, task_id, run_id, use, cfg, 'no_supported_missing_probe')
             return None
-        state = _context(conn, task_id, spec)
+        state = (_context(conn, task_id, spec) if not opportunity_trigger else
+                 {'purpose': 'registered_measurement_selection', 'stage': stage,
+                  'goal': str(spec.get('goal', '')) if len(str(spec.get('goal', ''))) <= 512 else 'See source-bound SPEC',
+                  'spec_revision': row['revision'], 'trigger': opportunity_trigger})
         state.update(reason=str(reason), mutation=mutation,
                      available=[{'option': 'probe_'+str(i), 'criterion': c['id'], 'text': c['text'], 'kind': c['probe']['kind']}
                                 for i, c in enumerate(candidates)])
@@ -417,13 +622,73 @@ def collect_missing_probe(conn, task_id, run_id, *, use, reason=''):
             'next_action': 'Inspect the measurement and continue this card; collected evidence does not mean the impediment is resolved.',
             'selected_engine': cfg['engine'], 'used_engine': cfg['engine'], 'model': result['model'],
             'model_revision': cfg.get('model_revision'), 'latency_ms': result.get('latency_ms'),
-            'principal_calls_saved': 1 if use == 'impediment' and succeeded else 0,
+            'principal_calls_saved': 1 if use == 'impediment' and succeeded and not opportunity_trigger else 0,
             'typed_action_executed': True, 'fallback_reason': None if succeeded else 'probe_failed_or_inconclusive'}
         with d._kb().write_txn(conn):
             d._owned(conn, task_id, run_id)
             d._event(conn, task_id, run_id, 'nfos_jev_action', receipt)
+            if cfg.get('policy_revision'):
+                d._event(conn, task_id, run_id, 'nfos_system_one_outcome', {
+                    'opportunity_id': result['key'], 'policy_validity': 'VALID',
+                    'actual_engine': cfg['engine'], 'decision_mode': 'active',
+                    'outcome': {'status': 'PASS' if succeeded else 'FAIL' if any(r['state'] == 'FAIL' for r in measured) else 'NOT_PROVEN',
+                        'evidence_refs': ['artifact:probe:' + r['criterion'] + ':' + str(r['revision']) for r in measured],
+                        'verified_at': time.time()}})
         return receipt if succeeded else None
     except Exception:
+        return None
+
+
+def worker_material_opportunity(agent, messages, num_tools):
+    """One native batch boundary; never executes a model-proposed command or retry."""
+    task_id = os.environ.get('HERMES_KANBAN_TASK')
+    if not task_id or not num_tools or system_one_policy()['mode'] == 'off':
+        return None
+    from hermes_cli import kanban_db as kb, nfos_delivery as d
+    if kb._NFOS_DISPATCH_LOCK_HELD.get():
+        return None
+    try:
+        with kb.connect_closing() as conn:
+            task = kb.get_task(conn, task_id)
+            if not task or task.status != 'running' or task.worker_pid != os.getpid():
+                return None
+            cfg = settings(conn, task_id)
+            if not cfg.get('selection') or not cfg['enabled']:
+                return None
+            wf = d.get_workflow(conn, task_id)
+            if not wf:
+                return None
+            seen = getattr(agent, '_nfos_system_one_seen', {})
+            run_key = str(task.current_run_id)
+            previous_stage = seen.get('stage:' + run_key)
+            seen['stage:' + run_key] = wf['stage']
+            failures = []
+            for message in messages[-num_tools:]:
+                content = message.get('content')
+                if not isinstance(content, str):
+                    continue
+                # Only a bounded error category reaches the decision state, never raw tool output.
+                from agent.display import _detect_tool_failure
+                failed, _ = _detect_tool_failure(message.get('name', ''), content)
+                match = re.search(r'timed out|timeout|connection reset|temporarily unavailable|HTTP (?:429|503)', content, re.I)
+                if failed and match:
+                    failures.append((message.get('name', 'tool'), match.group(0).lower()))
+            trigger = 'next_evidence' if wf['stage'] in {'verify', 'report'} and previous_stage != wf['stage'] else 'stage_start' if previous_stage != wf['stage'] else None
+            if failures:
+                failure_key = _digest([run_key, wf['stage'], failures])
+                count = seen.get(failure_key, 0) + 1
+                seen[failure_key] = count
+                trigger = 'recoverable_failure' if count == 1 else 'stagnant_retry' if count == 2 else trigger
+            agent._nfos_system_one_seen = seen
+            if not trigger:
+                return None
+            use = 'impediment' if trigger in {'recoverable_failure', 'stagnant_retry'} else 'evidence'
+            result = collect_missing_probe(conn, task_id, task.current_run_id, use=use,
+                reason=trigger, opportunity_trigger=trigger)
+            if result:
+                return json.dumps({'system_one': result}, ensure_ascii=False)
+    except Exception:
+        # This observer cannot block the native loop on missing/migrating state.
         return None
 
 
@@ -433,12 +698,12 @@ def _smoke_path():
 
 
 def _smoke_identity(cfg):
-    return _digest([cfg, os.environ.get(cfg.get('api_key_env', ''), '')])
+    return _digest([cfg, _provider_key(cfg.get('api_key_env')) or ''])
 
 
 def status():
     cfg = settings()
-    available = bool(cfg.get('api_key_env') and os.environ.get(cfg['api_key_env']))
+    available = bool(_provider_key(cfg.get('api_key_env')))
     result = {k: v for k, v in dict(cfg, key_present=available,
         state=('unavailable' if cfg.get('error') else 'disabled' if not cfg['enabled'] else
                'configured_not_validated_live' if available else 'unavailable'), validated_live=False).items() if k != 'endpoint'}

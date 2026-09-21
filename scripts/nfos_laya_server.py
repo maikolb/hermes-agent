@@ -5,7 +5,8 @@ import argparse
 import json
 import resource
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 SOURCE_REVISION = '42626c348753fbb17572a813127df2278a1ec527'
@@ -84,6 +85,9 @@ def main():
                 'encoder_max_positions': agent.model.encoder.config.max_position_embeddings,
                 'load_seconds': round(load_seconds, 4), 'cold_inference_seconds': round(warm_seconds, 4)}
 
+    admission = threading.BoundedSemaphore(1)
+    counters = {'busy_refusals': 0, 'completed': 0}
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass  # Request state can contain customer data; no access/body logging.
@@ -100,11 +104,16 @@ def main():
             if self.path != '/health':
                 return self.reply(404, {'reason': 'not_found'})
             return self.reply(200, dict(identity, ready=True,
+                concurrency=1, **counters,
                 peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss))
 
         def do_POST(self):
             if self.path != '/systemone':
                 return self.reply(404, {'reason': 'not_found'})
+            if not admission.acquire(blocking=False):
+                counters['busy_refusals'] += 1
+                self.close_connection = True
+                return self.reply(429, {'reason': 'busy', 'retryable': True})
             try:
                 size = int(self.headers.get('Content-Length', '0'))
                 if not 0 < size <= 48000:
@@ -126,6 +135,7 @@ def main():
                     latency_ms=round((time.monotonic() - began) * 1000, 3), token_lengths=lengths,
                     peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
                 self.reply(200, result)
+                counters['completed'] += 1
             except (ValueError, KeyError, TypeError, AttributeError) as exc:
                 reason = str(exc) if str(exc) in {'context_too_large', 'unsupported_question', 'inconclusive'} else 'unsupported_question'
                 self.reply(422, {'reason': reason, **identity})
@@ -133,9 +143,11 @@ def main():
                 pass
             except Exception:
                 self.reply(503, {'reason': 'inference_failed', **identity})
+            finally:
+                admission.release()
 
     print(json.dumps(dict(identity, ready=True)), flush=True)
-    HTTPServer(('127.0.0.1', args.port), Handler).serve_forever()
+    ThreadingHTTPServer(('127.0.0.1', args.port), Handler).serve_forever()
 
 
 if __name__ == '__main__':
