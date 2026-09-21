@@ -201,6 +201,48 @@ def escalation_usage(conn, task_id, run_id):
             'turns': sum(json.loads(r['metadata'] or '{}').get('escalation_usage', {}).get('turns', 0) for r in rows)}
 
 
+def iteration_grants(conn, task_id):
+    """Read the append-only grants from the existing Project Ops event ledger."""
+    return [json.loads(row['payload']) for row in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_iteration_budget_granted' ORDER BY id",
+        (task_id,))]
+
+
+def grant_iteration_budget(conn, task_id, *, grant_id, iterations, actor, reason,
+                           expected_run_id, expected_instruction_revision):
+    """Grant a finite allowance to an idle escalation lineage, without resuming it."""
+    from agent.delegation_context import is_dispatcher_owned_worker_context
+    if (os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT')
+            or not is_dispatcher_owned_worker_context()):
+        raise d.WorkflowError('Budget grants belong to the Principal maintainer, outside a worker')
+    if (type(iterations) is not int or iterations <= 0
+            or any(not isinstance(v, str) or not v.strip() for v in (grant_id, actor, reason))
+            or type(expected_run_id) is not int or expected_run_id <= 0
+            or type(expected_instruction_revision) is not int):
+        raise d.WorkflowError('Specify a grant id, positive iterations, actor, reason and observed run/instruction')
+    request = dict(grant_id=grant_id, iterations=iterations, actor=actor, reason=reason,
+                   expected_run_id=expected_run_id, expected_instruction_revision=expected_instruction_revision)
+    from hermes_cli.nfos_workspace_repair import _idle
+    with d._kb().write_txn(conn):
+        grants = iteration_grants(conn, task_id)
+        for saved in grants:
+            if saved['grant_id'] == grant_id:
+                if any(saved.get(k) != v for k, v in request.items()):
+                    raise d.WorkflowError('Grant id already exists with different parameters')
+                return saved
+        task = _idle(conn, task_id)
+        last = conn.execute('SELECT id FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1', (task_id,)).fetchone()
+        first = worker_escalation(conn, task_id).get('first_run_id')
+        if (not last or last['id'] != expected_run_id or task.instruction_revision != expected_instruction_revision
+                or not first or not conn.execute('SELECT 1 FROM task_runs WHERE task_id=? AND id=?', (task_id, first)).fetchone()):
+            raise d.WorkflowError('Card run, instruction or escalation lineage changed; read the current card')
+        receipt = dict(request, task_id=task_id, first_run_id=first, at=int(time.time()),
+                       prior_iterations=escalation_usage(conn, task_id, expected_run_id + 1)['iterations'],
+                       granted_iterations=sum(g['iterations'] for g in grants if g['first_run_id'] == first) + iterations)
+        d._event(conn, task_id, expected_run_id, 'nfos_iteration_budget_granted', receipt)
+        return receipt
+
+
 def _owned_worker_run(conn, task_id, run_id, claim):
     """Read the current process owner; callers recheck inside each write transaction."""
     from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER, is_dispatcher_owned_worker_context
@@ -260,13 +302,21 @@ def worker_checkpoint(agent, turn_id=None):
         if budget is not None:
             prior = escalation_usage(conn, task_id, int(run_id))
             if not getattr(agent, '_nfos_budget_loaded', False):
-                budget.max_total = max(0, budget.max_total - prior['iterations'])
+                first = pending.get('first_run_id', int(run_id))
+                grants = [g for g in iteration_grants(conn, task_id) if g['first_run_id'] == first]
+                allowance = dict(base_iterations=budget.max_total, prior_iterations=prior['iterations'],
+                                 granted_iterations=sum(g['iterations'] for g in grants),
+                                 grant_ids=[g['grant_id'] for g in grants], first_run_id=first)
+                budget.max_total = max(0, budget.max_total + allowance['granted_iterations'] - prior['iterations'])
+                allowance['effective_iterations'] = budget.max_total
+                agent._nfos_iteration_allowance = allowance
                 agent._nfos_budget_loaded = True
             with d._kb().write_txn(conn):
                 row = _owned_worker_run(conn, task_id, run_id, claim)
                 if row is None:
                     return False
                 metadata = json.loads(row['metadata'] or '{}')
+                metadata['iteration_budget'] = agent._nfos_iteration_allowance
                 usage = metadata.setdefault('escalation_usage', {'turns': 0})
                 usage['iterations'] = budget.used
                 if turn_id and usage.get('turn_id') != turn_id and not (
