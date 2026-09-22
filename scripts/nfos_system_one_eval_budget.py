@@ -82,7 +82,7 @@ def _process_alive(pid):
             return True  # Unknown owner: never settle a request that may still be live.
         return psutil.pid_exists(pid)
     try:
-        os.kill(pid, 0)
+        os.kill(pid, 0)  # windows-footgun: ok (POSIX branch only; Windows returns above via psutil)
     except ProcessLookupError:
         return False
     except PermissionError:

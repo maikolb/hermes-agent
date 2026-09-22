@@ -773,7 +773,7 @@ def _bound_routes(routes, task, spec):
             if not manifest.is_file() or 'node_modules' in manifest.parts:
                 continue
             try:
-                scripts = json.loads(manifest.read_text()).get('scripts', {})
+                scripts = json.loads(manifest.read_text(encoding='utf-8')).get('scripts', {})
             except (ValueError, OSError):
                 continue
             for name in scripts:
