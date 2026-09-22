@@ -69,6 +69,60 @@ def safe_receipt(value):
     return text
 
 
+def _process_alive(pid):
+    import os
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if os.name == 'nt':
+        try:
+            import psutil
+        except ImportError:
+            return True  # Unknown owner: never settle a request that may still be live.
+        return psutil.pid_exists(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def reconcile_dead_pending(ledger_path, *, alive=_process_alive):
+    """Settle reservations left pending by a process that died mid-call.
+
+    The reserved amount stays billed: a crash or an expiry never proves zero
+    cost, and authorize() keeps bounding spend by the account counters. Only
+    rows whose owner process is gone are touched; the in-flight lock is freed
+    only when every pending row was settled this way.
+    """
+    import os
+    import time
+    from pathlib import Path
+    path = Path(ledger_path)
+    if not path.is_file():
+        return 0
+    ledger = json.loads(path.read_text(encoding='utf-8'))
+    pending = [row for row in ledger.get('requests', []) if row.get('pending')]
+    settled = 0
+    for row in pending:
+        if not alive(row.get('pid')):
+            row.update(pending=False, billed=str(amount(row.get('reserved', 0))),
+                       billing_state='RECONCILED_CONSERVATIVE_AFTER_CRASH', ended_at=time.time())
+            settled += 1
+    if settled:
+        temporary = path.with_suffix(path.suffix + '.pending')
+        temporary.write_text(safe_receipt(ledger), encoding='utf-8')
+        os.replace(temporary, path)
+        if settled == len(pending):
+            path.with_suffix(path.suffix + '.lock').unlink(missing_ok=True)
+    return settled
+
+
 def guarded_call(cfg, payload, secret, send):
     """Opt-in operational evaluator guard used by the native adapter, including CLI children.
 

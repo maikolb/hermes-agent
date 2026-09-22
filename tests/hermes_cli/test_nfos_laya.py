@@ -50,7 +50,8 @@ def test_native_laya_primary_replaces_principal(task_context, http_fixture, choi
     assert all(call[0] == '/systemone' and call[1] is None for call in http_fixture.calls)
     assert kb.get_task(conn, task.id).model_override == task.model_override
     receipt = json.loads(conn.execute("SELECT payload FROM task_events WHERE kind='nfos_jev_primary_spec' ORDER BY id DESC LIMIT 1").fetchone()[0])
-    assert receipt['used_engine'] == 'laya' and receipt['principal_calls_saved'] == 1
+    # Only an acceptance replaces a Principal review; a changes round saves nothing.
+    assert receipt['used_engine'] == 'laya' and receipt['principal_calls_saved'] == (1 if action == 'continue' else 0)
 
 
 @pytest.mark.parametrize('failure', ['revision', 'source_revision', 'contradiction', 'context', 'confidence'])
@@ -82,21 +83,26 @@ def test_laya_fallback_has_explicit_receipt(task_context, http_fixture, failure)
         assert 'answers' not in receipt
 
 
-@pytest.mark.parametrize('use', ['impediment', 'evidence'])
-def test_laya_executes_native_probe_without_second_action_review(task_context, http_fixture, monkeypatch, use):
+def test_laya_executes_native_probe_without_second_action_review(task_context, http_fixture, monkeypatch):
     conn, task, spec, artifact = task_context
     prepare_probe(conn, task, spec, http_fixture, monkeypatch)
-    select_laya(conn, task, http_fixture, [use])
-    if use == 'impediment':
-        assert kb.block_task(conn, task.id, reason='Medir o total configurado', kind='transient', expected_run_id=task.current_run_id)
-        assert not kb._nfos_pending_decision(conn, task.id, task.current_run_id)
-    else:
-        save_report(conn, task, artifact)
-        assert not review.accepted(conn, task.id, 'final_review')
+    select_laya(conn, task, http_fixture, ['evidence'])
+    save_report(conn, task, artifact)
+    assert not review.accepted(conn, task.id, 'final_review')
     assert http_fixture.probes == ['/count']
     receipt = json.loads(conn.execute("SELECT payload FROM task_events WHERE kind='nfos_jev_action' ORDER BY id DESC LIMIT 1").fetchone()[0])
     assert receipt['used_engine'] == 'laya' and receipt['typed_action_executed']
+    assert receipt['principal_calls_saved'] == 0
     assert kb.get_task(conn, task.id).current_run_id == task.current_run_id
+
+
+def test_laya_impediment_selection_never_swallows_a_block(task_context, http_fixture, monkeypatch):
+    conn, task, spec, _ = task_context
+    prepare_probe(conn, task, spec, http_fixture, monkeypatch)
+    select_laya(conn, task, http_fixture, ['impediment'])
+    assert kb.block_task(conn, task.id, reason='Medir o total configurado', kind='transient', expected_run_id=task.current_run_id)
+    assert kb._nfos_pending_decision(conn, task.id, task.current_run_id)
+    assert not http_fixture.probes and not http_fixture.calls
 
 
 def test_selected_config_drift_invalidates_acceptance(task_context, http_fixture):
@@ -113,13 +119,13 @@ def test_selected_config_drift_invalidates_acceptance(task_context, http_fixture
 
 def test_probe_failure_escalates_without_claiming_saved_call(task_context, http_fixture, monkeypatch):
     from tests.hermes_cli.test_nfos_principal_acceptance import accept
-    conn, task, spec, _ = task_context
+    conn, task, spec, artifact = task_context
     spec = prepare_probe(conn, task, spec, http_fixture, monkeypatch)
     spec['criteria'][0]['probe']['expect'] = {'equals': 99}
     save(conn, task, spec)
     accept(conn, task, 'spec_review')
-    select_laya(conn, task, http_fixture, ['impediment'])
-    assert kb.block_task(conn, task.id, reason='Verificar contagem', kind='transient')
+    select_laya(conn, task, http_fixture, ['evidence'])
+    save_report(conn, task, artifact)
     assert kb._nfos_pending_decision(conn, task.id, task.current_run_id)
     receipt = json.loads(conn.execute("SELECT payload FROM task_events WHERE kind='nfos_jev_action' ORDER BY id DESC LIMIT 1").fetchone()[0])
     assert receipt['principal_calls_saved'] == 0 and receipt['fallback_reason'] == 'probe_failed_or_inconclusive'

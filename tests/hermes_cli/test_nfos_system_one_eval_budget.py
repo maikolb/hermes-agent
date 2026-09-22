@@ -43,6 +43,26 @@ def test_credential_and_authorization_header_never_enter_receipt():
     assert 'OPENROUTER_API_KEY' in safe_receipt({'variable_name': 'OPENROUTER_API_KEY', 'present': True})
 
 
+def test_crashed_reservation_settles_at_reserved_amount_never_zero(tmp_path):
+    import json
+    from scripts.nfos_system_one_eval_budget import reconcile_dead_pending
+    ledger = tmp_path / 'ledger.json'
+    ledger.write_text(json.dumps({'initial': account(), 'requests': [
+        {'label': 'crashed', 'pending': True, 'reserved': '0.041', 'pid': 101},
+        {'label': 'settled', 'pending': False, 'billed': '0.00002', 'pid': 102}]}))
+    lock = ledger.with_suffix('.json.lock')
+    lock.write_text('')
+    assert reconcile_dead_pending(str(ledger), alive=lambda pid: True) == 0
+    assert json.loads(ledger.read_text())['requests'][0]['pending'] is True and lock.exists()
+    assert reconcile_dead_pending(str(ledger), alive=lambda pid: False) == 1
+    row = json.loads(ledger.read_text())['requests'][0]
+    assert row['pending'] is False and row['billed'] == '0.041'
+    assert row['billing_state'] == 'RECONCILED_CONSERVATIVE_AFTER_CRASH'
+    assert not lock.exists()
+    # The settled reserve still counts against the cap; nothing is refunded.
+    assert authorize(account(), account(), json.loads(ledger.read_text())['requests'], Decimal('.01')) == Decimal('0.04102')
+
+
 def test_paid_key_is_never_sent_to_laya_or_an_alternate_provider():
     for endpoint in ['http://127.0.0.1:18991/systemone', 'https://example.org/systemone', 'https://openrouter.ai/api/v1/chat/completions']:
         with pytest.raises(ValueError, match='only permits'):

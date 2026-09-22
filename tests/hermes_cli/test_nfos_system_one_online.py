@@ -29,7 +29,7 @@ def prepare(task_context, http_fixture, monkeypatch, mode='active'):
     return conn, task
 
 
-def test_native_batch_without_executable_evidence_uses_existing_fallback_once(task_context, http_fixture, monkeypatch):
+def test_native_batch_guidance_is_advisory_and_opens_no_principal_question(task_context, http_fixture, monkeypatch):
     from agent import tool_executor
     conn, task = prepare(task_context, http_fixture, monkeypatch)
     before = conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0]
@@ -41,11 +41,12 @@ def test_native_batch_without_executable_evidence_uses_existing_fallback_once(ta
     tool_executor.execute_tool_calls_segmented(agent, SimpleNamespace(tool_calls=[object()]), messages, 'isolated', segments=[])
     assert http_fixture.probes == []  # guidance is not an automatic duplicate probe
     assert 'system_one' in messages[-1]['content']
-    assert conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0] == before + 1
-    assert engine._requirement(conn, task.id)['status'] == 'awaiting_principal'
+    # Formerly the verify boundary could only offer escalation and filed an impediment.
+    assert conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0] == before
     assert kb.get_task(conn, task.id).current_run_id == task.current_run_id
     rows = [json.loads(r[0]) for r in conn.execute("SELECT payload FROM task_events WHERE kind='nfos_system_one_guidance'")]
     assert rows[-1]['principal_calls_saved'] == 0
+    assert rows[-1]['advisory'] is True and rows[-1]['enforced'] is False
     count = len(http_fixture.calls)
     tool_executor._system_one_after_batch(agent, messages, 1)
     assert len(http_fixture.calls) == count  # cheap repeated reads are not decision opportunities

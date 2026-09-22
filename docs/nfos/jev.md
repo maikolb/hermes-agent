@@ -37,16 +37,18 @@ Erros, ausência de chave e baixa confiança preservam o caminho anterior.
 
 ## Entradas efetivas
 
-- save_spec seleciona P/M/G, grava a estimativa no card e aplica o limite sem ultrapassar o teto corrente. Preserva modelo/provider/effort fixados e consumo acumulado. Se reduzir o prazo expiraria o run atual, conserva o limite corrente. Não renova tentativas.
+- save_spec pode registrar uma estimativa P/M/G (`nfos_jev_budget_estimate`, `applied=false`). Ela nunca altera o limite: quem escreve a spec define o orçamento (BLOCK_LESS9). Preserva modelo/provider/effort fixados e consumo acumulado.
 - save_spec em auxiliary envia checagem por critério ao spec_review existente. Em primary, Jev pode aceitar a SPEC ou devolver changes diretamente ao worker, com autoria Jev e recibo canônico. Não adiciona revisão no modo que não a exige.
-- block_task tenta uma coleta útil antes de abrir impedimento ao Principal, depois das verificações de dependência/decisão pendente. Somente sondas sql/http/header já presentes na spec atual e permitidas pelo executor são candidatas. Executa run_probes, registra recibo e responde ao worker com blocked=false, status=running e resultado da coleta. Isso não afirma resolução do impedimento. Sem ação aplicável, segue a rota anterior.
+- block_task não consulta Jev: todo bloqueio chega ao Principal pelo caminho nativo. Uma medição que passa não prova que o impedimento sumiu.
 - save_report pode coletar uma medição faltante antes da conferência de evidências existente. Origem, destino, prova e aceitação continuam sob as regras nativas. PASS/FAIL de uma sonda vem de seu executor, nunca de Jev.
+- A orientação ao worker nos limites de etapa é só sugestão: não bloqueia tool, não trava transição e não abre pergunta ao Principal. A adesão real é registrada em `nfos_system_one_guidance_consumed`.
+- Apenas o aceite primário de spec conta `principal_calls_saved=1`. Plano e critérios de ativação: [jev-plano-corrigido.md](jev-plano-corrigido.md).
 
 A recuperação inicial é deliberadamente limitada a sondas existentes sem medição atual. Não há geração de comandos, criação de credencial, reparo arbitrário, deploy ou mudança de permissões pelo classificador. Problemas que exigem outros passos seguem o executor/Principal atual. Uma sonda já medida, inclusive FAIL/indeterminada, não é repetida automaticamente sem alteração de spec/mutação.
 
 As chamadas não ocorrem dentro de transação SQLite nem sob o lock do dispatcher. Respostas que chegam depois de mudança da identidade do trabalho são descartadas. Uma reserva em task_events limita a uma chamada por uso/contexto/configuração material. Spec/orçamento podem reutilizar resposta válida; ações não são reexecutadas pelo cache. Nenhuma tabela ou serviço novo.
 
-Eventos nfos_jev registram provider, modelo pedido/real, uso, latência, usage e custo quando fornecido, ou motivo do fallback. nfos_jev_budget_applied separa estimativa de limite. nfos_jev_action aponta para as medições nativas. Nenhum evento contém chave, resposta HTTP integral ou raciocínio privado.
+Eventos nfos_jev registram provider, modelo pedido/real, uso, latência, usage e custo quando fornecido, ou motivo do fallback. nfos_jev_budget_estimate registra a estimativa sem aplicá-la. nfos_jev_action aponta para as medições nativas. Nenhum evento contém chave, resposta HTTP integral ou raciocínio privado.
 
 ## Status e smoke explícito
 

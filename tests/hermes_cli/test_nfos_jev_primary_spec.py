@@ -129,6 +129,26 @@ def test_late_result_never_accepts_stale_spec(task_context, http_fixture, monkey
     assert not review.accepted(conn, task.id, 'spec_review')
 
 
+def test_disabling_during_inference_leaves_the_principal_as_single_owner(task_context, http_fixture, monkeypatch):
+    conn, task, spec, _ = task_context
+    enable(monkeypatch, ['spec'], spec_review_mode='primary')
+    original = jev._request
+    def switched_off_mid_flight(*args):
+        result = original(*args)
+        enable(monkeypatch, ['spec'], spec_review_mode='primary', enabled=False)
+        return result
+    monkeypatch.setattr(jev, '_request', switched_off_mid_flight)
+    save(conn, task, spec)
+    rows = [tuple(r) for r in conn.execute(
+        "SELECT status, author FROM nfos_decisions WHERE task_id=? AND kind='spec_review'", (task.id,))]
+    # The late answer is discarded; exactly one owner remains: the pending Principal review.
+    assert [r for r in rows if r[0] == 'pending'] == [('pending', None)]
+    assert not [r for r in rows if r[1] == 'Jev']
+    assert not review.accepted(conn, task.id, 'spec_review')
+    stale = json.loads(conn.execute("SELECT payload FROM task_events WHERE kind='nfos_jev' ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert stale['used_engine'] is None
+
+
 def test_complete_request_and_full_spec_are_sent(task_context, http_fixture, monkeypatch):
     conn, task, spec, _ = task_context
     enable(monkeypatch, ['spec'], spec_review_mode='primary')

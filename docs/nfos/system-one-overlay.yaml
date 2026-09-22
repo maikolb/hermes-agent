@@ -1,11 +1,13 @@
 # PREPARED ONLY. Merge these scoped keys after future explicit activation.
 # Preserve projects, worker pins, Principal defaults, credentials and cron.
+# mode stays off: see docs/nfos/jev-plano-corrigido.md. A layer is activated only
+# after its pre-registered replay criteria pass and the owner decides.
 kanban:
   delivery:
     decision_engines:
       allowed: [laya, jev]
     system_one:
-      mode: active
+      mode: off
       engine: laya
       classes: [budget, impediment, evidence]
       timeout_seconds: 90

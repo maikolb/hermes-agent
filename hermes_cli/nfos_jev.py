@@ -114,7 +114,7 @@ def system_one_status():
     if path.is_file():
         try:
             with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
-                for kind, payload in conn.execute("SELECT kind,payload FROM task_events WHERE kind IN ('nfos_system_one_opportunity','nfos_jev','nfos_jev_action','nfos_jev_primary_spec','nfos_jev_budget_applied','nfos_rework_requested','nfos_system_one_guidance','nfos_system_one_guidance_consumed') ORDER BY id DESC LIMIT 5000"):
+                for kind, payload in conn.execute("SELECT kind,payload FROM task_events WHERE kind IN ('nfos_system_one_opportunity','nfos_jev','nfos_jev_action','nfos_jev_primary_spec','nfos_jev_budget_estimate','nfos_rework_requested','nfos_system_one_guidance','nfos_system_one_guidance_consumed') ORDER BY id DESC LIMIT 5000"):
                     row = json.loads(payload)
                     metrics['opportunities'] += kind == 'nfos_system_one_opportunity'
                     metrics['engine_calls'] += bool(row.get('inference_engine'))
@@ -125,9 +125,10 @@ def system_one_status():
                     metrics['rework'] += kind == 'nfos_rework_requested'
                     metrics['guidance_issued'] += kind == 'nfos_system_one_guidance'
                     if kind == 'nfos_system_one_guidance_consumed':
-                        metrics['guidance_observed'] += row.get('acknowledgment') == 'implicit_tool_match'
+                        followed = row.get('acknowledgment') in {'implicit_tool_match', 'category_tool_match'}
+                        metrics['guidance_observed'] += followed
                         metrics['guidance_tool_succeeded'] += row.get('observation') == 'matching_tool_succeeded'
-                        metrics['guidance_not_observed'] += row.get('acknowledgment') != 'implicit_tool_match'
+                        metrics['guidance_not_observed'] += not followed
                     used = row.get('inference_engine')
                     if used in providers and row.get('credential_binding') == bindings[used]:
                         providers[used]['inference_tested'] = True
@@ -672,7 +673,8 @@ def collect_missing_probe(conn, task_id, run_id, *, use, reason='', opportunity_
             'next_action': 'Inspect the measurement and continue this card; collected evidence does not mean the impediment is resolved.',
             'selected_engine': cfg['engine'], 'used_engine': cfg['engine'], 'model': result['model'],
             'model_revision': cfg.get('model_revision'), 'latency_ms': result.get('latency_ms'),
-            'principal_calls_saved': 1 if use == 'impediment' and succeeded and not opportunity_trigger else 0,
+            # A measurement never replaces a Principal decision; it is evidence for one.
+            'principal_calls_saved': 0,
             'typed_action_executed': True, 'fallback_reason': None if succeeded else 'probe_failed_or_inconclusive'}
         with d._kb().write_txn(conn):
             d._owned(conn, task_id, run_id)
@@ -738,23 +740,8 @@ def _guidance_binding(conn, task_id):
                     spec.get('revision'), spec.get('content')])
 
 
-def _requirement(conn, task_id):
-    from hermes_cli import nfos_delivery as d
-    wf = d.get_workflow(conn, task_id)
-    return json.loads(wf['state_json']).get('system_one_requirement') if wf else None
-
-
-def _save_requirement(conn, task, value, event):
-    from hermes_cli import nfos_delivery as d
-    wf = d.get_workflow(conn, task.id)
-    state = json.loads(wf['state_json'])
-    state['system_one_requirement'] = value
-    conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (d._json(state), task.id))
-    d._event(conn, task.id, task.current_run_id, event, value)
-
-
 def _bound_routes(routes, task, spec):
-    """Only offer categories with an inspectable target/argument contract."""
+    """Bind targets/commands the workspace exposes; a check route stays available without them."""
     from pathlib import Path
     import shlex
     root = Path(task.workspace_path).resolve()
@@ -795,35 +782,23 @@ def _bound_routes(routes, task, spec):
         if commands:
             result['run_relevant_checks'] = {**routes['run_relevant_checks'], 'commands': commands[:16],
                 'instruction': 'Run an existing registered repository checker; final acceptance remains Principal. Allowed exact commands: ' + '; '.join(shlex.join(c) for c in commands[:16])}
+        else:
+            # Every stack keeps the route: the worker runs the checks its repository already has.
+            result['run_relevant_checks'] = dict(routes['run_relevant_checks'])
     for name in ('continue_worker', 'escalate_existing'):
         result[name] = routes[name]
     return result
 
 
-def _requirement_fallback(conn, task, requirement, reason):
-    from hermes_cli import nfos_delivery as d
-    requirement.update(status='awaiting_principal', fallback_reason=reason, enforced=True)
-    decision = d.ask_principal(conn, task.id, task.current_run_id, kind='impediment',
-        question='Resolve the unsatisfied System One action using the existing worker/Principal flow. '
-                 'No new permission or final acceptance is granted. Reason: ' + reason,
-        context={'system_one_requirement': requirement})
-    requirement['fallback_decision_id'] = decision
-    _save_requirement(conn, task, requirement, 'nfos_system_one_enforcement_fallback')
-
-
 def _worker_boundary(agent, conn, task):
-    """One persisted material opportunity, including the first tool after restart."""
+    """One persisted advisory opportunity per stage/source boundary, also after restart."""
     from hermes_cli import kanban_db as kb, nfos_delivery as d
     wf = d.get_workflow(conn, task.id)
     state = json.loads(wf['state_json'])
-    pending = state.get('system_one_requirement')
-    if pending and pending.get('status') not in {'completed', 'fallback_resolved'}:
-        return
-    boundary = _digest([task.current_run_id, wf['stage'], _guidance_binding(conn, task.id),
-                        state.get('system_one_boundary_request')])
+    boundary = _digest([task.current_run_id, wf['stage'], _guidance_binding(conn, task.id)])
     if state.get('system_one_boundary') == boundary:
-        return
-    trigger = state.get('system_one_boundary_request') or ('next_evidence' if wf['stage'] in {'verify', 'report'} else 'stage_start')
+        return None
+    trigger = 'next_evidence' if wf['stage'] in {'verify', 'report'} else 'stage_start'
     receipt = _guide_worker(agent, conn, task, wf, trigger, [])
     if system_one_policy()['mode'] == 'shadow':
         # The asynchronous observer binds to the unchanged native state.
@@ -831,34 +806,8 @@ def _worker_boundary(agent, conn, task):
     with kb.write_txn(conn):
         state = json.loads(d.get_workflow(conn, task.id)['state_json'])
         state['system_one_boundary'] = boundary
-        if not receipt and trigger == 'next_evidence':
-            state['system_one_evidence_fallback'] = _guidance_binding(conn, task.id)
         conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (d._json(state), task.id))
     return receipt
-
-
-def require_worker_action(conn, task_id, *, transition=None):
-    """Native state transitions cannot forge/discard a pending tool requirement."""
-    from hermes_cli import kanban_db as kb, nfos_delivery as d
-    cfg = settings(conn, task_id)
-    if system_one_policy()['mode'] != 'active' or not cfg.get('selection') or not cfg['enabled']:
-        return
-    requirement = _requirement(conn, task_id)
-    if requirement and requirement.get('status') in {'pending', 'executing'}:
-        raise d.WorkflowError('System One action is pending; execute the validated action or resolve its native fallback first')
-    if transition == 'report' and 'evidence' in cfg['uses']:
-        state = json.loads(d.get_workflow(conn, task_id)['state_json'])
-        binding = _guidance_binding(conn, task_id)
-        # Once a requirement was escalated (or the Principal resolved it) enforcement
-        # released it to the native flow; only an un-escalated requirement still owes
-        # this opportunity at the current binding.
-        released = bool(requirement and requirement.get('status') in {'awaiting_principal', 'fallback_resolved'})
-        opportunity = bool(requirement and requirement.get('trigger') == 'next_evidence' and requirement.get('binding') == binding)
-        if not released and not opportunity and state.get('system_one_evidence_fallback') != binding:
-            with kb.write_txn(conn):
-                state['system_one_boundary_request'] = 'next_evidence'
-                conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (d._json(state), task_id))
-            raise d.WorkflowError('System One next_evidence opportunity required before saving the report; return to the native worker loop')
 
 
 def _typed_action_matches(requirement, root, name, args, *, digest=True):
@@ -885,115 +834,10 @@ def _typed_action_matches(requirement, root, name, args, *, digest=True):
     return False
 
 
-_WORKER_GUARD_CREATION = threading.Lock()
-
-
-def before_worker_tool(agent, name, args, call_id):
-    """Reserve the selected action before dispatch. No model-provided acknowledgment counts."""
-    from hermes_cli import kanban_db as kb, nfos_delivery as d
-    from pathlib import Path
-    task_id = os.environ.get('HERMES_KANBAN_TASK')
-    if not task_id or system_one_policy()['mode'] != 'active':
-        return None, None
-    with kb.connect_closing() as conn:
-        task = kb.get_task(conn, task_id)
-        if not task or task.worker_pid != os.getpid() or not settings(conn, task_id).get('selection'):
-            return None, None
-        with _WORKER_GUARD_CREATION:
-            lock = getattr(agent, '_nfos_system_one_guard_lock', None)
-            if lock is None:
-                lock = agent._nfos_system_one_guard_lock = threading.RLock()
-        with lock:
-            _worker_boundary(agent, conn, task)
-        with kb.write_txn(conn):
-            requirement = _requirement(conn, task_id)
-            if not requirement or requirement.get('status') in {'completed', 'fallback_resolved'}:
-                if requirement and requirement.get('tool_call_id') == call_id:
-                    return 'System One action already executed; duplicate tool call refused', None
-                return None, None
-            if requirement['status'] != 'awaiting_principal' and requirement['binding'] != _guidance_binding(conn, task_id):
-                _requirement_fallback(conn, task, requirement, 'stale_source_binding')
-            if requirement['status'] == 'awaiting_principal':
-                decision = requirement.get('fallback_decision_id') and d.get_decision(conn, requirement['fallback_decision_id'])
-                if decision and decision['status'] == 'resolved' and decision['action'] in {'continue', 'changes'}:
-                    requirement.update(status='fallback_resolved', actual_engine='principal')
-                    _save_requirement(conn, task, requirement, 'nfos_system_one_enforcement_resolved')
-                # Scoped fallback: the native Principal flow owns this requirement, so
-                # the sole native loop continues under prior semantics. Nothing is
-                # marked executed here and no completion can be forged.
-                return None, None
-            # Native status/plan bookkeeping is allowed, but never discharges the action.
-            if name in {'kanban_show', 'todo', 'tool_search', 'skills_list', 'skills_view'}:
-                return None, None
-            if requirement['status'] == 'executing':
-                # Sequential and concurrent dispatch share this boundary: a live
-                # reservation must never run a second side effect.
-                if requirement.get('tool_call_id') == call_id:
-                    return 'System One action already executing; duplicate tool call refused', None
-                pid = requirement.get('execution_pid')
-                if pid == os.getpid() or kb._pid_alive(pid):
-                    return 'System One action is still executing in the native executor', None
-                # The reserving worker died mid-tool (crash/OOM/stop). The attempt
-                # never completed, so it is reconciled instead of freezing every
-                # later tool call; the same validated action may still be redone.
-                requirement.update(status='pending', execution_pid=None, tool_call_id=None,
-                                   interrupted_attempts=requirement.get('interrupted_attempts', 0) + 1)
-                _save_requirement(conn, task, requirement, 'nfos_system_one_enforcement_interrupted')
-            valid = requirement['status'] == 'pending' and _typed_action_matches(
-                requirement, Path(task.workspace_path).resolve(), name, args)
-            if not valid:
-                requirement['blocked_attempts'] = requirement.get('blocked_attempts', 0) + 1
-                _save_requirement(conn, task, requirement, 'nfos_system_one_enforcement_blocked')
-                if requirement['status'] == 'pending' and requirement['blocked_attempts'] >= 3:
-                    # Escalate once, scoped to this requirement; the next dispatch is
-                    # released to native semantics instead of blocking the loop.
-                    _requirement_fallback(conn, task, requirement, 'noncompliant_attempt_limit')
-                return 'System One action required before progress: ' + json.dumps(requirement, ensure_ascii=False), None
-            requirement.update(status='executing', tool_call_id=call_id, tool=name,
-                               arguments_sha256=_digest(args), execution_pid=os.getpid())
-            _save_requirement(conn, task, requirement, 'nfos_system_one_enforcement_started')
-            return None, {'task_id': task_id, 'run_id': task.current_run_id,
-                          'opportunity_id': requirement['opportunity_id'], 'tool_call_id': call_id}
-
-
-def after_worker_tool(ticket, result, *, failed=False):
-    from hermes_cli import kanban_db as kb
-    from agent.display import _detect_tool_failure
-    with kb.connect_closing() as conn, kb.write_txn(conn):
-        task = kb.get_task(conn, ticket['task_id'])
-        requirement = _requirement(conn, task.id)
-        if not requirement or requirement.get('tool_call_id') != ticket['tool_call_id'] or requirement['status'] != 'executing':
-            return
-        text = result if isinstance(result, str) else json.dumps(result)
-        detected, _ = _detect_tool_failure(requirement['tool'], text)
-        try:
-            data = json.loads(text)
-        except (ValueError, TypeError):
-            data = text
-        meaningful = bool(data)
-        if isinstance(data, dict):
-            meaningful = any(data.get(key) for key in ('content', 'text', 'output', 'result'))
-            if requirement['tool'] == 'terminal' and data.get('exit_code') == 0:
-                meaningful = True
-            failed = failed or data.get('exit_code', 0) not in (0, None) or bool(data.get('error'))
-        requirement['result_sha256'] = _digest(result)
-        if requirement['binding'] != _guidance_binding(conn, task.id):
-            _requirement_fallback(conn, task, requirement, 'source_changed_during_execution')
-        elif failed or detected or not meaningful:
-            _requirement_fallback(conn, task, requirement, 'tool_failed_or_unverified_result')
-        else:
-            requirement.update(status='completed', typed_action_executed=True, actual_engine='native_executor',
-                               principal_calls_saved=0, semantic_outcome='NOT_PROVEN')
-            _save_requirement(conn, task, requirement, 'nfos_system_one_enforcement_completed')
-
-
 def _observe_guidance(agent, conn, task, messages, num_tools):
     """A tool match is observed adherence, never a semantic acceptance or enforced dispatch."""
     pending = getattr(agent, '_nfos_system_one_pending', None)
     if not pending:
-        return
-    if pending.get('enforced'):
-        # Only the pre-execution guard and actual canonical callback can discharge it.
         return
     agent._nfos_system_one_pending = None
     from hermes_cli import nfos_delivery as d
@@ -1003,6 +847,9 @@ def _observe_guidance(agent, conn, task, messages, num_tools):
     calls = {c.get('id'): c.get('function', {}) for m in messages if m.get('role') == 'assistant'
              for c in m.get('tool_calls', []) if isinstance(c, dict)}
     root = Path(task.workspace_path).resolve()
+    # A route with a bound target/command is matched exactly; a route without one
+    # (e.g. checks in a repository with no registered scripts) only by tool category.
+    exact = bool(pending.get('targets') or pending.get('commands'))
     observed = []
     for m in messages[-num_tools:]:
         call = calls.get(m.get('tool_call_id'), {})
@@ -1017,8 +864,7 @@ def _observe_guidance(agent, conn, task, messages, num_tools):
                 args = json.loads(raw or '{}')
             except (ValueError, TypeError):
                 continue
-        if not isinstance(args, dict) or not _typed_action_matches(pending, root, name, args, digest=False):
-            # The bound target/command, not the tool name alone, defines adherence.
+        if not isinstance(args, dict) or exact and not _typed_action_matches(pending, root, name, args, digest=False):
             continue
         content = m.get('content', '')
         failed, _ = _detect_tool_failure(name, content) if isinstance(content, str) else (False, '')
@@ -1037,7 +883,8 @@ def _observe_guidance(agent, conn, task, messages, num_tools):
             'opportunity_id': pending['opportunity_id'], 'route': pending['route'],
             'binding': pending['binding'], 'enforced': False, 'principal_calls_saved': 0,
             'observed_after_batches': pending['batches_seen'],
-            'acknowledgment': 'implicit_tool_match' if observed and not stale else 'not_observed',
+            'acknowledgment': ('not_observed' if not observed or stale
+                               else 'implicit_tool_match' if exact else 'category_tool_match'),
             'observation': 'stale' if stale else 'matching_tool_failed' if any(x['tool_failed'] for x in observed)
                 else 'matching_tool_succeeded' if observed else 'different_tool_or_no_action',
             'tool_call_id': observed[0]['tool_call_id'] if observed else None,
@@ -1049,9 +896,6 @@ def _guide_worker(agent, conn, task, wf, trigger, failures):
     spec_row = d.get_spec(conn, task.id)
     spec = json.loads(spec_row['content']) if spec_row else {}
     routes = _bound_routes(_guidance_routes(agent, wf['stage'], trigger, spec, failures), task, spec)
-    if trigger == 'next_evidence':
-        routes = {key: value for key, value in routes.items()
-                  if key in {'run_relevant_checks', 'escalate_existing'}}
     use = 'impediment' if trigger in {'recoverable_failure', 'stagnant_retry'} else 'evidence'
     phase = use if trigger != 'stage_start' else 'guidance'
     request = d.get_request(conn, wf['request_id'])
@@ -1061,7 +905,7 @@ def _guide_worker(agent, conn, task, wf, trigger, failures):
         'criteria': [{'id': c['id'], 'text': c['text']} for c in spec.get('criteria', [])],
         'spec_revision': spec_row['revision'] if spec_row else None,
         'binding': _guidance_binding(conn, task.id), 'failures': failures,
-        'available': routes, 'authority': 'mandatory source-bound next action; existing permissions and final Principal acceptance remain native'}
+        'available': routes, 'authority': 'advisory suggestion only; the worker may decline it; existing permissions and final Principal acceptance remain native'}
     if len(json.dumps(state).encode()) > 8192:
         _fallback(conn, task.id, task.current_run_id, use, settings(conn, task.id), 'guidance_context_too_large')
         return None
@@ -1076,21 +920,15 @@ def _guide_worker(agent, conn, task, wf, trigger, failures):
     receipt = {'route': route, 'instruction': routes[route]['instruction'], 'tools': routes[route]['tools'],
         'trigger': trigger, 'opportunity_id': result['key'], 'binding': state['binding'],
         'selected_engine': settings(conn, task.id)['engine'], 'model': result['model'],
-        'confidence': result['answers']['route']['confidence'], 'advisory': False,
-        'enforced': True, 'typed_action_executed': False, 'principal_calls_saved': 0,
+        'confidence': result['answers']['route']['confidence'], 'advisory': True,
+        'enforced': False, 'typed_action_executed': False, 'principal_calls_saved': 0,
         'targets': routes[route].get('targets', {}), 'commands': routes[route].get('commands', []),
-        'status': 'completed' if route == 'continue_worker' else 'pending'}
+        'note': 'Advisory only: follow it if useful. Nothing is blocked and no Principal question is opened.'}
     with d._kb().write_txn(conn):
         d._owned(conn, task.id, task.current_run_id)
         d._event(conn, task.id, task.current_run_id, 'nfos_system_one_guidance', receipt)
-        _save_requirement(conn, task, receipt, 'nfos_system_one_enforcement_required')
-        state = json.loads(d.get_workflow(conn, task.id)['state_json'])
-        state['system_one_boundary'] = _digest([task.current_run_id, wf['stage'], state['system_one_requirement']['binding'],
-                                               state.get('system_one_boundary_request')])
-        conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (d._json(state), task.id))
-        if route == 'escalate_existing':
-            _requirement_fallback(conn, task, receipt, 'selected_existing_escalation')
-    agent._nfos_system_one_pending = receipt
+    if receipt['tools']:
+        agent._nfos_system_one_pending = receipt
     return json.dumps({'system_one': receipt}, ensure_ascii=False)
 
 
@@ -1113,9 +951,6 @@ def worker_material_opportunity(agent, messages, num_tools):
             wf = d.get_workflow(conn, task_id)
             if not wf:
                 return None
-            pending = _requirement(conn, task_id)
-            if pending and pending.get('status') not in {'completed', 'fallback_resolved'}:
-                return None
             _observe_guidance(agent, conn, task, messages, num_tools)
             seen = getattr(agent, '_nfos_system_one_seen', {})
             run_key = str(task.current_run_id)
@@ -1134,9 +969,8 @@ def worker_material_opportunity(agent, messages, num_tools):
                 match = re.search(r'\b(?:timed out|TimeoutError|ETIMEDOUT|(?:read|connect|request|operation) timeout|connection reset|temporarily unavailable|HTTP (?:429|503))\b', content, re.I)
                 if failed:
                     failures.append((message.get('name', 'tool'), match.group(0).lower() if match else 'tool_failed'))
-            trigger = json.loads(wf['state_json']).get('system_one_boundary_request')
-            if not trigger:
-                trigger = 'next_evidence' if wf['stage'] in {'verify', 'report'} and previous_stage != wf['stage'] else 'stage_start' if previous_stage != wf['stage'] else None
+            trigger = ('next_evidence' if wf['stage'] in {'verify', 'report'} and previous_stage != wf['stage']
+                       else 'stage_start' if previous_stage != wf['stage'] else None)
             if failures:
                 failure_key = _digest([run_key, wf['stage'], failures])
                 count = seen.get(failure_key, 0) + 1
@@ -1380,7 +1214,10 @@ def primary_spec_review(conn, task_id, run_id):
         d._event(conn, task_id, run_id, 'nfos_jev_primary_spec', {'decision_id': decision_id, 'action': action,
             'provider': cfg['provider'], 'model': result['model'], 'evaluation_key': result['key'], 'seal': _decision_seal(row),
             'selected_engine': cfg['engine'], 'used_engine': cfg['engine'], 'model_revision': cfg.get('model_revision'),
-            'latency_ms': result.get('latency_ms'), 'principal_calls_saved': 1, 'typed_action_executed': True})
+            # Only an acceptance replaces a review the Principal would have done; a
+            # 'changes' round may exist only because of this engine, so it saves nothing.
+            'latency_ms': result.get('latency_ms'), 'principal_calls_saved': 1 if action == 'continue' else 0,
+            'typed_action_executed': True})
         receipt_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
         context['jev_receipt_id'] = receipt_id
         conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (d._json(context), decision_id))

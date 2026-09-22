@@ -8726,9 +8726,6 @@ def block_task(
                                        "requested_reason": str(reason or "")[:400]},
                                       run_id=current.current_run_id)
                     return True
-                from hermes_cli.nfos_jev import collect_missing_probe
-                if collect_missing_probe(conn, task_id, current.current_run_id, use='impediment', reason=reason):
-                    return True  # A real measurement was collected; the worker continues the same run.
                 ask_principal(conn,task_id,current.current_run_id,kind='impediment',
                     question=reason or 'Diagnose why this task cannot advance',context={'requested_block_kind':kind})
                 return True
