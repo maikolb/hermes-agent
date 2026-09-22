@@ -1,0 +1,38 @@
+{
+ "L1-A": {
+  "sem_limiar": {
+   "changes->accept": 46,
+   "changes->changes": 8,
+   "changes->inconclusive": 9,
+   "continue->accept": 56,
+   "continue->changes": 9,
+   "continue->inconclusive": 7
+  },
+  "min_confidence_p50": 0.35,
+  "min_confidence_p90": 0.73,
+  "n": 135
+ },
+ "L1-B": {
+  "sem_limiar": {
+   "changes->accept": 43,
+   "changes->changes": 7,
+   "continue->accept": 48,
+   "continue->changes": 11,
+   "continue->inconclusive": 1
+  },
+  "min_confidence_p50": 0.45,
+  "min_confidence_p90": 0.92,
+  "n": 110
+ },
+ "L5-A": {
+  "sem_limiar": {
+   "changes->accept": 15,
+   "changes->changes": 132,
+   "continue->accept": 19,
+   "continue->changes": 76
+  },
+  "min_confidence_p50": 0.37,
+  "min_confidence_p90": 0.55,
+  "n": 242
+ }
+}
