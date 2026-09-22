@@ -4828,12 +4828,6 @@ def completion_ready(conn, task_id, *, evidence_check=None):
         scope=destination(conn,task_id)
         if review_only(scope):
             required=('candidate_sha','candidate_tree')
-        elif scope and scope.get('verification_operation')=='homolog':
-            # DELIVERY_ENV: a homolog-only destination ends at the tested
-            # environment; the confirmed homolog effect above IS the delivery
-            # receipt. Demanding pr/merge would require inventing a publication
-            # that the approved destination explicitly excludes.
-            required=('homolog_sha','candidate_tree')
         else:
             required=('homolog_sha','integrated_sha') if scope else ('homolog_sha','integrated_sha','artifact','production_readback')
         if any(not state.get(k) for k in required):
@@ -4842,8 +4836,6 @@ def completion_ready(conn, task_id, *, evidence_check=None):
             return False
         if review_only(scope):
             effects=[('pr',state['candidate_sha'])]
-        elif scope and scope.get('verification_operation')=='homolog':
-            effects=[]
         else:
             effects=[('pr',_delivery_candidate(conn,task_id,state)),('merge',_delivery_candidate(conn,task_id,state))]
             if not scope:
