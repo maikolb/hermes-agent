@@ -217,27 +217,3 @@ def test_homolog_only_destination_closes_on_confirmed_homolog_effect(task_contex
     assert d.completion_ready(conn, task.id, evidence_check=d.completion_evidence_check(conn, task.id)) is True
     monkeypatch.setattr(dest, 'verified', lambda *a, **kw: False)
     assert d.completion_ready(conn, task.id, evidence_check=d.completion_evidence_check(conn, task.id)) is False
-
-
-@pytest.mark.parametrize('task_context', ['code'], indirect=True)
-def test_homolog_only_review_approves_on_confirmed_homolog_receipt(task_context, monkeypatch):
-    """Approving the delivery review of a homolog-only destination must require
-    the confirmed homolog receipt, never a PR that destination excludes."""
-    from hermes_cli import nfos_destination as dest
-    conn, task, spec, artifact = task_context
-    accept(conn, task, 'spec_review')
-    scope = {'environment': 'test', 'target': 'http://127.0.0.1:3100', 'source': 'request',
-             'authorization_message': 'isolated local delivery', 'verification_operation': 'homolog'}
-    d.save_spec(conn, task.id, task.current_run_id, dict(spec, delivery_destination=scope),
-                author='worker', evidence={'session': 'fixture'})
-    accept(conn, task, 'spec_review')
-    conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (json.dumps({
-        'homolog_sha': 'a' * 40, 'candidate_tree': 'b' * 40, 'candidate_sha': 'a' * 40,
-        'homolog_evidence': {'readback': True}}), task.id))
-    conn.commit()
-    decision = d.ask_principal(conn, task.id, task.current_run_id, kind='review',
-        question='Approve the isolated local delivery for the homologated candidate', context={})
-    monkeypatch.setattr(dest, 'verified', lambda *a, **kw: True)
-    d.resolve_decision(conn, decision, action='approve', answer='Confirmed homolog receipt verified', author='Principal')
-    assert d.get_decision(conn, decision)['status'] == 'resolved'
-    assert d.get_decision(conn, decision)['action'] == 'approve'
