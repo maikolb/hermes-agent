@@ -3072,8 +3072,6 @@ def lesson_command(conn, payload, *, author):
 
 
 def save_spec(conn, task_id, run_id, spec, *, author, evidence):
-    from hermes_cli.nfos_jev import require_worker_action
-    require_worker_action(conn, task_id)
     if 'delivery_destination' in spec:
         from hermes_cli.nfos_destination import validate
         validate(spec['delivery_destination'])
@@ -3094,34 +3092,19 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         raise WorkflowError('Codex spec fallback needs the Claude unavailability reason')
     from hermes_cli import nfos_jev
     jev = nfos_jev.spec_decisions(conn, task_id, run_id, spec)
-    budget_config = nfos_jev.settings(conn, task_id)
-    bounded_budget = (budget_config['enabled'] and 'budget' in budget_config['uses']
-                      and budget_config.get('decision_mode', 'active') == 'active')
-    spec = dict(spec)  # Never mutate the caller's candidate.
     with _kb().write_txn(conn):
         task=_owned(conn,task_id,run_id)
         wf=get_workflow(conn,task_id)
         jev = {k: v for k, v in jev.items() if v and v['identity'] == nfos_jev.identity(conn, task_id)}
         budget = jev.get('budget')
-        # An inconclusive/keep decision must not let the worker's proposed size
-        # bypass the same cap enforced for a confident System One estimate.
-        limit = task.max_runtime_seconds if bounded_budget else None
         if budget and budget['answers']['size']['choice'] in SPEC_SIZE_BUDGET:
-            selected = budget['answers']['size']['choice']
-            current_limit = task.max_runtime_seconds
-            proposed_limit = SPEC_SIZE_BUDGET[selected]
-            limit = min(proposed_limit, current_limit) if current_limit else proposed_limit
-            run = conn.execute('SELECT started_at FROM task_runs WHERE id=?', (run_id,)).fetchone()
-            elapsed = max(0, time.time() - float(run[0])) if run and run[0] else 0
-            if limit <= elapsed:
-                limit = current_limit  # Do not expire an active run by lowering its estimate.
-            spec['size'] = selected
-            _event(conn,task_id,run_id,'nfos_jev_budget_applied',
-                   {'estimated_size':selected,'estimate_seconds':proposed_limit,'limit_seconds':limit,
-                    'previous_limit_seconds':current_limit,'elapsed_seconds':elapsed,'model_pin_preserved':True,
+            # Record only. The spec author keeps setting the run budget (BLOCK_LESS9_20260910).
+            _event(conn,task_id,run_id,'nfos_jev_budget_estimate',
+                   {'estimated_size':budget['answers']['size']['choice'],
+                    'author_size':str(spec.get('size') or '').strip().upper() or None,'applied':False,
                     'selected_engine':budget.get('selected_engine'),'used_engine':budget.get('used_engine'),
                     'model':budget.get('model'),'model_revision':budget.get('model_revision'),
-                    'typed_action_executed':True,'principal_calls_saved':0})
+                    'principal_calls_saved':0})
         from hermes_cli.nfos_principal_review import settings as _settings
         if _settings().get('principal_validation') is False and not wf['spec_revision']:  # BLOCK_LESS7_20260910: modo das premissas
             _pc=(json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') or {}
@@ -3131,8 +3114,8 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                 raise WorkflowError('Spec needs size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class')
         _size=str(spec.get('size') or '').strip().upper()  # BLOCK_LESS9_20260910: quem escreve a spec define o orçamento
         if _size in SPEC_SIZE_BUDGET:
-            conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?',(limit if limit is not None else SPEC_SIZE_BUDGET[_size],task_id))
-            _event(conn,task_id,run_id,'nfos_spec_size',{'size':_size,'max_runtime_seconds':limit if limit is not None else SPEC_SIZE_BUDGET[_size]})
+            conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?',(SPEC_SIZE_BUDGET[_size],task_id))
+            _event(conn,task_id,run_id,'nfos_spec_size',{'size':_size,'max_runtime_seconds':SPEC_SIZE_BUDGET[_size]})
         if spec.get('delivery_type')!=task.delivery_type:
             # The project default is provisional until TL has analyzed the
             # request. An audit must not inherit a Git delivery requirement.
@@ -3183,8 +3166,6 @@ def _scope_needs_new_spec(workflow):
 
 
 def advance(conn, task_id, run_id, stage, *, next_action, state=None):
-    from hermes_cli.nfos_jev import require_worker_action
-    require_worker_action(conn, task_id)
     if stage not in {'analysis','implement','homolog','review','publish','verify','report'}:
         raise WorkflowError('Unknown delivery stage')
     with _kb().write_txn(conn):
@@ -3504,8 +3485,6 @@ def _check_reclassification(conn, task_id, report):
 
 
 def save_report(conn, task_id, run_id, report):
-    from hermes_cli.nfos_jev import require_worker_action
-    require_worker_action(conn, task_id, transition='report')
     if conn.in_transaction:
         raise WorkflowError('Report evidence must be read outside a write transaction')
     task=_owned(conn,task_id,run_id)
@@ -4195,18 +4174,10 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             task=_kb().get_task(conn,row['task_id'])
             if task.delivery_type=='code':
                 from hermes_cli.nfos_destination import destination, review_only, verified
-                scope=destination(conn,task.id)
-                if review_only(scope):
+                if review_only(destination(conn,task.id)):
                     # The review PR with green CI is the verified destination itself.
                     if not verified(conn,task.id,json.loads(get_workflow(conn,task.id)['state_json'])):
                         raise WorkflowError('Review needs the confirmed review PR with CI for the accepted candidate')
-                elif scope and scope.get('verification_operation')=='homolog':
-                    # A tested-environment destination has no PR by design; the
-                    # confirmed homolog receipt is what this review approves.
-                    if not all(identity.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')):
-                        raise WorkflowError('Review needs the actual homologated candidate and evidence')
-                    if not verified(conn,task.id,json.loads(get_workflow(conn,task.id)['state_json'])):
-                        raise WorkflowError('Review needs the confirmed homolog receipt for this candidate')
                 else:
                     if not all(identity.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')):
                         raise WorkflowError('Review needs the actual homologated candidate and evidence')
@@ -4607,8 +4578,6 @@ def _record_mode_effect_checks(conn, task_id, candidate):
     return None
 
 def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
-    from hermes_cli.nfos_jev import require_worker_action
-    require_worker_action(conn, task_id)
     if operation not in {'homolog','pr','merge','deploy','staging_pr','staging_merge','repair'} or not target or not candidate:  # RESULT_PROBE_20260911: repair = mutação de dado
         raise WorkflowError('External effect needs operation, destination and exact candidate')
     with _kb().write_txn(conn):
@@ -4836,12 +4805,6 @@ def completion_ready(conn, task_id, *, evidence_check=None):
         scope=destination(conn,task_id)
         if review_only(scope):
             required=('candidate_sha','candidate_tree')
-        elif scope and scope.get('verification_operation')=='homolog':
-            # DELIVERY_ENV: a homolog-only destination ends at the tested
-            # environment; the confirmed homolog effect above IS the delivery
-            # receipt. Demanding pr/merge would require inventing a publication
-            # that the approved destination explicitly excludes.
-            required=('homolog_sha','candidate_tree')
         else:
             required=('homolog_sha','integrated_sha') if scope else ('homolog_sha','integrated_sha','artifact','production_readback')
         if any(not state.get(k) for k in required):
@@ -4850,8 +4813,6 @@ def completion_ready(conn, task_id, *, evidence_check=None):
             return False
         if review_only(scope):
             effects=[('pr',state['candidate_sha'])]
-        elif scope and scope.get('verification_operation')=='homolog':
-            effects=[]
         else:
             effects=[('pr',_delivery_candidate(conn,task_id,state)),('merge',_delivery_candidate(conn,task_id,state))]
             if not scope:

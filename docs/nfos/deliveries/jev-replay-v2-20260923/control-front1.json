@@ -1,0 +1,6 @@
+{
+ "sample": "40 continue + 40 changes, test split, seed 20260923, same input as Jev (worker question text and requested block kind)",
+ "frontier_llm_blind": {"auc": 0.652, "accuracy_at_0_5": 0.625},
+ "jev_can_continue_alone_same_cases": {"auc": 0.489},
+ "note": "n=80; AUC intervals are wide. Labels were never shown to the blind evaluator."
+}

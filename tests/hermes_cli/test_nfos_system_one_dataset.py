@@ -204,16 +204,24 @@ def test_legacy_secret_shapes_redacted_without_erasing_tokenizer_revision():
 
 
 def test_learning_consumes_actual_native_opportunity(task_context, http_fixture, monkeypatch):
-    from hermes_cli import nfos_reviewer
-    from tests.hermes_cli.test_nfos_system_one_online import test_native_batch_collects_registered_probe_without_principal_repeat
-    test_native_batch_collects_registered_probe_without_principal_repeat(task_context, http_fixture, monkeypatch)
-    conn, _, _, _ = task_context
+    # Producer: the native report path collecting a registered, still unmeasured probe.
+    from hermes_cli import nfos_reviewer, nfos_jev
+    from tests.hermes_cli.test_nfos_jev import prepare_probe
+    from tests.hermes_cli.test_nfos_laya import select_laya
+    from tests.hermes_cli.test_nfos_principal_acceptance import save_report
+    conn, task, spec, artifact = task_context
+    prepare_probe(conn, task, spec, http_fixture, monkeypatch)
+    nfos_jev.configure_system_one({'mode': 'active', 'engine': 'laya', 'classes': ['evidence'],
+                                   'timeout_seconds': 1, 'max_decisions_per_run': 4})
+    select_laya(conn, task, http_fixture, ['evidence'])
+    save_report(conn, task, artifact)
+    assert http_fixture.probes == ['/count']
     db = conn.execute('PRAGMA database_list').fetchone()[2]
     opportunity = json.loads(conn.execute("SELECT payload FROM task_events WHERE kind='nfos_system_one_opportunity'").fetchone()[0])
     cases = nfos_reviewer.collect(db, opportunity['project_id'], 0, 9999999999)
     result = dataset.build_dataset(cases, train_before=9999999999, test_after=10000000000)
     rows = [r for r in result['examples'] if not r['provenance']['legacy']]
-    assert rows and rows[0]['inputs']['state']['purpose'] == 'registered_measurement_selection'
+    assert rows and rows[0]['inputs']['state']['reason'] == 'Collect missing evidence for the current report'
     assert rows[0]['decision']['actual_engine'] == 'laya'
     assert rows[0]['labels']['policy_validity'] == 'VALID'
     assert rows[0]['labels']['verified_outcome'] == 'PASS'

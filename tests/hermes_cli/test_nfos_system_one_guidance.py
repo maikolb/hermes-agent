@@ -12,16 +12,21 @@ from tests.hermes_cli.test_nfos_laya import select_laya
 
 
 def test_no_probe_spec_can_guide_and_trace_actual_next_tool(task_context, http_fixture, monkeypatch):
-    from tests.hermes_cli.test_nfos_system_one_enforcement import selected_context, native_call
-    conn, task, artifact, agent = selected_context(task_context, http_fixture, monkeypatch)
-    requirement = engine._requirement(conn, task.id)
-    assert requirement['route'] == 'acquire_context' and requirement['enforced']
-    assert requirement['targets'].get(str(artifact))
-    native_call(monkeypatch, agent, 'read_file', {'path': str(artifact)}, lambda args: artifact.read_text())
-    completed = engine._requirement(conn, task.id)
-    assert completed['status'] == 'completed' and completed['typed_action_executed']
-    assert completed['principal_calls_saved'] == 0
-    assert completed['result_sha256'] == engine._digest(artifact.read_text())
+    from tests.hermes_cli.test_nfos_system_one_advisory import selected_context, native_call, guidance
+    conn, task, artifact, agent, _ = selected_context(task_context, http_fixture, monkeypatch)
+    receipt = guidance(conn)
+    assert receipt['route'] == 'acquire_context' and receipt['advisory'] and not receipt['enforced']
+    assert receipt['targets'].get(str(artifact))
+    result = native_call(monkeypatch, agent, 'read_file', {'path': str(artifact)}, lambda args: artifact.read_text())
+    assert not result.blocked
+    # The next native batch boundary records what the worker actually did.
+    engine.worker_material_opportunity(agent, [
+        {'role': 'assistant', 'tool_calls': [{'id': 'r1', 'type': 'function', 'function': {
+            'name': 'read_file', 'arguments': json.dumps({'path': str(artifact)})}}]},
+        {'role': 'tool', 'name': 'read_file', 'tool_call_id': 'r1', 'content': artifact.read_text()}], 1)
+    consumed = json.loads(conn.execute("SELECT payload FROM task_events WHERE kind='nfos_system_one_guidance_consumed' ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert consumed['acknowledgment'] == 'implicit_tool_match'
+    assert consumed['principal_calls_saved'] == 0 and consumed['semantic_outcome'] == 'NOT_PROVEN'
 
 
 def test_phase_limits_reserve_lifecycle_capacity():

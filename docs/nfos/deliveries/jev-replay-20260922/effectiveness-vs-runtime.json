@@ -1,0 +1,41 @@
+{
+ "runtime_today": {
+  "spec_reviews_measured": 261,
+  "spec_review_wait_min_p50": 1.2,
+  "spec_review_wait_min_p90": 2.1,
+  "spec_review_wait_hours_total": 7.7,
+  "implementation_cycle_min_p50": 16.4,
+  "implementation_cycles_measured": 130,
+  "final_review_wait_min_p50": 2.0,
+  "final_reviews_measured": 246
+ },
+ "with_jev_layer1": {
+  "L1-A": {
+   "spec_reviews_replaced": 9,
+   "correct_accepts": 4,
+   "false_accepts": 5,
+   "principal_calls_net": 4,
+   "principal_calls_net_share_of_spec_reviews": 0.0153,
+   "review_wait_saved_hours": 0.19,
+   "rework_added_hours_lower_bound": 1.53,
+   "net_hours": -1.34,
+   "defective_specs_sent_to_implementation": 5
+  },
+  "L1-B": {
+   "spec_reviews_replaced": 26,
+   "correct_accepts": 16,
+   "false_accepts": 10,
+   "principal_calls_net": 16,
+   "principal_calls_net_share_of_spec_reviews": 0.0613,
+   "review_wait_saved_hours": 0.83,
+   "rework_added_hours_lower_bound": 3.06,
+   "net_hours": -2.23,
+   "defective_specs_sent_to_implementation": 10
+  }
+ },
+ "with_jev_layer5": {
+  "decisive": 1,
+  "final_reviews": 245,
+  "note": "decisive in under 1% of final reviews; no measurable effect"
+ }
+}

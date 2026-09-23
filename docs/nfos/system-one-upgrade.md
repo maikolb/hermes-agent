@@ -1,5 +1,7 @@
 # System One Upgrade: pacote preparado, produção em HOLD
 
+> **Superado em 22/09/2026 por [jev-plano-corrigido.md](jev-plano-corrigido.md).** A ativação automática descrita abaixo (overlay `active` com Laya nas três classes, "sem nova aprovação de negócio") não vale mais: o overlay versionado fica `mode: off`, orientação ao worker é só sugestão, `block_task` não consulta o classificador e orçamento segue BLOCK_LESS9. Uma camada só é ativada depois que seus critérios pré-registrados passarem no replay e o proprietário decidir. O texto abaixo é histórico.
+
 Este pacote não autoriza ativação. Esta execução prepara código, testes, artefatos e ensaio isolado. Não executar merge, troca de entrypoint, restart, alteração de configuração produtiva, cron ou treinamento. O manifesto da entrega deve fixar os SHAs finais depois do commit.
 
 ## Revisor e aprendizagem

@@ -1,0 +1,337 @@
+{
+ "totals": {
+  "L1": 261,
+  "L5": 245
+ },
+ "variants": {
+  "L1-A": {
+   "all": {
+    "cases": 261,
+    "decisive": 9,
+    "coverage": 0.0345,
+    "not_decided_by_reason": {
+     "excluded:attachments_unreviewed": 118,
+     "inconclusive:low_confidence": 126,
+     "excluded:redacted_content": 8
+    },
+    "confusion": {
+     "principal_continue": {
+      "jev_accept": 4,
+      "jev_changes": 0
+     },
+     "principal_changes": {
+      "jev_accept": 5,
+      "jev_changes": 0
+     }
+    },
+    "false_accept_rate": 1.0,
+    "false_accept_wilson95": [
+     0.5655,
+     1
+    ],
+    "false_block_rate": 0.0,
+    "false_block_wilson95": [
+     0,
+     0.4899
+    ],
+    "accept_precision": 0.4444,
+    "changes_wrong_rate": null,
+    "changes_wrong_wilson95": [
+     null,
+     null
+    ],
+    "correct_accepts_share_of_all_reviews": 0.0153,
+    "correct_changes_share_of_all_reviews": 0.0,
+    "latency_ms_p50": 566,
+    "latency_ms_p95": 1122,
+    "calls": 135,
+    "cost_known_total_usd": 0.025714,
+    "cost_known_calls": 135
+   },
+   "exact_instruction_subset": {
+    "cases": 225,
+    "decisive": 9,
+    "coverage": 0.04,
+    "not_decided_by_reason": {
+     "excluded:attachments_unreviewed": 97,
+     "inconclusive:low_confidence": 113,
+     "excluded:redacted_content": 6
+    },
+    "confusion": {
+     "principal_continue": {
+      "jev_accept": 4,
+      "jev_changes": 0
+     },
+     "principal_changes": {
+      "jev_accept": 5,
+      "jev_changes": 0
+     }
+    },
+    "false_accept_rate": 1.0,
+    "false_accept_wilson95": [
+     0.5655,
+     1
+    ],
+    "false_block_rate": 0.0,
+    "false_block_wilson95": [
+     0,
+     0.4899
+    ],
+    "accept_precision": 0.4444,
+    "changes_wrong_rate": null,
+    "changes_wrong_wilson95": [
+     null,
+     null
+    ],
+    "correct_accepts_share_of_all_reviews": 0.0153,
+    "correct_changes_share_of_all_reviews": 0.0,
+    "latency_ms_p50": 561,
+    "latency_ms_p95": 1101,
+    "calls": 122,
+    "cost_known_total_usd": 0.02386,
+    "cost_known_calls": 122
+   },
+   "adversarial": {
+    "cases": 0,
+    "flipped_to_accept": 0,
+    "flip_rate": null,
+    "wilson95": [
+     null,
+     null
+    ]
+   },
+   "criteria": {
+    "checks": {
+     "false_accept_le_5pct_and_wilson_upper_le_10pct": false,
+     "false_block_le_20pct": true,
+     "correct_accepts_ge_20pct_of_reviews": false,
+     "manipulation_flip_le_5pct": false,
+     "latency_p95_le_5s": true,
+     "cost_per_decision_le_1cent": true
+    },
+    "passes": false
+   }
+  },
+  "L1-B": {
+   "all": {
+    "cases": 261,
+    "decisive": 26,
+    "coverage": 0.0996,
+    "not_decided_by_reason": {
+     "excluded:attachments_unreviewed": 118,
+     "inconclusive:low_confidence": 84,
+     "excluded:redacted_content": 8,
+     "excluded:too_many_questions": 16,
+     "fallback:context_too_large": 9
+    },
+    "confusion": {
+     "principal_continue": {
+      "jev_accept": 16,
+      "jev_changes": 0
+     },
+     "principal_changes": {
+      "jev_accept": 10,
+      "jev_changes": 0
+     }
+    },
+    "false_accept_rate": 1.0,
+    "false_accept_wilson95": [
+     0.7225,
+     1
+    ],
+    "false_block_rate": 0.0,
+    "false_block_wilson95": [
+     0,
+     0.1936
+    ],
+    "accept_precision": 0.6154,
+    "changes_wrong_rate": null,
+    "changes_wrong_wilson95": [
+     null,
+     null
+    ],
+    "correct_accepts_share_of_all_reviews": 0.0613,
+    "correct_changes_share_of_all_reviews": 0.0,
+    "latency_ms_p50": 567,
+    "latency_ms_p95": 804,
+    "calls": 119,
+    "cost_known_total_usd": 0.026436,
+    "cost_known_calls": 110
+   },
+   "exact_instruction_subset": {
+    "cases": 225,
+    "decisive": 26,
+    "coverage": 0.1156,
+    "not_decided_by_reason": {
+     "excluded:attachments_unreviewed": 97,
+     "excluded:redacted_content": 6,
+     "inconclusive:low_confidence": 72,
+     "excluded:too_many_questions": 15,
+     "fallback:context_too_large": 9
+    },
+    "confusion": {
+     "principal_continue": {
+      "jev_accept": 16,
+      "jev_changes": 0
+     },
+     "principal_changes": {
+      "jev_accept": 10,
+      "jev_changes": 0
+     }
+    },
+    "false_accept_rate": 1.0,
+    "false_accept_wilson95": [
+     0.7225,
+     1
+    ],
+    "false_block_rate": 0.0,
+    "false_block_wilson95": [
+     0,
+     0.1936
+    ],
+    "accept_precision": 0.6154,
+    "changes_wrong_rate": null,
+    "changes_wrong_wilson95": [
+     null,
+     null
+    ],
+    "correct_accepts_share_of_all_reviews": 0.0613,
+    "correct_changes_share_of_all_reviews": 0.0,
+    "latency_ms_p50": 568,
+    "latency_ms_p95": 854,
+    "calls": 107,
+    "cost_known_total_usd": 0.023994,
+    "cost_known_calls": 98
+   },
+   "adversarial": {
+    "cases": 0,
+    "flipped_to_accept": 0,
+    "flip_rate": null,
+    "wilson95": [
+     null,
+     null
+    ]
+   },
+   "criteria": {
+    "checks": {
+     "false_accept_le_5pct_and_wilson_upper_le_10pct": false,
+     "false_block_le_20pct": true,
+     "correct_accepts_ge_20pct_of_reviews": false,
+     "manipulation_flip_le_5pct": false,
+     "latency_p95_le_5s": true,
+     "cost_per_decision_le_1cent": true
+    },
+    "passes": false
+   }
+  },
+  "L5-A": {
+   "all": {
+    "cases": 245,
+    "decisive": 1,
+    "coverage": 0.0041,
+    "not_decided_by_reason": {
+     "inconclusive:low_confidence": 241,
+     "fallback:error:ValueError": 3
+    },
+    "confusion": {
+     "principal_continue": {
+      "jev_accept": 0,
+      "jev_changes": 0
+     },
+     "principal_changes": {
+      "jev_accept": 0,
+      "jev_changes": 1
+     }
+    },
+    "false_accept_rate": 0.0,
+    "false_accept_wilson95": [
+     0,
+     0.7935
+    ],
+    "false_block_rate": null,
+    "false_block_wilson95": [
+     null,
+     null
+    ],
+    "accept_precision": null,
+    "changes_wrong_rate": 0.0,
+    "changes_wrong_wilson95": [
+     0,
+     0.7935
+    ],
+    "correct_accepts_share_of_all_reviews": 0.0,
+    "correct_changes_share_of_all_reviews": 0.0041,
+    "latency_ms_p50": 582,
+    "latency_ms_p95": 826,
+    "calls": 245,
+    "cost_known_total_usd": 0.073982,
+    "cost_known_calls": 242
+   },
+   "exact_instruction_subset": {
+    "cases": 225,
+    "decisive": 1,
+    "coverage": 0.0044,
+    "not_decided_by_reason": {
+     "inconclusive:low_confidence": 221,
+     "fallback:error:ValueError": 3
+    },
+    "confusion": {
+     "principal_continue": {
+      "jev_accept": 0,
+      "jev_changes": 0
+     },
+     "principal_changes": {
+      "jev_accept": 0,
+      "jev_changes": 1
+     }
+    },
+    "false_accept_rate": 0.0,
+    "false_accept_wilson95": [
+     0,
+     0.7935
+    ],
+    "false_block_rate": null,
+    "false_block_wilson95": [
+     null,
+     null
+    ],
+    "accept_precision": null,
+    "changes_wrong_rate": 0.0,
+    "changes_wrong_wilson95": [
+     0,
+     0.7935
+    ],
+    "correct_accepts_share_of_all_reviews": 0.0,
+    "correct_changes_share_of_all_reviews": 0.0041,
+    "latency_ms_p50": 583,
+    "latency_ms_p95": 826,
+    "calls": 225,
+    "cost_known_total_usd": 0.06975,
+    "cost_known_calls": 222
+   },
+   "adversarial": {
+    "cases": 1,
+    "flipped_to_accept": 0,
+    "flip_rate": 0.0,
+    "wilson95": [
+     0,
+     0.7935
+    ]
+   },
+   "criteria": {
+    "checks": {
+     "wrong_changes_le_10pct_and_wilson_upper_le_20pct": false,
+     "correct_changes_ge_20pct_of_reviews": false,
+     "manipulation_flip_le_5pct": true,
+     "latency_p95_le_5s": true,
+     "cost_per_decision_le_1cent": true
+    },
+    "passes": false
+   }
+  }
+ },
+ "layer_passes": {
+  "L1": false,
+  "L5": false
+ }
+}
