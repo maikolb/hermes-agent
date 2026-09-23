@@ -345,3 +345,32 @@ def test_begin_effect_refuses_denied_restricted_or_pending_urgency(board, monkey
             with pytest.raises(delivery.WorkflowError, match='delivers in HML'):
                 delivery.begin_effect(conn, task.id, task.current_run_id, operation=operation, target=REPO+'/tree/main', candidate=SHA)
         assert not conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND operation IN ('merge','deploy')", (task.id,)).fetchone()
+
+
+URGENCY_AUTHORIZATION_BOUNDARIES = [
+ "É urgente, mas só execute depois da minha aprovação",
+ "Urgente: publique em HML",
+ "Urgente: faça em teste",
+]
+@pytest.mark.parametrize("text",URGENCY_AUTHORIZATION_BOUNDARIES)
+def test_explicit_scope_or_pending_permission_keeps_hml(board,monkeypatch,text):
+ monkeypatch.setattr(runtime,"project_config",lambda board,config=None:{"delivery_environment":"hml","enabled":True})
+ with kb.connect_closing() as conn:
+  task=_code_card(conn,board,_request_body(text))
+  with pytest.raises(delivery.WorkflowError,match="delivers in HML"):
+   delivery.begin_effect(conn,task.id,task.current_run_id,operation="merge",target=REPO+"/tree/main",candidate=SHA)
+
+def test_latest_revocation_keeps_gate_and_route_consistent(board,monkeypatch):
+ monkeypatch.setattr(runtime,"project_config",lambda board,config=None:{"delivery_environment":"hml","enabled":True})
+ body=_request_body("arrume urgente")+"\n\nOrientação do proprietário (dec_new):\nNão é urgente, faça quando puder"
+ assert runtime.delivery_route({"delivery_environment":"hml"},body=body)["environment"]=="hml"
+ with kb.connect_closing() as conn:
+  task=_code_card(conn,board,body)
+  with pytest.raises(delivery.WorkflowError,match="delivers in HML"):
+   delivery.begin_effect(conn,task.id,task.current_run_id,operation="merge",target=REPO+"/tree/main",candidate=SHA)
+
+@pytest.mark.parametrize("text", ["Urgente: arrume isso em produção e uma cópia em HML", "Não publique em HML. Arrume urgente", "Urgente: corrija o login, não apague dados"])
+def test_urgent_route_preserves_production_and_unrelated_constraints(text):
+ body=_request_body(text)
+ assert delivery._express_production_order(body)
+ assert runtime.delivery_route({"delivery_environment":"hml"},body=body)["environment"]=="production"

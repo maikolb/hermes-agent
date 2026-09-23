@@ -4357,14 +4357,24 @@ _NON_PRODUCTION_ONLY = re.compile(r"\b(?:s[oó]|somente|apenas|only)\s+(?:em\s+|
 _PRODUCTION_REFUSED = re.compile(r"\b(?:n[aã]o|nunca|jamais|sem)\s+(?:\w+\s+){0,3}?(?:em|para|pra|na|no)\s+" + _PRODUCTION_WORD, re.I)
 
 
+_NON_PRODUCTION_ORDER = re.compile(
+    r"\b(?:fa[cç]a|fazer|publique|publicar|entregue|entregar|suba|subir|arrum[ae]|corrija|corrigir|implemente|implementar)\b"
+    r"[^.!?;\n]{0,80}?\b(?:em|para|pra|no|na)\s+(?:hml|homologa[cç][aã]o|staging|teste|test|dev|preview)\b", re.I)
+
+
 def _urgency_intent(text):
     """URGENT_PRODUCTION_20260923: True quando a pessoa pede urgência sem restringir o destino; False quando restringe o
     destino ou nega a urgência; None sem sinal. Pergunta não conta."""
     text = _QUOTED_REPLY.sub(' ', str(text or ''))
-    if _PRODUCTION_REFUSED.search(text):
+    if _PRODUCTION_REFUSED.search(text) or _PENDING_AUTHORIZATION.search(text):
         return False
     sentences = re.split(r'(?<=[.!?;\n])', text)
     for sentence in sentences:
+        destination = _NON_PRODUCTION_ORDER.search(sentence)
+        if (destination and not sentence.rstrip().endswith('?')
+                and not _NOT_URGENT_BEFORE.search(sentence[:destination.start()])
+                and not (_PRODUCTION_ORDER_RX.search(sentence) or _owner_production_phrasing(sentence))):
+            return False
         only = _NON_PRODUCTION_ONLY.search(sentence)
         if only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', sentence[:only.start()], re.I):
             return False
@@ -4443,8 +4453,8 @@ def _production_guidance_intent(text, *, everyday=True):
                 continue
             if _PRODUCTION_ORDER_RX.search(scoped) or (everyday and _owner_production_phrasing(scoped)):
                 intent = True
-    if intent is None and everyday and _urgency_intent(text) is True:  # URGENT_PRODUCTION_20260923: urgente vai para produção
-        intent = True
+    if intent is None and everyday:  # Preserve both urgency and its later withdrawal.
+        intent = _urgency_intent(text)
     return intent
 
 
