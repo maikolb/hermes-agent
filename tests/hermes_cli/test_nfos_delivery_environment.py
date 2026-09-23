@@ -213,3 +213,12 @@ def test_no_keyword_parser_remains():
     for name in ("_PRODUCTION_ORDER_RX", "_OWNER_PRODUCTION_RX", "_URGENT_RX", "_express_production_order",
                  "_production_guidance_intent", "_owner_urgent_production"):
         assert name not in source
+
+
+@pytest.mark.parametrize("environment", ["hml", "test", "dev"])
+def test_recorded_nonproduction_destination_overrides_project_default(environment):
+    destination = {"environment": environment, "verification_operation": "homolog"}
+    project = {"delivery_environment": "production", "staging_branch": "staging"}
+    route = runtime.delivery_route(project, destination=destination)
+    assert route["environment"] == environment
+    assert not route.get("owner_production")

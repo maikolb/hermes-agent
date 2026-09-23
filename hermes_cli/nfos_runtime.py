@@ -53,6 +53,8 @@ def delivery_route(project, destination=None):
     env = str(project.get('delivery_environment') or 'production').strip().lower()
     if env != 'production' and isinstance(destination, dict) and destination.get('environment') == 'production':
         return {'environment': 'production', 'staging_branch': None, 'owner_production': True, 'route': OWNER_PRODUCTION_ROUTE}
+    if isinstance(destination, dict) and destination.get("environment") in {"production", "hml", "test", "dev"}:
+        env = destination["environment"]
     staging = str(project.get('staging_branch') or '').strip()
     key = env
     if env == 'production' and not staging:
