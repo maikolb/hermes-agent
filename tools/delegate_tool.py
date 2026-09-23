@@ -1425,6 +1425,11 @@ def _build_child_system_prompt(
         "",
         f"YOUR TASK:\n{goal}",
     ]
+    from hermes_cli.nfos_principal_review import QUALITY_POLICY, settings as nfos_settings
+    projects = nfos_settings().get('projects') or {}
+    if board_bound or os.environ.get('HERMES_KANBAN_TASK') or any(
+            isinstance(p, dict) and p.get('enabled') is True for p in projects.values()):
+        parts.append(QUALITY_POLICY)
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
     if workspace_path and str(workspace_path).strip():

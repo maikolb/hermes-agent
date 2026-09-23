@@ -10,17 +10,196 @@ from pathlib import Path
 from hermes_cli import nfos_delivery as d
 
 
+QUALITY_POLICY_VERSION = 1
+QUALITY_POLICY = """NFOS engineering and evidence policy v1 (Maikol, 23/09/2026).
+Correct the cause with the smallest general domain rule. Apply SOLID, DRY,
+separation of responsibilities, clear contracts, KISS/YAGNI without speculative
+layers. Do not patch lists of customers, projects, people, IDs or words to pass
+known examples. Legitimate domain enums are allowed. Regex normalizes documented
+syntax; it and string similarity cannot establish semantic identity. Use compatible
+structured data or explicit authoritative source evidence; keep ambiguity visible.
+Reproduce before changing when possible, otherwise say not reproduced. Validate
+positive, negative, conflicting and previously unseen inputs. Green tests do not
+certify universal correctness. Code for future runs is not a backfill: independently
+verify any required saved-data repair, preserving history/progress, transactions,
+idempotence and concurrency appropriate to the operation.
+A report explains work. Logs, SQL, tests and rendered reports are technical evidence.
+A PNG of a report, HTML reconstruction, mockup or status board is NOT product proof.
+A product capture is the REAL platform interface exercising the requested flow,
+case, actor and environment. Never fabricate it or alter the DOM to simulate success.
+Reuse authorized access, headless execution and protect personal data. Identify
+case, target/environment, version, time, scope and observed outcome. A partial/admin
+capture cannot prove an entire user flow, historical repair or future generation.
+Keep technical proof, visual proof, readiness for retest and human acceptance distinct.
+If access or reproduction is missing, record the specific pending result, never fake it.
+These rules apply to Principal, workers, delegated work, new sessions and resumes.
+Final acceptance always uses the existing Principal review, even in record mode.
+No new owner approval: return missing evidence/corrections to this same executor.
+Semantic quality and capture authenticity require explicit Principal inspection;
+file hashes, extensions, lint and regex do not certify them.
+Final assessment retains request_alignment, scope_assessment and criteria, and adds:
+quality_review={policy_version:1, engineering:{verdict:general_rule|not_applicable,
+rationale:source/diff-grounded explanation, evidence:[inspected artifact refs]},
+validation:{reproduction:reproduced|not_reproduced|not_applicable, rationale:why,
+cases:{positive:coverage,negative:coverage,conflict:coverage,unseen:coverage},
+executions:[native nfos_tool call IDs]}, artifacts:[{ref,sha256,
+kind:product_capture|technical|execution|data_repair|source_document|rendered_report,
+case,actor,environment,target,version,scope,source,captured_at,observed,
+authentic:true,unaltered:true}]}.
+Each final criterion includes proof={kind,case,actor,environment,target,version,scope,
+coverage:full|partial,data_scope:none|new_flow|historical} describing what the ORIGINAL
+request requires. Match inspected artifacts to these fields, not the other way round.
+artifact.kind is your independent classification, never merely the worker label.
+Product captures require source, timezone-aware captured_at, authentic/unaltered and
+observed behavior. Required tests use completed native nfos_tool IDs with real output;
+inspect argv/output and exit code for the asserted test. Run commands through the
+existing nfos_tool CLI as you work; reuse valid receipts, never rerun only for paperwork.
+For general_rule engineering provide all four case-coverage explanations and execution
+receipts. not_applicable needs the factual reason no code rule/test is being claimed.
+A historical criterion requires data_repair evidence; publishing code alone cannot pass.
+Accept only full proof. Keep missing functional proof pending through changes;
+verdict observe can record a genuine nonfunctional limitation with partial coverage.
+Never promote an observation into PASS or manufacture a human acceptance.
+"""
+
+
+class QualityReviewChanges(d.WorkflowError):
+    """A concrete correction returned by the existing decision path, not a human gate."""
+
+
+def _quality_text(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def quality_review(conn, task_id, assessment):
+    """Check provenance/coverage; the Principal, not a heuristic, judges semantics.
+
+    Only persisted local bytes and native completed executions back the receipt.
+    This deliberately does not claim to detect a Principal lying about an image.
+    """
+    def require(ok, message, *, reviewer=False):
+        if not ok:
+            if reviewer:
+                raise d.WorkflowError('Principal review incomplete: '+message+'; complete this same decision, without worker or human paperwork')
+            raise QualityReviewChanges(message)
+
+    q = assessment.get('quality_review') if isinstance(assessment, dict) else None
+    require(isinstance(q, dict) and q.get('policy_version') == QUALITY_POLICY_VERSION,
+            'Review engineering and classify the current evidence using quality_review policy v1', reviewer=True)
+    report = d._artifact(conn, task_id, 'report')
+    checks = json.loads(report['evidence']).get('artifact_checks', [])
+    linked = {key: c for c in checks if c.get('status') == 'verified_local'
+              for key in (c['ref'], c.get('path')) if key}
+    engineering = q.get('engineering')
+    require(isinstance(engineering, dict), 'Explain the mechanism/general rule, or why engineering is not applicable', reviewer=True)
+    require(engineering.get('verdict') in {'general_rule', 'not_applicable'}
+            and _quality_text(engineering.get('rationale')),
+            'Fix the mechanism/domain rule; a case-specific patch or unreviewed change cannot be accepted')
+    refs = engineering.get('evidence')
+    require(isinstance(refs, list) and refs and all(isinstance(r, str) and r in linked for r in refs),
+            'Engineering judgment needs inspected source/diff/report evidence', reviewer=True)
+    validation = q.get('validation')
+    require(isinstance(validation, dict) and validation.get('reproduction') in
+            {'reproduced', 'not_reproduced', 'not_applicable'} and _quality_text(validation.get('rationale')),
+            'Record actual reproduction, or the specific not-reproduced/not-applicable limitation', reviewer=True)
+    calls = validation.get('executions')
+    require(isinstance(calls, list) and all(isinstance(c, str) for c in calls)
+            and len(calls) == len(set(calls)), 'List distinct native execution IDs, not claimed test results', reviewer=True)
+    if engineering['verdict'] == 'general_rule':
+        cases = validation.get('cases')
+        require(isinstance(cases, dict) and all(_quality_text(cases.get(k)) for k in
+                ('positive', 'negative', 'conflict', 'unseen')) and bool(calls),
+                'General-rule acceptance needs varied positive/negative/conflict/unseen validation and executed tests')
+    executions = []
+    for call_id in calls:
+        require(conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_tool_calls'").fetchone(),
+                'Test execution is unproven; use the existing native tool receipt')
+        call = conn.execute('SELECT * FROM nfos_tool_calls WHERE id=? AND task_id=?', (call_id, task_id)).fetchone()
+        require(call and call['status'] == 'succeeded' and call['returncode'] == 0
+                and call['started_at'] is not None and call['finished_at'] is not None,
+                'Test execution must be completed successfully on this card, not planned or borrowed')
+        chunks = conn.execute('SELECT seq,stream,content FROM nfos_tool_chunks WHERE call_id=? ORDER BY seq', (call_id,)).fetchall()
+        require(any(c['content'] for c in chunks), 'Inspect the real command output before claiming tests passed')
+        digest = hashlib.sha256()
+        for chunk in chunks:
+            data = chunk['content']
+            digest.update(d._json([chunk['seq'], chunk['stream']]).encode())
+            digest.update(data.encode() if isinstance(data, str) else bytes(data))
+        executions.append({'id': call_id, 'run_id': call['run_id'], 'argv_sha256': hashlib.sha256(call['argv_json'].encode()).hexdigest(),
+                           'cwd': call['cwd'], 'exit': call['returncode'], 'finished_at': call['finished_at'],
+                           'output_sha256': digest.hexdigest()})
+    artifacts = q.get('artifacts')
+    require(isinstance(artifacts, list) and artifacts, 'Classify the evidence actually inspected', reviewer=True)
+    reviewed = {}
+    fields = ('case', 'actor', 'environment', 'target', 'version', 'scope')
+    kinds = {'product_capture', 'technical', 'execution', 'data_repair', 'source_document', 'rendered_report'}
+    for item in artifacts:
+        require(isinstance(item, dict) and isinstance(item.get('ref'), str) and item['ref'] in linked,
+                'Evidence review must reference a saved local report artifact', reviewer=True)
+        check = linked[item['ref']]
+        require(check['ref'] not in reviewed, 'Classify each artifact only once', reviewer=True)
+        require(item.get('sha256') == check['sha256'] and item.get('kind') in kinds
+                and all(_quality_text(item.get(k)) for k in fields + ('observed',)),
+                'Record artifact hash, actual classification, case, environment, version, scope and observation', reviewer=True)
+        if item['kind'] == 'product_capture':
+            require(check.get('media_type') == 'image',
+                    'Product capture needs actual image bytes plus independent inspection, not an image filename')
+            from datetime import datetime
+            try:
+                captured = datetime.fromisoformat(str(item.get('captured_at', '')).replace('Z', '+00:00'))
+                timed = captured.tzinfo is not None and captured.timestamp() <= time.time() + 60
+            except (ValueError, OverflowError):
+                timed = False
+            require(item.get('authentic') is True and item.get('unaltered') is True
+                    and timed and _quality_text(item.get('source')),
+                    'Inspect the real unaltered platform capture and its source/time; report images and mockups are not product evidence')
+        reviewed[check['ref']] = item
+    from hermes_cli.nfos_destination import destination
+    dest = destination(conn, task_id)
+    state = json.loads(d.get_workflow(conn, task_id)['state_json'])
+    version = state.get('integrated_sha') or state.get('candidate_sha')
+    for row in assessment['criteria']:
+        proof = row.get('proof')
+        require(isinstance(proof, dict) and proof.get('kind') in kinds
+                and all(_quality_text(proof.get(k)) for k in fields)
+                and proof.get('coverage') in {'full', 'partial'}
+                and proof.get('data_scope') in {'none', 'new_flow', 'historical'},
+                f"Criterion {row['id']}: describe the original request's case, target, version, scope and required proof", reviewer=True)
+        require(row['verdict'] != 'accept' or proof['coverage'] == 'full',
+                f"Criterion {row['id']}: partial evidence cannot prove the whole result")
+        if row['verdict'] != 'accept':
+            continue  # Honest observations do not become a functional PASS.
+        if dest and proof['kind'] in {'product_capture', 'data_repair'}:
+            require(proof['environment'] == dest['environment'] and proof['target'] == dest['target'],
+                    f"Criterion {row['id']}: evidence does not target the accepted destination")
+        if version and proof['kind'] in {'product_capture', 'execution', 'data_repair'}:
+            require(proof['version'] == version, f"Criterion {row['id']}: evidence is for another candidate/version")
+        matched = []
+        for ref in row['evidence']:
+            item = reviewed.get(linked[ref]['ref'])
+            if item and item['kind'] == proof['kind'] and all(item[k] == proof[k] for k in fields):
+                matched.append(item)
+        require(matched, f"Criterion {row['id']}: classify and inspect proof of this case/scope/environment; a report is not a product capture")
+        require(proof['data_scope'] != 'historical' or proof['kind'] == 'data_repair',
+                f"Criterion {row['id']}: code publication is not proof of saved-data repair")
+        require(proof['kind'] != 'execution' or bool(executions),
+                f"Criterion {row['id']}: test results require a completed native execution")
+    return executions
+
+
 def settings():
     from hermes_cli.config import load_config
     return (load_config().get('kanban') or {}).get('delivery') or {}
 
 
-def required(conn, task_id):
+def required(conn, task_id, kind=None):
     # Record mode removes orchestration gates, not the Principal's judgment of
     # scope and outcome. Both reviews use the existing decisions on this card.
     workflow = d.get_workflow(conn, task_id)
     if not workflow:
         return False
+    if kind == 'final_review':
+        return True
     if settings().get('result_review') is True:
         return True
     if settings().get('principal_validation') is False:
@@ -423,6 +602,7 @@ def identity(conn, task_id, kind):
     result = d._legacy_spec_identity(task, spec)
     result['spec_revision'] = spec['revision']
     if kind == 'final_review':
+        result['quality_policy_version'] = QUALITY_POLICY_VERSION
         report = d._artifact(conn, task_id, 'report')
         if not report:
             raise d.WorkflowError('Final review requires the saved report')
@@ -445,7 +625,7 @@ def identity(conn, task_id, kind):
 
 
 def accepted(conn, task_id, kind):
-    if not required(conn, task_id):
+    if not required(conn, task_id, kind):
         return True
     try:
         current = identity(conn, task_id, kind)
@@ -454,6 +634,18 @@ def accepted(conn, task_id, kind):
     # A newer rejection/pending review revokes the former acceptance.
     row = conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',
                        (task_id, kind)).fetchone()
+    historical = bool(kind == 'final_review' and row
+                      and d._kb().get_task(conn, task_id).status == 'done'
+                      and 'quality_policy_version' not in json.loads(row['context']).get('acceptance_identity', {}))
+    if historical:
+        current.pop('quality_policy_version', None)  # Preserve terminal history; reopened work must use v1.
+    if kind == 'final_review' and not historical and row and row['status'] == 'resolved' and row['action'] == 'continue':
+        assessment = json.loads(row['context']).get('assessment') or {}
+        try:
+            if quality_review(conn, task_id, assessment) != assessment.get('quality_review', {}).get('execution_receipts'):
+                return False
+        except (d.WorkflowError, KeyError, TypeError, ValueError):
+            return False
     return bool(row and row['status'] == 'resolved' and row['action'] == 'continue'
                 and row['author'] == 'Principal'
                 and json.loads(row['context']).get('acceptance_identity') == current
@@ -475,8 +667,14 @@ def complete_accepted(conn, decision_id):
         return False
     task = kb.get_task(conn, decision['task_id'])
     if (not task or task.status == 'done' or task.current_run_id is None
-            or task.current_run_id != decision['run_id']
-            or not accepted(conn, task.id, 'final_review')):
+            or task.current_run_id != decision['run_id']):
+        return False
+    if not accepted(conn, task.id, 'final_review'):
+        old_identity = json.loads(decision['context']).get('acceptance_identity', {})
+        if task.status == 'running' and old_identity.get('quality_policy_version') != QUALITY_POLICY_VERSION:
+            d.ask_principal(conn, task.id, task.current_run_id, kind='final_review',
+                question='Review the retained result under the current quality policy; reuse evidence and do not repeat delivery',
+                context={'quality_upgrade_of': decision_id})
         return False
     report = d._artifact(conn, task.id, 'report')
     content = json.loads(report['content'])
@@ -525,12 +723,7 @@ def final_assessment(conn, task_id):
     if not row or row['status'] != 'resolved' or row['action'] != 'continue' or row['author'] != 'Principal':
         return {}
     context=json.loads(row['context'])
-    try:
-        if context.get('acceptance_identity') != identity(conn, task_id, 'final_review'):
-            return {}
-    except d.WorkflowError:
-        return {}
-    return context.get('assessment', {})
+    return context.get('assessment', {}) if accepted(conn, task_id, 'final_review') else {}
 
 
 def _unresolved_functional_failures(spec, report):
@@ -563,8 +756,17 @@ def closeout_packet(conn, task_id):
         return None
     content = json.loads(report['content'])
     observations = [r['id'] + ': ' + r['observation'] for r in assessment['criteria'] if r.get('verdict') == 'observe']
-    images = [c['path'] for c in json.loads(report['evidence']).get('artifact_checks', [])
-              if c.get('status') == 'verified_local' and Path(c.get('path', '')).suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'}]
+    checks = json.loads(report['evidence']).get('artifact_checks', [])
+    classified = {key: item for item in assessment.get('quality_review', {}).get('artifacts', [])
+                  for check in checks if item['ref'] in (check['ref'], check.get('path'))
+                  for key in (check['ref'], check.get('path')) if key}
+    fields = ('kind', 'case', 'actor', 'environment', 'target', 'version', 'scope')
+    visual = {ref for row in assessment['criteria']
+              if row['verdict'] == 'accept' and row.get('proof', {}).get('kind') == 'product_capture'
+              and row['proof'].get('coverage') == 'full' for ref in row['evidence']
+              if ref in classified and all(classified[ref].get(k) == row['proof'][k] for k in fields)}
+    images = [c['path'] for c in checks
+              if c.get('status') == 'verified_local' and (c['ref'] in visual or c.get('path') in visual)]
     return {'resolution': assessment.get('resolution') or content.get('summary') or assessment['request_alignment'],
             'observations': observations, 'images': list(dict.fromkeys(images)),
             'learning': assessment.get('learning') or assessment.get('resolution') or assessment['scope_assessment'],
@@ -652,4 +854,13 @@ def assess(conn, decision, assessment):
                 actual = d._inspect_local_evidence(check['path'])
                 if any(actual[k] != check[k] for k in ('sha256', 'size_bytes')):
                     raise d.WorkflowError('Report evidence changed; save and review the current evidence')
-    return json.loads(d._json(assessment))
+    assessment = json.loads(d._json(assessment))
+    if kind == 'final_review':
+        try:
+            executions = quality_review(conn, task_id, assessment)
+        except d.WorkflowError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise d.WorkflowError('Malformed Principal quality review; complete the same decision without worker or human paperwork') from exc
+        assessment['quality_review']['execution_receipts'] = executions
+    return assessment

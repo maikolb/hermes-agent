@@ -5,7 +5,7 @@ from contextlib import nullcontext
 import pytest
 
 from hermes_cli import kanban_db as kb, nfos_delivery as d, nfos_principal_review as review
-from tests.hermes_cli.test_nfos_principal_acceptance import task_context, accept
+from tests.hermes_cli.test_nfos_principal_acceptance import task_context, accept, assessment as base_assessment
 
 
 def prepare(ctx, monkeypatch):
@@ -21,11 +21,14 @@ def prepare(ctx, monkeypatch):
 
 
 def assessment(artifact):
-    return {'request_alignment':'Investigation exhausted the available local records',
-            'scope_assessment':'No functional request abandoned and no extra mutation',
-            'resolution':'Investigação concluída. O recibo histórico não está disponível.',
-            'learning':'Preservar o recibo antes de alterar dados; ausência histórica não prova perda.',
-            'criteria':[{'id':'C1','verdict':'observe','observation':'Sem recibo histórico, preservação permanece não comprovada.','evidence':[str(artifact)]}]}
+    result = base_assessment(artifact)
+    result.update(request_alignment='Investigation exhausted the available local records',
+                  scope_assessment='No functional request abandoned and no extra mutation',
+                  resolution='Investigação concluída. O recibo histórico não está disponível.',
+                  learning='Preservar o recibo antes de alterar dados; ausência histórica não prova perda.')
+    result['criteria'][0].update(verdict='observe', observation='Sem recibo histórico, preservação permanece não comprovada.')
+    result['criteria'][0]['proof']['coverage'] = 'partial'
+    return result
 
 
 def test_principal_can_close_with_observation_without_rewriting_not_run(task_context, monkeypatch):
@@ -39,8 +42,8 @@ def test_principal_can_close_with_observation_without_rewriting_not_run(task_con
     report=json.loads(d._artifact(conn,task.id,'report')['content'])
     assert report['criteria'][0]['status']=='NOT_RUN'
     assert review.observed_criteria(conn,task.id)=={'C1'}
-    event=json.loads(conn.execute("select payload from task_events where task_id=? and kind='completed' order by id desc limit 1",(task.id,)).fetchone()['payload'])
-    assert str(image) in event['artifacts']
+    assert str(image) not in review.closeout_packet(conn, task.id)['images'], 'An unreviewed PNG is not promoted into visual proof'
+    assert report['artifacts'][1]['path'] == str(image), 'The original attachment remains in history'
     assert 'recibo histórico' in kb.get_task(conn,task.id).result
     assert 'Observações' in kb.get_task(conn,task.id).result
     from tools.memory_tool import get_memory_dir
@@ -134,8 +137,8 @@ def test_legacy_observation_does_not_hide_functional_failure_or_partial_label(ta
     conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',author='Principal',context=? WHERE id=?",
                  (json.dumps(context), decision['id']))
     conn.commit()
-    assert review.final_assessment(conn, task.id) == proposed
-    assert review.observed_criteria(conn, task.id) == ({'C2'} if other_observation else set())
+    assert review.final_assessment(conn, task.id) == {}, 'Legacy acceptance without the current quality receipt cannot authorize closure'
+    assert review.observed_criteria(conn, task.id) == set()
     assert not kb.complete_task(conn, task.id, result='Legacy partial')
     monkeypatch.setattr(kb, 'connect_closing', lambda **kwargs: nullcontext(conn))
     assert _progress_outcome('pilot', task.id) == 'parcial'

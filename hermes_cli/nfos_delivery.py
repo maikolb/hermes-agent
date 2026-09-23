@@ -3200,13 +3200,19 @@ def _inspect_local_evidence(value):
         digest=hashlib.sha256()
         with path.open('rb') as stream:
             opened=os.fstat(stream.fileno())
+            header=stream.read(16)
+            stream.seek(0)
+            image=(header.startswith(b'\x89PNG\r\n\x1a\n') or header.startswith(b'\xff\xd8\xff')
+                   or header.startswith((b'GIF87a', b'GIF89a'))
+                   or (header.startswith(b'RIFF') and header[8:12]==b'WEBP'))
             for chunk in iter(lambda:stream.read(1024*1024),b''):
                 digest.update(chunk)
             after=os.fstat(stream.fileno())
         identity=lambda s:(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)
         if identity(before)!=identity(opened) or identity(opened)!=identity(after) or identity(after)!=identity(path.stat()):
             raise WorkflowError(f'Evidence changed while being read: {path}')
-        return {'path':str(path),'sha256':digest.hexdigest(),'size_bytes':after.st_size}
+        return {'path':str(path),'sha256':digest.hexdigest(),'size_bytes':after.st_size,
+                'media_type':'image' if image else 'other'}
     except OSError as exc:
         raise WorkflowError(f'Local evidence is unavailable or inaccessible: {path}') from exc
 
@@ -3483,7 +3489,7 @@ def save_report(conn, task_id, run_id, report):
             (task_id,run_id,'report',revision,encoded,'worker',_json(evidence),int(time.time())))
         _event(conn,task_id,run_id,'nfos_report_saved',{'revision':revision,'spec_revision':spec['revision']})
         from hermes_cli.nfos_principal_review import required
-        if required(conn,task_id):
+        if required(conn,task_id,'final_review'):
             decision_id = ask_principal(conn,task_id,run_id,kind='final_review',
                 question=('Review changed fields and affected criteria using report_delta; reuse unchanged verified evidence. '
                           'Do not repeat operations or ask the owner to confirm valid observations.' if delta else
@@ -3650,7 +3656,7 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
         raise WorkflowError('A decision needs its kind and concrete question')
     with _kb().write_txn(conn,allow_nested=True):
         _owned(conn,task_id,run_id)
-        if kind in {'spec_review','final_review'} and _owner_mode() and not _result_review():
+        if kind == 'spec_review' and _owner_mode() and not _result_review():
             decision_id='dec_'+uuid.uuid4().hex[:20];now=int(time.time())
             answer='Registro automático: revisão do resultado não está habilitada neste perfil.'
             conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -3695,6 +3701,9 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
             _require_current_instruction_spec(conn,task_id)
             context.pop('assessment',None)
             context['acceptance_identity']=identity(conn,task_id,kind)
+            if kind == 'final_review':
+                from hermes_cli.nfos_principal_review import QUALITY_POLICY
+                context['quality_policy']=QUALITY_POLICY
             for pending in conn.execute("SELECT id,context FROM nfos_decisions WHERE task_id=? AND kind=? AND status='pending'",
                                         (task_id,kind)).fetchall():
                 if json.loads(pending['context']).get('acceptance_identity') != context['acceptance_identity']:
@@ -4038,11 +4047,18 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
         raise WorkflowError(HUMAN_MAINTENANCE_REFUSAL)
     initial=get_decision(conn,decision_id)
     assessed=None
+    quality_refusal=None
     if initial and initial['status']=='pending' and initial['kind'] in {'spec_review','final_review'} and action=='continue':
-        from hermes_cli.nfos_principal_review import assess
+        from hermes_cli.nfos_principal_review import assess, QualityReviewChanges
         if conn.in_transaction:
             raise WorkflowError('Acceptance evidence must be inspected outside a write transaction; ask for a fresh review')
-        assessed=assess(conn,initial,assessment)
+        try:
+            assessed=assess(conn,initial,assessment)
+        except QualityReviewChanges as exc:
+            quality_refusal=str(exc)
+            action='changes'
+            answer='Revise the result/evidence on this same card: '+quality_refusal
+            assessment=None  # Evidence correction is not an automatic model escalation.
     # Reconsideration composes this same validation with the unblock atomically.
     with _kb().write_txn(conn, allow_nested=True):
         row=get_decision(conn,decision_id)
@@ -4118,6 +4134,13 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                         raise WorkflowError('Review needs the confirmed PR for this candidate')
             elif not identity.get('report_revision'):
                 raise WorkflowError('Review needs the saved report')
+        if quality_refusal:
+            from hermes_cli.nfos_principal_review import identity
+            context=json.loads(row['context'])
+            if context.get('acceptance_identity')!=identity(conn,row['task_id'],row['kind']):
+                raise WorkflowError('Result changed while reviewing quality; review its current evidence')
+            context['quality_refusal']=quality_refusal
+            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?',(_json(context),decision_id))
         if action == 'changes':
             from hermes_cli.nfos_principal_review import escalate_rework
             escalate_rework(conn, row, assessment)
@@ -4892,8 +4915,10 @@ def main():
     evidence=json.loads(Path(args.evidence).read_text(encoding='utf-8-sig')) if args.evidence else {}
     with _kb().connect_closing(db_path=Path(args.db) if args.db else None) as conn:
         if args.action=='show':
+            from hermes_cli.nfos_principal_review import QUALITY_POLICY
             result={'workflow':get_workflow(conn,args.task),'spec':get_spec(conn,args.task),
                 'runtime':{'code_root':str(Path(__file__).resolve().parents[1]),'python':sys.executable},
+                'quality_policy':QUALITY_POLICY,
                 'report':_artifact(conn,args.task,'report'),
                 'decisions':[dict(r) for r in conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? ORDER BY created_at',(args.task,))],
                 'effects':[dict(r) for r in conn.execute('SELECT * FROM nfos_effects WHERE task_id=?',(args.task,))]}
