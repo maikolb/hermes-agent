@@ -127,6 +127,8 @@ def test_explicit_grant_restores_exhausted_card_without_resetting_history(resume
     review.worker_checkpoint(agent)
     assert not agent.iteration_budget.consume()
     with kb.write_txn(conn):
+        # This fixture exhausts iterations only; do not simulate decades of runtime.
+        conn.execute('UPDATE task_runs SET started_at=? WHERE id=?', (int(kb.time.time()), task.current_run_id))
         kb._end_run(conn, task.id, outcome='blocked', status='blocked')
         conn.execute("UPDATE tasks SET status='blocked',claim_lock=NULL,worker_pid=NULL,worker_started_at=NULL WHERE id=?", (task.id,))
     monkeypatch.delenv('HERMES_KANBAN_TASK')
@@ -252,6 +254,10 @@ def test_runtime_grant_debits_history_and_timeout_uses_remaining_balance(exhaust
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='ready',block_kind=NULL WHERE id=?", (task.id,))
     current = kb.claim_task(conn, task.id)
+    if not grant:
+        assert current is None  # Native admission rejects the exhausted lineage before spawn.
+        assert kb.get_task(conn, task.id).worker_pid is None
+        return
     assert current
     kb._set_worker_pid(conn, task.id, os.getpid())
     with kb.write_txn(conn):
