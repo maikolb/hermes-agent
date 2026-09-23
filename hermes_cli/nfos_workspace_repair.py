@@ -1,5 +1,6 @@
 """Maintainer recovery of an idle card's repository binding, with provenance."""
 import json
+import hashlib
 import os
 import secrets
 import time
@@ -166,6 +167,134 @@ def _idle(conn, task_id):
     if previous_runs_termination_pending(conn, task_id):
         raise delivery.WorkflowError('Previous worker termination is not confirmed')
     return task
+
+
+def execution_budget(conn, task):
+    """Compute the next native worker's balance without launching a process."""
+    import yaml
+    from hermes_cli import nfos_principal_review as review
+    from hermes_cli.config import resolve_turn_limit
+    from hermes_cli.profiles import get_profile_dir
+    first = review.worker_escalation(conn, task.id).get('first_run_id')
+    if not first:
+        return None
+    last = conn.execute('SELECT MAX(id) FROM task_runs WHERE task_id=?', (task.id,)).fetchone()[0]
+    usage = review.escalation_usage(conn, task.id, last + 1)
+    config_path = get_profile_dir(task.assignee or 'default') / 'config.yaml'
+    raw = config_path.read_bytes() if config_path.is_file() else b''
+    cfg = yaml.safe_load(raw) or {}
+    limit = (cfg.get('agent') or {}).get('max_turns', cfg.get('max_turns'))
+    base = resolve_turn_limit(limit if limit is not None else os.environ.get('HERMES_MAX_ITERATIONS'))
+    grants = [g for g in review.iteration_grants(conn, task.id) if g['first_run_id'] == first]
+    return dict(config_sha256=hashlib.sha256(raw).hexdigest(), base_iterations=base, prior_usage=usage,
+                remaining_iterations=base + sum(g['iterations'] for g in grants) - usage['iterations'],
+                remaining_runtime_seconds=task.max_runtime_seconds - usage['seconds'] if task.max_runtime_seconds is not None else None,
+                remaining_goal_turns=task.goal_max_turns - usage['turns'] if task.goal_max_turns else None)
+
+
+def request_execution_budget_review(conn, task, balance):
+    """Persist one internal Principal wake per material exhausted state, including pre-spawn."""
+    wf = delivery.get_workflow(conn, task.id)
+    last = conn.execute('SELECT MAX(id) FROM task_runs WHERE task_id=?', (task.id,)).fetchone()[0]
+    identity = dict(run_id=last, instruction_revision=task.instruction_revision, spec_revision=wf['spec_revision'])
+    context = dict(execution_budget_identity=identity,
+                   balance={k: v for k, v in balance.items() if k != 'config_sha256'})
+    decision_id = 'dec_' + hashlib.sha256(delivery._json([task.id, context]).encode()).hexdigest()[:24]
+    if delivery.get_decision(conn, decision_id):
+        return decision_id
+    question = ('Saldo de execução esgotado. Verifique a autorização existente para concessão finita com '
+                'grant-budget; após saldo positivo e saída confirmada, use repair-execution dry-run/apply. '
+                'Continue não concede orçamento e esta revisão não aceita a entrega.')
+    conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) '
+                 "VALUES(?,?,?,'impediment',?,?,?,?)",
+                 (decision_id, task.id, last, question, delivery._json(context), wf['spec_revision'], int(time.time())))
+    kb._append_event(conn, task.id, 'nfos_principal_requested',
+                     dict(decision_id=decision_id, kind='impediment', question=question, retained_card=True), run_id=last)
+    return decision_id
+
+
+def repair_execution(conn, task_id, *, board, expected_run_id, expected_instruction_revision,
+                     expected_spec_revision, expected_resume_session, actor, reason,
+                     pause_run_id=None, apply=False):
+    """Release an execution hold only after observing usable budget and native resume context."""
+    from agent.delegation_context import is_dispatcher_owned_worker_context
+    from hermes_cli import nfos_principal_review as review
+    from hermes_cli.profiles import profile_matches_home
+    from hermes_constants import get_hermes_home
+    if (os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT')
+            or not is_dispatcher_owned_worker_context()):
+        raise delivery.WorkflowError('Execution repair belongs to the Principal maintainer, outside a worker')
+    if (any(not isinstance(v, str) or not v.strip() for v in (actor, reason))
+            or type(expected_run_id) is not int or expected_run_id <= 0
+            or type(expected_instruction_revision) is not int or type(expected_spec_revision) is not int
+            or (pause_run_id is not None and type(pause_run_id) is not int)):
+        raise delivery.WorkflowError('Specify actor, reason and observed run/instruction/spec identity')
+    home = Path(get_hermes_home())
+
+    def observed():
+        task = _idle(conn, task_id)
+        wf = delivery.get_workflow(conn, task_id)
+        last = conn.execute('SELECT * FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1', (task_id,)).fetchone()
+        if (not wf or not last or last['id'] != expected_run_id or last['ended_at'] is None
+                or task.instruction_revision != expected_instruction_revision or wf['spec_revision'] != expected_spec_revision):
+            raise delivery.WorkflowError('Run, instruction or specification changed before execution repair')
+        if not profile_matches_home(task.assignee or 'default', home):
+            raise delivery.WorkflowError('Run repair under the executor profile')
+        db = Path(conn.execute('PRAGMA database_list').fetchone()[2]).resolve()
+        if db != kb.kanban_db_path(board=board).resolve():
+            raise delivery.WorkflowError('Board does not match the current database')
+        budget = execution_budget(conn, task)
+        if budget is None:
+            raise delivery.WorkflowError('Execution budget recovery requires an existing escalation lineage')
+        if any(budget[k] is not None and budget[k] <= 0 for k in
+               ('remaining_iterations', 'remaining_runtime_seconds', 'remaining_goal_turns')):
+            raise delivery.WorkflowError('Execution budget remains exhausted')
+        resume, _ = kb._worker_resume_context(replace(task, current_run_id=expected_run_id + 1), str(home), board=board)
+        if resume != expected_resume_session:
+            raise delivery.WorkflowError('Native resume context changed before execution repair')
+        pauses = conn.execute("SELECT id,metadata FROM task_runs WHERE task_id=? "
+                              "AND json_type(metadata,'$.maintenance_pause')='object' "
+                              "AND json_extract(metadata,'$.maintenance_pause.repaired_at') IS NULL", (task_id,)).fetchall()
+        if len(pauses) > 1:
+            raise delivery.WorkflowError('Multiple maintenance pauses require separate review')
+        pause = pauses[0] if pauses else None
+        if pause_run_id is not None and (pause is None or pause['id'] != pause_run_id):
+            raise delivery.WorkflowError('Selected maintenance pause changed')
+        generic = pause and json.loads(pause['metadata'])['maintenance_pause'].get('kind') != 'runtime_budget_exhausted'
+        if generic and (pause_run_id != pause['id'] or last['outcome'] != 'reclaimed'
+                        or json.loads(last['metadata'] or '{}').get('worker_session_id') or resume is not None):
+            raise delivery.WorkflowError('Generic execution pause requires an explicitly selected unbound reclaimed attempt')
+        return dict(task_id=task_id, run_id=expected_run_id, instruction_revision=task.instruction_revision,
+                    spec_revision=wf['spec_revision'], pause_run_id=pause['id'] if pause else None,
+                    pause_metadata_sha256=hashlib.sha256(pause['metadata'].encode()).hexdigest() if pause else None,
+                    **budget, resume_session=resume,
+                    resume_kind='native fresh context after unbound reclaimed attempt' if generic else 'native resume selection',
+                    worker_args=review.worker_model_args(task, conn), actor=actor, reason=reason)
+
+    proposed = observed()
+    if not apply:
+        return dict(proposed, apply=False)
+    with kb.write_txn(conn):
+        current = observed()
+        if current != proposed:
+            raise delivery.WorkflowError('Execution conditions changed during repair')
+        if current['pause_run_id'] is not None:
+            row = conn.execute('SELECT metadata FROM task_runs WHERE id=?', (current['pause_run_id'],)).fetchone()
+            metadata = json.loads(row['metadata'])
+            metadata['maintenance_pause'].update(repaired_at=time.time(), repaired_by=actor, repair_kind='execution')
+            conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (delivery._json(metadata), current['pause_run_id']))
+        kb.unblock_task(conn, task_id)
+        current['status'] = kb.get_task(conn, task_id).status
+        identity = {k: current[k] for k in ('run_id', 'instruction_revision', 'spec_revision')}
+        for decision in conn.execute("SELECT id,context FROM nfos_decisions WHERE task_id=? AND status='pending'", (task_id,)).fetchall():
+            if json.loads(decision['context']).get('execution_budget_identity') == identity:
+                answer = 'Execution readiness verified by authorized repair; this is not delivery acceptance'
+                conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',author=?,answer=?,resolved_at=? WHERE id=?",
+                             (actor, answer, int(time.time()), decision['id']))
+                kb._append_event(conn, task_id, 'nfos_principal_resolved',
+                                 dict(decision_id=decision['id'], action='continue', answer=answer), run_id=expected_run_id)
+        kb._append_event(conn, task_id, 'nfos_execution_repaired', current, run_id=expected_run_id)
+    return dict(current, apply=True)
 
 
 def repair_workspace(conn, task_id, *, board, repo_path, base_sha, expected_workspace,

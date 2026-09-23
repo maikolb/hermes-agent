@@ -3767,7 +3767,15 @@ class GatewayKanbanWatchersMixin:
                                     "por `decide`. Um worker ativo continua após sua resposta; um card migrado sem worker "
                                     "volta ao distribuidor pelo mesmo decide. Não crie outro worker "
                                     "nem encerre o card para fazer a revisão. Se resolver, use continue ou approve; "
-                                    "se depender de humano, registre human com a pergunta concreta.")
+                                    "se depender de humano, registre human com a pergunta concreta. "
+                                    "Se o impedimento for orçamento esgotado, existe `grant-budget --task ID --input JSON` "
+                                    "com grant_id, iterations, runtime_seconds opcional, actor, reason, expected_run_id e "
+                                    "expected_instruction_revision; exige autorização existente para a concessão limitada. "
+                                    "Conceder orçamento não libera manutenção. Use `repair-execution --task ID --input JSON` "
+                                    "primeiro em dry-run (apply=false), com expected_run_id, expected_instruction_revision, "
+                                    "expected_spec_revision, expected_resume_session, actor, reason e pause_run_id quando genérica; "
+                                    "apply=true só após saldo positivo e contexto nativo comprovado. "
+                                    "Registre o recibo e confirme a execução real antes de declarar retomada; continue não concede orçamento.")
 
                         if not _is_push_adapter and _wake_kinds and _session_key:
                             # Wake self-post IS the delivery on this path —
