@@ -167,6 +167,26 @@ def test_bad_contract_has_no_authority(bad):
         jev._parse(bad, questions())
 
 
+def test_rounded_many_option_distribution_is_valid_but_a_broken_one_is_not():
+    # Replay v2: the provider rounds each probability to two decimals; with 69 skills
+    # many small ones round down to 0.00, so a valid answer sums below 0.99 and the
+    # old +-0.01 tolerance discarded it.
+    options = {'s%02d' % i: None for i in range(69)}
+    probabilities = dict.fromkeys(options, 0.0)
+    probabilities.update(s00=.45, s01=.13, s02=.12)
+    for name in [k for k, v in probabilities.items() if v == 0.0][:28]:
+        probabilities[name] = .01
+    assert abs(sum(probabilities.values()) - 1) > .01  # sums to 0.98: rejected before the fix
+    question = {'skill': {'type': 'choice', 'criteria': options}}
+    data = {'model': 'jev-1.13', 'usage': {'input_tokens': 10, 'output_tokens': 1},
+            'answers': {'skill': {'type': 'choice', 'choice': 's00', 'confidence': .4, 'probabilities': probabilities}}}
+    assert jev._parse(data, question)['answers']['skill']['choice'] == 's00'
+    probabilities['s00'] = .05
+    data['answers']['skill']['choice'] = 's01'
+    with pytest.raises(ValueError, match='distribution'):
+        jev._parse(data, question)
+
+
 def test_off_entrypoints_unchanged(task_context, http_fixture, monkeypatch):
     conn, task, spec, artifact = task_context
     monkeypatch.setattr(jev, '_post', lambda *a: pytest.fail('disabled feature made network request'))

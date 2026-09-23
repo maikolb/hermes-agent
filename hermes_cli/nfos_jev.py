@@ -307,9 +307,12 @@ def _parse(data, questions):
             continue
         options = set(question['criteria']) if kind == 'choice' else {str(i) for i in range(len(question['criteria']))}
         probabilities = answer.get('probabilities')
+        # The provider rounds each probability to two decimals, so the sum drifts by
+        # up to .005 per option: 69 skills can legitimately sum to 0.989999.
+        rounding = .005 * len(options)
         if (not isinstance(probabilities, dict) or set(probabilities) != options
                 or not all(_number(p, high=1) for p in probabilities.values())
-                or abs(sum(probabilities.values()) - 1) > .01
+                or abs(sum(probabilities.values()) - 1) > max(.01, rounding) + 1e-9
                 or not _number(answer.get('confidence'), high=1)):
             raise ValueError('invalid distribution')
         if kind == 'choice':
@@ -320,9 +323,11 @@ def _parse(data, questions):
         elif kind == 'score':
             legend = answer.get('legend')
             expected = sum(int(k) * v for k, v in probabilities.items())
+            # Rounded probabilities shift the weighted mean by up to .005 per level index.
+            drift = .005 * sum(range(len(options))) + .005
             if (not isinstance(legend, dict) or set(legend) != options
                     or not _number(answer.get('score'), high=len(options)-1)
-                    or abs(answer['score'] - expected) > .01):
+                    or abs(answer['score'] - expected) > max(.01, drift) + 1e-9):
                 raise ValueError('invalid score')
             answers[qid] = {'type': kind, 'score': answer['score'], 'confidence': answer['confidence']}
         else:
