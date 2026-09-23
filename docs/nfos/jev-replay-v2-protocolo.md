@@ -39,6 +39,8 @@ Data: 23/09/2026. Este arquivo é publicado antes de qualquer chamada paga. Uso 
 
 ## Frente 3: repetir ou mudar após falha de tool
 
+> **Emenda de 23/09/2026, antes de qualquer chamada paga: frente cancelada.** Na extração, o rótulo "repetição idêntica em até 30 chamadas" se mostrou inválido. Ele mistura erro transitório com "o worker mudou o código e rodou o mesmo comando de novo", e 94% das 556 repetições deram certo. Com o rótulo limpo (a chamada seguinte, idêntica, sem nada no meio), houve só 19 casos em 15 dias: 9 funcionaram e 10 falharam. Isso não sustenta calibração nem teste. Achado: os workers quase nunca repetem às cegas. O desenho original fica abaixo como registro.
+
 - **Caso:** chamada de tool que falhou (`error` ou `exit_code` ≠ 0) e foi repetida de forma idêntica (mesma tool, mesmos argumentos) em até 30 chamadas na mesma sessão.
 - **Rótulo:** a repetição funcionou ou falhou de novo.
 - **Amostra:** 300 casos da calibração e 300 do teste, sorteio com semente 20260923.
