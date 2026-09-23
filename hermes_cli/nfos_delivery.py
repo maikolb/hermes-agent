@@ -4296,18 +4296,28 @@ _OWNER_PRODUCTION_RX = (
 _NEGATED_BEFORE = re.compile(r"\b(?:n[aã]o|nunca|jamais|sem|not|never)\s+(?:\w+\s+)?$", re.I)
 _HML_ONLY = re.compile(r"\b(?:s[oó]|somente|apenas|only)\s+(?:em\s+|no\s+|na\s+)?(?:hml|homologa[cç][aã]o|staging)\b", re.I)
 _HUMAN_ENVELOPE = re.compile(r"\[[^\[\]|\n]{1,80}\|\d{3,}\]")
-_OWNER_GUIDANCE_SECTION = re.compile(r"\n\nOrientação do proprietário \([^)\n]*\):\n(.*?)(?=\n\nDecisão do Principal:|\Z)", re.S)
+_CARD_SECTION = r'(?:Original attachments:|Decis[aã]o do Principal:|Orientação do proprietário \([^)\n]*\):|Lineage:|Linhagem:)'
+_CARD_SECTION_RX = re.compile(r'^[ \t]*' + _CARD_SECTION, re.M | re.I)
+_OWNER_GUIDANCE_SECTION = re.compile(r"^[ \t]*Orientação do proprietário \([^)\n]*\):\n(.*?)(?=^[ \t]*" + _CARD_SECTION + r"|\Z)", re.S | re.M | re.I)
 _QUOTED_REPLY = re.compile(r"\[(?:Replied-to|Replying to)[^\]]*\]", re.I)
+_PENDING_AUTHORIZATION = re.compile(
+    r'\b(?:se|caso|quando|ap[oó]s|depois|at[eé]|aguard\w*)\b[^.!?;]{0,120}'
+    r'\b(?:aprov\w*|autoriz\w*|aval|confirma[cç][aã]o|libera[cç][aã]o)\b', re.I)
 
 
-def _human_text(body):
+def _human_text_sections(body):
     """OWNER_PHRASING_20260923: o que uma pessoa escreveu no card: a mensagem depois do envelope [Nome|id] do canal e as
     orientações do proprietário anexadas. Texto do Principal, anexos, linhagem e resposta citada ficam de fora."""
-    original = body.split('\n\nOriginal attachments:', 1)[0]
+    body = str(body or '').replace('\r\n', '\n').replace('\r', '\n')
+    original = _CARD_SECTION_RX.split(body, maxsplit=1)[0]
     envelopes = list(_HUMAN_ENVELOPE.finditer(original))
     parts = [_QUOTED_REPLY.sub(' ', original[m.end():envelopes[i + 1].start() if i + 1 < len(envelopes) else len(original)])
              for i, m in enumerate(envelopes)]
-    return '\n'.join(parts + [m.group(1) for m in _OWNER_GUIDANCE_SECTION.finditer(body)])
+    return parts + [_QUOTED_REPLY.sub(' ', m.group(1)) for m in _OWNER_GUIDANCE_SECTION.finditer(body)]
+
+
+def _human_text(body):
+    return '\n\n'.join(_human_text_sections(body))
 
 
 def _owner_production_phrasing(text):
@@ -4342,24 +4352,45 @@ def _express_production_order(text, *, human=False):
     OWNER_PHRASING_20260923: a fala do dia a dia só conta no texto escrito por pessoa; human=True quando o texto inteiro já é
     a orientação do owner."""
     text = str(text or '')
-    if any(not _NEGATED_BEFORE.search(text[:m.start()]) for m in _PRODUCTION_ORDER_RX.finditer(text)):
-        return True
-    return _owner_production_phrasing(text if human else _human_text(text))
+    sections = [text] if human else _human_text_sections(text)
+    # Legacy unwrapped requests retain their narrow imperative grammar, but never
+    # consume appended Principal/attachment sections as authorization.
+    if not sections:
+        scoped = _CARD_SECTION_RX.split(text.replace('\r\n', '\n'), maxsplit=1)[0]
+        return _production_guidance_intent(scoped, everyday=False) is True
+    intent = None
+    for section in sections:
+        current = _production_guidance_intent(section)
+        if current is not None:
+            intent = current
+    return intent is True
 
 
-def _production_guidance_intent(text):
+def _production_guidance_intent(text, *, everyday=True):
     """Return an explicit destination decision, or None for unrelated guidance."""
     production = r'\b(produ[cç][aã]o|production|prod|prd|main)\b'
-    for clause in re.split(r'[,;.!?\n]', text):
-        if re.search(production, clause, re.I) and re.search(r'\b(n[aã]o|not|never)\b', clause, re.I):
-            return False
+    intent = None
+    for clause in re.findall(r'[^.!?;]+[.!?;]?', _QUOTED_REPLY.sub(' ', text)):
+        if re.search(production, clause, re.I) and _PENDING_AUTHORIZATION.search(clause):
+            intent = False
+            continue
         hml_only = re.search(r'\b(s[oó]|somente|apenas|only)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', clause, re.I)
         if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', clause[:hml_only.start()], re.I):
-            return False
-    if _express_production_order(text, human=True) or re.search(
-            r'\b(direto|diretamente)\s+(para|pra|em)\s+(produ[cç][aã]o|production|prod|prd)\b', text, re.I):
-        return True
-    return None
+            intent = False
+            continue
+        # Negation of an observed defect condition is not a prohibition on its
+        # corrective action. An approval condition above is never discharged here.
+        directive = re.sub(r'\bse\b[^,;.!?]*,', ' ', clause, flags=re.I)
+        directive = re.sub(r'\bn[aã]o\s+(?:[eé]\s+)?(?:s[oó]|somente|apenas)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', ' ', directive, flags=re.I)
+        if re.search(production, clause, re.I) and re.search(r'\b(n[aã]o|nunca|jamais|not|never)\b', directive, re.I):
+            intent = False
+            continue
+        if clause.rstrip().endswith('?'):
+            continue
+        legacy = any(not _NEGATED_BEFORE.search(clause[:m.start()]) for m in _PRODUCTION_ORDER_RX.finditer(clause))
+        if legacy or (everyday and _owner_production_phrasing(clause)):
+            intent = True
+    return intent
 
 
 def _owner_guidance_production_order(conn, task, scope):
