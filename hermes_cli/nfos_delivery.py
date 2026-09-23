@@ -4278,9 +4278,58 @@ _PRODUCTION_ORDER_RX = re.compile(  # DELIVERY_ENV_20260911
     r"\W{0,24}(em|para|pra|na|no|to|in|on)?\W{0,12}(produ[cç][aã]o|\bprod\b|\bprd\b|production|\bmain\b)", re.I)
 
 
+# OWNER_PHRASING_20260923: o owner pede produção no português do dia a dia ("arruma isso urgente em produção",
+# "Suba esse específico para produção", "arrume em hml e produção também"). A lista acima não tinha esses verbos e só
+# aceitava pontuação entre verbo e destino, então card urgente de projeto HML travava aqui pedindo a ordem que já estava no corpo.
+_PRODUCTION_WORD = r"(?:produ[cç][aã]o|prod|prd|production)\b"
+_OWNER_PRODUCTION_RX = (
+    re.compile(r"\b(?P<verb>arrum(?:a|e|em|ar)|corrig(?:e|ir)|corrij(?:a|am)|consert(?:a|e|em|ar)|ajust(?:a|e|em|ar)|"
+               r"implement(?:a|e|em|ar)|apli(?:ca|que|quem|car)|coloc(?:a|ar)|coloqu(?:e|em)|bot(?:a|e|em|ar)|jog(?:a|ar)|"
+               r"jogu(?:e|em)|mand(?:a|e|em|ar)|lev(?:a|e|em|ar)|resolv(?:e|a|am|er)|sobe|sub(?:a|am|ir)|publi(?:ca|que|quem|car)|"
+               r"liber(?:a|e|em|ar)|promov(?:a|e|am|er)|integr(?:a|e|em|ar)|merge(?:ia|ar)?|deploy(?:a|ar)?)\b"
+               r"[^.!?;\n]{0,60}?\b(?P<prep>em|para|pra|na|no)\s+"
+               r"(?:(?:hml|homologa[cç][aã]o|staging)\s+e\s+(?:em\s+|na\s+|no\s+)?)?" + _PRODUCTION_WORD, re.I),
+    re.compile(r"\b(?:direto|diretamente)\s+(?P<prep>para|pra|em|na|no)\s+" + _PRODUCTION_WORD, re.I),
+    re.compile(r"\b(?:tem que|tem de|precisa|deve)\s+(?:estar|ir|ficar|subir|entrar|rodar)\s+(?P<prep>em|para|pra|na|no)\s+"
+               + _PRODUCTION_WORD, re.I),
+)
+_NEGATED_BEFORE = re.compile(r"\b(?:n[aã]o|nunca|jamais|sem|not|never)\s+(?:\w+\s+)?$", re.I)
+_HML_ONLY = re.compile(r"\b(?:s[oó]|somente|apenas|only)\s+(?:em\s+|no\s+|na\s+)?(?:hml|homologa[cç][aã]o|staging)\b", re.I)
+
+
+def _owner_production_phrasing(text):
+    """OWNER_PHRASING_20260923: pedido de produção na fala do owner; pergunta, negação, 'só em hml', substantivo
+    ('o ajuste em produção') e finalidade ('pra subir o número em prod') não contam como ordem."""
+    for rx in _OWNER_PRODUCTION_RX:
+        pos = 0
+        while (m := rx.search(text, pos)):
+            pos = m.start() + 1  # a refused match must not hide an order that starts inside it
+            before = text[:m.start()]
+            tail = re.search(r'[.!?;\n]', text[m.end():])
+            if tail and tail.group(0) == '?':
+                continue
+            if _NEGATED_BEFORE.search(before) or _NEGATED_BEFORE.search(text[m.start():m.start('prep')]):
+                continue
+            verb = (m.groupdict().get('verb') or '').lower()
+            if verb and re.search(r'\b(?:o|a|os|as|um|uma|esse|essa|este|esta|do|da|seu|sua|meu|minha|nosso|nossa)\s+$', before, re.I):
+                continue
+            if verb.endswith('r') and re.search(r'\b(?:pra|para|de)\s+$', before, re.I):
+                continue
+            start = max(text.rfind(c, 0, m.start()) for c in '.!?;\n') + 1
+            sentence = text[start:m.end() + (tail.start() if tail else len(text))]
+            hml_only = _HML_ONLY.search(sentence)
+            if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', sentence[:hml_only.start()], re.I):
+                continue
+            return True
+    return False
+
+
 def _express_production_order(text):
     """DELIVERY_ENV_20260911: ordem expressa do owner para produção no corpo do card (imperativo + produção), não menção descritiva."""
-    return bool(_PRODUCTION_ORDER_RX.search(str(text or '')))
+    text = str(text or '')
+    if any(not _NEGATED_BEFORE.search(text[:m.start()]) for m in _PRODUCTION_ORDER_RX.finditer(text)):
+        return True
+    return _owner_production_phrasing(text)
 
 
 def _production_guidance_intent(text):
