@@ -1,0 +1,134 @@
+{
+ "front1_impediment": {
+  "calibration_cases": 242,
+  "test_cases": 242,
+  "calibration_grid": [
+   {
+    "T": 0.5,
+    "auto": 2,
+    "errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "T": 0.55,
+    "auto": 1,
+    "errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "T": 0.6,
+    "auto": 1,
+    "errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "T": 0.65,
+    "auto": 0,
+    "errors": 0,
+    "error_rate": null
+   },
+   {
+    "T": 0.7,
+    "auto": 0,
+    "errors": 0,
+    "error_rate": null
+   },
+   {
+    "T": 0.75,
+    "auto": 0,
+    "errors": 0,
+    "error_rate": null
+   },
+   {
+    "T": 0.8,
+    "auto": 0,
+    "errors": 0,
+    "error_rate": null
+   },
+   {
+    "T": 0.85,
+    "auto": 0,
+    "errors": 0,
+    "error_rate": null
+   },
+   {
+    "T": 0.9,
+    "auto": 0,
+    "errors": 0,
+    "error_rate": null
+   },
+   {
+    "T": 0.95,
+    "auto": 0,
+    "errors": 0,
+    "error_rate": null
+   }
+  ],
+  "chosen_T": 0.5,
+  "calibration_base_rate_continue": 0.8678,
+  "fallbacks_test": 1,
+  "jev_ms_p50": 392,
+  "jev_ms_p95": 544,
+  "test_auto": 4,
+  "test_errors": 1,
+  "test_error_rate": 0.25,
+  "test_error_wilson95": [
+   0.0456,
+   0.6994
+  ],
+  "test_coverage": 0.0165,
+  "secondary_correct_with_specific_principal_instruction": "3/3",
+  "test_errors_by_action": {
+   "changes": 1
+  },
+  "checks": {
+   "error_le_5pct": false,
+   "wilson_upper_le_10pct": false,
+   "coverage_ge_20pct": false,
+   "jev_p95_le_1s": true
+  },
+  "passes": false
+ },
+ "front2_skill_suggestion": {
+  "calibration_cases": 76,
+  "test_cases": 76,
+  "baseline_skill_rank1_share_calibration": [
+   [
+    "nfos-prime-agent",
+    38
+   ],
+   [
+    "kanban-ops",
+    31
+   ],
+   [
+    "github-workflows",
+    24
+   ]
+  ],
+  "baseline_precision_test": 0.5789,
+  "test_suggested": 53,
+  "test_hits": 22,
+  "test_precision": 0.4151,
+  "test_precision_wilson95": [
+   0.2926,
+   0.5491
+  ],
+  "test_coverage": 0.6974,
+  "no_suggestion_reasons_test": {
+   "no_fit": 23
+  },
+  "avg_labels_per_card": 3.02,
+  "jev_ms_p50": 398,
+  "jev_ms_p95": 535,
+  "checks": {
+   "precision_ge_60pct": false,
+   "beats_baseline_by_15pts": false,
+   "coverage_ge_30pct": true
+  },
+  "passes": false
+ },
+ "front3": "cancelled before paid calls (protocol amendment 2c3d0e84)",
+ "cost_known_usd": 0.045871,
+ "rows": 636
+}
