@@ -415,16 +415,31 @@ def _goal_judge_available() -> bool:
     return client is not None and bool(model)
 
 
-def _delivery_environment_note(body=None):
+def _card_destination(task_id, conn=None):
+    """INTENT_DESTINATION_20260923: destino gravado na spec do card (a intenção do dono lida pelo worker e aceita pelo Principal)."""
+    try:
+        from hermes_cli import nfos_delivery as _d
+        if conn is not None:
+            spec = _d.get_spec(conn, task_id)
+        else:
+            from hermes_cli import kanban_db as _kb
+            with _kb.connect_closing() as own:
+                spec = _d.get_spec(own, task_id)
+        return json.loads(spec["content"]).get("delivery_destination") if spec else None
+    except Exception:
+        return None
+
+
+def _delivery_environment_note(destination=None):
     """DELIVERY_ENV_20260911: o juiz de fechamento julga contra o ambiente de entrega do projeto, não contra produção por padrão.
-    URGENT_PRODUCTION_20260923: pedido urgente do owner no corpo do card leva o julgamento para produção."""
+    INTENT_DESTINATION_20260923: o destino gravado na spec pode levar o julgamento para produção."""
     try:
         from hermes_cli.kanban_db import get_current_board
         from hermes_cli.nfos_runtime import project_config, delivery_route
         cfg = project_config(get_current_board())
         if not cfg:
             return ""
-        route = delivery_route(cfg, body=body)
+        route = delivery_route(cfg, destination=destination)
         return ("\n\nDelivery environment for this project: " + route["environment"].upper() + ". Delivered and read back in "
                 + route["environment"].upper() + " is complete; environments beyond it are out of scope unless the card body orders them.")
     except Exception:
@@ -447,8 +462,7 @@ def _stamp_delivery_record(conn, tid: str, metadata):
             return metadata
         from hermes_cli.kanban_db import get_current_board
         from hermes_cli.nfos_runtime import project_config, delivery_route
-        card = conn.execute("SELECT body FROM tasks WHERE id=?", (tid,)).fetchone()  # URGENT_PRODUCTION_20260923
-        route = delivery_route(project_config(get_current_board()) or {}, body=card[0] if card else None)
+        route = delivery_route(project_config(get_current_board()) or {}, destination=_card_destination(tid, conn))  # INTENT_DESTINATION_20260923
         effects = []
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_effects'").fetchone():
             for row in conn.execute("SELECT operation, target, candidate, status FROM nfos_effects WHERE task_id=? ORDER BY updated_at", (tid,)):
@@ -481,7 +495,7 @@ def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
     reason = ""
     try:
         verdict, reason, _, _, _ = judge_goal(
-            goal=f"{task.title}\n\n{task.body or ''}".strip() + _delivery_environment_note(task.body),  # DELIVERY_ENV_20260911
+            goal=f"{task.title}\n\n{task.body or ''}".strip() + _delivery_environment_note(_card_destination(task.id)),  # DELIVERY_ENV_20260911
             last_response=evidence.strip(),
         )
     except Exception as judge_exc:
