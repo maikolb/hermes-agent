@@ -44,8 +44,10 @@ def worker_model_args(task, conn=None):
         effort = policy.get('worker_reasoning_effort') or task.reasoning_effort
     if conn is not None:
         escalation = worker_escalation(conn, task.id)
-        if escalation and not task.model_override and model == 'gpt-5.6-luna' and provider in (None, 'openai-codex'):
-            model, provider, effort = escalation['model'], 'openai-codex', escalation['reasoning_effort']
+        if escalation and not task.model_override and model in ('gpt-5.6-luna', 'gpt-6-luna') and provider in (None, 'openai-codex'):
+            # A retained Luna tier follows the configured generation, keeping its effort.
+            model = model if escalation['model'] in ('gpt-5.6-luna', 'gpt-6-luna') else escalation['model']
+            provider, effort = 'openai-codex', escalation['reasoning_effort']
     args = ['-m', model] if model else []
     if model and provider:
         args += ['--provider', provider]
@@ -162,7 +164,7 @@ def escalate_rework(conn, decision, assessment):
     model = args[args.index('-m')+1] if '-m' in args else None
     effort = args[args.index('--reasoning')+1] if '--reasoning' in args else None
     provider = args[args.index('--provider')+1] if '--provider' in args else None
-    if task.model_override or model != 'gpt-5.6-luna' or provider not in (None, 'openai-codex'):
+    if task.model_override or model not in ('gpt-5.6-luna', 'gpt-6-luna') or provider not in (None, 'openai-codex'):
         return  # Other model pins and already-higher models remain untouched.
     workflow = d.get_workflow(conn, task_id)
     state = json.loads(workflow['state_json'])
@@ -177,7 +179,7 @@ def escalate_rework(conn, decision, assessment):
         return  # Only a correction actually dispatched on this tier can fail it.
     level = min(2, level + 1)
     exhausted = bool(old and old.get('level') == 2)
-    escalation = dict(level=level, model='gpt-5.6-luna' if level == 1 else 'gpt-6-astra',
+    escalation = dict(level=level, model=model if level == 1 else 'gpt-6-astra',
                       reasoning_effort='max' if level == 1 else 'low', reason=reason,
                       decision_id=decision['id'], report_id=report['id'] if report else None, report_revision=report['revision'] if report else None,
                       source_run_id=source_run_id, first_run_id=old.get('first_run_id', source_run_id),
@@ -209,25 +211,27 @@ def iteration_grants(conn, task_id):
 
 
 def grant_iteration_budget(conn, task_id, *, grant_id, iterations, actor, reason,
-                           expected_run_id, expected_instruction_revision):
+                           expected_run_id, expected_instruction_revision, runtime_seconds=0):
     """Grant a finite allowance to an idle escalation lineage, without resuming it."""
     from agent.delegation_context import is_dispatcher_owned_worker_context
     if (os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT')
             or not is_dispatcher_owned_worker_context()):
         raise d.WorkflowError('Budget grants belong to the Principal maintainer, outside a worker')
     if (type(iterations) is not int or iterations <= 0
+            or type(runtime_seconds) is not int or runtime_seconds < 0
             or any(not isinstance(v, str) or not v.strip() for v in (grant_id, actor, reason))
             or type(expected_run_id) is not int or expected_run_id <= 0
             or type(expected_instruction_revision) is not int):
-        raise d.WorkflowError('Specify a grant id, positive iterations, actor, reason and observed run/instruction')
+        raise d.WorkflowError('Specify a grant id, positive iterations, nonnegative runtime seconds, actor, reason and observed run/instruction')
     request = dict(grant_id=grant_id, iterations=iterations, actor=actor, reason=reason,
-                   expected_run_id=expected_run_id, expected_instruction_revision=expected_instruction_revision)
+                   expected_run_id=expected_run_id, expected_instruction_revision=expected_instruction_revision,
+                   runtime_seconds=runtime_seconds)
     from hermes_cli.nfos_workspace_repair import _idle
     with d._kb().write_txn(conn):
         grants = iteration_grants(conn, task_id)
         for saved in grants:
             if saved['grant_id'] == grant_id:
-                if any(saved.get(k) != v for k, v in request.items()):
+                if any(saved.get(k, 0 if k == 'runtime_seconds' else None) != v for k, v in request.items()):
                     raise d.WorkflowError('Grant id already exists with different parameters')
                 return saved
         task = _idle(conn, task_id)
@@ -236,8 +240,18 @@ def grant_iteration_budget(conn, task_id, *, grant_id, iterations, actor, reason
         if (not last or last['id'] != expected_run_id or task.instruction_revision != expected_instruction_revision
                 or not first or not conn.execute('SELECT 1 FROM task_runs WHERE task_id=? AND id=?', (task_id, first)).fetchone()):
             raise d.WorkflowError('Card run, instruction or escalation lineage changed; read the current card')
+        usage = escalation_usage(conn, task_id, expected_run_id + 1)
+        previous_limit = task.max_runtime_seconds
+        if runtime_seconds and (type(previous_limit) is not int or previous_limit <= 0):
+            raise d.WorkflowError('Runtime grants require an explicit positive max_runtime_seconds')
+        new_limit = previous_limit + runtime_seconds if runtime_seconds else previous_limit
+        if runtime_seconds:
+            conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?', (new_limit, task_id))
         receipt = dict(request, task_id=task_id, first_run_id=first, at=int(time.time()),
-                       prior_iterations=escalation_usage(conn, task_id, expected_run_id + 1)['iterations'],
+                       previous_max_runtime_seconds=previous_limit, max_runtime_seconds=new_limit,
+                       prior_runtime_seconds=usage['seconds'],
+                       remaining_runtime_seconds=max(0, new_limit - usage['seconds']) if new_limit else None,
+                       prior_iterations=usage['iterations'],
                        granted_iterations=sum(g['iterations'] for g in grants if g['first_run_id'] == first) + iterations)
         d._event(conn, task_id, expected_run_id, 'nfos_iteration_budget_granted', receipt)
         return receipt

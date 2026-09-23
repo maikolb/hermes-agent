@@ -455,9 +455,9 @@ def test_config_applies_to_retained_tasks_without_changing_card_overrides(task_c
     assert review.worker_model_args(task) == ['-m', 'gpt-5.6-luna', '--provider', 'openai-codex', '--reasoning', 'high']
 
 
-def _enable_escalation(monkeypatch):
+def _enable_escalation(monkeypatch, model='gpt-5.6-luna'):
     monkeypatch.setattr(review, 'settings', lambda: dict(principal_validation=True, worker_escalation=True,
-        worker_model='gpt-5.6-luna', worker_provider='openai-codex', worker_reasoning_effort='high'))
+        worker_model=model, worker_provider='openai-codex', worker_reasoning_effort='high'))
 
 
 def _reject_functional(conn, task, artifact, kind='functional'):
@@ -468,14 +468,15 @@ def _reject_functional(conn, task, artifact, kind='functional'):
     return decision
 
 
-def test_escalation_two_attempts_then_exhausted_retains_history(task_context, monkeypatch):
+@pytest.mark.parametrize('luna_model', ['gpt-5.6-luna', 'gpt-6-luna'])
+def test_escalation_two_attempts_then_exhausted_retains_history(task_context, monkeypatch, luna_model):
     monkeypatch.setattr('hermes_cli.nfos_runtime.previous_runs_termination_pending', lambda *a: False)
     conn, task, _, artifact = task_context
-    _enable_escalation(monkeypatch)
+    _enable_escalation(monkeypatch, luna_model)
     accept(conn, task, 'spec_review')
     artifact.write_text('count=30\n')
     runs = []
-    for level, model, effort in [(1, 'gpt-5.6-luna', 'max'), (2, 'gpt-6-astra', 'low')]:
+    for level, model, effort in [(1, luna_model, 'max'), (2, 'gpt-6-astra', 'low')]:
         runs.append(task.current_run_id)
         save_report(conn, task, artifact, status='FAIL')
         decision = _reject_functional(conn, task, artifact)
@@ -519,11 +520,32 @@ def test_nonfunctional_rejections_do_not_escalate(task_context, monkeypatch, kin
 
 @pytest.mark.parametrize('model,provider,effort', [('deepseek-v4.1-flash','opencode-go','max'),
     ('gpt-6-astra','openai-codex','medium'), ('another-model','other','high')])
-def test_explicit_model_pins_survive_policy(task_context, monkeypatch, model, provider, effort):
+@pytest.mark.parametrize('luna_model', ['gpt-5.6-luna', 'gpt-6-luna'])
+def test_explicit_model_pins_survive_policy(task_context, monkeypatch, model, provider, effort, luna_model):
     conn, task, _, artifact = task_context
-    _enable_escalation(monkeypatch)
+    _enable_escalation(monkeypatch, luna_model)
     task.model_override, task.provider_override, task.reasoning_effort = model, provider, effort
     assert review.worker_model_args(task) == ['-m',model,'--provider',provider,'--reasoning',effort]
+
+
+@pytest.mark.parametrize('status', ['pending', 'applied'])
+@pytest.mark.parametrize('stored_model,level,effort,expected', [
+    ('gpt-5.6-luna', 1, 'max', 'gpt-6-luna'),
+    ('gpt-6-astra', 2, 'low', 'gpt-6-astra'),
+])
+def test_luna_upgrade_preserves_retained_escalation(task_context, monkeypatch, status, stored_model, level, effort, expected):
+    conn, task, _, _ = task_context
+    _enable_escalation(monkeypatch, 'gpt-6-luna')
+    with kb.write_txn(conn):
+        state = json.loads(d.get_workflow(conn, task.id)['state_json'])
+        state['worker_escalation'] = dict(model=stored_model, level=level, reasoning_effort=effort,
+                                           status=status, first_run_id=task.current_run_id)
+        conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (json.dumps(state), task.id))
+    before = d.get_workflow(conn, task.id)['state_json']
+    assert review.worker_model_args(task, conn) == ['-m', expected, '--provider', 'openai-codex', '--reasoning', effort]
+    assert d.get_workflow(conn, task.id)['state_json'] == before
+    task.model_override, task.provider_override, task.reasoning_effort = 'deepseek-v4.1-flash', 'opencode-go', 'max'
+    assert review.worker_model_args(task, conn) == ['-m', 'deepseek-v4.1-flash', '--provider', 'opencode-go', '--reasoning', 'max']
 
 
 def test_escalation_requires_current_linked_evidence(task_context, monkeypatch):
