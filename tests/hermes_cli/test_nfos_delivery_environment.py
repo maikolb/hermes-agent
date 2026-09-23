@@ -190,6 +190,9 @@ AUTHORIZATION_BOUNDARIES = [
     'Se eu aprovar:\n\narrume isso em produção',
     'Não publique, diretamente em produção',
     'Não implemente isso, direto em produção',
+    # RESTRICTION_BINDS_MESSAGE_20260923: a restrição vale para a mensagem inteira.
+    'Só HML agora; publicar em produção depois',
+    'Somente em hml por enquanto. Amanhã, suba para produção.',
 ]
 
 

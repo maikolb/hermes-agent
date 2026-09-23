@@ -4370,13 +4370,16 @@ def _production_guidance_intent(text, *, everyday=True):
     """Return an explicit destination decision, or None for unrelated guidance."""
     production = r'\b(produ[cç][aã]o|production|prod|prd|main)\b'
     intent = None
+    # RESTRICTION_BINDS_MESSAGE_20260923: an HML-only restriction or a pending approval binds the whole message
+    # ("Só HML agora; publicar em produção depois"); only a later owner message can lift it.
+    restricted = False
     for clause in re.findall(r'[^.!?;]+[.!?;]?', _QUOTED_REPLY.sub(' ', text)):
         if re.search(production, clause, re.I) and _PENDING_AUTHORIZATION.search(clause):
-            intent = False
+            intent, restricted = False, True
             continue
         hml_only = re.search(r'\b(s[oó]|somente|apenas|only)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', clause, re.I)
         if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', clause[:hml_only.start()], re.I):
-            intent = False
+            intent, restricted = False, True
             continue
         # Negation of an observed defect condition is not a prohibition on its
         # corrective action. An approval condition above is never discharged here.
@@ -4403,7 +4406,7 @@ def _production_guidance_intent(text, *, everyday=True):
                 continue
             if _PRODUCTION_ORDER_RX.search(scoped) or (everyday and _owner_production_phrasing(scoped)):
                 intent = True
-    return intent
+    return False if restricted else intent
 
 
 def _owner_guidance_production_order(conn, task, scope):
