@@ -4347,6 +4347,47 @@ def _owner_production_phrasing(text):
     return False
 
 
+# URGENT_PRODUCTION_20260923 (ordem do Maikol): pedido urgente do owner vai para produção em qualquer projeto, salvo quando ele
+# restringe o destino ("só em hml", "não suba para produção"), condiciona a aprovação ou nega a urgência ("não é urgente").
+_URGENT_RX = re.compile(r"\burg[eê]n(?:te|tes|t[ií]ssim[oa]|cia)\b|\bprioridade\s+(?:m[aá]xima|alta|total|urgente)\b|\basap\b|"
+                        r"\bo\s+quanto\s+antes\b|\bo\s+mais\s+r[aá]pido\s+poss[ií]vel\b|\b(?:pra|para)\s+ontem\b|\bimediatamente\b|"
+                        r"\bagora\s+mesmo\b", re.I)
+_NOT_URGENT_BEFORE = re.compile(r"\b(?:n[aã]o|nada|sem|nunca)\s+(?:\w+\s+){0,2}$", re.I)
+_NON_PRODUCTION_ONLY = re.compile(r"\b(?:s[oó]|somente|apenas|only)\s+(?:em\s+|no\s+|na\s+)?(?:hml|homologa[cç][aã]o|staging|teste|test|dev)\b", re.I)
+_PRODUCTION_REFUSED = re.compile(r"\b(?:n[aã]o|nunca|jamais|sem)\s+(?:\w+\s+){0,3}?(?:em|para|pra|na|no)\s+" + _PRODUCTION_WORD, re.I)
+
+
+def _urgency_intent(text):
+    """URGENT_PRODUCTION_20260923: True quando a pessoa pede urgência sem restringir o destino; False quando restringe o
+    destino ou nega a urgência; None sem sinal. Pergunta não conta."""
+    text = _QUOTED_REPLY.sub(' ', str(text or ''))
+    if _PRODUCTION_REFUSED.search(text):
+        return False
+    sentences = re.split(r'(?<=[.!?;\n])', text)
+    for sentence in sentences:
+        only = _NON_PRODUCTION_ONLY.search(sentence)
+        if only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', sentence[:only.start()], re.I):
+            return False
+    intent = None
+    for sentence in sentences:
+        if sentence.rstrip().endswith('?'):
+            continue
+        for m in _URGENT_RX.finditer(sentence):
+            intent = not _NOT_URGENT_BEFORE.search(sentence[:m.start()])
+    return intent
+
+
+def _owner_urgent_production(body):
+    """URGENT_PRODUCTION_20260923: uma pessoa pediu urgência no card (a última seção com sinal decide) e o gate de produção
+    concorda. Usado para levar a rota do card a produção."""
+    decision = None
+    for section in _human_text_sections(body):
+        current = _urgency_intent(section)
+        if current is not None:
+            decision = current
+    return decision is True and _express_production_order(body)
+
+
 def _express_production_order(text, *, human=False):
     """DELIVERY_ENV_20260911: ordem expressa do owner para produção no corpo do card (imperativo + produção), não menção descritiva.
     OWNER_PHRASING_20260923: a fala do dia a dia só conta no texto escrito por pessoa; human=True quando o texto inteiro já é
@@ -4402,6 +4443,8 @@ def _production_guidance_intent(text, *, everyday=True):
                 continue
             if _PRODUCTION_ORDER_RX.search(scoped) or (everyday and _owner_production_phrasing(scoped)):
                 intent = True
+    if intent is None and everyday and _urgency_intent(text) is True:  # URGENT_PRODUCTION_20260923: urgente vai para produção
+        intent = True
     return intent
 
 
@@ -4482,8 +4525,9 @@ def _project_delivery_environment(conn, task_id):
         return 'production'
 
 
-def _delivery_environment_for_db(db_path):
-    """DELIVERY_ENV_20260911: ambiente e rota do projeto do board (para o show)."""
+def _delivery_environment_for_db(db_path, body=None):
+    """DELIVERY_ENV_20260911: ambiente e rota do projeto do board (para o show).
+    URGENT_PRODUCTION_20260923: com o corpo do card, pedido urgente do owner troca a rota para produção."""
     try:
         from hermes_cli.nfos_runtime import project_config, delivery_route
         slug = Path(str(db_path)).resolve().parent.name if db_path else None
@@ -4491,7 +4535,7 @@ def _delivery_environment_for_db(db_path):
         if not cfg:
             from hermes_cli.kanban_db import get_current_board
             cfg = project_config(get_current_board())
-        return delivery_route(cfg or {})
+        return delivery_route(cfg or {}, body=body)
     except Exception:
         return None
 
@@ -5012,7 +5056,8 @@ def main():
             except Exception:
                 pass
             result['credentials']=_credentials_hint(args.db)  # BLOCK_LESS6_20260910
-            result['delivery_environment']=_delivery_environment_for_db(args.db)  # DELIVERY_ENV_20260911
+            _card=_kb().get_task(conn,args.task)  # URGENT_PRODUCTION_20260923: a rota considera o pedido urgente deste card
+            result['delivery_environment']=_delivery_environment_for_db(args.db,body=_card.body if _card else None)  # DELIVERY_ENV_20260911
             result['continuation']=continuation_links(conn,args.task)  # RECORD_CONTINUATION_20260911
             try:  # RESULT_PROBE_20260911: medições, tentativas e nota de debug
                 _st=(json.loads(result['workflow']['state_json'] or '{}') or {}) if result['workflow'] else {}
