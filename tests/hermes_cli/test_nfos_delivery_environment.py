@@ -188,6 +188,8 @@ AUTHORIZATION_BOUNDARIES = [
     'Publique em produção somente depois da minha aprovação',
     'Se eu der o aval, suba para produção',
     'Se eu aprovar:\n\narrume isso em produção',
+    'Não publique, diretamente em produção',
+    'Não implemente isso, direto em produção',
 ]
 
 

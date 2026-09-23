@@ -4388,7 +4388,13 @@ def _production_guidance_intent(text, *, everyday=True):
         # its verb. Other comma/newline-delimited actions keep their own negation.
         directive = re.sub(r',\s*(?:sob|sem|com|de|em|por)\b[^,.!?;\n]*,', ' ', directive, flags=re.I)
         patterns = (_PRODUCTION_ORDER_RX,) + (_OWNER_PRODUCTION_RX if everyday else ())
-        candidates = sorted((m for rx in patterns for m in rx.finditer(directive)), key=lambda m: (m.end(), m.start()))
+        spans = {(m.start(), m.end()): m for rx in patterns for m in rx.finditer(directive)}
+        # A nested destination phrase cannot restart the scope of its enclosing
+        # command and turn a refused imperative into an authorization.
+        candidates = sorted((m for (start, end), m in spans.items()
+                             if not any(outer_start < start and outer_end == end
+                                        for outer_start, outer_end in spans)),
+                            key=lambda m: (m.end(), m.start()))
         for candidate in candidates:
             start = max(directive.rfind(c, 0, candidate.start()) for c in ',\n') + 1
             scoped = directive[start:candidate.end()]
