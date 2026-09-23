@@ -192,6 +192,27 @@ def execution_budget(conn, task):
                 remaining_goal_turns=task.goal_max_turns - usage['turns'] if task.goal_max_turns else None)
 
 
+def request_execution_budget_review(conn, task, balance):
+    """Persist one internal Principal wake per material exhausted state, including pre-spawn."""
+    wf = delivery.get_workflow(conn, task.id)
+    last = conn.execute('SELECT MAX(id) FROM task_runs WHERE task_id=?', (task.id,)).fetchone()[0]
+    identity = dict(run_id=last, instruction_revision=task.instruction_revision, spec_revision=wf['spec_revision'])
+    context = dict(execution_budget_identity=identity,
+                   balance={k: v for k, v in balance.items() if k != 'config_sha256'})
+    decision_id = 'dec_' + hashlib.sha256(delivery._json([task.id, context]).encode()).hexdigest()[:24]
+    if delivery.get_decision(conn, decision_id):
+        return decision_id
+    question = ('Saldo de execução esgotado. Verifique a autorização existente para concessão finita com '
+                'grant-budget; após saldo positivo e saída confirmada, use repair-execution dry-run/apply. '
+                'Continue não concede orçamento e esta revisão não aceita a entrega.')
+    conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) '
+                 "VALUES(?,?,?,'impediment',?,?,?,?)",
+                 (decision_id, task.id, last, question, delivery._json(context), wf['spec_revision'], int(time.time())))
+    kb._append_event(conn, task.id, 'nfos_principal_requested',
+                     dict(decision_id=decision_id, kind='impediment', question=question, retained_card=True), run_id=last)
+    return decision_id
+
+
 def repair_execution(conn, task_id, *, board, expected_run_id, expected_instruction_revision,
                      expected_spec_revision, expected_resume_session, actor, reason,
                      pause_run_id=None, apply=False):
@@ -264,6 +285,14 @@ def repair_execution(conn, task_id, *, board, expected_run_id, expected_instruct
             conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (delivery._json(metadata), current['pause_run_id']))
         kb.unblock_task(conn, task_id)
         current['status'] = kb.get_task(conn, task_id).status
+        identity = {k: current[k] for k in ('run_id', 'instruction_revision', 'spec_revision')}
+        for decision in conn.execute("SELECT id,context FROM nfos_decisions WHERE task_id=? AND status='pending'", (task_id,)).fetchall():
+            if json.loads(decision['context']).get('execution_budget_identity') == identity:
+                answer = 'Execution readiness verified by authorized repair; this is not delivery acceptance'
+                conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',author=?,answer=?,resolved_at=? WHERE id=?",
+                             (actor, answer, int(time.time()), decision['id']))
+                kb._append_event(conn, task_id, 'nfos_principal_resolved',
+                                 dict(decision_id=decision['id'], action='continue', answer=answer), run_id=expected_run_id)
         kb._append_event(conn, task_id, 'nfos_execution_repaired', current, run_id=expected_run_id)
     return dict(current, apply=True)
 

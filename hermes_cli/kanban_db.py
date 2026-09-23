@@ -5709,7 +5709,7 @@ def claim_task(
         from hermes_cli.nfos_delivery import active_suspension
         if active_suspension(conn, task_id):
             return None
-        from hermes_cli.nfos_workspace_repair import maintenance_pause_pending, execution_budget
+        from hermes_cli.nfos_workspace_repair import maintenance_pause_pending, execution_budget, request_execution_budget_review
         if maintenance_pause_pending(conn, task_id):
             return None
         balance = execution_budget(conn, task)
@@ -5718,6 +5718,7 @@ def claim_task(
             if task.status == 'ready':
                 conn.execute("UPDATE tasks SET status='blocked',block_kind='awaiting_principal' WHERE id=?", (task_id,))
                 _append_event(conn, task_id, 'nfos_execution_budget_exhausted', balance)
+            request_execution_budget_review(conn, task, balance)
             return None
         retained = conn.execute("SELECT json_extract(state_json,'$.retained_workspace') FROM nfos_workflows WHERE task_id=?", (task_id,)).fetchone()
         if retained and retained[0] and not json.loads(retained[0]).get('restored_at'):
@@ -12117,6 +12118,14 @@ def enforce_max_runtime(
 
         pid = int(row["worker_pid"])
         tid = row["id"]
+        cleanup = None
+        if cumulative_budget:
+            from hermes_cli.nfos_tool import _descendants
+            active = get_task(conn, tid)
+            cleanup = dict(worker_pid=pid, worker_started_at=active.worker_started_at,
+                           status='waiting', grace_seconds=0, not_before=now, requested_at=now,
+                           descendants_json='[]')
+            cleanup['descendants_json'] = json.dumps(_descendants(cleanup, include_group=True))
         # SIGTERM then SIGKILL. Keep it simple: 5 s grace. Workers that
         # want a cleaner shutdown can install their own SIGTERM handler
         # before the grace expires.
@@ -12162,6 +12171,7 @@ def enforce_max_runtime(
                     "retry_status": retry_status,
                 }
                 if cumulative_budget:
+                    payload['nfos_cleanup'] = cleanup
                     payload['maintenance_pause'] = dict(
                         kind='runtime_budget_exhausted', actor='runtime', at=now,
                         reason='Cumulative runtime exhausted; grant-budget then repair-execution before resuming')
@@ -12174,6 +12184,10 @@ def enforce_max_runtime(
                 _append_event(
                     conn, tid, "timed_out", payload, run_id=run_id,
                 )
+                if cumulative_budget:
+                    from hermes_cli.nfos_workspace_repair import execution_budget, request_execution_budget_review
+                    held = get_task(conn, tid)
+                    request_execution_budget_review(conn, held, execution_budget(conn, held))
                 timed_out.append(tid)
         # Increment the unified failure counter. Outside the write_txn
         # above because ``_record_task_failure`` opens its own. If the

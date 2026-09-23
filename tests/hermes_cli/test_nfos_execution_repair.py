@@ -1,6 +1,7 @@
 """Closed-run budget recovery uses the real claim hold and native resume selection."""
 import json
 import os
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from hermes_cli import kanban_db as kb, nfos_principal_review as review
 from hermes_cli import nfos_workspace_repair as repair
 from tests.hermes_cli.test_nfos_principal_acceptance import task_context  # noqa: F401
 from tests.hermes_cli.test_nfos_escalation_budget import resumed, exhausted_idle  # noqa: F401
+from hermes_cli.nfos_runtime import previous_runs_termination_pending as real_termination_pending
 
 
 def test_escalated_timeout_stays_held_even_after_unblock(resumed, monkeypatch):
@@ -167,3 +169,70 @@ def test_cli_repair_execution_exposes_dry_run_and_preserves_bound_session(paused
     repair.repair_execution(conn, task.id, board=None, **args, apply=True)
     meta = json.loads(conn.execute('SELECT metadata FROM task_runs WHERE id=?', (task.current_run_id,)).fetchone()[0])
     assert meta['worker_session_id'] == sid
+
+
+@pytest.mark.parametrize('source', ['claim', 'timeout'])
+def test_exhaustion_wakes_principal_once_without_new_run(resumed, monkeypatch, source):
+    from tests.gateway.test_kanban_notifier import _make_runner, _run_one_notifier_tick
+    from tests.gateway.test_kanban_notifier_durable import RecordingAdapter
+    from hermes_cli.config import load_config
+    conn, task, _ = resumed
+    cfg = load_config(); cfg.setdefault('kanban', {})['agent_wake_on_events'] = True
+    monkeypatch.setattr('hermes_cli.config.load_config', lambda: cfg)
+    monkeypatch.setattr(kb.time, 'time', lambda: 1041)
+    kb.add_notify_sub(conn, task_id=task.id, platform='telegram', chat_id='test', thread_id='8',
+                      chat_type='group', notifier_profile='default', delivery_mode='notify+wake')
+    monkeypatch.setattr(kb, '_pid_alive', lambda pid: False)
+    if source == 'timeout':
+        kb.enforce_max_runtime(conn, signal_fn=lambda *a: None)
+    else:
+        with kb.write_txn(conn):
+            kb._end_run(conn, task.id, outcome='blocked', status='blocked')
+            conn.execute("UPDATE tasks SET status='ready',worker_pid=NULL,worker_started_at=NULL,claim_lock=NULL WHERE id=?", (task.id,))
+        assert kb.claim_task(conn, task.id) is None
+    decisions = lambda: conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND json_type(context,'$.execution_budget_identity')='object'", (task.id,)).fetchall()
+    assert len(decisions()) == 1 and decisions()[0]['status'] == 'pending'
+    count = conn.execute('SELECT count(*) FROM task_runs').fetchone()[0]
+    adapter = RecordingAdapter(); adapter.fail = False
+    for _ in range(2):
+        kb.unblock_task(conn, task.id)
+        assert kb.claim_task(conn, task.id) is None
+        runner = _make_runner(adapter)
+        asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert len(decisions()) == 1 and decisions()[0]['status'] == 'pending'
+    assert len(adapter.handled) == 1
+    assert 'grant-budget' in adapter.handled[0].text and 'repair-execution' in adapter.handled[0].text
+    assert conn.execute('SELECT count(*) FROM task_runs').fetchone()[0] == count
+    monkeypatch.delenv('HERMES_KANBAN_TASK')
+    review.grant_iteration_budget(conn, task.id, grant_id='approved-recovery', iterations=200, runtime_seconds=3600,
+                                  actor='Principal', reason='Owner authorized', expected_run_id=task.current_run_id,
+                                  expected_instruction_revision=task.instruction_revision)
+    repair.repair_execution(conn, task.id, board=None, expected_run_id=task.current_run_id,
+                            expected_instruction_revision=task.instruction_revision,
+                            expected_spec_revision=review.d.get_workflow(conn, task.id)['spec_revision'],
+                            expected_resume_session=None, actor='Principal', reason='Verified recovery', apply=True)
+    assert decisions()[0]['status'] == 'resolved'
+    assert kb.claim_task(conn, task.id) is not None
+
+
+def test_timeout_preserves_cleanup_until_native_exit_confirmation(resumed, monkeypatch):
+    from hermes_cli import nfos_runtime, nfos_tool
+    conn, task, _ = resumed
+    monkeypatch.setattr(kb.time, 'time', lambda: 1041)
+    monkeypatch.setattr(kb, '_pid_alive', lambda pid: False)
+    monkeypatch.setattr(nfos_tool, '_descendants', lambda *a, **k: [])
+    kb.enforce_max_runtime(conn, signal_fn=lambda *a: None)
+    meta = json.loads(conn.execute('SELECT metadata FROM task_runs WHERE id=?', (task.current_run_id,)).fetchone()[0])
+    assert meta['nfos_cleanup']['worker_pid'] == os.getpid()
+    assert meta['nfos_cleanup']['status'] == 'waiting'
+    monkeypatch.setattr(nfos_runtime, 'previous_runs_termination_pending', real_termination_pending)
+    monkeypatch.setattr(nfos_tool, '_matches', lambda *a: True)
+    with pytest.raises(review.d.WorkflowError, match='termination'):
+        repair._idle(conn, task.id)
+    monkeypatch.setattr(nfos_tool, '_matches', lambda *a: False)
+    monkeypatch.setattr(nfos_tool, '_stop_tree', lambda *a: [])
+    monkeypatch.setattr(nfos_tool, 'terminate_calls', lambda *a, **k: [])
+    nfos_runtime.reconcile_terminal_workers(conn)
+    meta = json.loads(conn.execute('SELECT metadata FROM task_runs WHERE id=?', (task.current_run_id,)).fetchone()[0])
+    assert meta['nfos_cleanup']['status'] == 'confirmed'
+    assert repair._idle(conn, task.id).id == task.id
