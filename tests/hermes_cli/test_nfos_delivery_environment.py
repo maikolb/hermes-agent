@@ -224,7 +224,11 @@ def test_begin_effect_ignores_nonhuman_sections_without_attachment_marker(board,
 
 
 @pytest.mark.parametrize('route', ['body', 'guidance'])
-@pytest.mark.parametrize('text', OWNER_PRODUCTION_ORDERS)
+@pytest.mark.parametrize('text', OWNER_PRODUCTION_ORDERS + [
+    'arrume isso em produção, não apague os dados',
+    'Não apague os dados, arrume isso em produção',
+    'arrume isso em produção\nnão apague os dados',
+])
 def test_begin_effect_preserves_authorized_owner_corpus(board, monkeypatch, route, text):
     monkeypatch.setattr(runtime, 'project_config', lambda board, config=None: {'delivery_environment': 'hml', 'enabled': True})
     with kb.connect_closing() as conn:

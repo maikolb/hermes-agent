@@ -4382,14 +4382,21 @@ def _production_guidance_intent(text, *, everyday=True):
         # corrective action. An approval condition above is never discharged here.
         directive = re.sub(r'\bse\b[^,;.!?]*,', ' ', clause, flags=re.I)
         directive = re.sub(r'\bn[aã]o\s+(?:[eé]\s+)?(?:s[oó]|somente|apenas)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', ' ', directive, flags=re.I)
-        if re.search(production, clause, re.I) and re.search(r'\b(n[aã]o|nunca|jamais|not|never)\b', directive, re.I):
-            intent = False
-            continue
         if clause.rstrip().endswith('?'):
             continue
-        legacy = any(not _NEGATED_BEFORE.search(clause[:m.start()]) for m in _PRODUCTION_ORDER_RX.finditer(clause))
-        if legacy or (everyday and _owner_production_phrasing(clause)):
-            intent = True
+        # An inserted adverbial phrase must not detach a long prohibition from
+        # its verb. Other comma/newline-delimited actions keep their own negation.
+        directive = re.sub(r',\s*(?:sob|sem|com|de|em|por)\b[^,.!?;\n]*,', ' ', directive, flags=re.I)
+        patterns = (_PRODUCTION_ORDER_RX,) + (_OWNER_PRODUCTION_RX if everyday else ())
+        candidates = sorted((m for rx in patterns for m in rx.finditer(directive)), key=lambda m: (m.end(), m.start()))
+        for candidate in candidates:
+            start = max(directive.rfind(c, 0, candidate.start()) for c in ',\n') + 1
+            scoped = directive[start:candidate.end()]
+            if re.search(r'\b(n[aã]o|nunca|jamais|sem|not|never)\b', scoped, re.I):
+                intent = False
+                continue
+            if _PRODUCTION_ORDER_RX.search(scoped) or (everyday and _owner_production_phrasing(scoped)):
+                intent = True
     return intent
 
 
