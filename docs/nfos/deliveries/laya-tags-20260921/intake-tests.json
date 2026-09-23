@@ -1,0 +1,29 @@
+{
+  "VisibleWindows": 0,
+  "commands": [
+    {
+      "args": [
+        "C:/Users/maiko/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe",
+        "-m",
+        "pytest",
+        "tests/hermes_cli/test_nfos_decision_engine_tags.py",
+        "tests/hermes_cli/test_nfos_deepseek_flag.py",
+        "-q",
+        "--tb=short"
+      ],
+      "exit": 0,
+      "stdout": "..................................                                       [100%]\r\n34 passed in 33.36s\r\n",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "C:/Program Files/Git/cmd/git.exe",
+        "diff",
+        "--check"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ]
+}

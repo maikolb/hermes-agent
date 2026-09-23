@@ -1,0 +1,30 @@
+{
+  "utc": "2026-09-21T11:26:49Z",
+  "weights_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
+  "matches_official_lfs": true,
+  "gateway": "MainPID=4191054\nActiveState=active\n",
+  "experiment": "RuntimeMaxUSec=2h\nMainPID=1416548\nMemoryCurrent=2355875840\nMemoryPeak=2356154368\nActiveState=active\n",
+  "health": {
+    "engine": "laya",
+    "model": "convaiinnovations/laya-multilingual",
+    "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+    "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+    "device": "cpu",
+    "threads": 2,
+    "max_len": 1024,
+    "head_max_len": 256,
+    "encoder_max_positions": 8192,
+    "load_seconds": 14.1697,
+    "cold_inference_seconds": 0.7814,
+    "ready": true,
+    "peak_rss_kib": 2356288
+  },
+  "preserved_config_hashes": {
+    "/usr/local/bin/hermes": "cf330dc0b51e8467564f842ac251b37320a7f7b19c6448f21633774c547c7df4",
+    "/srv/hermes/profiles/hermes-project-factory/config.yaml": "8368f55725df00d0c717faf47f8b6c3643773db1b6211758ba41a064c9f72214"
+  },
+  "free": "               total        used        free      shared  buff/cache   available\nMem:           32094        9431        2315         178       20981       22663\nSwap:              0           0           0\n",
+  "disk": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1       387G  312G   76G  81% /\n",
+  "load": "3.30 2.86 2.47 1/1467 1445097\n",
+  "bound_socket": "State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess\nLISTEN 0      5          127.0.0.1:18991      0.0.0.0:*    users:((\"python\",pid=1416548,fd=3))\n"
+}

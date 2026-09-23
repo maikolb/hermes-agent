@@ -2188,6 +2188,9 @@ def _cross_process_init_lock(path: Path):
             handle.close()
 
 
+_NFOS_DISPATCH_LOCK_HELD = ContextVar('nfos_dispatch_lock_held', default=False)
+
+
 @contextlib.contextmanager
 def _dispatch_tick_lock(db_path: Path):
     """Non-blocking single-writer guard around one dispatcher tick.
@@ -2250,9 +2253,11 @@ def _dispatch_tick_lock(db_path: Path):
         # Degrade to a no-op so a probe failure never blocks dispatch.
         acquired = True
         handle = None
+    token = _NFOS_DISPATCH_LOCK_HELD.set(acquired)
     try:
         yield acquired
     finally:
+        _NFOS_DISPATCH_LOCK_HELD.reset(token)
         if handle is not None:
             try:
                 if acquired:
@@ -8729,6 +8734,9 @@ def block_task(
                                        "requested_reason": str(reason or "")[:400]},
                                       run_id=current.current_run_id)
                     return True
+                from hermes_cli.nfos_jev import collect_missing_probe
+                if collect_missing_probe(conn, task_id, current.current_run_id, use='impediment', reason=reason):
+                    return True  # A real measurement was collected; the worker continues the same run.
                 ask_principal(conn,task_id,current.current_run_id,kind='impediment',
                     question=reason or 'Diagnose why this task cannot advance',context={'requested_block_kind':kind})
                 return True

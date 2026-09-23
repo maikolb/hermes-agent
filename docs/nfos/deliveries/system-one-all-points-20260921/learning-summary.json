@@ -1,0 +1,20 @@
+{
+  "source": "nfos_reviewer.collect real native trajectories, SQLite read-only",
+  "narrative_model_called": false,
+  "teacher_labels": false,
+  "training": false,
+  "cases": 28,
+  "examples": 54,
+  "outcomes": {
+    "NOT_PROVEN": 39,
+    "PASS": 12,
+    "FAIL": 3
+  },
+  "splits": {
+    "quarantine": 41,
+    "test": 13
+  },
+  "duplicate_collection_equal": true,
+  "split_limit": "Exporter implements train/test/quarantine; no separate calibration partition is implemented",
+  "evidence": "actual probe outcome is bound by run/spec/mutation/artifact revision; reviewer opinion absent"
+}

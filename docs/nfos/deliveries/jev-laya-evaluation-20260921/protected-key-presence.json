@@ -1,0 +1,10 @@
+{
+  "state": "present_exact_match",
+  "stored": true,
+  "other_values_preserved": true,
+  "path": "/srv/hermes/profiles/hermes-project-factory/.env",
+  "mode": "0o600",
+  "owner_uid": 999,
+  "config_unchanged": true,
+  "restart": false
+}

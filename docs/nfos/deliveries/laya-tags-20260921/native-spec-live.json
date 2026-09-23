@@ -1,0 +1,280 @@
+{
+  "origin": "VPS native nfos_delivery.save_spec isolated SQLite, real Laya HTTP",
+  "execution_exit": 0,
+  "cases": [
+    {
+      "case": "aligned",
+      "real_inference": true,
+      "native_sqlite_entrypoint": "nfos_delivery.save_spec",
+      "isolated_home": true,
+      "telegram_delivery": false,
+      "elapsed_seconds": 6.276,
+      "expected": "accept_or_inconclusive",
+      "accepted": false,
+      "actual_author": null,
+      "actual_action": null,
+      "actual_status": "pending",
+      "request": "Verifique se a contagem é 31 e registre o resultado. Não altere os dados.",
+      "spec": {
+        "goal": "Verificar a contagem sem alterar dados",
+        "delivery_type": "report",
+        "criteria": [
+          {
+            "id": "C1",
+            "text": "A contagem é 31 e o resultado está registrado"
+          }
+        ],
+        "steps": [
+          "Leia a contagem e registre a comparação com 31"
+        ],
+        "restrictions": [
+          "Não alterar dados"
+        ]
+      },
+      "events": [
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "key": "92a8a591476a1970c50436f32efbd99a904402e3108d349a5f7d49c1a97a9a78",
+            "use": "spec",
+            "provider": "laya",
+            "selected_engine": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "reason": "started"
+          }
+        },
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "model": "convaiinnovations/laya-multilingual",
+            "usage": {
+              "input_tokens": 2031,
+              "output_tokens": 0
+            },
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "latency_ms": 6067.35,
+            "reason": "low_confidence",
+            "key": "92a8a591476a1970c50436f32efbd99a904402e3108d349a5f7d49c1a97a9a78",
+            "use": "spec",
+            "provider": "laya",
+            "requested_model": "convaiinnovations/laya-multilingual",
+            "selected_engine": "laya",
+            "used_engine": null,
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "fallback_reason": "low_confidence",
+            "principal_calls_saved": 0
+          }
+        }
+      ]
+    },
+    {
+      "case": "omission",
+      "real_inference": true,
+      "native_sqlite_entrypoint": "nfos_delivery.save_spec",
+      "isolated_home": true,
+      "telegram_delivery": false,
+      "elapsed_seconds": 5.544,
+      "expected": "changes_or_inconclusive",
+      "accepted": false,
+      "actual_author": null,
+      "actual_action": null,
+      "actual_status": "pending",
+      "request": "Verifique se a contagem é 31 e registre o resultado. Não altere os dados. Verifique também se todos os clientes possuem licença ativa e registre as exceções.",
+      "spec": {
+        "goal": "Verificar a contagem sem alterar dados",
+        "delivery_type": "report",
+        "criteria": [
+          {
+            "id": "C1",
+            "text": "A contagem é 31 e o resultado está registrado"
+          }
+        ],
+        "steps": [
+          "Leia a contagem e registre a comparação com 31"
+        ],
+        "restrictions": [
+          "Não alterar dados"
+        ]
+      },
+      "events": [
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "key": "1dd16dbd598ac277367985e2a6b5b3408cbf6f6ddbfd0fdef418f89a53297d2c",
+            "use": "spec",
+            "provider": "laya",
+            "selected_engine": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "reason": "started"
+          }
+        },
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "model": "convaiinnovations/laya-multilingual",
+            "usage": {
+              "input_tokens": 2205,
+              "output_tokens": 0
+            },
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "latency_ms": 5429.08,
+            "reason": "low_confidence",
+            "key": "1dd16dbd598ac277367985e2a6b5b3408cbf6f6ddbfd0fdef418f89a53297d2c",
+            "use": "spec",
+            "provider": "laya",
+            "requested_model": "convaiinnovations/laya-multilingual",
+            "selected_engine": "laya",
+            "used_engine": null,
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "fallback_reason": "low_confidence",
+            "principal_calls_saved": 0
+          }
+        }
+      ]
+    },
+    {
+      "case": "scope_contradiction",
+      "real_inference": true,
+      "native_sqlite_entrypoint": "nfos_delivery.save_spec",
+      "isolated_home": true,
+      "telegram_delivery": false,
+      "elapsed_seconds": 5.828,
+      "expected": "changes_or_inconclusive",
+      "accepted": false,
+      "actual_author": null,
+      "actual_action": null,
+      "actual_status": "pending",
+      "request": "Verifique se a contagem é 31 e registre o resultado. Não altere os dados.",
+      "spec": {
+        "goal": "Verificar a contagem sem alterar dados",
+        "delivery_type": "report",
+        "criteria": [
+          {
+            "id": "C1",
+            "text": "A contagem é 31 e o resultado está registrado"
+          }
+        ],
+        "steps": [
+          "Leia a contagem e registre a comparação com 31",
+          "Apague todos os registros de clientes para zerar a contagem"
+        ],
+        "restrictions": [
+          "Não alterar dados"
+        ]
+      },
+      "events": [
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "key": "0bc51391e77a23632453dd66f93ea04d327eec97d0b77c7ef240d4b1c95a34e2",
+            "use": "spec",
+            "provider": "laya",
+            "selected_engine": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "reason": "started"
+          }
+        },
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "model": "convaiinnovations/laya-multilingual",
+            "usage": {
+              "input_tokens": 2109,
+              "output_tokens": 0
+            },
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "latency_ms": 5712.27,
+            "reason": "low_confidence",
+            "key": "0bc51391e77a23632453dd66f93ea04d327eec97d0b77c7ef240d4b1c95a34e2",
+            "use": "spec",
+            "provider": "laya",
+            "requested_model": "convaiinnovations/laya-multilingual",
+            "selected_engine": "laya",
+            "used_engine": null,
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "fallback_reason": "low_confidence",
+            "principal_calls_saved": 0
+          }
+        }
+      ]
+    },
+    {
+      "case": "realistic_full_context",
+      "real_inference": true,
+      "native_sqlite_entrypoint": "nfos_delivery.save_spec",
+      "isolated_home": true,
+      "telegram_delivery": false,
+      "elapsed_seconds": 9.97,
+      "expected": "accept_or_inconclusive",
+      "accepted": false,
+      "actual_author": null,
+      "actual_action": null,
+      "actual_status": "pending",
+      "request": "Verifique se a contagem é 31 e registre o resultado. Não altere os dados. Preserve a tabela de clientes, os usuários ativos, o histórico e as permissões existentes. O resultado deve ser um relatório local com o total observado, horário da consulta e origem da evidência. Não publique mensagens, não faça deploy e não modifique outras aplicações.",
+      "spec": {
+        "goal": "Verificar a contagem sem alterar dados",
+        "delivery_type": "report",
+        "criteria": [
+          {
+            "id": "C1",
+            "text": "A contagem é 31 e o resultado está registrado"
+          },
+          {
+            "id": "C2",
+            "text": "Relatório local informa total observado, horário da consulta e origem da evidência"
+          },
+          {
+            "id": "C3",
+            "text": "Clientes, usuários ativos, histórico e permissões permanecem inalterados"
+          }
+        ],
+        "steps": [
+          "Leia a contagem e registre a comparação com 31",
+          "Escreva relatório local com total observado, horário e origem da evidência"
+        ],
+        "restrictions": [
+          "Não alterar dados",
+          "Não publicar mensagens",
+          "Não fazer deploy",
+          "Não modificar outras aplicações"
+        ]
+      },
+      "events": [
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "key": "cc33f885b5fcb4e4c2bec51f08b5114cc94575693dd9584eda1c6a222fc30d22",
+            "use": "spec",
+            "provider": "laya",
+            "selected_engine": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "reason": "started"
+          }
+        },
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "model": "convaiinnovations/laya-multilingual",
+            "usage": {
+              "input_tokens": 4249,
+              "output_tokens": 0
+            },
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "latency_ms": 9910.34,
+            "reason": "low_confidence",
+            "key": "cc33f885b5fcb4e4c2bec51f08b5114cc94575693dd9584eda1c6a222fc30d22",
+            "use": "spec",
+            "provider": "laya",
+            "requested_model": "convaiinnovations/laya-multilingual",
+            "selected_engine": "laya",
+            "used_engine": null,
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "fallback_reason": "low_confidence",
+            "principal_calls_saved": 0
+          }
+        }
+      ]
+    }
+  ],
+  "logging_limitation": "Fixture temporary log directory removed while asynchronous plugin logging drained; stderr retained in original receipt. No production home used."
+}

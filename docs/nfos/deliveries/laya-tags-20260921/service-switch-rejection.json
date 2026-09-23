@@ -1,0 +1,13 @@
+{
+  "service_switch": "not performed",
+  "specific_reason": "No more specific reason was returned",
+  "action": "stop and recreate only nfos-laya-experiment.service using the existing immutable script and PYTHONPATH=/opt/nfos-laya/compat5",
+  "execution_started": false,
+  "record_type": "agent transcription of actual tool rejection, not a service execution receipt",
+  "stated_reason": "blocked by policy",
+  "retry_mutation": false,
+  "exact_stop": "systemctl stop nfos-laya-experiment.service",
+  "exact_start": "systemd-run --unit=nfos-laya-experiment --collect -p CPUQuota=200% -p AllowedCPUs=6-7 -p MemoryMax=6G -p TasksMax=64 -p Nice=10 -p RuntimeMaxSec=7200 --setenv=HF_HUB_OFFLINE=1 --setenv=TRANSFORMERS_OFFLINE=1 --setenv=TOKENIZERS_PARALLELISM=false --setenv=PYTHONPATH=/opt/nfos-laya/compat5 /opt/nfos-laya/venv/bin/python /opt/nfos-laya/releases/46be2c76a72271a8f8cff3bea2d471a2110ed075/scripts/nfos_laya_server.py --model-dir /opt/nfos-laya/model --threads 2",
+  "tool": "functions.exec -> tools.exec_command",
+  "raw_error_summary": "exec_command failed: CreateProcess { message: Rejected(... rejected: blocked by policy) }"
+}

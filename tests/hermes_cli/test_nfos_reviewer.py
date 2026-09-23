@@ -101,3 +101,44 @@ def test_initial_weekly_review_covers_seven_days(home,monkeypatch):
     monkeypatch.setattr(reviewer,'settings',lambda:{**reviewer.DEFAULTS,'frequency':'weekly'})
     result=reviewer.run(boards=[],analyzer=judgment)
     assert result['until']-result['since']==7*86400
+
+
+def test_system_one_config_does_not_touch_retrospective_schedule(home, monkeypatch):
+    from cron import jobs
+    from hermes_cli import nfos_jev
+    calls = []
+    monkeypatch.setattr(nfos_jev, 'configure_system_one', lambda policy: calls.append(policy))
+    monkeypatch.setattr(nfos_jev, 'system_one_status', lambda: {'policy': {'mode': 'shadow'}})
+    monkeypatch.setattr(jobs, 'create_job', lambda **kw: pytest.fail('System One policy must not create cron'))
+    monkeypatch.setattr(jobs, 'update_job', lambda *a, **kw: pytest.fail('System One policy must not rewrite cron'))
+    result = reviewer.configure({'system_one': {'mode': 'shadow', 'engine': 'laya'}})
+    assert calls == [{'mode': 'shadow', 'engine': 'laya'}]
+    assert result['system_one']['policy']['mode'] == 'shadow'
+    assert not (reviewer.root()/'config.json').exists()
+
+
+def test_retrospective_consumes_system_one_records_without_re_review(home):
+    path = board(home, 'one')
+    opportunity = {'opportunity_id': 'o1', 'project_id': 'one', 'task_id': 't1', 'run_id': 1,
+                   'lineage_id': 'r1', 'input': {'objective': 'Verify checkout',
+                    'options': ['read', 'fallback'], 'constraints': {'target': 'checkout'}},
+                   'versions': {'policy': '1'}}
+    timestamp = int(datetime(2026,9,15,12,tzinfo=ZoneInfo('America/Sao_Paulo')).timestamp())
+    with sqlite3.connect(path) as conn:
+        conn.execute('INSERT INTO task_events VALUES(?,?,?,?,?)',
+                     (2, 't1', 'nfos_system_one_opportunity', json.dumps(opportunity), timestamp))
+    def analysis(case, memory, emit):
+        result = judgment(case, memory, emit)
+        ref = 'one/t1/task_events/2'
+        assert ref in {r['ref'] for r in case['records']}
+        result['inspected_sources'].append(ref)
+        result['system_one_labels'] = [{'source': ref, 'preferred_option': 'read', 'reason': 'Read actual checkout'}]
+        return result
+    first = reviewer.run('2026-09-15', [('one',path)], analysis)
+    exports = list((reviewer.root()/'runs'/first['id']/'system-one').glob('*.json'))
+    assert len(exports) == 1
+    row = json.loads(exports[0].read_text())['examples'][0]
+    assert row['labels']['reviewer_preference']['option'] == 'read'
+    assert row['labels']['verified_outcome'] == 'NOT_PROVEN'
+    second = reviewer.run('2026-09-15', [('one',path)], lambda *a: pytest.fail('Unchanged card must not be re-reviewed'))
+    assert second['reviewed'] == 0

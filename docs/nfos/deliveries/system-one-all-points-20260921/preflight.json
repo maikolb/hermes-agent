@@ -1,0 +1,85 @@
+{
+  "refs": {
+    "hermes-agent": "c6fc293b7606298be4df82f8381eb71d2521a50d\trefs/heads/codex/nfos-jev-integration\n7709634542763453522a605c5c9cba778496eef8\trefs/heads/main\n",
+    "nexa-factory-os": "0914460c2ad0f68df02418d29914b540accbcfec\trefs/heads/codex/nfos-jev-integration\nff090b8b705749058b6b46e3d1bb426ccfe2a7db\trefs/heads/main\n"
+  },
+  "files": {
+    "entrypoint": "cf330dc0b51e8467564f842ac251b37320a7f7b19c6448f21633774c547c7df4",
+    "config": "25377ffbf979971aac339d1f85c3ac9361cc8e218e09bec05b06aac7d5984cde",
+    "laya_unit": "1f927c481eecd2295c12e6c6d58054a1833e72e9f1ebb74fe23cdf2cc02768f2"
+  },
+  "units": {
+    "nfos-laya.service": "MainPID=1508465\nMemoryCurrent=1752539136\nActiveState=active\n",
+    "hermes-gateway@hermes-project-factory.service": "MainPID=4191054\nMemoryCurrent=11368751104\nActiveState=active\n",
+    "suporte.service": "MainPID=4189823\nMemoryCurrent=71806976\nActiveState=active\n"
+  },
+  "health": {
+    "engine": "laya",
+    "model": "convaiinnovations/laya-multilingual",
+    "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+    "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+    "device": "cpu",
+    "threads": 2,
+    "transformers_version": "5.0.0",
+    "max_len": 1024,
+    "head_max_len": 256,
+    "encoder_max_positions": 8192,
+    "load_seconds": 34.767,
+    "cold_inference_seconds": 0.1706,
+    "ready": true,
+    "peak_rss_kib": 2389268
+  },
+  "tariff": {
+    "data": {
+      "id": "typesafe/jev-1.13",
+      "name": "TypeSafe: Jev 1.13",
+      "created": 1789689684,
+      "description": "Jev is a structured decision model from TypeSafe, and the first of its System One models. System One models make fast, structured decisions for software, returning a typed choice rather...",
+      "architecture": {
+        "tokenizer": "Other",
+        "instruct_type": null,
+        "modality": "text->decisions",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "decisions"
+        ]
+      },
+      "endpoints": [
+        {
+          "name": "TypeSafe | typesafe/jev-1.13-20260917",
+          "model_id": "typesafe/jev-1.13",
+          "model_name": "TypeSafe: Jev 1.13",
+          "context_length": 32000,
+          "pricing": {
+            "prompt": "0.000000042",
+            "completion": "0",
+            "discount": 0
+          },
+          "provider_name": "TypeSafe",
+          "tag": "typesafe",
+          "quantization": "unknown",
+          "max_completion_tokens": 28800,
+          "max_prompt_tokens": null,
+          "supported_parameters": [],
+          "supports_tool_choice": {
+            "none": true,
+            "auto": true,
+            "required": true,
+            "function": true
+          },
+          "status": 0,
+          "uptime_last_30m": 100,
+          "uptime_last_5m": 100,
+          "uptime_last_1d": 100,
+          "supports_implicit_caching": false,
+          "supports_voice_cloning": false,
+          "latency_last_30m": null,
+          "throughput_last_30m": null
+        }
+      ]
+    }
+  },
+  "load": "4.11 5.33 5.08 1/1823 1964677\n"
+}

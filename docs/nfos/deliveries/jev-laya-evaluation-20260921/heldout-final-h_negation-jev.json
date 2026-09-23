@@ -1,0 +1,78 @@
+{
+  "http_status": 200,
+  "data": {
+    "model": "typesafe/jev-1.13-20260917",
+    "answers": {
+      "coverage": {
+        "type": "choice",
+        "choice": "missing",
+        "probabilities": {
+          "uncertain": 0.01,
+          "missing": 0.54,
+          "complete": 0.41,
+          "partial": 0.04
+        },
+        "confidence": 0.39
+      },
+      "scope": {
+        "type": "choice",
+        "choice": "expansion",
+        "probabilities": {
+          "uncertain": 0,
+          "expansion": 0.98,
+          "aligned": 0.02
+        },
+        "confidence": 0.97
+      },
+      "destination": {
+        "type": "choice",
+        "choice": "aligned",
+        "probabilities": {
+          "uncertain": 0.01,
+          "conflict": 0.03,
+          "aligned": 0.96
+        },
+        "confidence": 0.95
+      },
+      "constraints": {
+        "type": "choice",
+        "choice": "conflict",
+        "probabilities": {
+          "uncertain": 0,
+          "preserved": 0,
+          "conflict": 1
+        },
+        "confidence": 0.99
+      },
+      "verdict": {
+        "type": "choice",
+        "choice": "changes",
+        "probabilities": {
+          "accept": 0.03,
+          "uncertain": 0.03,
+          "changes": 0.94
+        },
+        "confidence": 0.92
+      },
+      "criterion_0": {
+        "type": "choice",
+        "choice": "conflict",
+        "probabilities": {
+          "unverifiable": 0.01,
+          "uncertain": 0,
+          "conflict": 0.91,
+          "aligned": 0.08
+        },
+        "confidence": 0.88
+      }
+    },
+    "usage": {
+      "input_tokens": 1275,
+      "output_tokens": 258,
+      "cost": 5.355e-05
+    },
+    "id": "gen-dec-1790001142-Q8bGLtx2WStewzPeVOjY",
+    "provider": "TypeSafe"
+  },
+  "seconds": 0.36
+}

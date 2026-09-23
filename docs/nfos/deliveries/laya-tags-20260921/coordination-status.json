@@ -1,0 +1,47 @@
+{
+  "timestamp_utc": "2026-09-21T11:11:11.830186+00:00",
+  "master_thread": "01a0a8ad-dd7b-7000-9528-77e45c50e8c3",
+  "master_pid": 24248,
+  "delivery_status": "not_delivered",
+  "master_confirmation": "absent",
+  "safe_contact_result": "blocked",
+  "master_process_transport": "stdio",
+  "master_tcp_listeners": [],
+  "official_proxy": {
+    "command": "codex app-server proxy",
+    "exit_code": 1,
+    "socket": "C:/Users/maiko/.codex/app-server-control/app-server-control.sock",
+    "error_code": 10050,
+    "error": "failed to connect to socket; network down"
+  },
+  "memory_query": {
+    "preflight": "GLOBAL_PREFLIGHT_V1 no hits",
+    "master_query": "No project hits or messaging channel; only unrelated global preference references"
+  },
+  "candidate_sha": "044fcfc685089d46e2ad6e7ad53e49aac96a07d9",
+  "reported_main_sha": "6381c19b79d69bcee07d41442c2466d70a1a2471",
+  "scope": "Prepare isolated VPS multilingual Laya inference and independent NFOS #jev/#laya selection for four typed decision uses; worker #deepseek axis preserved",
+  "activation_condition": "Exact integrated candidate, evidence, configuration diff, rollout order and preservation plan must be reviewed and explicitly confirmed by owner-designated master before production activation",
+  "parallel_work": "Independent installation, inference, code and tests remain authorized",
+  "prohibited_actions_not_performed": [
+    "CLI resume retry",
+    "master process stop or restart",
+    "session DB edits",
+    "lock access or takeover",
+    "GUI contact",
+    "AOF/AIRC"
+  ],
+  "evidence_files": [
+    "coordination-runtime-result.json",
+    "coordination-transport-result.json",
+    "coordination-proxy-help-result.json",
+    "coordination-proxy-probe-result.json"
+  ],
+  "visible_windows_receipts": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "unresolved": "No supported live contact route to the existing master process was available in this session. A drafted file is not delivered communication and does not authorize activation."
+}

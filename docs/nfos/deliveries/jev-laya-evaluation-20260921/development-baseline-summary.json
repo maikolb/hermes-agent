@@ -1,0 +1,772 @@
+{
+  "split": "development",
+  "rows": [
+    {
+      "id": "d_valid",
+      "expected": "accept",
+      "http_status": 200,
+      "seconds": 0.375,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1145,
+        "output_tokens": 256,
+        "cost": 4.809e-05
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "changes",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.83,
+        "scope": 0.98,
+        "destination": 0.38,
+        "constraints": 0.93,
+        "verdict": 0.07,
+        "criterion_0": 0.8
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": null,
+      "engine": "jev",
+      "input_sha256": "7b5f8f5f113cf5be34eb7036e621aea996b7c939158e4ad1d24189877e69b668",
+      "receipt": "development-baseline-d_valid-jev.json"
+    },
+    {
+      "id": "d_valid",
+      "expected": "accept",
+      "http_status": 200,
+      "seconds": 22.8448,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1623,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.1856,
+        "scope": 0.2136,
+        "destination": 0.4509,
+        "constraints": 0.7252,
+        "verdict": 0.7638,
+        "criterion_0": 0.2204
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "continue",
+        []
+      ],
+      "engine": "laya",
+      "input_sha256": "7b5f8f5f113cf5be34eb7036e621aea996b7c939158e4ad1d24189877e69b668",
+      "receipt": "development-baseline-d_valid-laya.json"
+    },
+    {
+      "id": "d_missing",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 0.391,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1113,
+        "output_tokens": 256,
+        "cost": 4.6746e-05
+      },
+      "choices": {
+        "coverage": "missing",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "changes",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.99,
+        "scope": 0.62,
+        "destination": 0.42,
+        "constraints": 0.49,
+        "verdict": 0.82,
+        "criterion_0": 0.42
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "changes",
+        [
+          {
+            "code": "coverage",
+            "text": "Inclua os requisitos omitidos do pedido original e da instrução atual na spec e em seus critérios."
+          }
+        ]
+      ],
+      "engine": "jev",
+      "input_sha256": "fbe9262af64ecc332a546feafbcb73417634c7e3287f23defd5ca0c809280b74",
+      "receipt": "development-baseline-d_missing-jev.json"
+    },
+    {
+      "id": "d_missing",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 3.812,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1455,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.2303,
+        "scope": 0.0734,
+        "destination": 0.4382,
+        "constraints": 0.2663,
+        "verdict": 0.7379,
+        "criterion_0": 0.1282
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "continue",
+        []
+      ],
+      "engine": "laya",
+      "input_sha256": "fbe9262af64ecc332a546feafbcb73417634c7e3287f23defd5ca0c809280b74",
+      "receipt": "development-baseline-d_missing-laya.json"
+    },
+    {
+      "id": "d_prohibition",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 0.39,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1128,
+        "output_tokens": 259,
+        "cost": 4.7376e-05
+      },
+      "choices": {
+        "coverage": "missing",
+        "scope": "expansion",
+        "destination": "conflict",
+        "constraints": "conflict",
+        "verdict": "changes",
+        "criterion_0": "conflict"
+      },
+      "confidence": {
+        "coverage": 0.97,
+        "scope": 0.96,
+        "destination": 0.7,
+        "constraints": 1,
+        "verdict": 1,
+        "criterion_0": 0.99
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "changes",
+        [
+          {
+            "code": "coverage",
+            "text": "Inclua os requisitos omitidos do pedido original e da instrução atual na spec e em seus critérios."
+          },
+          {
+            "code": "scope",
+            "text": "Remova o trabalho que amplia o escopo solicitado."
+          },
+          {
+            "code": "destination",
+            "text": "Corrija o destino da spec para corresponder ao pedido original."
+          },
+          {
+            "code": "constraints",
+            "text": "Corrija a spec para preservar as restrições e os limites do pedido."
+          },
+          {
+            "code": "conflict",
+            "criterion": "C1",
+            "text": "Corrija o conflito com o pedido em C1."
+          }
+        ]
+      ],
+      "engine": "jev",
+      "input_sha256": "d5ae224181787697a45acc892c9e5f42b92a2f33a5a9550546477679cbfc4218",
+      "receipt": "development-baseline-d_prohibition-jev.json"
+    },
+    {
+      "id": "d_prohibition",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 3.7957,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1509,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.1796,
+        "scope": 0.0694,
+        "destination": 0.1724,
+        "constraints": 0.39,
+        "verdict": 0.6282,
+        "criterion_0": 0.0617
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "continue",
+        []
+      ],
+      "engine": "laya",
+      "input_sha256": "d5ae224181787697a45acc892c9e5f42b92a2f33a5a9550546477679cbfc4218",
+      "receipt": "development-baseline-d_prohibition-laya.json"
+    },
+    {
+      "id": "d_destination",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 0.485,
+      "outcome": "changes",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1179,
+        "output_tokens": 259,
+        "cost": 4.9518e-05
+      },
+      "choices": {
+        "coverage": "missing",
+        "scope": "expansion",
+        "destination": "conflict",
+        "constraints": "conflict",
+        "verdict": "changes",
+        "criterion_0": "conflict"
+      },
+      "confidence": {
+        "coverage": 0.99,
+        "scope": 0.91,
+        "destination": 0.99,
+        "constraints": 0.89,
+        "verdict": 0.99,
+        "criterion_0": 0.99
+      },
+      "engine": "jev",
+      "input_sha256": "bb0a85f1f2424bbe9ed832f28be839e403bcbcdd9f160b33964bddac3494e9f5",
+      "receipt": "development-baseline-d_destination-jev.json"
+    },
+    {
+      "id": "d_destination",
+      "expected": "changes",
+      "http_status": 200,
+      "seconds": 7.8174,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1887,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "partial",
+        "scope": "expansion",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "unverifiable"
+      },
+      "confidence": {
+        "coverage": 0.0378,
+        "scope": 0.0475,
+        "destination": 0.0579,
+        "constraints": 0.1054,
+        "verdict": 0.1455,
+        "criterion_0": 0.0885
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": null,
+      "engine": "laya",
+      "input_sha256": "bb0a85f1f2424bbe9ed832f28be839e403bcbcdd9f160b33964bddac3494e9f5",
+      "receipt": "development-baseline-d_destination-laya.json"
+    },
+    {
+      "id": "d_negation",
+      "expected": "accept",
+      "http_status": 200,
+      "seconds": 0.359,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1136,
+        "output_tokens": 256,
+        "cost": 4.7712e-05
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.98,
+        "scope": 0.97,
+        "destination": 0.83,
+        "constraints": 0.96,
+        "verdict": 0.2,
+        "criterion_0": 0.92
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "continue",
+        []
+      ],
+      "engine": "jev",
+      "input_sha256": "4c06f1a970555783c08d11ce13d0401c44b389fc0830879cb763a53b66fdc56d",
+      "receipt": "development-baseline-d_negation-jev.json"
+    },
+    {
+      "id": "d_negation",
+      "expected": "accept",
+      "http_status": 200,
+      "seconds": 5.9405,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1587,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.0877,
+        "scope": 0.032,
+        "destination": 0.2261,
+        "constraints": 0.6308,
+        "verdict": 0.6275,
+        "criterion_0": 0.1383
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": [
+        "continue",
+        []
+      ],
+      "engine": "laya",
+      "input_sha256": "4c06f1a970555783c08d11ce13d0401c44b389fc0830879cb763a53b66fdc56d",
+      "receipt": "development-baseline-d_negation-laya.json"
+    },
+    {
+      "id": "d_incomplete",
+      "expected": "inconclusive",
+      "http_status": 200,
+      "seconds": 0.375,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 1080,
+        "output_tokens": 264,
+        "cost": 4.536e-05
+      },
+      "choices": {
+        "coverage": "uncertain",
+        "scope": "uncertain",
+        "destination": "conflict",
+        "constraints": "preserved",
+        "verdict": "changes",
+        "criterion_0": "unverifiable"
+      },
+      "confidence": {
+        "coverage": 0.81,
+        "scope": 0.35,
+        "destination": 0.36,
+        "constraints": 0.37,
+        "verdict": 0.82,
+        "criterion_0": 0.92
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": null,
+      "engine": "jev",
+      "input_sha256": "1da6df1fea18280349c188dbb6214b46fe17d5de739f7cd1abef8ad61bbce518",
+      "receipt": "development-baseline-d_incomplete-jev.json"
+    },
+    {
+      "id": "d_incomplete",
+      "expected": "inconclusive",
+      "http_status": 200,
+      "seconds": 3.2862,
+      "outcome": "inconclusive",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 1269,
+        "output_tokens": 0
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "uncertain",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "accept",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.1045,
+        "scope": 0.0136,
+        "destination": 0.0274,
+        "constraints": 0.3631,
+        "verdict": 0.6835,
+        "criterion_0": 0.008
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": null,
+      "engine": "laya",
+      "input_sha256": "1da6df1fea18280349c188dbb6214b46fe17d5de739f7cd1abef8ad61bbce518",
+      "receipt": "development-baseline-d_incomplete-laya.json"
+    },
+    {
+      "id": "d_long",
+      "expected": "accept",
+      "http_status": 200,
+      "seconds": 0.438,
+      "outcome": "inconclusive",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 3721,
+        "output_tokens": 256,
+        "cost": 0.000156282
+      },
+      "choices": {
+        "coverage": "complete",
+        "scope": "aligned",
+        "destination": "aligned",
+        "constraints": "preserved",
+        "verdict": "changes",
+        "criterion_0": "aligned"
+      },
+      "confidence": {
+        "coverage": 0.72,
+        "scope": 0.91,
+        "destination": 0.43,
+        "constraints": 0.88,
+        "verdict": 0.25,
+        "criterion_0": 0.58
+      },
+      "reason": "low_confidence",
+      "semantic_feedback": null,
+      "engine": "jev",
+      "input_sha256": "d4cb63262d6097f444f33d82d38df98b843d84f385e64435b5783c8b0ece5b62",
+      "receipt": "development-baseline-d_long-jev.json"
+    },
+    {
+      "id": "d_long",
+      "expected": "accept",
+      "http_status": 422,
+      "seconds": 0.1731,
+      "outcome": "inconclusive",
+      "reason": "context_too_large",
+      "engine": "laya",
+      "input_sha256": "d4cb63262d6097f444f33d82d38df98b843d84f385e64435b5783c8b0ece5b62",
+      "receipt": "development-baseline-d_long-laya.json"
+    },
+    {
+      "id": "d_original_counterexample",
+      "expected": "ler",
+      "http_status": 200,
+      "seconds": 0.469,
+      "outcome": "ler",
+      "model": "typesafe/jev-1.13-20260917",
+      "usage": {
+        "input_tokens": 342,
+        "output_tokens": 32,
+        "cost": 1.4364e-05
+      },
+      "choices": {
+        "acao": "ler"
+      },
+      "confidence": {
+        "acao": 1
+      },
+      "engine": "jev",
+      "input_sha256": "60e86fb5af5a22c9c9ec22f2b77ba121d58c26d52b29adf7588f75ff4bc9f5c1",
+      "receipt": "development-baseline-d_original_counterexample-jev.json"
+    },
+    {
+      "id": "d_original_counterexample",
+      "expected": "ler",
+      "http_status": 200,
+      "seconds": 0.7638,
+      "outcome": "apagar",
+      "model": "convaiinnovations/laya-multilingual",
+      "usage": {
+        "input_tokens": 51,
+        "output_tokens": 0
+      },
+      "choices": {
+        "acao": "apagar"
+      },
+      "confidence": {
+        "acao": 0.9227
+      },
+      "engine": "laya",
+      "input_sha256": "60e86fb5af5a22c9c9ec22f2b77ba121d58c26d52b29adf7588f75ff4bc9f5c1",
+      "receipt": "development-baseline-d_original_counterexample-laya.json"
+    }
+  ],
+  "cost": {
+    "budget": "2.88",
+    "initial": {
+      "key_usage": "0",
+      "key_limit": null,
+      "total_credits": "14",
+      "total_usage": "11.119566295"
+    },
+    "requests": [
+      {
+        "label": "first-systemone-smoke",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.003688000",
+        "before": {
+          "key_usage": "0",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119566295"
+        },
+        "pending": false,
+        "payload_sha256": "ff1fdc2b82b6f5f83a878ae4d7b895e5f6e6fc641700c5af20c7e755cea0daf7",
+        "after": {
+          "key_usage": "0",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119566295"
+        },
+        "billed": "1.4364e-05",
+        "http_status": 200
+      },
+      {
+        "label": "legacy-model-id-probe",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.003688000",
+        "before": {
+          "key_usage": "1.4364e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119580659"
+        },
+        "pending": false,
+        "payload_sha256": "5ada9251db64c11ea5acf8f405a94148f4db8d7e306453872c7495334743242b",
+        "after": {
+          "key_usage": "1.4364e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119580659"
+        },
+        "billed": "1.4364e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_valid-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "1.4364e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119580659"
+        },
+        "pending": false,
+        "payload_sha256": "2e6648b8ad62333881e03d9c40c37e22642b3248d1abdda22e878247b610fb59",
+        "after": {
+          "key_usage": "2.8728e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119595023"
+        },
+        "billed": "4.809e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_missing-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "2.8728e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119595023"
+        },
+        "pending": false,
+        "payload_sha256": "2d789968bcb2a092bb156c9549f0b62204e6fbb83cc24b2b8895fc9f1e77284b",
+        "after": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "billed": "4.6746e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_prohibition-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "pending": false,
+        "payload_sha256": "42ba3ef7f70585f3b7371cae9ab1d6aa9f3a28eb0a2d8bddc82e03c81c14e859",
+        "after": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "billed": "4.7376e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_destination-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "pending": false,
+        "payload_sha256": "686d8d2854f23a1b86cd9f9e075bfb009766ed37c2944d15c0e8c28a7e501e7a",
+        "after": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "billed": "4.9518e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_negation-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "7.6818e-05",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119643113"
+        },
+        "pending": false,
+        "payload_sha256": "2f86ca23c16bba06c305407519fb7c1ce7e634ad618923813cf79fb0cb84e612",
+        "after": {
+          "key_usage": "0.000220458",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119786753"
+        },
+        "billed": "4.7712e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_incomplete-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.000220458",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119786753"
+        },
+        "pending": false,
+        "payload_sha256": "c082f59bdfc74704ebc19c58679f17604e6ce9179f7c1ee4f865a2353df65a58",
+        "after": {
+          "key_usage": "0.000220458",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119786753"
+        },
+        "billed": "4.536e-05",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_long-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.017128000",
+        "before": {
+          "key_usage": "0.000220458",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119786753"
+        },
+        "pending": false,
+        "payload_sha256": "900af19c449e259f8bf2e1f608efd32e8e47be643e79943e6ca905f2b8b97aea",
+        "after": {
+          "key_usage": "0.000220458",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119786753"
+        },
+        "billed": "0.000156282",
+        "http_status": 200
+      },
+      {
+        "label": "development-baseline-d_original_counterexample-jev",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "reserved": "0.003688000",
+        "before": {
+          "key_usage": "0.00026817",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119834465"
+        },
+        "pending": false,
+        "payload_sha256": "ff1fdc2b82b6f5f83a878ae4d7b895e5f6e6fc641700c5af20c7e755cea0daf7",
+        "after": {
+          "key_usage": "0.00026817",
+          "key_limit": null,
+          "total_credits": "14",
+          "total_usage": "11.119834465"
+        },
+        "billed": "1.4364e-05",
+        "http_status": 200
+      }
+    ],
+    "latest": {
+      "key_usage": "0.00026817",
+      "key_limit": null,
+      "total_credits": "14",
+      "total_usage": "11.119834465"
+    },
+    "response_billed_total": "0.000484176",
+    "key_usage_delta": "0.00026817",
+    "account_usage_delta": "0.000268170",
+    "remaining_authorized": "2.879515824"
+  }
+}

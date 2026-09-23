@@ -1,0 +1,21 @@
+{
+  "frozen_before_calls": true,
+  "cases": [
+    {
+      "id": "budget_keep_proposed_g",
+      "expected": "incomplete context must keep existing1200s limit even when proposed SPEC size is G",
+      "setup": "isolated native save_spec, Jev/Laya; no actual worker spending"
+    },
+    {
+      "id": "native_spec_math",
+      "expected": "accept",
+      "request": "Calcule 2+3 e informe o resultado nesta conversa. Não leia arquivos, não execute comandos e não acesse rede."
+    },
+    {
+      "id": "native_spec_literal",
+      "expected": "accept",
+      "request": "Prepare um texto exatamente OK nesta conversa, sem arquivos, comandos ou publicação."
+    }
+  ],
+  "scope": "untouched exploratory native cases, not new heldout claims; thresholds and questions unchanged"
+}

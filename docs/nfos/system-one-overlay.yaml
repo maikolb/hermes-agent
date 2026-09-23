@@ -1,0 +1,31 @@
+# PREPARED ONLY. Merge these scoped keys after future explicit activation.
+# Preserve projects, worker pins, Principal defaults, credentials and cron.
+kanban:
+  delivery:
+    decision_engines:
+      allowed: [laya, jev]
+    system_one:
+      mode: active
+      engine: laya
+      classes: [budget, impediment, evidence]
+      timeout_seconds: 90
+      max_decisions_per_run: 4
+    laya:
+      enabled: false
+      endpoint: http://127.0.0.1:18991/systemone
+      model: convaiinnovations/laya-multilingual
+      model_revision: 052592a15d198d9ad47da779604259b10b47b7aa
+      source_revision: 42626c348753fbb17572a813127df2278a1ec527
+      uses: [budget, impediment, evidence]
+      timeout_seconds: 90
+      min_confidence: 0.8
+      spec_review_mode: auxiliary
+    jev:
+      enabled: false
+      provider: openrouter
+      model: jev-1.13
+      api_key_env: OPENROUTER_API_KEY
+      uses: [budget, impediment, spec, evidence]
+      timeout_seconds: 2
+      min_confidence: 0.8
+      spec_review_mode: auxiliary

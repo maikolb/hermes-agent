@@ -1,0 +1,13 @@
+{
+  "source_sha": "0914460c2ad0f68df02418d29914b540accbcfec",
+  "image_id": "sha256:5d387a922c9ed1707ffb09d5018c978e7dbdc9f62bff4db73a314c66c85afae3",
+  "tag": "vigilia-system-one:0914460c2ad0",
+  "retained_base": "ghcr.io/maikolb/vigilia-live-view@sha256:f7aca6725df3d3aa41d14f4bf00825b62d346fc72ecea0f906c7d4468776220b",
+  "assets": {
+    "index.html": "8a01335e569d3af1e15243b6ffe6828fdec88ce414ea0bc377e6c847723997d7",
+    "lux.css": "e3581bc67d9f81a46ab822a9514537fd045be50ab27f11d2a3f40db0cadcebe0",
+    "reviewer.js": "42eb45b1256db3ff5d979fa38464dce2da981753546825536acf94ac80782fe0"
+  },
+  "isolated_image_test": true,
+  "productive_mutations": false
+}

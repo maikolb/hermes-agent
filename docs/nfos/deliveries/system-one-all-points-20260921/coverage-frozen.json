@@ -1,0 +1,106 @@
+{
+  "frozen_at": "before all-points live requests",
+  "baseline": "c6fc293b7606298be4df82f8381eb71d2521a50d",
+  "cumulative_budget": "2.88",
+  "previous_billed": "0.001944012",
+  "remaining_authorized": "2.878055988",
+  "production": "HOLD",
+  "rows": [
+    {
+      "id": "budget",
+      "entrypoint": "nfos_delivery.save_spec -> nfos_jev.spec_decisions",
+      "authority": "Jev/Laya permitted P/M/G/keep only",
+      "cases": "small request with1200s cap; incomplete context; pins/run count unchanged",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "online_stage_start",
+      "entrypoint": "tool_executor batch -> worker_material_opportunity(stage_start)",
+      "authority": "Jev/Laya registered before-phase probe",
+      "cases": "new stage versus repeated cheap read; real result appended only when PASS",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "online_recoverable",
+      "entrypoint": "worker_material_opportunity(recoverable_failure)",
+      "authority": "Jev/Laya registered probe",
+      "cases": "typed timeout/reset first failure; no free command",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "online_stagnant",
+      "entrypoint": "worker_material_opportunity(stagnant_retry)",
+      "authority": "Jev/Laya registered probe",
+      "cases": "second identical typed failure only; third repeated failure no new opportunity",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "online_next_evidence",
+      "entrypoint": "worker_material_opportunity(next_evidence)",
+      "authority": "Jev/Laya registered after-phase probe",
+      "cases": "verify/report entry versus same-stage repeats",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "impediment",
+      "entrypoint": "kanban_db.block_task -> collect_missing_probe -> run_probes",
+      "authority": "Jev/Laya selects registered measurement; worker same run",
+      "cases": "PASS count; FAIL count; prohibited SQL; no route fallback",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "evidence",
+      "entrypoint": "nfos_delivery.save_report -> collect_missing_probe -> run_probes",
+      "authority": "Jev/Laya collection only; Principal final authority",
+      "cases": "real artifact; repeat no duplicate; stale spec invalidates evidence; no resolved final review",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "spec",
+      "entrypoint": "nfos_delivery.save_spec -> primary_spec_review",
+      "authority": "prior real Jev changes/fallback; Laya active excluded",
+      "cases": "reuse c6fc package; add at most untouched explicit low-risk cases if justified; no forced accept",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "learning",
+      "entrypoint": "nfos_reviewer.collect -> dataset export/replay",
+      "authority": "existing retrospective collector; no paid narrative model",
+      "cases": "real test trajectories; provenance/NOT_PROVEN/dedupe; fixture corruption/quarantine",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "routing",
+      "entrypoint": "receive_request/bootstrap/reopen/retry",
+      "authority": "native deterministic persisted worker+engine axes",
+      "cases": "reuse unchanged tests plus regression; no tag, conflicts, cross-card; no Telegram transport",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "ui",
+      "entrypoint": "Vigilia -> Suporte -> native reviewer CLI",
+      "authority": "existing candidate API; no new UI",
+      "cases": "reuse c6fc/091446 screenshots and exact-source tests; rotation/schedule independently tested",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    },
+    {
+      "id": "limits",
+      "entrypoint": "nfos_jev.evaluate/_request",
+      "authority": "bounded one request, no DB/dispatch lock; real latency",
+      "cases": "reuse CPU capacity; record serial per-call latency; fixture timeout/429/errors distinct from real inference",
+      "status": "PLANNED",
+      "expected": "only registered non-destructive action; explicit fallback permitted; never final acceptance"
+    }
+  ]
+}

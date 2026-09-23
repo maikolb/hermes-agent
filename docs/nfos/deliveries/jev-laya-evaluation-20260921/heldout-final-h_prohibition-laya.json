@@ -1,0 +1,114 @@
+{
+  "http_status": 200,
+  "data": {
+    "engine": "laya",
+    "model": "convaiinnovations/laya-multilingual",
+    "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+    "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+    "device": "cpu",
+    "threads": 2,
+    "transformers_version": "5.0.0",
+    "max_len": 1024,
+    "head_max_len": 256,
+    "encoder_max_positions": 8192,
+    "load_seconds": 34.767,
+    "cold_inference_seconds": 0.1706,
+    "answers": {
+      "coverage": {
+        "type": "choice",
+        "choice": "complete",
+        "probabilities": {
+          "complete": 0.6036,
+          "missing": 0.1955,
+          "partial": 0.0936,
+          "uncertain": 0.1072
+        },
+        "confidence": 0.2173,
+        "action": {
+          "act_probability": 1.0
+        }
+      },
+      "scope": {
+        "type": "choice",
+        "choice": "uncertain",
+        "probabilities": {
+          "aligned": 0.3182,
+          "expansion": 0.2275,
+          "uncertain": 0.4543
+        },
+        "confidence": 0.0355,
+        "action": {
+          "act_probability": 1.0
+        }
+      },
+      "destination": {
+        "type": "choice",
+        "choice": "uncertain",
+        "probabilities": {
+          "aligned": 0.3049,
+          "conflict": 0.2909,
+          "uncertain": 0.4042
+        },
+        "confidence": 0.0101,
+        "action": {
+          "act_probability": 1.0
+        }
+      },
+      "constraints": {
+        "type": "choice",
+        "choice": "conflict",
+        "probabilities": {
+          "preserved": 0.2989,
+          "conflict": 0.5111,
+          "uncertain": 0.1899
+        },
+        "confidence": 0.072,
+        "action": {
+          "act_probability": 1.0
+        }
+      },
+      "verdict": {
+        "type": "choice",
+        "choice": "changes",
+        "probabilities": {
+          "accept": 0.4467,
+          "changes": 0.5066,
+          "uncertain": 0.0467
+        },
+        "confidence": 0.2285,
+        "action": {
+          "act_probability": 1.0
+        }
+      },
+      "criterion_0": {
+        "type": "choice",
+        "choice": "unverifiable",
+        "probabilities": {
+          "aligned": 0.2575,
+          "unverifiable": 0.306,
+          "conflict": 0.146,
+          "uncertain": 0.2905
+        },
+        "confidence": 0.0249,
+        "action": {
+          "act_probability": 1.0
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 1547,
+      "output_tokens": 0
+    },
+    "latency_ms": 5275.201,
+    "token_lengths": {
+      "coverage": 260,
+      "scope": 242,
+      "destination": 265,
+      "constraints": 252,
+      "verdict": 275,
+      "criterion_0": 253
+    },
+    "peak_rss_kib": 2389268
+  },
+  "seconds": 5.3404
+}

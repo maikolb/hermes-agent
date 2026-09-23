@@ -1,0 +1,787 @@
+{
+  "budget": "2.88",
+  "initial": {
+    "key_usage": "0",
+    "key_limit": null,
+    "total_credits": "14",
+    "total_usage": "11.119566295"
+  },
+  "requests": [
+    {
+      "label": "first-systemone-smoke",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.003688000",
+      "before": {
+        "key_usage": "0",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119566295"
+      },
+      "pending": false,
+      "payload_sha256": "ff1fdc2b82b6f5f83a878ae4d7b895e5f6e6fc641700c5af20c7e755cea0daf7",
+      "after": {
+        "key_usage": "0",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119566295"
+      },
+      "billed": "1.4364e-05",
+      "http_status": 200
+    },
+    {
+      "label": "legacy-model-id-probe",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.003688000",
+      "before": {
+        "key_usage": "1.4364e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119580659"
+      },
+      "pending": false,
+      "payload_sha256": "5ada9251db64c11ea5acf8f405a94148f4db8d7e306453872c7495334743242b",
+      "after": {
+        "key_usage": "1.4364e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119580659"
+      },
+      "billed": "1.4364e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-baseline-d_valid-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "1.4364e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119580659"
+      },
+      "pending": false,
+      "payload_sha256": "2e6648b8ad62333881e03d9c40c37e22642b3248d1abdda22e878247b610fb59",
+      "after": {
+        "key_usage": "2.8728e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119595023"
+      },
+      "billed": "4.809e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-baseline-d_missing-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "2.8728e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119595023"
+      },
+      "pending": false,
+      "payload_sha256": "2d789968bcb2a092bb156c9549f0b62204e6fbb83cc24b2b8895fc9f1e77284b",
+      "after": {
+        "key_usage": "7.6818e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119643113"
+      },
+      "billed": "4.6746e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-baseline-d_prohibition-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "7.6818e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119643113"
+      },
+      "pending": false,
+      "payload_sha256": "42ba3ef7f70585f3b7371cae9ab1d6aa9f3a28eb0a2d8bddc82e03c81c14e859",
+      "after": {
+        "key_usage": "7.6818e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119643113"
+      },
+      "billed": "4.7376e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-baseline-d_destination-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "7.6818e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119643113"
+      },
+      "pending": false,
+      "payload_sha256": "686d8d2854f23a1b86cd9f9e075bfb009766ed37c2944d15c0e8c28a7e501e7a",
+      "after": {
+        "key_usage": "7.6818e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119643113"
+      },
+      "billed": "4.9518e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-baseline-d_negation-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "7.6818e-05",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119643113"
+      },
+      "pending": false,
+      "payload_sha256": "2f86ca23c16bba06c305407519fb7c1ce7e634ad618923813cf79fb0cb84e612",
+      "after": {
+        "key_usage": "0.000220458",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119786753"
+      },
+      "billed": "4.7712e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-baseline-d_incomplete-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.000220458",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119786753"
+      },
+      "pending": false,
+      "payload_sha256": "c082f59bdfc74704ebc19c58679f17604e6ce9179f7c1ee4f865a2353df65a58",
+      "after": {
+        "key_usage": "0.000220458",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119786753"
+      },
+      "billed": "4.536e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-baseline-d_long-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.000220458",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119786753"
+      },
+      "pending": false,
+      "payload_sha256": "900af19c449e259f8bf2e1f608efd32e8e47be643e79943e6ca905f2b8b97aea",
+      "after": {
+        "key_usage": "0.000220458",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119786753"
+      },
+      "billed": "0.000156282",
+      "http_status": 200
+    },
+    {
+      "label": "development-baseline-d_original_counterexample-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.003688000",
+      "before": {
+        "key_usage": "0.00026817",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119834465"
+      },
+      "pending": false,
+      "payload_sha256": "ff1fdc2b82b6f5f83a878ae4d7b895e5f6e6fc641700c5af20c7e755cea0daf7",
+      "after": {
+        "key_usage": "0.00026817",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119834465"
+      },
+      "billed": "1.4364e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-refactor-d_valid-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.00026817",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.119834465"
+      },
+      "pending": false,
+      "payload_sha256": "ccf7f17bb60d55ecc55240029a86b7cd0f283d72fc617f9991b6a2690ad27c2e",
+      "after": {
+        "key_usage": "0.000484176",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120050471"
+      },
+      "billed": "5.4306e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-refactor-d_missing-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.000484176",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120050471"
+      },
+      "pending": false,
+      "payload_sha256": "31e82c5286358eb99bb58515f7d22361b6fe29641e3650e64ae1d570223d5b2c",
+      "after": {
+        "key_usage": "0.000484176",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120050471"
+      },
+      "billed": "5.2962e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-refactor-d_prohibition-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.000484176",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120050471"
+      },
+      "pending": false,
+      "payload_sha256": "3bc61a2ee052321d7112e217b7332a9be442b71ee9256a70d005c60ecbfee85e",
+      "after": {
+        "key_usage": "0.000538482",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120104777"
+      },
+      "billed": "5.3592e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-refactor-d_destination-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.000538482",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120104777"
+      },
+      "pending": false,
+      "payload_sha256": "cf6450f03abc237aac9dc9b8e2ad06239d9d39f59afc1a8bcc8e28e7e8ad4faa",
+      "after": {
+        "key_usage": "0.000538482",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120104777"
+      },
+      "billed": "5.5734e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-refactor-d_negation-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.000538482",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120104777"
+      },
+      "pending": false,
+      "payload_sha256": "e778deeefb7326b2b70901c620acecc787d54665e1f344b118a59028caf8bc67",
+      "after": {
+        "key_usage": "0.00070077",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120267065"
+      },
+      "billed": "5.3928e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-refactor-d_incomplete-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.00070077",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120267065"
+      },
+      "pending": false,
+      "payload_sha256": "cd47d3a9ff4def4e3e7bb4772b5b14f03f9c50d6514f92f8e3eb477a30423855",
+      "after": {
+        "key_usage": "0.00070077",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120267065"
+      },
+      "billed": "5.1576e-05",
+      "http_status": 200
+    },
+    {
+      "label": "development-refactor-d_long-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.00070077",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120267065"
+      },
+      "pending": false,
+      "payload_sha256": "f74a77c5b4556f38e43a7802a41f14754bba566d642a603c72b0b3b87d1255d8",
+      "after": {
+        "key_usage": "0.00070077",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120267065"
+      },
+      "billed": "0.000162498",
+      "http_status": 200
+    },
+    {
+      "label": "development-refactor-d_original_counterexample-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.003688000",
+      "before": {
+        "key_usage": "0.00070077",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120267065"
+      },
+      "pending": false,
+      "payload_sha256": "ff1fdc2b82b6f5f83a878ae4d7b895e5f6e6fc641700c5af20c7e755cea0daf7",
+      "after": {
+        "key_usage": "0.000806274",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120372569"
+      },
+      "billed": "1.4364e-05",
+      "http_status": 200
+    },
+    {
+      "label": "heldout-final-h_valid-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.000983136",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120549431"
+      },
+      "pending": false,
+      "payload_sha256": "e4c10f9507dcd0d1d57c521c25f6a9e7100d33d6cd4f34dc3573589bf1e399b0",
+      "after": {
+        "key_usage": "0.000983136",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120549431"
+      },
+      "billed": "5.5104e-05",
+      "http_status": 200
+    },
+    {
+      "label": "heldout-final-h_missing-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.000983136",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120549431"
+      },
+      "pending": false,
+      "payload_sha256": "c0dd1558f92279b4751a9e38f0c3658c61d31473e0df872323994deb0a1a154f",
+      "after": {
+        "key_usage": "0.000983136",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120549431"
+      },
+      "billed": "5.3508e-05",
+      "http_status": 200
+    },
+    {
+      "label": "heldout-final-h_prohibition-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.000983136",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120549431"
+      },
+      "pending": false,
+      "payload_sha256": "32f100286598713cf17e9dc7b715051c162b9eb98e8853afa445957b152c2048",
+      "after": {
+        "key_usage": "0.001091748",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120658043"
+      },
+      "billed": "5.3088e-05",
+      "http_status": 200
+    },
+    {
+      "label": "heldout-final-h_destination-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.001091748",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120658043"
+      },
+      "pending": false,
+      "payload_sha256": "ad81bceba9bd39761690d80cff3a7deabb792f73c52cf574dacea10f7ed318e8",
+      "after": {
+        "key_usage": "0.001091748",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120658043"
+      },
+      "billed": "5.5692e-05",
+      "http_status": 200
+    },
+    {
+      "label": "heldout-final-h_negation-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.001091748",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120711131"
+      },
+      "pending": false,
+      "payload_sha256": "8a29d55b16724e13421ef72925508964551c9102aae82d1a4999a3d52a5363c2",
+      "after": {
+        "key_usage": "0.001144836",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120711131"
+      },
+      "billed": "5.355e-05",
+      "http_status": 200
+    },
+    {
+      "label": "heldout-final-h_permuted-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.001144836",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120711131"
+      },
+      "pending": false,
+      "payload_sha256": "3adbf72670d543cc3a21c93585e761658e2355d440f8f61ece1d34d99139acfd",
+      "after": {
+        "key_usage": "0.001144836",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120711131"
+      },
+      "billed": "5.3886e-05",
+      "http_status": 200
+    },
+    {
+      "label": "heldout-final-h_incomplete-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.001144836",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120711131"
+      },
+      "pending": false,
+      "payload_sha256": "81140e09f708aef5fd3ca27b4c9e042b9a6bc74e9c9fef87768c6650c8cf402f",
+      "after": {
+        "key_usage": "0.001144836",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120711131"
+      },
+      "billed": "5.3298e-05",
+      "http_status": 200
+    },
+    {
+      "label": "heldout-final-h_long-jev",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.001144836",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120711131"
+      },
+      "pending": false,
+      "payload_sha256": "0aa858ba5c52c6ba303a38d214df44c9209dfe57b8332aeb8469cf0681afb5b5",
+      "after": {
+        "key_usage": "0.001307964",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.120874259"
+      },
+      "billed": "0.000164892",
+      "http_status": 200
+    },
+    {
+      "label": "native-http-1",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.003688000",
+      "before": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "pending": false,
+      "payload_sha256": "05517cc23ea9746c775e53ac2ce56810003ad246a25f20977ecc9b702b6f748c",
+      "after": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "billed": "0.000022638",
+      "billing_state": "RESPONSE_BILLED",
+      "http_status": 200
+    },
+    {
+      "label": "native-http-2",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "pending": false,
+      "payload_sha256": "8362522495c36b1bdab0390c3bcf3ed50ec73d5191d3b2012f11055ad3887187",
+      "after": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "billed": "0.000057666",
+      "billing_state": "RESPONSE_BILLED",
+      "http_status": 200
+    },
+    {
+      "label": "native-http-3",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.003688000",
+      "before": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "pending": false,
+      "payload_sha256": "a9abb1f86c56c205bfc26e9d64f152396b4b65a5787dbb2b8dc6076544bd5222",
+      "after": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "billed": "0.000023394",
+      "billing_state": "RESPONSE_BILLED",
+      "http_status": 200
+    },
+    {
+      "label": "native-http-4",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "pending": false,
+      "payload_sha256": "c6d526988100dd69dc93025cab71b0444430ce8cc28a9eed79b0c5483e284c0d",
+      "after": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "billed": "0.000058296",
+      "billing_state": "RESPONSE_BILLED",
+      "http_status": 200
+    },
+    {
+      "label": "native-http-5",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.003688000",
+      "before": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "pending": false,
+      "payload_sha256": "0c8dc4666508ec869db17b10a8f082ab9abd8b5d122765670b61963a0b1e8e5b",
+      "after": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "billed": "0.00002289",
+      "billing_state": "RESPONSE_BILLED",
+      "http_status": 200
+    },
+    {
+      "label": "native-http-6",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "pending": false,
+      "payload_sha256": "7fc3e5955621a3b07ccdc144d0c277685a966e7c2a8ef8d7264ec2940e77dc99",
+      "after": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "billed": "0.000058002",
+      "billing_state": "RESPONSE_BILLED",
+      "http_status": 200
+    },
+    {
+      "label": "native-http-7",
+      "endpoint": "http://127.0.0.1:18991/systemone",
+      "reserved": "0.003688000",
+      "before": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "pending": false,
+      "payload_sha256": "b8c215029d22ff68e1205ee128d3f386f81bbebe794a5752da9a76cbf438f6c7",
+      "after": {
+        "key_usage": "0.001526154",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121092449"
+      },
+      "billed": "0.003688000",
+      "billing_state": "RESERVED_UNKNOWN_BILLING",
+      "http_status": null
+    },
+    {
+      "label": "native-v3-http-1",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.00176904",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121335335"
+      },
+      "pending": false,
+      "payload_sha256": "e66416783101a2da1de0e1c1c0d82b597989c4c688f298c132bcff47619d740e",
+      "after": {
+        "key_usage": "0.00176904",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121335335"
+      },
+      "billed": "0.000058548",
+      "billing_state": "RESPONSE_BILLED",
+      "http_status": 200
+    },
+    {
+      "label": "native-v3-http-2",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.00176904",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121335335"
+      },
+      "pending": false,
+      "payload_sha256": "045b58bc3e6cdccdb095da8c922d9b682e252c38296571a15f95ae4d33f844b3",
+      "after": {
+        "key_usage": "0.00176904",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121335335"
+      },
+      "billed": "0.000058548",
+      "billing_state": "RESPONSE_BILLED",
+      "http_status": 200
+    },
+    {
+      "label": "native-v3-http-3",
+      "endpoint": "https://openrouter.ai/api/v1/systemone",
+      "reserved": "0.017128000",
+      "before": {
+        "key_usage": "0.00176904",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121335335"
+      },
+      "pending": false,
+      "payload_sha256": "147350e39e873b89c3c8440258066af47ddcfce6cd86f93843be13e5d910695d",
+      "after": {
+        "key_usage": "0.00176904",
+        "key_limit": null,
+        "total_credits": "14",
+        "total_usage": "11.121335335"
+      },
+      "billed": "0.000057876",
+      "billing_state": "RESPONSE_BILLED",
+      "http_status": 200
+    }
+  ],
+  "latest": {
+    "key_usage": "0.00176904",
+    "key_limit": null,
+    "total_credits": "14",
+    "total_usage": "11.121335335"
+  },
+  "response_billed_total": "0.005632012",
+  "key_usage_delta": "0.00176904",
+  "account_usage_delta": "0.001769040",
+  "remaining_authorized": "2.874367988"
+}

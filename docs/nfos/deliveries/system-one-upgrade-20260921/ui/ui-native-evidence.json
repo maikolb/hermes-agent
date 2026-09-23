@@ -1,0 +1,550 @@
+{
+  "route": "http://127.0.0.1:52898/lux/#revisor",
+  "backend": {
+    "url": "http://127.0.0.1:52898",
+    "backend_url": "http://127.0.0.1:52897",
+    "home": "C:\\Users\\maiko\\AppData\\Local\\Temp\\nfos-system-one-ui-n7e3h_yh",
+    "hermes_cli": "C:\\Users\\maiko\\Projetos\\NFOS-Jev-Integration\\hermes-agent\\hermes_cli\\nfos_reviewer.py",
+    "vigilia_server": "C:\\Users\\maiko\\Projetos\\NFOS-Jev-Integration\\nexa-factory-os\\modules\\vigilia\\src\\nexa_vigilia\\server.py",
+    "source_hashes": {
+      "C:\\Users\\maiko\\Projetos\\NFOS-Jev-Integration\\nexa-factory-os\\modules\\vigilia\\src\\nexa_vigilia\\server.py": "2f63c789060421a47d7aee3ec3965c2172671ba11679afa9af872dca9e991904",
+      "C:\\Users\\maiko\\Projetos\\NFOS-Jev-Integration\\hermes-agent\\hermes_cli\\nfos_reviewer.py": "3c17b97b80146cda8198ac374014f4016d0404f6f977a4dfaed4d4a357a41c63"
+    },
+    "asset_revision": "17be6655f4ed",
+    "synthetic": true,
+    "no_production_proxy": true
+  },
+  "posts": [
+    {
+      "system_one": {
+        "mode": "shadow",
+        "engine": "laya",
+        "classes": [
+          "budget",
+          "impediment",
+          "evidence",
+          "spec"
+        ],
+        "timeout_seconds": 12,
+        "max_decisions_per_run": 6
+      }
+    },
+    {
+      "system_one": {
+        "mode": "active",
+        "engine": "laya",
+        "classes": [
+          "budget",
+          "impediment",
+          "evidence"
+        ],
+        "timeout_seconds": 12,
+        "max_decisions_per_run": 6
+      }
+    },
+    {
+      "system_one": {
+        "mode": "off",
+        "engine": "jev",
+        "classes": [
+          "budget",
+          "impediment",
+          "evidence",
+          "spec"
+        ],
+        "timeout_seconds": 12,
+        "max_decisions_per_run": 6
+      }
+    },
+    {
+      "enabled": false,
+      "frequency": "weekly",
+      "time": "07:30",
+      "weekday": 1,
+      "timezone": "America/Sao_Paulo"
+    }
+  ],
+  "results": [
+    {
+      "step": "shadow_laya",
+      "status": 200,
+      "system_one": {
+        "policy": {
+          "mode": "shadow",
+          "engine": "laya",
+          "classes": [
+            "budget",
+            "evidence",
+            "impediment",
+            "spec"
+          ],
+          "timeout_seconds": 12,
+          "max_decisions_per_run": 6
+        },
+        "policy_revision": "6f5bfa23d109f019a39ce598080c89ae35b89d41707c42e3a3dea0dfdb38368d",
+        "providers": {
+          "laya": {
+            "provider": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "api_key_env": "",
+            "uses": [
+              "budget",
+              "evidence",
+              "impediment",
+              "spec"
+            ],
+            "configured": true,
+            "credential_present": false,
+            "authenticated": false,
+            "inference_tested": false,
+            "availability": "local_service_unavailable"
+          },
+          "jev": {
+            "provider": "openrouter",
+            "model": "jev-1.13",
+            "model_revision": "",
+            "source_revision": "",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "uses": [
+              "budget",
+              "spec",
+              "impediment",
+              "evidence"
+            ],
+            "configured": true,
+            "credential_present": false,
+            "authenticated": false,
+            "inference_tested": false,
+            "availability": "missing_key"
+          }
+        },
+        "metrics": {
+          "opportunities": 0,
+          "engine_calls": 0,
+          "applied_decisions": 0,
+          "fallbacks": 0,
+          "principal_calls_saved": 0,
+          "shadow": 0,
+          "rework": 0
+        },
+        "metrics_scope": "current_board_last_5000_events",
+        "eligibility": {
+          "laya": {
+            "budget": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "evidence": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "impediment": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "spec": {
+              "eligible": false,
+              "observation_eligible": true,
+              "reason": "unvalidated_primary_spec"
+            }
+          },
+          "jev": {
+            "budget": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "evidence": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "impediment": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "spec": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            }
+          }
+        }
+      },
+      "config": {
+        "enabled": true,
+        "frequency": "daily",
+        "time": "02:00",
+        "weekday": 0,
+        "timezone": "America/Sao_Paulo"
+      }
+    },
+    {
+      "step": "active_laya_three_classes",
+      "status": 200,
+      "system_one": {
+        "policy": {
+          "mode": "active",
+          "engine": "laya",
+          "classes": [
+            "budget",
+            "evidence",
+            "impediment"
+          ],
+          "timeout_seconds": 12,
+          "max_decisions_per_run": 6
+        },
+        "policy_revision": "777361130e7d5e26ad1fa4b4ce134b532a4d119fa13c00720f2574ddd8cd409f",
+        "providers": {
+          "laya": {
+            "provider": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "api_key_env": "",
+            "uses": [
+              "budget",
+              "evidence",
+              "impediment"
+            ],
+            "configured": true,
+            "credential_present": false,
+            "authenticated": false,
+            "inference_tested": false,
+            "availability": "local_service_unavailable"
+          },
+          "jev": {
+            "provider": "openrouter",
+            "model": "jev-1.13",
+            "model_revision": "",
+            "source_revision": "",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "uses": [
+              "budget",
+              "spec",
+              "impediment",
+              "evidence"
+            ],
+            "configured": true,
+            "credential_present": false,
+            "authenticated": false,
+            "inference_tested": false,
+            "availability": "missing_key"
+          }
+        },
+        "metrics": {
+          "opportunities": 0,
+          "engine_calls": 0,
+          "applied_decisions": 0,
+          "fallbacks": 0,
+          "principal_calls_saved": 0,
+          "shadow": 0,
+          "rework": 0
+        },
+        "metrics_scope": "current_board_last_5000_events",
+        "eligibility": {
+          "laya": {
+            "budget": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "evidence": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "impediment": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "spec": {
+              "eligible": false,
+              "observation_eligible": true,
+              "reason": "unvalidated_primary_spec"
+            }
+          },
+          "jev": {
+            "budget": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "evidence": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "impediment": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "spec": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            }
+          }
+        }
+      },
+      "config": {
+        "enabled": true,
+        "frequency": "daily",
+        "time": "02:00",
+        "weekday": 0,
+        "timezone": "America/Sao_Paulo"
+      }
+    },
+    {
+      "step": "off_jev_missing_key",
+      "status": 200,
+      "system_one": {
+        "policy": {
+          "mode": "off",
+          "engine": "jev",
+          "classes": [
+            "budget",
+            "evidence",
+            "impediment",
+            "spec"
+          ],
+          "timeout_seconds": 12,
+          "max_decisions_per_run": 6
+        },
+        "policy_revision": "8332b4bfdda6ea423f4035c4973a9cfd1aa0e5d006532d1e0e627a95ff080079",
+        "providers": {
+          "laya": {
+            "provider": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "api_key_env": "",
+            "uses": [
+              "budget",
+              "evidence",
+              "impediment"
+            ],
+            "configured": true,
+            "credential_present": false,
+            "authenticated": false,
+            "inference_tested": false,
+            "availability": "local_service_unavailable"
+          },
+          "jev": {
+            "provider": "openrouter",
+            "model": "jev-1.13",
+            "model_revision": "",
+            "source_revision": "",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "uses": [
+              "budget",
+              "evidence",
+              "impediment",
+              "spec"
+            ],
+            "configured": true,
+            "credential_present": false,
+            "authenticated": false,
+            "inference_tested": false,
+            "availability": "missing_key"
+          }
+        },
+        "metrics": {
+          "opportunities": 0,
+          "engine_calls": 0,
+          "applied_decisions": 0,
+          "fallbacks": 0,
+          "principal_calls_saved": 0,
+          "shadow": 0,
+          "rework": 0
+        },
+        "metrics_scope": "current_board_last_5000_events",
+        "eligibility": {
+          "laya": {
+            "budget": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "evidence": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "impediment": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "spec": {
+              "eligible": false,
+              "observation_eligible": true,
+              "reason": "unvalidated_primary_spec"
+            }
+          },
+          "jev": {
+            "budget": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "evidence": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "impediment": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "spec": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            }
+          }
+        }
+      },
+      "config": {
+        "enabled": true,
+        "frequency": "daily",
+        "time": "02:00",
+        "weekday": 0,
+        "timezone": "America/Sao_Paulo"
+      }
+    },
+    {
+      "step": "retrospective_schedule_only",
+      "status": 200,
+      "system_one": {
+        "policy": {
+          "mode": "off",
+          "engine": "jev",
+          "classes": [
+            "budget",
+            "evidence",
+            "impediment",
+            "spec"
+          ],
+          "timeout_seconds": 12,
+          "max_decisions_per_run": 6
+        },
+        "policy_revision": "8332b4bfdda6ea423f4035c4973a9cfd1aa0e5d006532d1e0e627a95ff080079",
+        "providers": {
+          "laya": {
+            "provider": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "api_key_env": "",
+            "uses": [
+              "budget",
+              "evidence",
+              "impediment"
+            ],
+            "configured": true,
+            "credential_present": false,
+            "authenticated": false,
+            "inference_tested": false,
+            "availability": "local_service_unavailable"
+          },
+          "jev": {
+            "provider": "openrouter",
+            "model": "jev-1.13",
+            "model_revision": "",
+            "source_revision": "",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "uses": [
+              "budget",
+              "evidence",
+              "impediment",
+              "spec"
+            ],
+            "configured": true,
+            "credential_present": false,
+            "authenticated": false,
+            "inference_tested": false,
+            "availability": "missing_key"
+          }
+        },
+        "metrics": {
+          "opportunities": 0,
+          "engine_calls": 0,
+          "applied_decisions": 0,
+          "fallbacks": 0,
+          "principal_calls_saved": 0,
+          "shadow": 0,
+          "rework": 0
+        },
+        "metrics_scope": "current_board_last_5000_events",
+        "eligibility": {
+          "laya": {
+            "budget": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "evidence": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "impediment": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "spec": {
+              "eligible": false,
+              "observation_eligible": true,
+              "reason": "unvalidated_primary_spec"
+            }
+          },
+          "jev": {
+            "budget": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "evidence": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "impediment": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            },
+            "spec": {
+              "eligible": true,
+              "observation_eligible": true,
+              "reason": "native_permission_filtered_choices"
+            }
+          }
+        }
+      },
+      "config": {
+        "enabled": false,
+        "frequency": "weekly",
+        "time": "07:30",
+        "weekday": 1,
+        "timezone": "America/Sao_Paulo",
+        "job_id": "d9ac55af3caa"
+      }
+    }
+  ],
+  "errors": [],
+  "no_response_mocks": true,
+  "headless": true,
+  "passed": true
+}

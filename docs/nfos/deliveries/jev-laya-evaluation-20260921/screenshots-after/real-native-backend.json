@@ -1,0 +1,120 @@
+{
+  "origin": {
+    "url": "http://127.0.0.1:63815",
+    "backend_url": "http://127.0.0.1:63814",
+    "home": "C:\\Users\\maiko\\AppData\\Local\\hermes\\cache\\nfos-jev\\implementation\\jev-laya-evaluation\\native-v3-home-changes",
+    "hermes_cli": "C:\\Users\\maiko\\Projetos\\NFOS-Jev-Integration\\hermes-agent\\hermes_cli\\nfos_reviewer.py",
+    "vigilia_server": "C:\\Users\\maiko\\Projetos\\NFOS-Jev-Integration\\nexa-factory-os\\modules\\vigilia\\src\\nexa_vigilia\\server.py",
+    "source_hashes": {
+      "C:\\Users\\maiko\\Projetos\\NFOS-Jev-Integration\\nexa-factory-os\\modules\\vigilia\\src\\nexa_vigilia\\server.py": "2f63c789060421a47d7aee3ec3965c2172671ba11679afa9af872dca9e991904",
+      "C:\\Users\\maiko\\Projetos\\NFOS-Jev-Integration\\hermes-agent\\hermes_cli\\nfos_reviewer.py": "3c17b97b80146cda8198ac374014f4016d0404f6f977a4dfaed4d4a357a41c63"
+    },
+    "asset_revision": "1c61ea985e06",
+    "synthetic": true,
+    "no_production_proxy": true
+  },
+  "no_response_mocks": true,
+  "no_posts": true,
+  "system_one": {
+    "policy": {
+      "mode": "active",
+      "engine": "jev",
+      "classes": [
+        "budget",
+        "evidence",
+        "impediment",
+        "spec"
+      ],
+      "timeout_seconds": 90,
+      "max_decisions_per_run": 4
+    },
+    "policy_revision": "f9f5656bdc9c4a36c026d92396d5e524d08240f877873011b7832828ba7690ca",
+    "providers": {
+      "laya": {
+        "provider": "laya",
+        "model": "convaiinnovations/laya-multilingual",
+        "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+        "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+        "api_key_env": "",
+        "uses": [],
+        "configured": true,
+        "credential_present": false,
+        "authenticated": false,
+        "inference_tested": false,
+        "availability": "local_service_unavailable"
+      },
+      "jev": {
+        "provider": "openrouter",
+        "model": "jev-1.13",
+        "model_revision": "",
+        "source_revision": "",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "uses": [
+          "spec"
+        ],
+        "configured": true,
+        "credential_present": true,
+        "authenticated": true,
+        "inference_tested": true,
+        "availability": "inference_verified"
+      }
+    },
+    "metrics": {
+      "opportunities": 1,
+      "engine_calls": 1,
+      "applied_decisions": 1,
+      "fallbacks": 0,
+      "principal_calls_saved": 1,
+      "shadow": 0,
+      "rework": 0
+    },
+    "metrics_scope": "current_board_last_5000_events",
+    "eligibility": {
+      "laya": {
+        "budget": {
+          "eligible": true,
+          "observation_eligible": true,
+          "reason": "native_permission_filtered_choices"
+        },
+        "evidence": {
+          "eligible": true,
+          "observation_eligible": true,
+          "reason": "native_permission_filtered_choices"
+        },
+        "impediment": {
+          "eligible": true,
+          "observation_eligible": true,
+          "reason": "native_permission_filtered_choices"
+        },
+        "spec": {
+          "eligible": false,
+          "observation_eligible": true,
+          "reason": "unvalidated_primary_spec"
+        }
+      },
+      "jev": {
+        "budget": {
+          "eligible": true,
+          "observation_eligible": true,
+          "reason": "native_permission_filtered_choices"
+        },
+        "evidence": {
+          "eligible": true,
+          "observation_eligible": true,
+          "reason": "native_permission_filtered_choices"
+        },
+        "impediment": {
+          "eligible": true,
+          "observation_eligible": true,
+          "reason": "native_permission_filtered_choices"
+        },
+        "spec": {
+          "eligible": true,
+          "observation_eligible": true,
+          "reason": "native_permission_filtered_choices"
+        }
+      }
+    }
+  },
+  "errors": []
+}

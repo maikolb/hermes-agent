@@ -1,0 +1,27 @@
+{
+  "http_status": 200,
+  "data": {
+    "model": "typesafe/jev-1.13-20260917",
+    "answers": {
+      "size": {
+        "type": "choice",
+        "choice": "P",
+        "probabilities": {
+          "P": 0.54,
+          "keep": 0.23,
+          "M": 0.21,
+          "G": 0.02
+        },
+        "confidence": 0.39
+      }
+    },
+    "usage": {
+      "input_tokens": 557,
+      "output_tokens": 45,
+      "cost": 2.3394e-05
+    },
+    "id": "gen-dec-1790001436-6oPmcEW61PXVHuzllS4i",
+    "provider": "TypeSafe"
+  },
+  "seconds": 0.375
+}

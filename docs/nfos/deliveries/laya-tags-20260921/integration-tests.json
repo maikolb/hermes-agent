@@ -1,0 +1,30 @@
+{
+  "VisibleWindows": 0,
+  "commands": [
+    {
+      "args": [
+        "C:/Users/maiko/AppData/Local/hermes/cache/nfos-jev/implementation/test-venv/Scripts/python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_nfos_jev.py",
+        "tests/hermes_cli/test_nfos_jev_primary_spec.py",
+        "tests/hermes_cli/test_nfos_laya.py",
+        "tests/hermes_cli/test_nfos_decision_engine_tags.py"
+      ],
+      "exit": 0,
+      "stdout": "........................................................................ [ 78%]\r\n....................                                                     [100%]\r\n92 passed in 103.06s (0:01:43)\r\n",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ]
+}

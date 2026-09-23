@@ -1,0 +1,785 @@
+[
+  {
+    "case": "budget_small",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "size": {
+          "type": "choice",
+          "choice": "P",
+          "confidence": 0.84
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 5.625,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "budget_small",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [
+      "low_confidence"
+    ],
+    "model_choices": [
+      {
+        "size": {
+          "type": "choice",
+          "choice": "M",
+          "confidence": 0.4123
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 22.344000000011874,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "budget_incomplete",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "size": {
+          "type": "choice",
+          "choice": "keep",
+          "confidence": 0.99
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 1.875,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "budget_incomplete",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [
+      "low_confidence"
+    ],
+    "model_choices": [
+      {
+        "size": {
+          "type": "choice",
+          "choice": "G",
+          "confidence": 0.2771
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 3.437000000005355,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "impediment_pass",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": false,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.86
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 1,
+    "elapsed_seconds": 1.8440000000118744,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "impediment_pass",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [
+      "low_confidence"
+    ],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.7817
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 4.48399999999674,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "impediment_fail",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "FAIL"
+    ],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.84
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 1.9530000000086147,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "impediment_fail",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [
+      "low_confidence"
+    ],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.7817
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 3.234000000025844,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "impediment_denied",
+    "engine": "jev",
+    "real_inference_calls": 0,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 0.8129999999946449,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "impediment_denied",
+    "engine": "laya",
+    "real_inference_calls": 0,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 1.0780000000086147,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "impediment_sql_denied",
+    "engine": "jev",
+    "real_inference_calls": 0,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 0.8439999999827705,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "impediment_sql_denied",
+    "engine": "laya",
+    "real_inference_calls": 0,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": null,
+    "repeat_behavior": null,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 0.8440000000118744,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "evidence_pass",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": null,
+    "repeat_behavior": 0,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.81
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 2.5,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "evidence_pass",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": null,
+    "repeat_behavior": 0,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.9286
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 3.2179999999934807,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "evidence_fail",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "FAIL"
+    ],
+    "worker_received_result": null,
+    "repeat_behavior": 0,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.82
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 1.75,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "evidence_fail",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "FAIL"
+    ],
+    "worker_received_result": null,
+    "repeat_behavior": 0,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.9286
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 5.625,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "evidence_stale",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": null,
+    "repeat_behavior": 0,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.8
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 1.8440000000118744,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "evidence_stale",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": null,
+    "repeat_behavior": 0,
+    "native_fallback_pending": true,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.9286
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 3.0,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "online_stage",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": true,
+    "repeat_behavior": [
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      }
+    ],
+    "native_fallback_pending": false,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.94
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 1.9530000000086147,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "online_stage",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": true,
+    "repeat_behavior": [
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      }
+    ],
+    "native_fallback_pending": false,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.8656
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 2.5160000000032596,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "online_failure",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": true,
+    "repeat_behavior": [
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      }
+    ],
+    "native_fallback_pending": false,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.95
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 1.7339999999967404,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "online_failure",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": true,
+    "repeat_behavior": [
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      }
+    ],
+    "native_fallback_pending": false,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.8496
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 2.7809999999881256,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "online_stagnant",
+    "engine": "jev",
+    "real_inference_calls": 2,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": true,
+    "repeat_behavior": [
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      },
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      }
+    ],
+    "native_fallback_pending": false,
+    "inference_fallbacks": [
+      "low_confidence"
+    ],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.98
+        }
+      },
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.3
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 2.6719999999913853,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "online_stagnant",
+    "engine": "laya",
+    "real_inference_calls": 2,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": false,
+    "repeat_behavior": [
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      },
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      }
+    ],
+    "native_fallback_pending": false,
+    "inference_fallbacks": [
+      "low_confidence",
+      "low_confidence"
+    ],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.075
+        }
+      },
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.0305
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 3.327999999979511,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "online_next",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": true,
+    "repeat_behavior": [
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      }
+    ],
+    "native_fallback_pending": false,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.95
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 1.8440000000118744,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "online_next",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 1,
+    "measurements": [
+      "PASS"
+    ],
+    "worker_received_result": true,
+    "repeat_behavior": [
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      }
+    ],
+    "native_fallback_pending": false,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.9033
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 2.7820000000065193,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "online_shadow",
+    "engine": "jev",
+    "real_inference_calls": 1,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": false,
+    "repeat_behavior": [
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      }
+    ],
+    "native_fallback_pending": false,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.93
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 1.9060000000172295,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  },
+  {
+    "case": "online_shadow",
+    "engine": "laya",
+    "real_inference_calls": 1,
+    "probes_executed": 0,
+    "measurements": [],
+    "worker_received_result": false,
+    "repeat_behavior": [
+      {
+        "get_delta": 0,
+        "worker_received_result": false
+      }
+    ],
+    "native_fallback_pending": false,
+    "inference_fallbacks": [],
+    "model_choices": [
+      {
+        "next": {
+          "type": "choice",
+          "choice": "probe_0",
+          "confidence": 0.9033
+        }
+      }
+    ],
+    "principal_calls_saved_synthetic": 0,
+    "elapsed_seconds": 5.827999999979511,
+    "pins_preserved": true,
+    "same_run": true,
+    "final_review_accepted": false
+  }
+]

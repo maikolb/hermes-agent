@@ -1,0 +1,171 @@
+{
+  "live_native_actions": [
+    {
+      "use": "budget",
+      "real_inference": true,
+      "native_sqlite": true,
+      "isolated_home": true,
+      "measurement_target": "synthetic_loopback_http",
+      "measurement_calls": 0,
+      "elapsed_seconds": 0.765,
+      "pending_principal": true,
+      "events": [
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "key": "1986a2e130b0c71db13307f6239f29110075cb8ca5ea0e4de65e2f581f1c4bbf",
+            "use": "budget",
+            "provider": "laya",
+            "selected_engine": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "reason": "started"
+          }
+        },
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "model": "convaiinnovations/laya-multilingual",
+            "usage": {
+              "input_tokens": 167,
+              "output_tokens": 0
+            },
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "latency_ms": 684.01,
+            "inference_answers": {
+              "size": {
+                "type": "choice",
+                "choice": "M",
+                "confidence": 0.1247
+              }
+            },
+            "reason": "low_confidence",
+            "key": "1986a2e130b0c71db13307f6239f29110075cb8ca5ea0e4de65e2f581f1c4bbf",
+            "use": "budget",
+            "provider": "laya",
+            "requested_model": "convaiinnovations/laya-multilingual",
+            "selected_engine": "laya",
+            "used_engine": null,
+            "inference_engine": "laya",
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "fallback_reason": "low_confidence",
+            "principal_calls_saved": 0
+          }
+        }
+      ]
+    },
+    {
+      "use": "token_limit_guard",
+      "real_adapter_request": true,
+      "response": {
+        "reason": "context_too_large",
+        "latency_ms": 118.59
+      }
+    },
+    {
+      "use": "impediment",
+      "real_inference": true,
+      "native_sqlite": true,
+      "isolated_home": true,
+      "measurement_target": "synthetic_loopback_http",
+      "measurement_calls": 0,
+      "elapsed_seconds": 0.633,
+      "pending_principal": true,
+      "events": [
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "key": "120b4270ba0391bffec92b23411fb0352eb76ed93004422de83234d1e9f0ebec",
+            "use": "impediment",
+            "provider": "laya",
+            "selected_engine": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "reason": "started"
+          }
+        },
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "model": "convaiinnovations/laya-multilingual",
+            "usage": {
+              "input_tokens": 196,
+              "output_tokens": 0
+            },
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "latency_ms": 547.16,
+            "inference_answers": {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.3178
+              }
+            },
+            "reason": "low_confidence",
+            "key": "120b4270ba0391bffec92b23411fb0352eb76ed93004422de83234d1e9f0ebec",
+            "use": "impediment",
+            "provider": "laya",
+            "requested_model": "convaiinnovations/laya-multilingual",
+            "selected_engine": "laya",
+            "used_engine": null,
+            "inference_engine": "laya",
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "fallback_reason": "low_confidence",
+            "principal_calls_saved": 0
+          }
+        }
+      ]
+    },
+    {
+      "use": "evidence",
+      "real_inference": true,
+      "native_sqlite": true,
+      "isolated_home": true,
+      "measurement_target": "synthetic_loopback_http",
+      "measurement_calls": 0,
+      "elapsed_seconds": 0.872,
+      "pending_principal": true,
+      "events": [
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "key": "34908d6059a3b9fc27321901306662d6ee90b570511c0f4db7feaf59943151df",
+            "use": "evidence",
+            "provider": "laya",
+            "selected_engine": "laya",
+            "model": "convaiinnovations/laya-multilingual",
+            "reason": "started"
+          }
+        },
+        {
+          "kind": "nfos_jev",
+          "payload": {
+            "model": "convaiinnovations/laya-multilingual",
+            "usage": {
+              "input_tokens": 193,
+              "output_tokens": 0
+            },
+            "model_revision": "052592a15d198d9ad47da779604259b10b47b7aa",
+            "latency_ms": 771.78,
+            "inference_answers": {
+              "next": {
+                "type": "choice",
+                "choice": "probe_0",
+                "confidence": 0.4403
+              }
+            },
+            "reason": "low_confidence",
+            "key": "34908d6059a3b9fc27321901306662d6ee90b570511c0f4db7feaf59943151df",
+            "use": "evidence",
+            "provider": "laya",
+            "requested_model": "convaiinnovations/laya-multilingual",
+            "selected_engine": "laya",
+            "used_engine": null,
+            "inference_engine": "laya",
+            "source_revision": "42626c348753fbb17572a813127df2278a1ec527",
+            "fallback_reason": "low_confidence",
+            "principal_calls_saved": 0
+          }
+        }
+      ]
+    }
+  ]
+}

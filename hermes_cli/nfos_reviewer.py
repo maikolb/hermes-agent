@@ -42,6 +42,13 @@ def settings():
 
 
 def configure(data):
+    from hermes_cli import nfos_jev
+    data = dict(data)
+    has_system_one = 'system_one' in data
+    system_one = data.pop('system_one', None)
+    if has_system_one and not data:
+        nfos_jev.configure_system_one(system_one)
+        return status()
     from cron import jobs
     from hermes_time import now
     cfg = {**settings(), **data}
@@ -50,6 +57,8 @@ def configure(data):
             or type(cfg['weekday']) is not int or not 0 <= cfg['weekday'] <= 6
             or cfg['timezone'] != DEFAULTS['timezone']):
         raise ValueError('Frequência, horário ou dia inválido')
+    if has_system_one:
+        nfos_jev.configure_system_one(system_one)
     current = now()
     local = datetime.combine(current.astimezone(ZoneInfo(cfg['timezone'])).date(),
                              daytime.fromisoformat(cfg['time']), ZoneInfo(cfg['timezone']))
@@ -79,6 +88,7 @@ def configure(data):
 
 def status(run_id=None, after=0):
     from cron import jobs
+    from hermes_cli.nfos_jev import system_one_status
     cfg = settings()
     job = next((j for j in jobs.list_jobs(include_disabled=True) if j.get('id') == cfg.get('job_id')), None)
     runs = sorted((root() / 'runs').glob('*/state.json'), reverse=True)
@@ -103,7 +113,7 @@ def status(run_id=None, after=0):
                     break
     return {'config': cfg, 'schedule': {k: job.get(k) for k in ['next_run_at', 'enabled', 'last_status']} if job else None,
             'run': state, 'events': events, 'cursor': events[-1]['seq'] if events else after,
-            'runs': [read(p) for p in runs]}
+            'runs': [read(p) for p in runs], 'system_one': system_one_status()}
 
 
 TABLES = ['task_runs', 'task_events', 'task_comments', 'task_attachments', 'nfos_artifacts', 'nfos_decisions',
@@ -169,6 +179,12 @@ anterior ainda válida com os novos aprendizados e seus limites importantes. Det
 completas ficam no histórico permanente; não copie relatórios para esta síntese."}. Pode retornar lessons vazio.
 A solução utilizável é prioridade. Lacunas documentais não justificam pedir autorização de fechamento
 nem repetir efeitos em produção. O resultado da sua análise será salvo automaticamente.
+Oportunidades nfos_system_one_opportunity registram apenas o contexto disponível na decisão.
+Compare-as com nfos_system_one_outcome, nfos_jev e nfos_jev_action quando existirem.
+Pode acrescentar "system_one_labels":[{"source":"ref exata da oportunidade lida",
+"preferred_option":"id de uma opção oferecida", "reason":"justificativa retrospectiva"}].
+Esta preferência é um rótulo do Revisor, não comprovação de validade da política nem de sucesso.
+Sem verificação pertinente no alvo, o resultado permanece NOT_PROVEN. Não invente rótulos.
 '''
 
 
@@ -354,6 +370,14 @@ def run(day=None, boards=None, analyzer=analyse):
                     memory=[e for e in store.memory_entries if e.startswith(f'[{slug}]') or e.startswith(f'[NFOS Revisor:{slug}]')]
                     review=analyzer(case,memory,emit)
                     write(folder/'reviews'/f'{identity}.json',review)
+                    from hermes_cli.nfos_system_one_dataset import build_dataset
+                    learning = build_dataset([case], {f'{slug}/{case["task_id"]}': review})
+                    if learning['examples']:
+                        write(folder/'system-one'/f'{identity}.json', learning)
+                        emit('system_one_learning', project=slug, task_id=case['task_id'],
+                             examples=len(learning['examples']),
+                             not_proven=sum(x['labels']['verified_outcome']=='NOT_PROVEN'
+                                            for x in learning['examples']))
                     emit('analysed',project=slug,task_id=case['task_id'],**{k:review.get(k,[]) for k in ['summary','findings','discarded','lessons']})
                     saved=save_lessons(case,review,store,emit)
                     state['saved']+=sum(bool(x['memory_result']['success']) for x in saved)

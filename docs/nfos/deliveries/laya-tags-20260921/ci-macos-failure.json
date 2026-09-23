@@ -1,0 +1,8 @@
+{
+  "job": "106314770470",
+  "exit": 1,
+  "failed_test": "tests/tools/test_voice_mode.py::TestMacOSAudioOutputPolicy::test_play_audio_file_skips_sounddevice_on_macos",
+  "failure": "assert False is True",
+  "relation": "Audio files are outside this change; baseline reproduction on macOS has not been performed",
+  "log_source": "https://github.com/maikolb/hermes-agent/actions/runs/35594053366/job/106314770470"
+}

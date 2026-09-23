@@ -1,0 +1,25 @@
+{
+  "ready_for_owner_hashtags": false,
+  "production_activated": false,
+  "production_main": "6381c19b79d69bcee07d41442c2466d70a1a2471",
+  "code_before_version_guard": "c0033d81ae74ca2be43eef615384234afaa18fb3",
+  "experimental_service_artifact": "46be2c76a72271a8f8cff3bea2d471a2110ed075",
+  "pr": "https://github.com/maikolb/hermes-agent/pull/231",
+  "features": {
+    "A_real_laya": "partial: installed and real inference; warm service4.57 incompatible, standalone5.0 correct config but semantic negative failed",
+    "B_native_hashtags": "present in candidate,34 passing tests; production activation absent",
+    "C_four_uses": "present in candidate,92+13 tests; initial real cases all fallback,5.0 native rerun absent",
+    "D_runtime_routes": "absent in live NFOS; gateway/config unchanged; synthetic native only",
+    "E_real_jev": "absent: configured provider/key unavailable",
+    "F_delivery": "partial: PR open, checks not green, merge/release absent; artifacts and screenshots present"
+  },
+  "principal_calls_saved_measured": 0,
+  "blockers": [
+    "Master active stdio writer cannot safely be contacted: proxy socket10050, no confirmation",
+    "Automatic approval review blocked experiment stop/restart with no specific reason",
+    "Semantic reliability failed even with compatible Transformers5.0",
+    "Jev configured supported credentials absent",
+    "PR CI macOS audio failure; remaining checks pending at readback"
+  ],
+  "scope_justification": "More than5 files required by explicitly requested native intake/adapter tests, separate serving, configuration guide, versioned evidence and actual screenshots. Two runtime Python modules changed; no new core tool or task authority."
+}

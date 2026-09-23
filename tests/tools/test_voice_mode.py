@@ -626,6 +626,9 @@ class TestMacOSAudioOutputPolicy:
         # Only Popen is stubbed: the host resolves afplay for real, so the
         # argv assertion below reflects real player selection.
         monkeypatch.setattr("subprocess.Popen", _fake_popen)
+        # Exercise routing only after stubbing the player. The fixture
+        # restores the suite's audio guard when this test finishes.
+        monkeypatch.delenv("HERMES_DISABLE_AUDIO", raising=False)
 
         from tools.voice_mode import play_audio_file
 

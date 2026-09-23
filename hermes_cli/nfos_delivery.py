@@ -103,6 +103,23 @@ def get_workflow(conn, task_id):
     return _row(conn,'nfos_workflows','task_id',task_id)
 
 
+def decision_engine_selection(conn, task_id):
+    """Restore the intake-owned engine, including native continuation cards."""
+    seen = set()
+    while task_id and task_id not in seen:
+        seen.add(task_id)
+        workflow = get_workflow(conn, task_id)
+        if workflow:
+            selection = json.loads(workflow['state_json'] or '{}').get('decision_engine_selection')
+            if selection is not None:
+                return selection
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_continuations'").fetchone():
+            return None
+        parent = conn.execute('SELECT parent_id FROM nfos_continuations WHERE child_id=?', (task_id,)).fetchone()
+        task_id = parent[0] if parent else None
+    return None
+
+
 def get_decision(conn, decision_id):
     return _row(conn,'nfos_decisions','id',decision_id)
 
@@ -342,10 +359,23 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
         if settings().get('deepseek_worker_trial') is True:
             project = dict(project, model='deepseek-v4.1-flash',
                            provider='opencode-go', reasoning_effort='max')
+    selection = None
+    if source.get('platform') == 'telegram':
+        engines = {tag.lower() for tag in re.findall(r'(?<!\S)#(jev|laya)(?![\w-])', text, re.IGNORECASE)}
+        if len(engines) > 1:
+            raise WorkflowError('Conflicting decision engines: choose exactly one of #jev or #laya')
+        if engines:
+            from hermes_cli.nfos_jev import settings as engine_settings, _digest
+            engine = next(iter(engines))
+            config = {k: v for k, v in engine_settings(engine=engine).items() if k not in {'enabled', 'selection'}}
+            selection = {'engine': engine, 'source': 'user_hashtag',
+                         'revision': _digest(config), 'config': config}
     urgency=_urgency_doc(urgency)  # URGENCY_CONTEXT_20260914: só o julgamento do Principal marca urgência
     source_key=_json([str(source[k]) for k in required]+[str(part)])
     request_id='req_'+hashlib.sha256(source_key.encode()).hexdigest()[:24]
     payload={'source':source,'text':text,'project':project,'attachments':list(attachments)}
+    if selection is not None:
+        payload['decision_engine_selection'] = selection
     if urgency is not None:
         payload['urgent']=True
         payload['urgency']=urgency
@@ -647,8 +677,14 @@ def bootstrap_card(conn, request_id, token, *, pid):
         started_at=kb._process_start_time(pid)
         conn.execute('UPDATE tasks SET worker_pid=?,worker_started_at=? WHERE id=?',(pid,started_at,task_id))
         conn.execute('UPDATE task_runs SET worker_pid=? WHERE id=?',(pid,task.current_run_id))
-        conn.execute('INSERT INTO nfos_workflows(task_id,request_id,updated_at) VALUES(?,?,?)',
-                     (task_id,request_id,int(time.time())))
+        initial_state = {}
+        if payload.get('decision_engine_selection'):
+            initial_state['decision_engine_selection'] = payload['decision_engine_selection']
+        conn.execute('INSERT INTO nfos_workflows(task_id,request_id,state_json,updated_at) VALUES(?,?,?,?)',
+                     (task_id,request_id,_json(initial_state),int(time.time())))
+        if initial_state:
+            _event(conn,task_id,task.current_run_id,'nfos_decision_engine_selected',
+                   initial_state['decision_engine_selection'])
         # The owner's NFOS workflow owns review and verified delivery for this
         # enrolled card. Keep the legacy row, but do not require a second
         # reviewer process or an unrelated board-admin policy on this path.
@@ -3036,6 +3072,8 @@ def lesson_command(conn, payload, *, author):
 
 
 def save_spec(conn, task_id, run_id, spec, *, author, evidence):
+    from hermes_cli.nfos_jev import require_worker_action
+    require_worker_action(conn, task_id)
     if 'delivery_destination' in spec:
         from hermes_cli.nfos_destination import validate
         validate(spec['delivery_destination'])
@@ -3054,9 +3092,36 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
         raise WorkflowError('Record the actual TL/Codex/worker execution evidence')
     if author=='Codex' and not evidence.get('fallback_reason'):
         raise WorkflowError('Codex spec fallback needs the Claude unavailability reason')
+    from hermes_cli import nfos_jev
+    jev = nfos_jev.spec_decisions(conn, task_id, run_id, spec)
+    budget_config = nfos_jev.settings(conn, task_id)
+    bounded_budget = (budget_config['enabled'] and 'budget' in budget_config['uses']
+                      and budget_config.get('decision_mode', 'active') == 'active')
+    spec = dict(spec)  # Never mutate the caller's candidate.
     with _kb().write_txn(conn):
         task=_owned(conn,task_id,run_id)
         wf=get_workflow(conn,task_id)
+        jev = {k: v for k, v in jev.items() if v and v['identity'] == nfos_jev.identity(conn, task_id)}
+        budget = jev.get('budget')
+        # An inconclusive/keep decision must not let the worker's proposed size
+        # bypass the same cap enforced for a confident System One estimate.
+        limit = task.max_runtime_seconds if bounded_budget else None
+        if budget and budget['answers']['size']['choice'] in SPEC_SIZE_BUDGET:
+            selected = budget['answers']['size']['choice']
+            current_limit = task.max_runtime_seconds
+            proposed_limit = SPEC_SIZE_BUDGET[selected]
+            limit = min(proposed_limit, current_limit) if current_limit else proposed_limit
+            run = conn.execute('SELECT started_at FROM task_runs WHERE id=?', (run_id,)).fetchone()
+            elapsed = max(0, time.time() - float(run[0])) if run and run[0] else 0
+            if limit <= elapsed:
+                limit = current_limit  # Do not expire an active run by lowering its estimate.
+            spec['size'] = selected
+            _event(conn,task_id,run_id,'nfos_jev_budget_applied',
+                   {'estimated_size':selected,'estimate_seconds':proposed_limit,'limit_seconds':limit,
+                    'previous_limit_seconds':current_limit,'elapsed_seconds':elapsed,'model_pin_preserved':True,
+                    'selected_engine':budget.get('selected_engine'),'used_engine':budget.get('used_engine'),
+                    'model':budget.get('model'),'model_revision':budget.get('model_revision'),
+                    'typed_action_executed':True,'principal_calls_saved':0})
         from hermes_cli.nfos_principal_review import settings as _settings
         if _settings().get('principal_validation') is False and not wf['spec_revision']:  # BLOCK_LESS7_20260910: modo das premissas
             _pc=(json.loads(wf['state_json'] or '{}') or {}).get('production_precheck') or {}
@@ -3066,8 +3131,8 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                 raise WorkflowError('Spec needs size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class')
         _size=str(spec.get('size') or '').strip().upper()  # BLOCK_LESS9_20260910: quem escreve a spec define o orçamento
         if _size in SPEC_SIZE_BUDGET:
-            conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?',(SPEC_SIZE_BUDGET[_size],task_id))
-            _event(conn,task_id,run_id,'nfos_spec_size',{'size':_size,'max_runtime_seconds':SPEC_SIZE_BUDGET[_size]})
+            conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?',(limit if limit is not None else SPEC_SIZE_BUDGET[_size],task_id))
+            _event(conn,task_id,run_id,'nfos_spec_size',{'size':_size,'max_runtime_seconds':limit if limit is not None else SPEC_SIZE_BUDGET[_size]})
         if spec.get('delivery_type')!=task.delivery_type:
             # The project default is provisional until TL has analyzed the
             # request. An audit must not inherit a Git delivery requirement.
@@ -3094,11 +3159,20 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                      (revision,int(time.time()),task_id))
         _event(conn,task_id,run_id,'nfos_spec_saved',{'revision':revision,'author':author,'evidence':saved_evidence})
         from hermes_cli.nfos_principal_review import required
-        if required(conn,task_id):
+        primary = required(conn,task_id) and nfos_jev.primary_enabled(conn, task_id)
+        if required(conn,task_id) and not primary:
             ask_principal(conn,task_id,run_id,kind='spec_review',
-                          question='Validate the saved spec against the original request before implementation',context={})
+                          question=('Validate the saved spec against the original request before implementation. '
+                                    'Inspect jev_spec_check gaps and correct material omissions in this card; it is advisory, not approval.'
+                                    if jev.get('spec') else 'Validate the saved spec against the original request before implementation'),
+                          context={'jev_spec_check':jev['spec']['feedback']} if jev.get('spec') else {})
             conn.execute('UPDATE nfos_workflows SET next_action=? WHERE task_id=?',
                          ('Wait for Principal spec acceptance; revise the spec if changes are requested',task_id))
+    if primary:
+        decision = nfos_jev.primary_spec_review(conn, task_id, run_id)
+        if decision is None:
+            ask_principal(conn, task_id, run_id, kind='spec_review',
+                          question='Review current spec: primary decision engine was unavailable or inconclusive', context={})
     return revision
 
 
@@ -3109,6 +3183,8 @@ def _scope_needs_new_spec(workflow):
 
 
 def advance(conn, task_id, run_id, stage, *, next_action, state=None):
+    from hermes_cli.nfos_jev import require_worker_action
+    require_worker_action(conn, task_id)
     if stage not in {'analysis','implement','homolog','review','publish','verify','report'}:
         raise WorkflowError('Unknown delivery stage')
     with _kb().write_txn(conn):
@@ -3125,6 +3201,8 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
         updates=dict(state or {})
         updates.pop('task_partition',None)  # Only Principal decisions own this receipt.
         updates.pop('worker_escalation',None)  # Only reviewed rework and actual dispatch own the tier.
+        updates.pop('decision_engine_selection',None)  # Only preserved user intake owns engine selection.
+        updates = {key: value for key, value in updates.items() if not key.startswith('system_one_')}
         saved=json.loads(wf['state_json']);saved.update(updates)
         if stage=='implement' and wf['stage'] in {'analysis','spec'} and not json.loads(wf['state_json']).get('task_partition'):
             partition=conn.execute("SELECT status,action FROM nfos_decisions WHERE task_id=? AND kind='additional_tasks' ORDER BY rowid DESC LIMIT 1",
@@ -3426,6 +3504,8 @@ def _check_reclassification(conn, task_id, report):
 
 
 def save_report(conn, task_id, run_id, report):
+    from hermes_cli.nfos_jev import require_worker_action
+    require_worker_action(conn, task_id, transition='report')
     if conn.in_transaction:
         raise WorkflowError('Report evidence must be read outside a write transaction')
     task=_owned(conn,task_id,run_id)
@@ -3433,6 +3513,8 @@ def save_report(conn, task_id, run_id, report):
     if not spec:
         raise WorkflowError('No persisted spec')
     _require_current_instruction_spec(conn,task_id)
+    from hermes_cli.nfos_jev import collect_missing_probe
+    collect_missing_probe(conn, task_id, run_id, use='evidence', reason='Collect missing evidence for the current report')
     report=json.loads(_json(report))
     # Report versions retain the previous result. The Principal assesses the
     # new evidence; a second reclassification form is not a separate gate.
@@ -3704,11 +3786,17 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
             latest=conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',
                                 (task_id,kind)).fetchone()
             from hermes_cli.nfos_principal_review import accepted
-            if (latest and latest['status']=='resolved' and latest['author']=='Principal'
+            from hermes_cli.nfos_jev import primary_decision_current
+            if (latest and latest['status']=='resolved'
+                    and (latest['author']=='Principal' or (kind=='spec_review' and primary_decision_current(conn,latest)))
                     and latest['action']=='continue'
                     and json.loads(latest['context']).get('acceptance_identity')==context['acceptance_identity']
                     and accepted(conn,task_id,kind)):
                 return latest['id']
+            if latest and kind == 'spec_review' and latest['action'] == 'changes':
+                from hermes_cli.nfos_jev import primary_decision_current
+                if primary_decision_current(conn, latest):
+                    return latest['id']
             if (latest and (latest['status']=='pending' or
                             (latest['author']=='NFOS automation' and json.loads(latest['context']).get('incomplete_result')))
                     and json.loads(latest['context']).get('acceptance_identity')==context['acceptance_identity']):
@@ -4107,10 +4195,18 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             task=_kb().get_task(conn,row['task_id'])
             if task.delivery_type=='code':
                 from hermes_cli.nfos_destination import destination, review_only, verified
-                if review_only(destination(conn,task.id)):
+                scope=destination(conn,task.id)
+                if review_only(scope):
                     # The review PR with green CI is the verified destination itself.
                     if not verified(conn,task.id,json.loads(get_workflow(conn,task.id)['state_json'])):
                         raise WorkflowError('Review needs the confirmed review PR with CI for the accepted candidate')
+                elif scope and scope.get('verification_operation')=='homolog':
+                    # A tested-environment destination has no PR by design; the
+                    # confirmed homolog receipt is what this review approves.
+                    if not all(identity.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')):
+                        raise WorkflowError('Review needs the actual homologated candidate and evidence')
+                    if not verified(conn,task.id,json.loads(get_workflow(conn,task.id)['state_json'])):
+                        raise WorkflowError('Review needs the confirmed homolog receipt for this candidate')
                 else:
                     if not all(identity.get(k) for k in ('homolog_sha','candidate_tree','homolog_evidence')):
                         raise WorkflowError('Review needs the actual homologated candidate and evidence')
@@ -4469,9 +4565,11 @@ def _owner_guidance_production_order(conn, task, scope):
         "AND json_extract(e.payload,'$.owner_guidance')=1 ORDER BY e.id DESC",
         (task.id,)).fetchall()
     from hermes_cli.nfos_principal_review import accepted
-    spec_review = conn.execute("SELECT status,action,author FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (task.id,)).fetchone()
+    from hermes_cli.nfos_jev import primary_decision_current
+    spec_review = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (task.id,)).fetchone()
     semantic_acceptance = bool(spec_review and spec_review['status']=='resolved'
-        and spec_review['action']=='continue' and spec_review['author']=='Principal'
+        and spec_review['action']=='continue'
+        and (spec_review['author']=='Principal' or primary_decision_current(conn,spec_review))
         and accepted(conn,task.id,'spec_review'))
     def bound_message(row):
         ctx = json.loads(row['context']); message_id = str((ctx.get('source') or {}).get('message_id') or '')
@@ -4670,6 +4768,8 @@ def _record_mode_effect_checks(conn, task_id, candidate):
     return None
 
 def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
+    from hermes_cli.nfos_jev import require_worker_action
+    require_worker_action(conn, task_id)
     if operation not in {'homolog','pr','merge','deploy','staging_pr','staging_merge','repair'} or not target or not candidate:  # RESULT_PROBE_20260911: repair = mutação de dado
         raise WorkflowError('External effect needs operation, destination and exact candidate')
     with _kb().write_txn(conn):
@@ -4897,6 +4997,12 @@ def completion_ready(conn, task_id, *, evidence_check=None):
         scope=destination(conn,task_id)
         if review_only(scope):
             required=('candidate_sha','candidate_tree')
+        elif scope and scope.get('verification_operation')=='homolog':
+            # DELIVERY_ENV: a homolog-only destination ends at the tested
+            # environment; the confirmed homolog effect above IS the delivery
+            # receipt. Demanding pr/merge would require inventing a publication
+            # that the approved destination explicitly excludes.
+            required=('homolog_sha','candidate_tree')
         else:
             required=('homolog_sha','integrated_sha') if scope else ('homolog_sha','integrated_sha','artifact','production_readback')
         if any(not state.get(k) for k in required):
@@ -4905,6 +5011,8 @@ def completion_ready(conn, task_id, *, evidence_check=None):
             return False
         if review_only(scope):
             effects=[('pr',state['candidate_sha'])]
+        elif scope and scope.get('verification_operation')=='homolog':
+            effects=[]
         else:
             effects=[('pr',_delivery_candidate(conn,task_id,state)),('merge',_delivery_candidate(conn,task_id,state))]
             if not scope:
@@ -5091,6 +5199,10 @@ def main():
             result={'task_id':args.task,'status':'done','disposition':'cancelled_by_owner','functional_delivery':False}
         elif args.action=='save-spec':
             result={'revision':save_spec(conn,args.task,args.run,payload,author=args.author,evidence=evidence)}
+            from hermes_cli.nfos_jev import primary_decision_current
+            current_review = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (args.task,)).fetchone()
+            if current_review and primary_decision_current(conn, current_review):
+                result['spec_review'] = {k: current_review[k] for k in ('id','author','action','answer','status')}
         elif args.action=='save-report':
             save_report(conn,args.task,args.run,payload);result={'saved':True}
         elif args.action=='reconcile-spec':

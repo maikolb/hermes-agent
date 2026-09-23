@@ -1255,6 +1255,14 @@ def _handle_block(args: dict, **kw) -> str:
                             "card is held until the Principal answers)."
                         ),
                     )
+                recovered = conn.execute(
+                    "SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='nfos_jev_action' "
+                    "ORDER BY id DESC LIMIT 1", (tid, run.id if run else None),
+                ).fetchone()
+                if recovered:
+                    return _ok(task_id=tid, run_id=run.id if run else None, status="running", blocked=False,
+                               recovery=json.loads(recovered[0]),
+                               note="Collected a configured measurement. Inspect the receipt and continue this card; no completion or authorization was granted.")
             return _ok(
                 task_id=tid,
                 run_id=run.id if run else None,

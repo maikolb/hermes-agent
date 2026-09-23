@@ -56,6 +56,19 @@ from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context
 logger = logging.getLogger(__name__)
 
 
+def _system_one_after_batch(agent, messages, count):
+    if not os.environ.get('HERMES_KANBAN_TASK') or not count or getattr(agent, '_interrupt_requested', False):
+        return
+    try:
+        from hermes_cli.nfos_jev import worker_material_opportunity
+        receipt = worker_material_opportunity(agent, messages, count)
+        if receipt and messages and isinstance(messages[-1].get('content'), str):
+            # Append only to the current tool result; the cached conversation prefix is unchanged.
+            messages[-1]['content'] += '\n' + receipt
+    except Exception:
+        logger.debug('Optional System One batch opportunity unavailable', exc_info=True)
+
+
 def _pairing_tool_call_id(tool_call: Any) -> str:
     """Return the canonical id used by the persisted assistant message."""
     return coalesce_tool_call_id(tool_call)
@@ -823,6 +836,19 @@ def _run_agent_tool_execution_middleware(
         elif function_name == "skill_manage":
             agent._iters_since_skill = 0
 
+        # Shared sequential/concurrent boundary, after argument rewrites and
+        # native permissions, before any canonical tool side effect.
+        system_one_ticket = None
+        if os.environ.get('HERMES_KANBAN_TASK'):
+            from hermes_cli.nfos_jev import before_worker_tool
+            block_message, system_one_ticket = before_worker_tool(
+                agent, function_name, final_args, tool_call_id)
+            if block_message:
+                _advance_start_order()
+                state['blocked'] = True
+                state['dispatched'] = False
+                return json.dumps({'error': block_message, 'system_one_blocked': True})
+
         _advance_start_order(_begin)
 
         # Keep the gateway turn-inactivity watchdog from abandoning a turn
@@ -841,8 +867,15 @@ def _run_agent_tool_execution_middleware(
         )
         _hb_thread.start()
         try:
-            return execute(final_args)
+            result = execute(final_args)
+            if system_one_ticket:
+                from hermes_cli.nfos_jev import after_worker_tool
+                after_worker_tool(system_one_ticket, result)
+            return result
         except BaseException:
+            if system_one_ticket:
+                from hermes_cli.nfos_jev import after_worker_tool
+                after_worker_tool(system_one_ticket, None, failed=True)
             # The handler may have committed an external effect before
             # raising.  Persist uncertainty immediately; a hard process exit
             # leaves the pre-effect reservation for fresh-process restore.
@@ -2060,6 +2093,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     # agent sees it on its next iteration. Runs AFTER budget enforcement
     # so the steer marker is never truncated. See steer() for details.
     if finalize and num_tools > 0:
+        _system_one_after_batch(agent, messages, num_tools)
         agent._apply_pending_steer_to_tool_results(messages, num_tools)
 
 
@@ -3003,6 +3037,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
     # See _execute_tool_calls_parallel for the rationale. Same hook,
     # applied to sequential execution as well.
     if finalize and num_tools_seq > 0:
+        _system_one_after_batch(agent, messages, num_tools_seq)
         agent._apply_pending_steer_to_tool_results(messages, num_tools_seq)
 
 
@@ -3065,6 +3100,7 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
             env=get_active_env(effective_task_id),
             config=_tool_budget,
         )
+        _system_one_after_batch(agent, messages, total_tools)
         agent._apply_pending_steer_to_tool_results(messages, total_tools)
 
 
