@@ -4273,253 +4273,28 @@ def _accept_homologation(conn, decision):
            {'decision_id':decision['id'],'identity':identity,'evidence_checks':context['evidence_checks']})
 
 
-_PRODUCTION_ORDER_RX = re.compile(  # DELIVERY_ENV_20260911
-    r"(subir|sobe|suba|publicar|publique|liberar|libere|promover|promova|deploy|mesclar|mescle|merge|mergear|integrar|integre)"
-    r"\W{0,24}(em|para|pra|na|no|to|in|on)?\W{0,12}(produ[cç][aã]o|\bprod\b|\bprd\b|production|\bmain\b)", re.I)
-
-
-# OWNER_PHRASING_20260923: o owner pede produção no português do dia a dia ("arruma isso urgente em produção",
-# "Suba esse específico para produção", "arrume em hml e produção também"). A lista acima não tinha esses verbos e só
-# aceitava pontuação entre verbo e destino, então card urgente de projeto HML travava aqui pedindo a ordem que já estava no corpo.
-_PRODUCTION_WORD = r"(?:produ[cç][aã]o|prod|prd|production)\b"
-_OWNER_PRODUCTION_RX = (
-    re.compile(r"\b(?P<verb>arrum(?:a|e|em|ar)|corrig(?:e|ir)|corrij(?:a|am)|consert(?:a|e|em|ar)|ajust(?:a|e|em|ar)|"
-               r"implement(?:a|e|em|ar)|apli(?:ca|que|quem|car)|coloc(?:a|ar)|coloqu(?:e|em)|bot(?:a|e|em|ar)|jog(?:a|ar)|"
-               r"jogu(?:e|em)|mand(?:a|e|em|ar)|lev(?:a|e|em|ar)|resolv(?:e|a|am|er)|sobe|sub(?:a|am|ir)|publi(?:ca|que|quem|car)|"
-               r"liber(?:a|e|em|ar)|promov(?:a|e|am|er)|integr(?:a|e|em|ar)|merge(?:ia|ar)?|deploy(?:a|ar)?)\b"
-               r"[^.!?;\n]{0,60}?\b(?P<prep>em|para|pra|na|no)\s+"
-               r"(?:(?:hml|homologa[cç][aã]o|staging)\s+e\s+(?:em\s+|na\s+|no\s+)?)?" + _PRODUCTION_WORD, re.I),
-    re.compile(r"\b(?:direto|diretamente)\s+(?P<prep>para|pra|em|na|no)\s+" + _PRODUCTION_WORD, re.I),
-    re.compile(r"\b(?:tem que|tem de|precisa|deve)\s+(?:estar|ir|ficar|subir|entrar|rodar)\s+(?P<prep>em|para|pra|na|no)\s+"
-               + _PRODUCTION_WORD, re.I),
-)
-_NEGATED_BEFORE = re.compile(r"\b(?:n[aã]o|nunca|jamais|sem|not|never)\s+(?:\w+\s+)?$", re.I)
-_HML_ONLY = re.compile(r"\b(?:s[oó]|somente|apenas|only)\s+(?:em\s+|no\s+|na\s+)?(?:hml|homologa[cç][aã]o|staging)\b", re.I)
-_HUMAN_ENVELOPE = re.compile(r"\[[^\[\]|\n]{1,80}\|\d{3,}\]")
-_CARD_SECTION = r'(?:Original attachments:|Decis[aã]o do Principal:|Orientação do proprietário \([^)\n]*\):|Lineage:|Linhagem:)'
-_CARD_SECTION_RX = re.compile(r'^[ \t]*' + _CARD_SECTION, re.M | re.I)
-_OWNER_GUIDANCE_SECTION = re.compile(r"^[ \t]*Orientação do proprietário \([^)\n]*\):\n(.*?)(?=^[ \t]*" + _CARD_SECTION + r"|\Z)", re.S | re.M | re.I)
-_QUOTED_REPLY = re.compile(r"\[(?:Replied-to|Replying to)[^\]]*\]", re.I)
-_PENDING_AUTHORIZATION = re.compile(
-    r'\b(?:se|caso|quando|ap[oó]s|depois|at[eé]|aguard\w*)\b[^.!?;]{0,120}'
-    r'\b(?:aprov\w*|autoriz\w*|aval|confirma[cç][aã]o|libera[cç][aã]o)\b', re.I)
-
-
-def _human_text_sections(body):
-    """OWNER_PHRASING_20260923: o que uma pessoa escreveu no card: a mensagem depois do envelope [Nome|id] do canal e as
-    orientações do proprietário anexadas. Texto do Principal, anexos, linhagem e resposta citada ficam de fora."""
-    body = str(body or '').replace('\r\n', '\n').replace('\r', '\n')
-    original = _CARD_SECTION_RX.split(body, maxsplit=1)[0]
-    envelopes = list(_HUMAN_ENVELOPE.finditer(original))
-    parts = [_QUOTED_REPLY.sub(' ', original[m.end():envelopes[i + 1].start() if i + 1 < len(envelopes) else len(original)])
-             for i, m in enumerate(envelopes)]
-    return parts + [_QUOTED_REPLY.sub(' ', m.group(1)) for m in _OWNER_GUIDANCE_SECTION.finditer(body)]
-
-
-def _human_text(body):
-    return '\n\n'.join(_human_text_sections(body))
-
-
-def _owner_production_phrasing(text):
-    """OWNER_PHRASING_20260923: pedido de produção na fala do owner; pergunta, negação, 'só em hml', substantivo
-    ('o ajuste em produção') e finalidade ('pra subir o número em prod') não contam como ordem."""
-    for rx in _OWNER_PRODUCTION_RX:
-        pos = 0
-        while (m := rx.search(text, pos)):
-            pos = m.start() + 1  # a refused match must not hide an order that starts inside it
-            before = text[:m.start()]
-            tail = re.search(r'[.!?;\n]', text[m.end():])
-            if tail and tail.group(0) == '?':
-                continue
-            if _NEGATED_BEFORE.search(before) or _NEGATED_BEFORE.search(text[m.start():m.start('prep')]):
-                continue
-            verb = (m.groupdict().get('verb') or '').lower()
-            if verb and re.search(r'\b(?:o|a|os|as|um|uma|esse|essa|este|esta|do|da|seu|sua|meu|minha|nosso|nossa)\s+$', before, re.I):
-                continue
-            if verb.endswith('r') and re.search(r'\b(?:pra|para|de)\s+$', before, re.I):
-                continue
-            start = max(text.rfind(c, 0, m.start()) for c in '.!?;\n') + 1
-            sentence = text[start:m.end() + (tail.start() if tail else len(text))]
-            hml_only = _HML_ONLY.search(sentence)
-            if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', sentence[:hml_only.start()], re.I):
-                continue
-            return True
-    return False
-
-
-# URGENT_PRODUCTION_20260923 (ordem do Maikol): pedido urgente do owner vai para produção em qualquer projeto, salvo quando ele
-# restringe o destino ("só em hml", "não suba para produção"), condiciona a aprovação ou nega a urgência ("não é urgente").
-_URGENT_RX = re.compile(r"\burg[eê]n(?:te|tes|t[ií]ssim[oa]|cia)\b|\bprioridade\s+(?:m[aá]xima|alta|total|urgente)\b|\basap\b|"
-                        r"\bo\s+quanto\s+antes\b|\bo\s+mais\s+r[aá]pido\s+poss[ií]vel\b|\b(?:pra|para)\s+ontem\b|\bimediatamente\b|"
-                        r"\bagora\s+mesmo\b", re.I)
-_NOT_URGENT_BEFORE = re.compile(r"\b(?:n[aã]o|nada|sem|nunca)\s+(?:\w+\s+){0,2}$", re.I)
-_NON_PRODUCTION_ONLY = re.compile(r"\b(?:s[oó]|somente|apenas|only)\s+(?:em\s+|no\s+|na\s+)?(?:hml|homologa[cç][aã]o|staging|teste|test|dev)\b", re.I)
-_PRODUCTION_REFUSED = re.compile(r"\b(?:n[aã]o|nunca|jamais|sem)\s+(?:\w+\s+){0,3}?(?:em|para|pra|na|no)\s+" + _PRODUCTION_WORD, re.I)
-
-
-_NON_PRODUCTION_ORDER = re.compile(
-    r"\b(?:fa[cç]a|fazer|publique|publicar|entregue|entregar|suba|subir|arrum[ae]|corrija|corrigir|implemente|implementar)\b"
-    r"[^.!?;\n]{0,80}?\b(?:em|para|pra|no|na)\s+(?:hml|homologa[cç][aã]o|staging|teste|test|dev|preview)\b", re.I)
-
-
-def _urgency_intent(text):
-    """URGENT_PRODUCTION_20260923: True quando a pessoa pede urgência sem restringir o destino; False quando restringe o
-    destino ou nega a urgência; None sem sinal. Pergunta não conta."""
-    text = _QUOTED_REPLY.sub(' ', str(text or ''))
-    if _PRODUCTION_REFUSED.search(text) or _PENDING_AUTHORIZATION.search(text):
-        return False
-    sentences = re.split(r'(?<=[.!?;\n])', text)
-    for sentence in sentences:
-        destination = _NON_PRODUCTION_ORDER.search(sentence)
-        if (destination and not sentence.rstrip().endswith('?')
-                and not _NOT_URGENT_BEFORE.search(sentence[:destination.start()])
-                and not (_PRODUCTION_ORDER_RX.search(sentence) or _owner_production_phrasing(sentence))):
-            return False
-        only = _NON_PRODUCTION_ONLY.search(sentence)
-        if only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', sentence[:only.start()], re.I):
-            return False
-    intent = None
-    for sentence in sentences:
-        if sentence.rstrip().endswith('?'):
-            continue
-        for m in _URGENT_RX.finditer(sentence):
-            intent = not _NOT_URGENT_BEFORE.search(sentence[:m.start()])
-    return intent
-
-
-def _owner_urgent_production(body):
-    """URGENT_PRODUCTION_20260923: uma pessoa pediu urgência no card (a última seção com sinal decide) e o gate de produção
-    concorda. Usado para levar a rota do card a produção."""
-    decision = None
-    for section in _human_text_sections(body):
-        current = _urgency_intent(section)
-        if current is not None:
-            decision = current
-    return decision is True and _express_production_order(body)
-
-
-def _express_production_order(text, *, human=False):
-    """DELIVERY_ENV_20260911: ordem expressa do owner para produção no corpo do card (imperativo + produção), não menção descritiva.
-    OWNER_PHRASING_20260923: a fala do dia a dia só conta no texto escrito por pessoa; human=True quando o texto inteiro já é
-    a orientação do owner."""
-    text = str(text or '')
-    sections = [text] if human else _human_text_sections(text)
-    # Legacy unwrapped requests retain their narrow imperative grammar, but never
-    # consume appended Principal/attachment sections as authorization.
-    if not sections:
-        scoped = _CARD_SECTION_RX.split(text.replace('\r\n', '\n'), maxsplit=1)[0]
-        return _production_guidance_intent(scoped, everyday=False) is True
-    intent = None
-    for section in sections:
-        current = _production_guidance_intent(section)
-        if current is not None:
-            intent = current
-    return intent is True
-
-
-def _production_guidance_intent(text, *, everyday=True):
-    """Return an explicit destination decision, or None for unrelated guidance."""
-    production = r'\b(produ[cç][aã]o|production|prod|prd|main)\b'
-    intent = None
-    for clause in re.findall(r'[^.!?;]+[.!?;]?', _QUOTED_REPLY.sub(' ', text)):
-        if re.search(production, clause, re.I) and _PENDING_AUTHORIZATION.search(clause):
-            intent = False
-            continue
-        hml_only = re.search(r'\b(s[oó]|somente|apenas|only)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', clause, re.I)
-        if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', clause[:hml_only.start()], re.I):
-            return False
-        # Negation of an observed defect condition is not a prohibition on its
-        # corrective action. An approval condition above is never discharged here.
-        directive = re.sub(r'\bse\b[^,;.!?]*,', ' ', clause, flags=re.I)
-        directive = re.sub(r'\bn[aã]o\s+(?:[eé]\s+)?(?:s[oó]|somente|apenas)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', ' ', directive, flags=re.I)
-        if clause.rstrip().endswith('?'):
-            continue
-        # An inserted adverbial phrase must not detach a long prohibition from
-        # its verb. Other comma/newline-delimited actions keep their own negation.
-        directive = re.sub(r',\s*(?:sob|sem|com|de|em|por)\b[^,.!?;\n]*,', ' ', directive, flags=re.I)
-        patterns = (_PRODUCTION_ORDER_RX,) + (_OWNER_PRODUCTION_RX if everyday else ())
-        spans = {(m.start(), m.end()): m for rx in patterns for m in rx.finditer(directive)}
-        # A nested destination phrase cannot restart the scope of its enclosing
-        # command and turn a refused imperative into an authorization.
-        candidates = sorted((m for (start, end), m in spans.items()
-                             if not any(outer_start < start and outer_end == end
-                                        for outer_start, outer_end in spans)),
-                            key=lambda m: (m.end(), m.start()))
-        for candidate in candidates:
-            start = max(directive.rfind(c, 0, candidate.start()) for c in ',\n') + 1
-            scoped = directive[start:candidate.end()]
-            if re.search(r'\b(n[aã]o|nunca|jamais|sem|not|never)\b', scoped, re.I):
-                intent = False
-                continue
-            if _PRODUCTION_ORDER_RX.search(scoped) or (everyday and _owner_production_phrasing(scoped)):
-                intent = True
-    if intent is None and everyday:  # Preserve both urgency and its later withdrawal.
-        intent = _urgency_intent(text)
-    return intent
-
-
-def _owner_guidance_production_order(conn, task, scope):
-    """Use the last explicit owner destination decision, preserving unrelated guidance."""
-    # The receipt event and its comment are produced by the operator entry point,
-    # not by a worker supplying an owner_guidance-shaped decision context.
-    receipts = conn.execute(
-        "SELECT e.id AS receipt_id,e.payload,d.* FROM task_events e JOIN nfos_decisions d "
-        "ON d.id=json_extract(e.payload,'$.decision_id') AND d.task_id=e.task_id "
-        "WHERE e.task_id=? AND e.kind='nfos_principal_requested' "
-        "AND json_extract(e.payload,'$.owner_guidance')=1 ORDER BY e.id DESC",
-        (task.id,)).fetchall()
-    from hermes_cli.nfos_principal_review import accepted
-    spec_review = conn.execute("SELECT status,action,author FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (task.id,)).fetchone()
-    semantic_acceptance = bool(spec_review and spec_review['status']=='resolved'
-        and spec_review['action']=='continue' and spec_review['author']=='Principal'
-        and accepted(conn,task.id,'spec_review'))
-    def bound_message(row):
-        ctx = json.loads(row['context']); message_id = str((ctx.get('source') or {}).get('message_id') or '')
-        return bool(scope and message_id and message_id in scope.get('source','')
-            and scope.get('authorization_message') == ctx.get('owner_guidance'))
-    receipt = next((row for row in receipts if bound_message(row) or _production_guidance_intent(
-        json.loads(row['context']).get('owner_guidance') or '') is not None), None)
-    if not receipt:
-        return None
-    if receipt['status'] != 'resolved' or receipt['author'] != 'Principal' or receipt['action'] not in {'continue','changes'}:
-        return False
-    context = json.loads(receipt['context'])
-    source = context.get('source') or {}
-    payload = json.loads(receipt['payload'])
-    text = context.get('owner_guidance') or ''
-    expected_id = 'dec_' + hashlib.sha256(_json([task.id,source]).encode()).hexdigest()[:24]
-    if payload.get('decision_id') != expected_id or not source.get('actor') or not source.get('message_id'):
-        return False
-    comment = conn.execute('SELECT author,body FROM task_comments WHERE id=? AND task_id=?',
-                           (payload.get('comment_id'),task.id)).fetchone()
-    if not comment or comment['author'] != source['actor'] or comment['body'] != text:
-        return False
+def _owner_production_destination(conn, task, scope):
+    """INTENT_DESTINATION_20260923 (ordem do Maikol: "Vcs tem que entender pela intenção"): o destino é a intenção do dono,
+    lida por quem escreve a spec e aceita pelo Principal. O runtime não interpreta texto; confere só que a spec atual tem
+    destino produção, que esse destino foi aceito e que toda orientação do dono recebida durante a spec atual passou pelo
+    Principal com `continue`. Orientação pendente, ou com `changes`, pede spec nova. Orientação só bloqueia, nunca autoriza."""
     if not scope or scope.get('environment') != 'production' or scope.get('verification_operation') != 'deploy':
         return False
-    revision = context.get('received_instruction_revision')
-    if revision is None:  # Receipts persisted before revision binding was explicit.
-        previous = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='instruction_updated' AND id<? ORDER BY id DESC LIMIT 1",
-                                (task.id,receipt['receipt_id'])).fetchone()
-        revision = json.loads(previous['payload']).get('revision',0) if previous else 0
-    if revision != task.instruction_revision:
+    from hermes_cli.nfos_principal_review import accepted
+    if not accepted(conn, task.id, 'spec_review'):
         return False
-    if semantic_acceptance and bound_message(receipt):
-        return True
-    if not _production_guidance_intent(text):
-        return False
-    original = context.get('received_destination')
-    if 'received_destination' not in context:
-        spec = conn.execute("SELECT content FROM nfos_artifacts WHERE task_id=? AND kind='spec' AND revision=?",
-                            (task.id,receipt['spec_revision'])).fetchone()
-        original = json.loads(spec['content']).get('delivery_destination') if spec else None
-    if original and all(original.get(key) == scope.get(key) for key in ('environment','target','verification_operation')):
-        return True
-    # A newly accepted spec may bind an early instruction or an HML -> production change.
-    # It must cite this exact authenticated message, not worker or Principal prose.
-    return bool((original is None or original.get('environment') == 'hml')
-        and get_workflow(conn,task.id)['spec_revision'] > receipt['spec_revision']
-        and re.search(r'(?<![\w-])'+re.escape(str(source['message_id']))+r'(?![\w-])', scope.get('source',''))
-        and scope.get('authorization_message') == text)
+    current = get_workflow(conn, task.id)['spec_revision']
+    guidance = conn.execute(
+        "SELECT d.status,d.action,d.author,d.spec_revision FROM task_events e JOIN nfos_decisions d "
+        "ON d.id=json_extract(e.payload,'$.decision_id') AND d.task_id=e.task_id "
+        "WHERE e.task_id=? AND e.kind='nfos_principal_requested' AND json_extract(e.payload,'$.owner_guidance')=1",
+        (task.id,)).fetchall()
+    for row in guidance:
+        if row['status'] != 'resolved':
+            return False
+        if row['spec_revision'] >= current and not (row['author'] == 'Principal' and row['action'] == 'continue'):
+            return False
+    return True
 
 
 def _project_delivery_environment(conn, task_id):
@@ -4535,9 +4310,9 @@ def _project_delivery_environment(conn, task_id):
         return 'production'
 
 
-def _delivery_environment_for_db(db_path, body=None):
+def _delivery_environment_for_db(db_path, destination=None):
     """DELIVERY_ENV_20260911: ambiente e rota do projeto do board (para o show).
-    URGENT_PRODUCTION_20260923: com o corpo do card, pedido urgente do owner troca a rota para produção."""
+    INTENT_DESTINATION_20260923: o destino gravado na spec pela intenção do dono pode levar a rota a produção."""
     try:
         from hermes_cli.nfos_runtime import project_config, delivery_route
         slug = Path(str(db_path)).resolve().parent.name if db_path else None
@@ -4545,7 +4320,7 @@ def _delivery_environment_for_db(db_path, body=None):
         if not cfg:
             from hermes_cli.kanban_db import get_current_board
             cfg = project_config(get_current_board())
-        return delivery_route(cfg or {}, body=body)
+        return delivery_route(cfg or {}, destination=destination)
     except Exception:
         return None
 
@@ -4694,9 +4469,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             if review_only(scope) and operation != 'pr':
                 raise WorkflowError('This delivery ends at the review PR; merge, homolog and deploy are outside its scope')
             if operation in {'merge','deploy'} and _project_delivery_environment(conn,task_id)=='hml':  # DELIVERY_ENV_20260911
-                order = _owner_guidance_production_order(conn,task,scope)
-                if not (order if order is not None else _express_production_order(task.body)):
-                    raise WorkflowError('This project delivers in HML: staging PR, HML deploy and HML readback close the card. Production (merge or deploy on main) only with the owner express order in the card body or authenticated guidance for the current instruction and destination')
+                if not _owner_production_destination(conn,task,scope):  # INTENT_DESTINATION_20260923
+                    raise WorkflowError('This project delivers in HML: staging PR, HML deploy and HML readback close the card. Production (merge or deploy on main) needs the current spec destination set to production from the owner intent, accepted by the Principal, with every later owner guidance already judged by the Principal')
             if _owner_mode():  # RECORD_MODE_20260911: o runtime registra a publicação (task, run, operação, alvo, SHA) e não conduz
                 preparation=_record_mode_effect_checks(conn,task_id,candidate)
             else:
@@ -5066,8 +4840,8 @@ def main():
             except Exception:
                 pass
             result['credentials']=_credentials_hint(args.db)  # BLOCK_LESS6_20260910
-            _card=_kb().get_task(conn,args.task)  # URGENT_PRODUCTION_20260923: a rota considera o pedido urgente deste card
-            result['delivery_environment']=_delivery_environment_for_db(args.db,body=_card.body if _card else None)  # DELIVERY_ENV_20260911
+            _dest=json.loads(result['spec']['content']).get('delivery_destination') if result['spec'] else None  # INTENT_DESTINATION_20260923
+            result['delivery_environment']=_delivery_environment_for_db(args.db,destination=_dest)  # DELIVERY_ENV_20260911
             result['continuation']=continuation_links(conn,args.task)  # RECORD_CONTINUATION_20260911
             try:  # RESULT_PROBE_20260911: medições, tentativas e nota de debug
                 _st=(json.loads(result['workflow']['state_json'] or '{}') or {}) if result['workflow'] else {}
