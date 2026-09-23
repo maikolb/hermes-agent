@@ -4278,24 +4278,132 @@ _PRODUCTION_ORDER_RX = re.compile(  # DELIVERY_ENV_20260911
     r"\W{0,24}(em|para|pra|na|no|to|in|on)?\W{0,12}(produ[cç][aã]o|\bprod\b|\bprd\b|production|\bmain\b)", re.I)
 
 
-def _express_production_order(text):
-    """DELIVERY_ENV_20260911: ordem expressa do owner para produção no corpo do card (imperativo + produção), não menção descritiva."""
-    return bool(_PRODUCTION_ORDER_RX.search(str(text or '')))
+# OWNER_PHRASING_20260923: o owner pede produção no português do dia a dia ("arruma isso urgente em produção",
+# "Suba esse específico para produção", "arrume em hml e produção também"). A lista acima não tinha esses verbos e só
+# aceitava pontuação entre verbo e destino, então card urgente de projeto HML travava aqui pedindo a ordem que já estava no corpo.
+_PRODUCTION_WORD = r"(?:produ[cç][aã]o|prod|prd|production)\b"
+_OWNER_PRODUCTION_RX = (
+    re.compile(r"\b(?P<verb>arrum(?:a|e|em|ar)|corrig(?:e|ir)|corrij(?:a|am)|consert(?:a|e|em|ar)|ajust(?:a|e|em|ar)|"
+               r"implement(?:a|e|em|ar)|apli(?:ca|que|quem|car)|coloc(?:a|ar)|coloqu(?:e|em)|bot(?:a|e|em|ar)|jog(?:a|ar)|"
+               r"jogu(?:e|em)|mand(?:a|e|em|ar)|lev(?:a|e|em|ar)|resolv(?:e|a|am|er)|sobe|sub(?:a|am|ir)|publi(?:ca|que|quem|car)|"
+               r"liber(?:a|e|em|ar)|promov(?:a|e|am|er)|integr(?:a|e|em|ar)|merge(?:ia|ar)?|deploy(?:a|ar)?)\b"
+               r"[^.!?;\n]{0,60}?\b(?P<prep>em|para|pra|na|no)\s+"
+               r"(?:(?:hml|homologa[cç][aã]o|staging)\s+e\s+(?:em\s+|na\s+|no\s+)?)?" + _PRODUCTION_WORD, re.I),
+    re.compile(r"\b(?:direto|diretamente)\s+(?P<prep>para|pra|em|na|no)\s+" + _PRODUCTION_WORD, re.I),
+    re.compile(r"\b(?:tem que|tem de|precisa|deve)\s+(?:estar|ir|ficar|subir|entrar|rodar)\s+(?P<prep>em|para|pra|na|no)\s+"
+               + _PRODUCTION_WORD, re.I),
+)
+_NEGATED_BEFORE = re.compile(r"\b(?:n[aã]o|nunca|jamais|sem|not|never)\s+(?:\w+\s+)?$", re.I)
+_HML_ONLY = re.compile(r"\b(?:s[oó]|somente|apenas|only)\s+(?:em\s+|no\s+|na\s+)?(?:hml|homologa[cç][aã]o|staging)\b", re.I)
+_HUMAN_ENVELOPE = re.compile(r"\[[^\[\]|\n]{1,80}\|\d{3,}\]")
+_CARD_SECTION = r'(?:Original attachments:|Decis[aã]o do Principal:|Orientação do proprietário \([^)\n]*\):|Lineage:|Linhagem:)'
+_CARD_SECTION_RX = re.compile(r'^[ \t]*' + _CARD_SECTION, re.M | re.I)
+_OWNER_GUIDANCE_SECTION = re.compile(r"^[ \t]*Orientação do proprietário \([^)\n]*\):\n(.*?)(?=^[ \t]*" + _CARD_SECTION + r"|\Z)", re.S | re.M | re.I)
+_QUOTED_REPLY = re.compile(r"\[(?:Replied-to|Replying to)[^\]]*\]", re.I)
+_PENDING_AUTHORIZATION = re.compile(
+    r'\b(?:se|caso|quando|ap[oó]s|depois|at[eé]|aguard\w*)\b[^.!?;]{0,120}'
+    r'\b(?:aprov\w*|autoriz\w*|aval|confirma[cç][aã]o|libera[cç][aã]o)\b', re.I)
 
 
-def _production_guidance_intent(text):
+def _human_text_sections(body):
+    """OWNER_PHRASING_20260923: o que uma pessoa escreveu no card: a mensagem depois do envelope [Nome|id] do canal e as
+    orientações do proprietário anexadas. Texto do Principal, anexos, linhagem e resposta citada ficam de fora."""
+    body = str(body or '').replace('\r\n', '\n').replace('\r', '\n')
+    original = _CARD_SECTION_RX.split(body, maxsplit=1)[0]
+    envelopes = list(_HUMAN_ENVELOPE.finditer(original))
+    parts = [_QUOTED_REPLY.sub(' ', original[m.end():envelopes[i + 1].start() if i + 1 < len(envelopes) else len(original)])
+             for i, m in enumerate(envelopes)]
+    return parts + [_QUOTED_REPLY.sub(' ', m.group(1)) for m in _OWNER_GUIDANCE_SECTION.finditer(body)]
+
+
+def _human_text(body):
+    return '\n\n'.join(_human_text_sections(body))
+
+
+def _owner_production_phrasing(text):
+    """OWNER_PHRASING_20260923: pedido de produção na fala do owner; pergunta, negação, 'só em hml', substantivo
+    ('o ajuste em produção') e finalidade ('pra subir o número em prod') não contam como ordem."""
+    for rx in _OWNER_PRODUCTION_RX:
+        pos = 0
+        while (m := rx.search(text, pos)):
+            pos = m.start() + 1  # a refused match must not hide an order that starts inside it
+            before = text[:m.start()]
+            tail = re.search(r'[.!?;\n]', text[m.end():])
+            if tail and tail.group(0) == '?':
+                continue
+            if _NEGATED_BEFORE.search(before) or _NEGATED_BEFORE.search(text[m.start():m.start('prep')]):
+                continue
+            verb = (m.groupdict().get('verb') or '').lower()
+            if verb and re.search(r'\b(?:o|a|os|as|um|uma|esse|essa|este|esta|do|da|seu|sua|meu|minha|nosso|nossa)\s+$', before, re.I):
+                continue
+            if verb.endswith('r') and re.search(r'\b(?:pra|para|de)\s+$', before, re.I):
+                continue
+            start = max(text.rfind(c, 0, m.start()) for c in '.!?;\n') + 1
+            sentence = text[start:m.end() + (tail.start() if tail else len(text))]
+            hml_only = _HML_ONLY.search(sentence)
+            if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', sentence[:hml_only.start()], re.I):
+                continue
+            return True
+    return False
+
+
+def _express_production_order(text, *, human=False):
+    """DELIVERY_ENV_20260911: ordem expressa do owner para produção no corpo do card (imperativo + produção), não menção descritiva.
+    OWNER_PHRASING_20260923: a fala do dia a dia só conta no texto escrito por pessoa; human=True quando o texto inteiro já é
+    a orientação do owner."""
+    text = str(text or '')
+    sections = [text] if human else _human_text_sections(text)
+    # Legacy unwrapped requests retain their narrow imperative grammar, but never
+    # consume appended Principal/attachment sections as authorization.
+    if not sections:
+        scoped = _CARD_SECTION_RX.split(text.replace('\r\n', '\n'), maxsplit=1)[0]
+        return _production_guidance_intent(scoped, everyday=False) is True
+    intent = None
+    for section in sections:
+        current = _production_guidance_intent(section)
+        if current is not None:
+            intent = current
+    return intent is True
+
+
+def _production_guidance_intent(text, *, everyday=True):
     """Return an explicit destination decision, or None for unrelated guidance."""
     production = r'\b(produ[cç][aã]o|production|prod|prd|main)\b'
-    for clause in re.split(r'[,;.!?\n]', text):
-        if re.search(production, clause, re.I) and re.search(r'\b(n[aã]o|not|never)\b', clause, re.I):
-            return False
+    intent = None
+    for clause in re.findall(r'[^.!?;]+[.!?;]?', _QUOTED_REPLY.sub(' ', text)):
+        if re.search(production, clause, re.I) and _PENDING_AUTHORIZATION.search(clause):
+            intent = False
+            continue
         hml_only = re.search(r'\b(s[oó]|somente|apenas|only)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', clause, re.I)
         if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', clause[:hml_only.start()], re.I):
-            return False
-    if _express_production_order(text) or re.search(
-            r'\b(direto|diretamente)\s+(para|pra|em)\s+(produ[cç][aã]o|production|prod|prd)\b', text, re.I):
-        return True
-    return None
+            intent = False
+            continue
+        # Negation of an observed defect condition is not a prohibition on its
+        # corrective action. An approval condition above is never discharged here.
+        directive = re.sub(r'\bse\b[^,;.!?]*,', ' ', clause, flags=re.I)
+        directive = re.sub(r'\bn[aã]o\s+(?:[eé]\s+)?(?:s[oó]|somente|apenas)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', ' ', directive, flags=re.I)
+        if clause.rstrip().endswith('?'):
+            continue
+        # An inserted adverbial phrase must not detach a long prohibition from
+        # its verb. Other comma/newline-delimited actions keep their own negation.
+        directive = re.sub(r',\s*(?:sob|sem|com|de|em|por)\b[^,.!?;\n]*,', ' ', directive, flags=re.I)
+        patterns = (_PRODUCTION_ORDER_RX,) + (_OWNER_PRODUCTION_RX if everyday else ())
+        spans = {(m.start(), m.end()): m for rx in patterns for m in rx.finditer(directive)}
+        # A nested destination phrase cannot restart the scope of its enclosing
+        # command and turn a refused imperative into an authorization.
+        candidates = sorted((m for (start, end), m in spans.items()
+                             if not any(outer_start < start and outer_end == end
+                                        for outer_start, outer_end in spans)),
+                            key=lambda m: (m.end(), m.start()))
+        for candidate in candidates:
+            start = max(directive.rfind(c, 0, candidate.start()) for c in ',\n') + 1
+            scoped = directive[start:candidate.end()]
+            if re.search(r'\b(n[aã]o|nunca|jamais|sem|not|never)\b', scoped, re.I):
+                intent = False
+                continue
+            if _PRODUCTION_ORDER_RX.search(scoped) or (everyday and _owner_production_phrasing(scoped)):
+                intent = True
+    return intent
 
 
 def _owner_guidance_production_order(conn, task, scope):
