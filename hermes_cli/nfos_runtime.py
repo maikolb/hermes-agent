@@ -37,12 +37,22 @@ ROUTES = {  # DELIVERY_ENV_20260911
     'dev': 'Deliver on the dev environment (branch and deploy the project uses); read it back; report; kanban_complete. No staging, no production.',
     'test': 'Deliver on the TEST environment the project uses; read it back; report; kanban_complete. No production.',
 }
+# URGENT_PRODUCTION_20260923 (ordem do Maikol): pedido urgente do owner vai para produção em qualquer projeto. Só o delta
+# deste card sobe para main; a esteira de staging (trabalho só homologado) não é promovida junto.
+URGENT_PRODUCTION_ROUTE = ('Urgent owner request: deliver in production. Branch from main; PR to main with only this card\'s change '
+                           '(CI green); merge; automatic production deploy; production readback; report; kanban_complete. '
+                           'Do not promote the staging branch.')
 
 
-def delivery_route(project):
-    """DELIVERY_ENV_20260911: ambiente de entrega padrão do projeto e a rota do card de código (config kanban.delivery.projects)."""
+def delivery_route(project, body=None):
+    """DELIVERY_ENV_20260911: ambiente de entrega padrão do projeto e a rota do card de código (config kanban.delivery.projects).
+    URGENT_PRODUCTION_20260923: com o corpo do card, pedido urgente do owner leva a rota para produção em qualquer projeto."""
     project = project or {}
     env = str(project.get('delivery_environment') or 'production').strip().lower()
+    if env != 'production' and body:
+        from hermes_cli.nfos_delivery import _owner_urgent_production
+        if _owner_urgent_production(body):
+            return {'environment': 'production', 'staging_branch': None, 'urgent': True, 'route': URGENT_PRODUCTION_ROUTE}
     staging = str(project.get('staging_branch') or '').strip()
     key = env
     if env == 'production' and not staging:
@@ -800,6 +810,8 @@ use pr when the approved phase ends at a review PR with CI on the exact candidat
 deploy; reconcile its pr effect with candidate, tree, pull_request URL and ci_status.
 The Principal must validate that destination against the user's latest request.
 TEST, HML, staging, preview and production are all valid requested destinations.
+An urgent owner request (urgente, prioridade máxima, asap) is a production request
+in any project unless the owner restricts it to HML/TEST; show carries that route.
 Never promote to www/production merely to close a card. Keep the existing PR and
 merge workflow. Confirm the chosen operation at the exact target with candidate,
 tree, artifact, readback and behavior_evidence, then save the report and obtain
@@ -850,8 +862,10 @@ environment, exact target, authorization source/message and verification_operati
 (homolog for the tested final target; deploy for requested integrated promotion;
 pr for a phase that ends at the review PR with CI, without homolog, merge or deploy).
 Do not expand TEST/HML/preview scope into production, or treat a Kanban closure
-problem as authorization for unrelated product or runtime maintenance. Resolve
-closure through the approved destination and reuse existing evidence. Internal
+problem as authorization for unrelated product or runtime maintenance. An urgent
+owner request (urgente, prioridade máxima, asap) is itself a production request in
+any project unless the owner restricts it to HML/TEST; only that card's change goes
+to main. Resolve closure through the approved destination and reuse existing evidence. Internal
 spec/final review is your responsibility and requires no new human confirmation. A `human` resolution is valid only with human_question (ending with ?) and human_to in the decide JSON; a technical pause is `continue` or `changes`, never `human`.
 Escalate only an indispensable decision, permission or access you cannot resolve
 within the authorized scope. Never weaken evidence or expand scope to fake success.

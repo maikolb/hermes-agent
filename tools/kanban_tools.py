@@ -415,15 +415,16 @@ def _goal_judge_available() -> bool:
     return client is not None and bool(model)
 
 
-def _delivery_environment_note():
-    """DELIVERY_ENV_20260911: o juiz de fechamento julga contra o ambiente de entrega do projeto, não contra produção por padrão."""
+def _delivery_environment_note(body=None):
+    """DELIVERY_ENV_20260911: o juiz de fechamento julga contra o ambiente de entrega do projeto, não contra produção por padrão.
+    URGENT_PRODUCTION_20260923: pedido urgente do owner no corpo do card leva o julgamento para produção."""
     try:
         from hermes_cli.kanban_db import get_current_board
         from hermes_cli.nfos_runtime import project_config, delivery_route
         cfg = project_config(get_current_board())
         if not cfg:
             return ""
-        route = delivery_route(cfg)
+        route = delivery_route(cfg, body=body)
         return ("\n\nDelivery environment for this project: " + route["environment"].upper() + ". Delivered and read back in "
                 + route["environment"].upper() + " is complete; environments beyond it are out of scope unless the card body orders them.")
     except Exception:
@@ -446,7 +447,8 @@ def _stamp_delivery_record(conn, tid: str, metadata):
             return metadata
         from hermes_cli.kanban_db import get_current_board
         from hermes_cli.nfos_runtime import project_config, delivery_route
-        route = delivery_route(project_config(get_current_board()) or {})
+        card = conn.execute("SELECT body FROM tasks WHERE id=?", (tid,)).fetchone()  # URGENT_PRODUCTION_20260923
+        route = delivery_route(project_config(get_current_board()) or {}, body=card[0] if card else None)
         effects = []
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_effects'").fetchone():
             for row in conn.execute("SELECT operation, target, candidate, status FROM nfos_effects WHERE task_id=? ORDER BY updated_at", (tid,)):
@@ -479,7 +481,7 @@ def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
     reason = ""
     try:
         verdict, reason, _, _, _ = judge_goal(
-            goal=f"{task.title}\n\n{task.body or ''}".strip() + _delivery_environment_note(),  # DELIVERY_ENV_20260911
+            goal=f"{task.title}\n\n{task.body or ''}".strip() + _delivery_environment_note(task.body),  # DELIVERY_ENV_20260911
             last_response=evidence.strip(),
         )
     except Exception as judge_exc:

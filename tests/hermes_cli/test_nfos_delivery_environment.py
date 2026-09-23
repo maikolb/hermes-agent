@@ -241,3 +241,136 @@ def test_begin_effect_preserves_authorized_owner_corpus(board, monkeypatch, rout
             delivery.resolve_decision(conn, receipt['decision_id'], action='continue', answer='Continue no escopo autorizado', author='Principal')
         effect = delivery.begin_effect(conn, task.id, task.current_run_id, operation='merge', target=REPO+'/tree/main', candidate=SHA)
         assert effect['execute'] is True
+
+
+# URGENT_PRODUCTION_20260923 (ordem do Maikol): pedido urgente do owner vai para produção em qualquer projeto.
+URGENT_OWNER_REQUESTS = [
+    '#deepseek veja e arrume urgente',
+    'prioridade máxima nisso aqui! Urgente',
+    'crie o Tenant e gere cadastro desses dois emails como gerentes com senha temporária o mais rápido possível',
+    'prioridade máxima! Parece que deu erro geral na plataforma. Investigue e arrume asap. Produção está instável',
+    'Esse card é urgente porra. não temos uma rota diferente para casos urgentes?',
+]
+# Urgência negada, destino restrito, aprovação pendente ou pergunta mantêm a rota do projeto.
+URGENCY_WITHOUT_PRODUCTION = [
+    'não é urgente, arrume em hml',
+    'urgente, mas só em hml por enquanto',
+    'urgente: não suba para produção ainda',
+    'urgente, mas só publique em produção depois da minha aprovação',
+    'sem urgência, faça quando der',
+    'temos casos urgentes?',
+]
+HML_PROJECT = {'delivery_environment': 'hml', 'staging_branch': 'staging', 'enabled': True}
+
+
+@pytest.mark.parametrize('text', URGENT_OWNER_REQUESTS)
+def test_urgent_owner_request_goes_to_production_in_any_project(text):
+    assert delivery._express_production_order(_request_body(text))
+    assert delivery._production_guidance_intent(text) is True
+    for env in ('hml', 'dev', 'test'):
+        route = runtime.delivery_route({'delivery_environment': env, 'staging_branch': 'staging'}, body=_request_body(text))
+        assert route['environment'] == 'production' and route['route'].startswith('Urgent owner request')
+        assert "only this card's change" in route['route'] and 'Do not promote the staging branch' in route['route']
+
+
+@pytest.mark.parametrize('text', URGENCY_WITHOUT_PRODUCTION)
+def test_denied_restricted_or_pending_urgency_keeps_the_project_route(text):
+    assert not delivery._express_production_order(_request_body(text))
+    assert delivery._production_guidance_intent(text) is not True
+    assert runtime.delivery_route(HML_PROJECT, body=_request_body(text))['environment'] == 'hml'
+
+
+def test_urgency_needs_a_person_and_leaves_production_projects_unchanged():
+    agent = 'Card urgente: corrigir o login.\n\nOriginal attachments:\n[]'
+    assert not delivery._express_production_order(agent)
+    assert runtime.delivery_route(HML_PROJECT, body=agent)['environment'] == 'hml'
+    principal = _request_body('arrume o botão') + '\n\nDecisão do Principal:\nÉ urgente, publique em produção.'
+    assert runtime.delivery_route(HML_PROJECT, body=principal)['environment'] == 'hml'
+    urgent = _request_body('#deepseek veja e arrume urgente')
+    production = {'delivery_environment': 'production', 'staging_branch': 'staging'}
+    assert runtime.delivery_route(production, body=urgent) == runtime.delivery_route(production)
+
+
+def test_latest_person_section_decides_urgency():
+    restricted_then_urgent = (_request_body('arrume isso só em hml')
+                              + '\n\nOrientação do proprietário (dec_1):\nAgora é urgente, o cliente está parado'
+                              + '\n\nDecisão do Principal:\nCHANGES: seguir a orientação.')
+    assert runtime.delivery_route(HML_PROJECT, body=restricted_then_urgent)['environment'] == 'production'
+    assert delivery._express_production_order(restricted_then_urgent)
+    urgent_then_restricted = (_request_body('#deepseek veja e arrume urgente')
+                              + '\n\nOrientação do proprietário (dec_2):\nsó em hml por enquanto'
+                              + '\n\nDecisão do Principal:\nCHANGES: seguir a orientação.')
+    assert runtime.delivery_route(HML_PROJECT, body=urgent_then_restricted)['environment'] == 'hml'
+    assert not delivery._express_production_order(urgent_then_restricted)
+
+
+def test_show_closing_judge_and_delivery_record_follow_the_urgent_route(tmp_path, monkeypatch):
+    from tools import kanban_tools
+    monkeypatch.setattr(runtime, 'project_config', lambda board, config=None: dict(HML_PROJECT, board=board))
+    monkeypatch.setattr(kb, 'get_current_board', lambda: 'dovcrm')
+    db = tmp_path / 'dovcrm' / 'kanban.db'
+    urgent, plain = _request_body('#deepseek veja e arrume urgente'), _request_body('arrume o botão de salvar')
+    assert delivery._delivery_environment_for_db(db, body=urgent)['environment'] == 'production'
+    assert delivery._delivery_environment_for_db(db, body=plain)['environment'] == 'hml'
+    assert 'PRODUCTION' in kanban_tools._delivery_environment_note(urgent)
+    assert 'HML' in kanban_tools._delivery_environment_note(plain)
+
+
+def _card_with_owner_text(conn, board, route, text):
+    task = _code_card(conn, board, _request_body(text if route == 'body' else 'Corrigir o modal.'))
+    if route == 'guidance':
+        receipt = delivery.receive_owner_guidance(conn, task.id, text=text,
+            source={'platform': 'portal', 'actor': 'Maikol', 'message_id': 'owner-instruction-fixture'})
+        delivery.resolve_decision(conn, receipt['decision_id'], action='continue', answer='Continue no escopo autorizado', author='Principal')
+    return task
+
+
+@pytest.mark.parametrize('route', ['body', 'guidance'])
+@pytest.mark.parametrize('text', URGENT_OWNER_REQUESTS)
+def test_begin_effect_allows_production_for_urgent_owner_request(board, monkeypatch, route, text):
+    monkeypatch.setattr(runtime, 'project_config', lambda board, config=None: {'delivery_environment': 'hml', 'enabled': True})
+    with kb.connect_closing() as conn:
+        task = _card_with_owner_text(conn, board, route, text)
+        effect = delivery.begin_effect(conn, task.id, task.current_run_id, operation='merge', target=REPO+'/tree/main', candidate=SHA)
+        assert effect['execute'] is True
+
+
+@pytest.mark.parametrize('route', ['body', 'guidance'])
+@pytest.mark.parametrize('text', URGENCY_WITHOUT_PRODUCTION)
+def test_begin_effect_refuses_denied_restricted_or_pending_urgency(board, monkeypatch, route, text):
+    monkeypatch.setattr(runtime, 'project_config', lambda board, config=None: {'delivery_environment': 'hml', 'enabled': True})
+    with kb.connect_closing() as conn:
+        task = _card_with_owner_text(conn, board, route, text)
+        for operation in ('merge', 'deploy'):
+            with pytest.raises(delivery.WorkflowError, match='delivers in HML'):
+                delivery.begin_effect(conn, task.id, task.current_run_id, operation=operation, target=REPO+'/tree/main', candidate=SHA)
+        assert not conn.execute("SELECT 1 FROM nfos_effects WHERE task_id=? AND operation IN ('merge','deploy')", (task.id,)).fetchone()
+
+
+URGENCY_AUTHORIZATION_BOUNDARIES = [
+ "É urgente, mas só execute depois da minha aprovação",
+ "Urgente: publique em HML",
+ "Urgente: faça em teste",
+]
+@pytest.mark.parametrize("text",URGENCY_AUTHORIZATION_BOUNDARIES)
+def test_explicit_scope_or_pending_permission_keeps_hml(board,monkeypatch,text):
+ monkeypatch.setattr(runtime,"project_config",lambda board,config=None:{"delivery_environment":"hml","enabled":True})
+ with kb.connect_closing() as conn:
+  task=_code_card(conn,board,_request_body(text))
+  with pytest.raises(delivery.WorkflowError,match="delivers in HML"):
+   delivery.begin_effect(conn,task.id,task.current_run_id,operation="merge",target=REPO+"/tree/main",candidate=SHA)
+
+def test_latest_revocation_keeps_gate_and_route_consistent(board,monkeypatch):
+ monkeypatch.setattr(runtime,"project_config",lambda board,config=None:{"delivery_environment":"hml","enabled":True})
+ body=_request_body("arrume urgente")+"\n\nOrientação do proprietário (dec_new):\nNão é urgente, faça quando puder"
+ assert runtime.delivery_route({"delivery_environment":"hml"},body=body)["environment"]=="hml"
+ with kb.connect_closing() as conn:
+  task=_code_card(conn,board,body)
+  with pytest.raises(delivery.WorkflowError,match="delivers in HML"):
+   delivery.begin_effect(conn,task.id,task.current_run_id,operation="merge",target=REPO+"/tree/main",candidate=SHA)
+
+@pytest.mark.parametrize("text", ["Urgente: arrume isso em produção e uma cópia em HML", "Não publique em HML. Arrume urgente", "Urgente: corrija o login, não apague dados"])
+def test_urgent_route_preserves_production_and_unrelated_constraints(text):
+ body=_request_body(text)
+ assert delivery._express_production_order(body)
+ assert runtime.delivery_route({"delivery_environment":"hml"},body=body)["environment"]=="production"
