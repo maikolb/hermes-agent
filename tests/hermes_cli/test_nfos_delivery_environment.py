@@ -79,10 +79,10 @@ def test_express_production_order_is_an_imperative_not_a_mention():
 
 # OWNER_PHRASING_20260923: mensagens reais do owner nos boards (DOVCRM/Concursa) que pedem produção.
 OWNER_PRODUCTION_ORDERS = [
-    "[Maikol|996979567]\n#deepseek arruma isso urgente em produção\n\n[Replied-to video 'file_239.mp4' saved at: /tmp/v.mp4]\n\nOriginal attachments:\n[]",
-    "[Maikol|996979567]\n#deepseek ajuste o sistema de usuários da seguinte forma: Lucas e Maikol são administradores do sistema como um todo. "
+    "#deepseek arruma isso urgente em produção\n\n[Replied-to video 'file_239.mp4' saved at: /tmp/v.mp4]",
+    "#deepseek ajuste o sistema de usuários da seguinte forma: Lucas e Maikol são administradores do sistema como um todo. "
     "Temos que ter acesso à todos os tenants e tudo no sistema, porém não podemos aparecer na listagem de usuários dos Tenants. "
-    "Implemente esse ajuste urgente direto em produção e uma cópia disso em hml\n\nOriginal attachments:\n[]",
+    "Implemente esse ajuste urgente direto em produção e uma cópia disso em hml",
     "#deepseek sobe isso pra produção",
     "Suba esse específico para produção",
     "arrume em hml e produção também #deepseek",
@@ -106,15 +106,35 @@ NOT_PRODUCTION_ORDERS = [
 ]
 
 
+def _request_body(message):
+    """Corpo do card como bootstrap_card monta a partir de uma mensagem do canal."""
+    return "[Maikol|996979567]\n" + message + "\n\nOriginal attachments:\n[]"
+
+
 @pytest.mark.parametrize("text", OWNER_PRODUCTION_ORDERS)
 def test_owner_everyday_phrasing_is_a_production_order(text):
-    assert delivery._express_production_order(text)
+    assert delivery._express_production_order(_request_body(text))
     assert delivery._production_guidance_intent(text) is True
 
 
 @pytest.mark.parametrize("text", NOT_PRODUCTION_ORDERS)
 def test_questions_negations_and_mentions_are_not_production_orders(text):
-    assert not delivery._express_production_order(text)
+    assert not delivery._express_production_order(_request_body(text))
+    assert delivery._production_guidance_intent(text) is not True
+
+
+def test_everyday_phrasing_counts_only_in_text_a_person_wrote():
+    agent = "Corrigir em produção o bug de simulados em que questões de Certo/Errado aparecem sem alternativas."
+    assert not delivery._express_production_order(agent + "\n\nOriginal attachments:\n[]")
+    assert delivery._express_production_order(_request_body(agent))
+    guided = (_request_body("#deepseek, arrume isso e apresente somente em HML o resultado")
+              + "\n\nOrientação do proprietário (dec_1):\nSuba esse específico para produção"
+              + "\n\nDecisão do Principal:\nCHANGES: reabrir o card com destino production.")
+    assert delivery._express_production_order(guided)
+    principal_only = (_request_body("arrume isso só em hml")
+                      + "\n\nOrientação do proprietário (dec_2):\nveja de novo"
+                      + "\n\nDecisão do Principal:\nCHANGES: corrigir em produção depois.")
+    assert not delivery._express_production_order(principal_only)
 
 
 def test_hml_project_allows_production_with_the_owner_everyday_order(board, monkeypatch):

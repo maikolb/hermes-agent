@@ -4295,6 +4295,19 @@ _OWNER_PRODUCTION_RX = (
 )
 _NEGATED_BEFORE = re.compile(r"\b(?:n[aã]o|nunca|jamais|sem|not|never)\s+(?:\w+\s+)?$", re.I)
 _HML_ONLY = re.compile(r"\b(?:s[oó]|somente|apenas|only)\s+(?:em\s+|no\s+|na\s+)?(?:hml|homologa[cç][aã]o|staging)\b", re.I)
+_HUMAN_ENVELOPE = re.compile(r"\[[^\[\]|\n]{1,80}\|\d{3,}\]")
+_OWNER_GUIDANCE_SECTION = re.compile(r"\n\nOrientação do proprietário \([^)\n]*\):\n(.*?)(?=\n\nDecisão do Principal:|\Z)", re.S)
+_QUOTED_REPLY = re.compile(r"\[(?:Replied-to|Replying to)[^\]]*\]", re.I)
+
+
+def _human_text(body):
+    """OWNER_PHRASING_20260923: o que uma pessoa escreveu no card: a mensagem depois do envelope [Nome|id] do canal e as
+    orientações do proprietário anexadas. Texto do Principal, anexos, linhagem e resposta citada ficam de fora."""
+    original = body.split('\n\nOriginal attachments:', 1)[0]
+    envelopes = list(_HUMAN_ENVELOPE.finditer(original))
+    parts = [_QUOTED_REPLY.sub(' ', original[m.end():envelopes[i + 1].start() if i + 1 < len(envelopes) else len(original)])
+             for i, m in enumerate(envelopes)]
+    return '\n'.join(parts + [m.group(1) for m in _OWNER_GUIDANCE_SECTION.finditer(body)])
 
 
 def _owner_production_phrasing(text):
@@ -4324,12 +4337,14 @@ def _owner_production_phrasing(text):
     return False
 
 
-def _express_production_order(text):
-    """DELIVERY_ENV_20260911: ordem expressa do owner para produção no corpo do card (imperativo + produção), não menção descritiva."""
+def _express_production_order(text, *, human=False):
+    """DELIVERY_ENV_20260911: ordem expressa do owner para produção no corpo do card (imperativo + produção), não menção descritiva.
+    OWNER_PHRASING_20260923: a fala do dia a dia só conta no texto escrito por pessoa; human=True quando o texto inteiro já é
+    a orientação do owner."""
     text = str(text or '')
     if any(not _NEGATED_BEFORE.search(text[:m.start()]) for m in _PRODUCTION_ORDER_RX.finditer(text)):
         return True
-    return _owner_production_phrasing(text)
+    return _owner_production_phrasing(text if human else _human_text(text))
 
 
 def _production_guidance_intent(text):
@@ -4341,7 +4356,7 @@ def _production_guidance_intent(text):
         hml_only = re.search(r'\b(s[oó]|somente|apenas|only)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', clause, re.I)
         if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', clause[:hml_only.start()], re.I):
             return False
-    if _express_production_order(text) or re.search(
+    if _express_production_order(text, human=True) or re.search(
             r'\b(direto|diretamente)\s+(para|pra|em)\s+(produ[cç][aã]o|production|prod|prd)\b', text, re.I):
         return True
     return None
