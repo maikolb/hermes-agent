@@ -4376,8 +4376,7 @@ def _production_guidance_intent(text, *, everyday=True):
             continue
         hml_only = re.search(r'\b(s[oó]|somente|apenas|only)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', clause, re.I)
         if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', clause[:hml_only.start()], re.I):
-            intent = False
-            continue
+            return False
         # Negation of an observed defect condition is not a prohibition on its
         # corrective action. An approval condition above is never discharged here.
         directive = re.sub(r'\bse\b[^,;.!?]*,', ' ', clause, flags=re.I)
