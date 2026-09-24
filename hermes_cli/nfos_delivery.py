@@ -334,9 +334,13 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
         raise WorkflowError('A request needs its original platform/chat/topic/message identity')
     if not text.strip() and not attachments:
         raise WorkflowError('A request needs text or attachments')
-    # Temporary owner opt-in, scoped to this preserved Telegram request.
+    # Worker opt-ins are scoped to this preserved Telegram request.
     # Keep the original text and the configured project defaults unchanged.
     if (source.get('platform') == 'telegram'
+            and re.search(r'(?<!\S)#luna(?![\w-])', text, re.IGNORECASE)):
+        project = dict(project, model='gpt-5.6-luna',
+                       provider='openai-codex', reasoning_effort='high')
+    elif (source.get('platform') == 'telegram'
             and re.search(r'(?<!\S)#deepseek(?![\w-])', text, re.IGNORECASE)):
         from hermes_cli.nfos_principal_review import settings
         if settings().get('deepseek_worker_trial') is True:
@@ -3356,7 +3360,8 @@ def create_continuation(conn, parent_id, *, title=None, body=None, requester='wo
             return {'task_id': child.id, 'continuation_of': parent_id, 'priority': child.priority, 'status': child.status, 'existing': True}
         _child_kind = 'scratch' if (parent.workspace_kind == 'scratch' and parent.delivery_type != 'code') else 'worktree'  # REWORK_IDEMPOTENT_20260911
         trial_model = {}
-        if parent.provider_override == 'opencode-go' and parent.model_override == 'deepseek-v4.1-flash':
+        if (parent.provider_override, parent.model_override) in {
+                ('opencode-go', 'deepseek-v4.1-flash'), ('openai-codex', 'gpt-5.6-luna')}:
             trial_model = dict(model_override=parent.model_override,
                                provider_override=parent.provider_override,
                                reasoning_effort=parent.reasoning_effort)
