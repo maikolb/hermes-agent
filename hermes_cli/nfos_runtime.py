@@ -33,16 +33,28 @@ ROUTES = {  # DELIVERY_ENV_20260911
     'production-direct': ('Branch from main; PR to main (CI green); merge; automatic production deploy; production readback; report; '
                           'kanban_complete.'),
     'hml': ('Branch from main; PR to the staging branch {staging} (CI green); merge; HML deploy; HML readback; report; kanban_complete. '
-            'Delivered in HML is delivered. Production (merge or deploy on main) only when the card body carries the owner order.'),
+            'Delivered in HML is delivered. Production (merge or deploy on main) when the owner wants it, as you understand his '
+            'intent; record it in delivery_destination for the Principal.'),
     'dev': 'Deliver on the dev environment (branch and deploy the project uses); read it back; report; kanban_complete. No staging, no production.',
     'test': 'Deliver on the TEST environment the project uses; read it back; report; kanban_complete. No production.',
 }
+# INTENT_DESTINATION_20260923 (ordem do Maikol): quando a spec leva o destino a produção num projeto que não entrega em
+# produção, só o delta deste card sobe para main; a esteira de staging (trabalho só homologado) não é promovida junto.
+OWNER_PRODUCTION_ROUTE = ('Owner production request: deliver in production. Branch from main; PR to main with only this card\'s '
+                          'change (CI green); merge; automatic production deploy; production readback; report; kanban_complete. '
+                          'Do not promote the staging branch.')
 
 
-def delivery_route(project):
-    """DELIVERY_ENV_20260911: ambiente de entrega padrão do projeto e a rota do card de código (config kanban.delivery.projects)."""
+def delivery_route(project, destination=None):
+    """DELIVERY_ENV_20260911: ambiente de entrega padrão do projeto e a rota do card de código (config kanban.delivery.projects).
+    INTENT_DESTINATION_20260923: o destino gravado na spec pela intenção do dono leva a rota a produção em qualquer projeto;
+    nada aqui interpreta texto."""
     project = project or {}
     env = str(project.get('delivery_environment') or 'production').strip().lower()
+    if env != 'production' and isinstance(destination, dict) and destination.get('environment') == 'production':
+        return {'environment': 'production', 'staging_branch': None, 'owner_production': True, 'route': OWNER_PRODUCTION_ROUTE}
+    if isinstance(destination, dict) and destination.get("environment") in {"production", "hml", "test", "dev"}:
+        env = destination["environment"]
     staging = str(project.get('staging_branch') or '').strip()
     key = env
     if env == 'production' and not staging:
@@ -802,6 +814,11 @@ use pr when the approved phase ends at a review PR with CI on the exact candidat
 deploy; reconcile its pr effect with candidate, tree, pull_request URL and ci_status.
 The Principal must validate that destination against the user's latest request.
 TEST, HML, staging, preview and production are all valid requested destinations.
+Read the owner's destination the way a person would, from his whole request and
+later guidance, never from keywords: when he wants it urgent or in production, the
+destination is production in any project, unless he restricts it, makes it wait for
+his approval or withdraws the urgency. Record that in delivery_destination; show
+then carries the production route.
 Never promote to www/production merely to close a card. Keep the existing PR and
 merge workflow. Confirm the chosen operation at the exact target with candidate,
 tree, artifact, readback and behavior_evidence, then save the report and obtain
@@ -852,8 +869,13 @@ environment, exact target, authorization source/message and verification_operati
 (homolog for the tested final target; deploy for requested integrated promotion;
 pr for a phase that ends at the review PR with CI, without homolog, merge or deploy).
 Do not expand TEST/HML/preview scope into production, or treat a Kanban closure
-problem as authorization for unrelated product or runtime maintenance. Resolve
-closure through the approved destination and reuse existing evidence. Internal
+problem as authorization for unrelated product or runtime maintenance. Judge the
+destination by the owner's intent, the way a person would, never by keywords: when
+he wants it urgent or in production, production is right in any project, unless he
+restricts it, makes it wait for his approval or withdraws the urgency; only that
+card's change goes to main. When later owner guidance changes the destination,
+answer `changes` so the spec is revised; `continue` keeps the current destination.
+Resolve closure through the approved destination and reuse existing evidence. Internal
 spec/final review is your responsibility and requires no new human confirmation. A `human` resolution is valid only with human_question (ending with ?) and human_to in the decide JSON; a technical pause is `continue` or `changes`, never `human`.
 Escalate only an indispensable decision, permission or access you cannot resolve
 within the authorized scope. Never weaken evidence or expand scope to fake success.

@@ -1,4 +1,4 @@
-"""DELIVERY_ENV_20260911: ambiente de entrega por projeto define a rota; projeto hml não vai a produção sem ordem expressa;
+"""DELIVERY_ENV_20260911: ambiente de entrega por projeto define a rota; projeto hml vai a produção pelo destino da spec (INTENT_DESTINATION_20260923);
 candidato com PR verde dispensa nova homologação; o show expõe a rota."""
 import json
 import os
@@ -71,28 +71,6 @@ def test_routes_follow_the_project_environment():
     assert runtime.delivery_route({})["environment"] == "production"
 
 
-def test_express_production_order_is_an_imperative_not_a_mention():
-    assert not delivery._express_production_order("Ambiente observado: produção, tenant sanitizado. Corrigir o modal.")
-    assert delivery._express_production_order("Depois de validar no HML, suba para produção hoje.")
-    assert delivery._express_production_order("Pode mergear em main e publicar em PRD.")
-
-
-def test_hml_project_refuses_production_merge_without_order(board, monkeypatch):
-    monkeypatch.setattr(runtime, "project_config", lambda board, config=None: {"delivery_environment": "hml", "staging_branch": "staging", "enabled": True, "board": board})
-    with kb.connect_closing() as conn:
-        task = _code_card(conn, board, "Criar produto abre diálogo nativo. Ambiente observado: produção.")
-        with pytest.raises(delivery.WorkflowError, match="delivers in HML"):
-            delivery.begin_effect(conn, task.id, task.current_run_id, operation="merge", target=REPO + "/tree/main", candidate=SHA)
-
-
-def test_hml_project_allows_production_with_the_owner_order(board, monkeypatch):
-    monkeypatch.setattr(runtime, "project_config", lambda board, config=None: {"delivery_environment": "hml", "staging_branch": "staging", "enabled": True, "board": board})
-    with kb.connect_closing() as conn:
-        task = _code_card(conn, board, "Corrigir o modal e depois subir para produção (ordem do Maikol).")
-        effect = delivery.begin_effect(conn, task.id, task.current_run_id, operation="merge", target=REPO + "/tree/main", candidate=SHA)
-        assert effect["execute"] is True
-
-
 def test_green_pr_candidate_needs_no_new_homologation(board):
     with kb.connect_closing() as conn:
         task = _code_card(conn, board, "Corrigir extração.")
@@ -100,3 +78,147 @@ def test_green_pr_candidate_needs_no_new_homologation(board):
         state = json.loads(wf["state_json"])
         state["homolog_sha"] = "c" * 40  # homologado antes do rebase; candidato atual difere
         assert delivery._delivery_candidate(conn, task.id, state) == SHA
+
+
+# INTENT_DESTINATION_20260923 (ordem do Maikol: "Vcs tem que entender pela intenção"): o destino é a intenção do dono,
+# lida pelo worker na spec e aceita pelo Principal. O runtime não interpreta texto: nenhuma frase autoriza nem bloqueia
+# produção sozinha; a orientação do dono só segura produção até o Principal julgá-la.
+HML_PROJECT = {"delivery_environment": "hml", "staging_branch": "staging", "enabled": True}
+
+
+def _hml(monkeypatch):
+    monkeypatch.setattr(runtime, "project_config", lambda board, config=None: dict(HML_PROJECT, board=board))
+
+
+def _merge(conn, task):
+    return delivery.begin_effect(conn, task.id, task.current_run_id, operation="merge", target=REPO + "/tree/main", candidate=SHA)
+
+
+def _guidance(conn, task, text, message, action=None):
+    receipt = delivery.receive_owner_guidance(conn, task.id, text=text,
+        source={"platform": "portal", "actor": "Maikol", "message_id": message})
+    if action:
+        delivery.resolve_decision(conn, receipt["decision_id"], action=action, answer="Julgado pelo Principal", author="Principal")
+    return receipt["decision_id"]
+
+
+def _revise_destination(conn, task, environment, message):
+    content = json.loads(delivery.get_spec(conn, task.id)["content"])
+    content["delivery_destination"].update(environment=environment, source="portal message_id=" + message,
+                                           authorization_message="orientação " + message)
+    delivery.save_spec(conn, task.id, task.current_run_id, content, author="worker", evidence={"source": "worker"})
+
+
+def test_hml_project_goes_to_production_when_the_spec_destination_is_production(board, monkeypatch):
+    _hml(monkeypatch)
+    with kb.connect_closing() as conn:
+        task = _code_card(conn, board, "[Maikol|996979567]\n#deepseek veja e arrume urgente", environment="production")
+        assert _merge(conn, task)["execute"] is True
+
+
+@pytest.mark.parametrize("text", [
+    "[Maikol|996979567]\nsuba para produção",
+    "[Maikol|996979567]\n#deepseek arruma isso urgente em produção",
+    "Corrigir o modal e depois subir para produção (ordem do Maikol).",
+])
+def test_card_text_never_authorizes_production_by_itself(board, monkeypatch, text):
+    _hml(monkeypatch)
+    with kb.connect_closing() as conn:
+        task = _code_card(conn, board, text, environment="hml")
+        with pytest.raises(delivery.WorkflowError, match="delivers in HML"):
+            _merge(conn, task)
+
+
+def test_pending_owner_guidance_holds_production_until_the_principal_judges_it(board, monkeypatch):
+    _hml(monkeypatch)
+    with kb.connect_closing() as conn:
+        task = _code_card(conn, board, "[Maikol|996979567]\nurgente", environment="production")
+        _guidance(conn, task, "Espera, deixa eu ver uma coisa antes", "owner-1")
+        with pytest.raises(delivery.WorkflowError, match="delivers in HML"):
+            _merge(conn, task)
+
+
+def test_guidance_the_principal_keeps_does_not_change_the_destination(board, monkeypatch):
+    _hml(monkeypatch)
+    with kb.connect_closing() as conn:
+        task = _code_card(conn, board, "[Maikol|996979567]\nurgente", environment="production")
+        _guidance(conn, task, "Mantenha as contas existentes", "owner-1", action="continue")
+        assert _merge(conn, task)["execute"] is True
+
+
+@pytest.mark.parametrize("new_environment,allowed", [("hml", False), ("production", True)])
+def test_guidance_that_changes_the_destination_needs_a_new_spec(board, monkeypatch, new_environment, allowed):
+    _hml(monkeypatch)
+    with kb.connect_closing() as conn:
+        task = _code_card(conn, board, "[Maikol|996979567]\nurgente", environment="production")
+        _guidance(conn, task, "Mudei de ideia sobre o destino", "owner-1", action="changes")
+        with pytest.raises(delivery.WorkflowError, match="delivers in HML"):
+            _merge(conn, task)
+        _revise_destination(conn, task, new_environment, "owner-1")
+        if allowed:
+            assert _merge(conn, task)["execute"] is True
+        else:
+            with pytest.raises(delivery.WorkflowError, match="delivers in HML"):
+                _merge(conn, task)
+
+
+def test_guidance_before_the_current_spec_was_already_absorbed(board, monkeypatch):
+    _hml(monkeypatch)
+    with kb.connect_closing() as conn:
+        task = _code_card(conn, board, "[Maikol|996979567]\narrume o login", environment="hml")
+        _guidance(conn, task, "Esse é urgente, vai direto pra produção", "owner-1", action="changes")
+        _revise_destination(conn, task, "production", "owner-1")
+        assert _merge(conn, task)["execute"] is True
+
+
+def test_production_destination_waits_for_the_principal_when_review_is_on(board, monkeypatch):
+    _hml(monkeypatch)
+    with kb.connect_closing() as conn:
+        task = _code_card(conn, board, "[Maikol|996979567]\nurgente", environment="hml")
+        monkeypatch.setattr(review, "settings", lambda: {"principal_validation": True})
+        _revise_destination(conn, task, "production", "owner-1")
+        with pytest.raises(delivery.WorkflowError):
+            _merge(conn, task)
+        assert not delivery._owner_production_destination(conn, kb.get_task(conn, task.id),
+                                                          json.loads(delivery.get_spec(conn, task.id)["content"])["delivery_destination"])
+
+
+def test_routes_follow_the_recorded_destination_not_the_text():
+    production = {"environment": "production", "target": REPO, "verification_operation": "deploy"}
+    for env in ("hml", "dev", "test"):
+        route = runtime.delivery_route({"delivery_environment": env, "staging_branch": "staging"}, destination=production)
+        assert route["environment"] == "production" and route["route"].startswith("Owner production request")
+        assert "only this card's change" in route["route"] and "Do not promote the staging branch" in route["route"]
+    assert runtime.delivery_route(HML_PROJECT, destination={"environment": "hml"})["environment"] == "hml"
+    assert runtime.delivery_route(HML_PROJECT)["environment"] == "hml"
+    prod_project = {"delivery_environment": "production", "staging_branch": "staging"}
+    assert runtime.delivery_route(prod_project, destination=production) == runtime.delivery_route(prod_project)
+
+
+def test_show_closing_judge_and_delivery_record_follow_the_recorded_destination(tmp_path, monkeypatch):
+    from tools import kanban_tools
+    monkeypatch.setattr(runtime, "project_config", lambda board, config=None: dict(HML_PROJECT, board=board))
+    monkeypatch.setattr(kb, "get_current_board", lambda: "dovcrm")
+    db = tmp_path / "dovcrm" / "kanban.db"
+    production = {"environment": "production", "target": REPO, "verification_operation": "deploy"}
+    assert delivery._delivery_environment_for_db(db, destination=production)["environment"] == "production"
+    assert delivery._delivery_environment_for_db(db, destination={"environment": "hml"})["environment"] == "hml"
+    assert "PRODUCTION" in kanban_tools._delivery_environment_note(production)
+    assert "HML" in kanban_tools._delivery_environment_note({"environment": "hml"})
+
+
+def test_no_keyword_parser_remains():
+    import inspect
+    source = inspect.getsource(delivery)
+    for name in ("_PRODUCTION_ORDER_RX", "_OWNER_PRODUCTION_RX", "_URGENT_RX", "_express_production_order",
+                 "_production_guidance_intent", "_owner_urgent_production"):
+        assert name not in source
+
+
+@pytest.mark.parametrize("environment", ["hml", "test", "dev"])
+def test_recorded_nonproduction_destination_overrides_project_default(environment):
+    destination = {"environment": environment, "verification_operation": "homolog"}
+    project = {"delivery_environment": "production", "staging_branch": "staging"}
+    route = runtime.delivery_route(project, destination=destination)
+    assert route["environment"] == environment
+    assert not route.get("owner_production")

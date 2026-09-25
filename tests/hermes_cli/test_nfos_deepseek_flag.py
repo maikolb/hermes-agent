@@ -95,3 +95,48 @@ def test_persisted_pin_reaches_spawn_and_continuation(trial, monkeypatch, tmp_pa
     assert command[command.index('--provider') + 1] == 'opencode-go'
     assert command[command.index('--reasoning') + 1] == 'max'
     assert 'deepseek-v4.1-flash' in command
+
+
+@pytest.mark.parametrize('tag', ['#luna', '#LUNA,', '#luna.'])
+def test_luna_opt_in_with_deepseek_default_survives_continuation(trial, tag):
+    trial.update(worker_model='deepseek-v4.1-flash', worker_provider='opencode-go',
+                 worker_reasoning_effort='max', worker_escalation=True)
+    with kb.connect_closing() as conn:
+        task = claim(conn, receive(conn, tag + ' Confira o relatório.'))
+        assert review.worker_model_args(task, conn) == [
+            '-m', 'gpt-5.6-luna', '--provider', 'openai-codex', '--reasoning', 'high']
+        child = kb.get_task(conn, delivery.create_continuation(conn, task.id)['task_id'])
+        assert review.worker_model_args(child, conn) == review.worker_model_args(task, conn)
+        normal = claim(conn, receive(conn, 'Confira outro relatório.', message='2'))
+        assert review.worker_model_args(normal, conn) == [
+            '-m', 'deepseek-v4.1-flash', '--provider', 'opencode-go', '--reasoning', 'max']
+
+
+@pytest.mark.parametrize('text,platform', [
+    ('#lunaish Confira.', 'telegram'), ('#luna-other Confira.', 'telegram'),
+    ('#luna_other Confira.', 'telegram'), ('#luna Confira.', 'fixture'),
+])
+def test_luna_requires_exact_native_tag(trial, text, platform):
+    trial.update(worker_model='deepseek-v4.1-flash', worker_provider='opencode-go',
+                 worker_reasoning_effort='max')
+    with kb.connect_closing() as conn:
+        task = claim(conn, receive(conn, text, platform=platform))
+        assert task.model_override is None
+        assert review.worker_model_args(task, conn)[1] == 'deepseek-v4.1-flash'
+
+
+def test_deepseek_default_supersedes_pending_luna_escalation(trial):
+    trial.update(worker_model='deepseek-v4.1-flash', worker_provider='opencode-go',
+                 worker_reasoning_effort='max', worker_escalation=True)
+    with kb.connect_closing() as conn:
+        task = claim(conn, receive(conn, 'Retome o relatório.'))
+        state = {'worker_escalation': {'model': 'gpt-6-luna',
+                 'reasoning_effort': 'max', 'status': 'pending', 'source_run_id': 'old-run'}}
+        conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?',
+                     (json.dumps(state), task.id))
+        assert review.worker_model_args(task, conn) == [
+            '-m', 'deepseek-v4.1-flash', '--provider', 'opencode-go', '--reasoning', 'max']
+        review.confirm_worker_dispatch(conn, task.id, task.current_run_id,
+                                       'deepseek-v4.1-flash', 'max')
+        assert review.worker_escalation(conn, task.id)['model'] == 'deepseek-v4.1-flash'
+        assert review.worker_escalation(conn, task.id)['status'] == 'applied'

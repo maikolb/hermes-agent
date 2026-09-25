@@ -334,9 +334,13 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
         raise WorkflowError('A request needs its original platform/chat/topic/message identity')
     if not text.strip() and not attachments:
         raise WorkflowError('A request needs text or attachments')
-    # Temporary owner opt-in, scoped to this preserved Telegram request.
+    # Worker opt-ins are scoped to this preserved Telegram request.
     # Keep the original text and the configured project defaults unchanged.
     if (source.get('platform') == 'telegram'
+            and re.search(r'(?<!\S)#luna(?![\w-])', text, re.IGNORECASE)):
+        project = dict(project, model='gpt-5.6-luna',
+                       provider='openai-codex', reasoning_effort='high')
+    elif (source.get('platform') == 'telegram'
             and re.search(r'(?<!\S)#deepseek(?![\w-])', text, re.IGNORECASE)):
         from hermes_cli.nfos_principal_review import settings
         if settings().get('deepseek_worker_trial') is True:
@@ -3362,7 +3366,8 @@ def create_continuation(conn, parent_id, *, title=None, body=None, requester='wo
             return {'task_id': child.id, 'continuation_of': parent_id, 'priority': child.priority, 'status': child.status, 'existing': True}
         _child_kind = 'scratch' if (parent.workspace_kind == 'scratch' and parent.delivery_type != 'code') else 'worktree'  # REWORK_IDEMPOTENT_20260911
         trial_model = {}
-        if parent.provider_override == 'opencode-go' and parent.model_override == 'deepseek-v4.1-flash':
+        if (parent.provider_override, parent.model_override) in {
+                ('opencode-go', 'deepseek-v4.1-flash'), ('openai-codex', 'gpt-5.6-luna')}:
             trial_model = dict(model_override=parent.model_override,
                                provider_override=parent.provider_override,
                                reasoning_effort=parent.reasoning_effort)
@@ -4296,93 +4301,28 @@ def _accept_homologation(conn, decision):
            {'decision_id':decision['id'],'identity':identity,'evidence_checks':context['evidence_checks']})
 
 
-_PRODUCTION_ORDER_RX = re.compile(  # DELIVERY_ENV_20260911
-    r"(subir|sobe|suba|publicar|publique|liberar|libere|promover|promova|deploy|mesclar|mescle|merge|mergear|integrar|integre)"
-    r"\W{0,24}(em|para|pra|na|no|to|in|on)?\W{0,12}(produ[cç][aã]o|\bprod\b|\bprd\b|production|\bmain\b)", re.I)
-
-
-def _express_production_order(text):
-    """DELIVERY_ENV_20260911: ordem expressa do owner para produção no corpo do card (imperativo + produção), não menção descritiva."""
-    return bool(_PRODUCTION_ORDER_RX.search(str(text or '')))
-
-
-def _production_guidance_intent(text):
-    """Return an explicit destination decision, or None for unrelated guidance."""
-    production = r'\b(produ[cç][aã]o|production|prod|prd|main)\b'
-    for clause in re.split(r'[,;.!?\n]', text):
-        if re.search(production, clause, re.I) and re.search(r'\b(n[aã]o|not|never)\b', clause, re.I):
-            return False
-        hml_only = re.search(r'\b(s[oó]|somente|apenas|only)\s+(?:em\s+)?(?:hml|homologa[cç][aã]o|staging)\b', clause, re.I)
-        if hml_only and not re.search(r'\b(?:n[aã]o\s+(?:[eé]\s+)?|not\s+)$', clause[:hml_only.start()], re.I):
-            return False
-    if _express_production_order(text) or re.search(
-            r'\b(direto|diretamente)\s+(para|pra|em)\s+(produ[cç][aã]o|production|prod|prd)\b', text, re.I):
-        return True
-    return None
-
-
-def _owner_guidance_production_order(conn, task, scope):
-    """Use the last explicit owner destination decision, preserving unrelated guidance."""
-    # The receipt event and its comment are produced by the operator entry point,
-    # not by a worker supplying an owner_guidance-shaped decision context.
-    receipts = conn.execute(
-        "SELECT e.id AS receipt_id,e.payload,d.* FROM task_events e JOIN nfos_decisions d "
-        "ON d.id=json_extract(e.payload,'$.decision_id') AND d.task_id=e.task_id "
-        "WHERE e.task_id=? AND e.kind='nfos_principal_requested' "
-        "AND json_extract(e.payload,'$.owner_guidance')=1 ORDER BY e.id DESC",
-        (task.id,)).fetchall()
-    from hermes_cli.nfos_principal_review import accepted
-    spec_review = conn.execute("SELECT status,action,author FROM nfos_decisions WHERE task_id=? AND kind='spec_review' ORDER BY rowid DESC LIMIT 1", (task.id,)).fetchone()
-    semantic_acceptance = bool(spec_review and spec_review['status']=='resolved'
-        and spec_review['action']=='continue' and spec_review['author']=='Principal'
-        and accepted(conn,task.id,'spec_review'))
-    def bound_message(row):
-        ctx = json.loads(row['context']); message_id = str((ctx.get('source') or {}).get('message_id') or '')
-        return bool(scope and message_id and message_id in scope.get('source','')
-            and scope.get('authorization_message') == ctx.get('owner_guidance'))
-    receipt = next((row for row in receipts if bound_message(row) or _production_guidance_intent(
-        json.loads(row['context']).get('owner_guidance') or '') is not None), None)
-    if not receipt:
-        return None
-    if receipt['status'] != 'resolved' or receipt['author'] != 'Principal' or receipt['action'] not in {'continue','changes'}:
-        return False
-    context = json.loads(receipt['context'])
-    source = context.get('source') or {}
-    payload = json.loads(receipt['payload'])
-    text = context.get('owner_guidance') or ''
-    expected_id = 'dec_' + hashlib.sha256(_json([task.id,source]).encode()).hexdigest()[:24]
-    if payload.get('decision_id') != expected_id or not source.get('actor') or not source.get('message_id'):
-        return False
-    comment = conn.execute('SELECT author,body FROM task_comments WHERE id=? AND task_id=?',
-                           (payload.get('comment_id'),task.id)).fetchone()
-    if not comment or comment['author'] != source['actor'] or comment['body'] != text:
-        return False
+def _owner_production_destination(conn, task, scope):
+    """INTENT_DESTINATION_20260923 (ordem do Maikol: "Vcs tem que entender pela intenção"): o destino é a intenção do dono,
+    lida por quem escreve a spec e aceita pelo Principal. O runtime não interpreta texto; confere só que a spec atual tem
+    destino produção, que esse destino foi aceito e que toda orientação do dono recebida durante a spec atual passou pelo
+    Principal com `continue`. Orientação pendente, ou com `changes`, pede spec nova. Orientação só bloqueia, nunca autoriza."""
     if not scope or scope.get('environment') != 'production' or scope.get('verification_operation') != 'deploy':
         return False
-    revision = context.get('received_instruction_revision')
-    if revision is None:  # Receipts persisted before revision binding was explicit.
-        previous = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='instruction_updated' AND id<? ORDER BY id DESC LIMIT 1",
-                                (task.id,receipt['receipt_id'])).fetchone()
-        revision = json.loads(previous['payload']).get('revision',0) if previous else 0
-    if revision != task.instruction_revision:
+    from hermes_cli.nfos_principal_review import accepted
+    if not accepted(conn, task.id, 'spec_review'):
         return False
-    if semantic_acceptance and bound_message(receipt):
-        return True
-    if not _production_guidance_intent(text):
-        return False
-    original = context.get('received_destination')
-    if 'received_destination' not in context:
-        spec = conn.execute("SELECT content FROM nfos_artifacts WHERE task_id=? AND kind='spec' AND revision=?",
-                            (task.id,receipt['spec_revision'])).fetchone()
-        original = json.loads(spec['content']).get('delivery_destination') if spec else None
-    if original and all(original.get(key) == scope.get(key) for key in ('environment','target','verification_operation')):
-        return True
-    # A newly accepted spec may bind an early instruction or an HML -> production change.
-    # It must cite this exact authenticated message, not worker or Principal prose.
-    return bool((original is None or original.get('environment') == 'hml')
-        and get_workflow(conn,task.id)['spec_revision'] > receipt['spec_revision']
-        and re.search(r'(?<![\w-])'+re.escape(str(source['message_id']))+r'(?![\w-])', scope.get('source',''))
-        and scope.get('authorization_message') == text)
+    current = get_workflow(conn, task.id)['spec_revision']
+    guidance = conn.execute(
+        "SELECT d.status,d.action,d.author,d.spec_revision FROM task_events e JOIN nfos_decisions d "
+        "ON d.id=json_extract(e.payload,'$.decision_id') AND d.task_id=e.task_id "
+        "WHERE e.task_id=? AND e.kind='nfos_principal_requested' AND json_extract(e.payload,'$.owner_guidance')=1",
+        (task.id,)).fetchall()
+    for row in guidance:
+        if row['status'] != 'resolved':
+            return False
+        if row['spec_revision'] >= current and not (row['author'] == 'Principal' and row['action'] == 'continue'):
+            return False
+    return True
 
 
 def _project_delivery_environment(conn, task_id):
@@ -4398,8 +4338,9 @@ def _project_delivery_environment(conn, task_id):
         return 'production'
 
 
-def _delivery_environment_for_db(db_path):
-    """DELIVERY_ENV_20260911: ambiente e rota do projeto do board (para o show)."""
+def _delivery_environment_for_db(db_path, destination=None):
+    """DELIVERY_ENV_20260911: ambiente e rota do projeto do board (para o show).
+    INTENT_DESTINATION_20260923: o destino gravado na spec pela intenção do dono pode levar a rota a produção."""
     try:
         from hermes_cli.nfos_runtime import project_config, delivery_route
         slug = Path(str(db_path)).resolve().parent.name if db_path else None
@@ -4407,7 +4348,7 @@ def _delivery_environment_for_db(db_path):
         if not cfg:
             from hermes_cli.kanban_db import get_current_board
             cfg = project_config(get_current_board())
-        return delivery_route(cfg or {})
+        return delivery_route(cfg or {}, destination=destination)
     except Exception:
         return None
 
@@ -4556,9 +4497,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             if review_only(scope) and operation != 'pr':
                 raise WorkflowError('This delivery ends at the review PR; merge, homolog and deploy are outside its scope')
             if operation in {'merge','deploy'} and _project_delivery_environment(conn,task_id)=='hml':  # DELIVERY_ENV_20260911
-                order = _owner_guidance_production_order(conn,task,scope)
-                if not (order if order is not None else _express_production_order(task.body)):
-                    raise WorkflowError('This project delivers in HML: staging PR, HML deploy and HML readback close the card. Production (merge or deploy on main) only with the owner express order in the card body or authenticated guidance for the current instruction and destination')
+                if not _owner_production_destination(conn,task,scope):  # INTENT_DESTINATION_20260923
+                    raise WorkflowError('This project delivers in HML: staging PR, HML deploy and HML readback close the card. Production (merge or deploy on main) needs the current spec destination set to production from the owner intent, accepted by the Principal, with every later owner guidance already judged by the Principal')
             if _owner_mode():  # RECORD_MODE_20260911: o runtime registra a publicação (task, run, operação, alvo, SHA) e não conduz
                 preparation=_record_mode_effect_checks(conn,task_id,candidate)
             else:
@@ -4930,7 +4870,8 @@ def main():
             except Exception:
                 pass
             result['credentials']=_credentials_hint(args.db)  # BLOCK_LESS6_20260910
-            result['delivery_environment']=_delivery_environment_for_db(args.db)  # DELIVERY_ENV_20260911
+            _dest=json.loads(result['spec']['content']).get('delivery_destination') if result['spec'] else None  # INTENT_DESTINATION_20260923
+            result['delivery_environment']=_delivery_environment_for_db(args.db,destination=_dest)  # DELIVERY_ENV_20260911
             result['continuation']=continuation_links(conn,args.task)  # RECORD_CONTINUATION_20260911
             try:  # RESULT_PROBE_20260911: medições, tentativas e nota de debug
                 _st=(json.loads(result['workflow']['state_json'] or '{}') or {}) if result['workflow'] else {}
