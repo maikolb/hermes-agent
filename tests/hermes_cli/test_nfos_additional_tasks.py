@@ -249,7 +249,8 @@ def test_cli_worker_cannot_skip_principal_with_receive(board, tmp_path, monkeypa
 
 def test_human_answer_returns_split_to_principal_instead_of_faking_dispatch(board):
     path, _, _ = board
-    child = subprocess.Popen([sys.executable, '-c', 'pass'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    child = subprocess.Popen([sys.executable, '-c', 'pass'], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     child.communicate(timeout=15)
     assert child.returncode == 0
@@ -288,6 +289,13 @@ def test_changed_primary_requires_new_spec_even_after_implementation_started(boa
              'criteria': [{'id': 'AC1', 'status': 'PASS', 'evidence': [str(evidence)]}]})
         review = d.ask_principal(conn, task.id, task.current_run_id, kind='review', question='Review original report?', context={})
         d.resolve_decision(conn, review, action='approve', answer='Original report verified.', author='Principal')
+        from tests.hermes_cli.test_nfos_principal_acceptance import assessment
+        reviewed = assessment(evidence)
+        reviewed['criteria'][0]['id'] = 'AC1'
+        final = d.ask_principal(conn, task.id, task.current_run_id, kind='final_review',
+            question='Verify current scope and evidence', context={})
+        d.resolve_decision(conn, final, action='continue', author='Principal',
+            answer='Current scope and evidence reviewed.', assessment=reviewed)
         assert d.completion_ready(conn, task.id)
         changed = {'primary_task': 'Conferir o total somente do período solicitado.', 'tasks': []}
         decide(conn, propose(conn, task, changed))

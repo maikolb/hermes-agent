@@ -1,6 +1,6 @@
 """Free text reaches the existing Principal instead of a keyword decision."""
 import pytest
-from tests.hermes_cli.test_nfos_principal_acceptance import task_context, accept, save_report
+from tests.hermes_cli.test_nfos_principal_acceptance import task_context, accept, assessment, save_report
 from hermes_cli import nfos_delivery as d, nfos_principal_review as review
 
 
@@ -34,10 +34,12 @@ def test_valid_observation_needs_no_human_confirmation(task_context, monkeypatch
     accept(conn, task, 'spec_review'); save_report(conn, task, artifact)
     decision = d.ask_principal(conn, task.id, task.current_run_id,
         kind='final_review', question='Review usable result with historical limitation', context={})
-    d.resolve_decision(conn, decision, action='continue', author='Principal', answer='Result accepted with observation',
-        assessment={'request_alignment':'Requested count verified', 'scope_assessment':'Existing evidence is sufficient',
-        'resolution':'Count delivered', 'criteria':[{'id':'C1','verdict':'observe',
-        'observation':'Result verified; historical timestamp unavailable', 'evidence':[str(artifact)]}]})
+    reviewed = assessment(artifact)
+    reviewed['resolution'] = 'Count delivered'
+    reviewed['criteria'][0].update(
+        verdict='observe', observation='Result verified; historical timestamp unavailable')
+    d.resolve_decision(conn, decision, action='continue', author='Principal',
+        answer='Result accepted with observation', assessment=reviewed)
     assert d.get_decision(conn, decision)['status'] == 'resolved'
     assert not conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='human'", (task.id,)).fetchone()
 
