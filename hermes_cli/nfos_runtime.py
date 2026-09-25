@@ -457,7 +457,9 @@ This does not authorize cancelling original user requests or required unfinished
 work. Administrative closure is not functional delivery.
 """
 
-OUTCOME_CLOSURE_POLICY = """Owner priority, 16/09/2026: Does the solution work, match the request and let the user use it?
+from hermes_cli.nfos_principal_review import QUALITY_POLICY
+
+OUTCOME_CLOSURE_POLICY = QUALITY_POLICY + "\n" + """Owner priority, 16/09/2026: Does the solution work, match the request and let the user use it?
 Those outcomes decide delivery. PASS, probes and paperwork support judgment; they are not the goal.
 The Principal owns closure, including explicit observations, without asking the owner to authorize it.
 If the solution is usable, historical/documentary gaps may be observations, with follow-up only when useful.

@@ -152,6 +152,14 @@ def test_done_requires_review_and_report_and_reports_need_no_pr(board):
         decision=delivery.ask_principal(conn,task.id,task.current_run_id,
             kind='review',question='Review the report',context={})
         delivery.resolve_decision(conn,decision,action='approve',answer='Count and evidence checked',author='Principal')
+        assert kb.complete_task(conn,task.id,result='Total reconciled') is False
+        from tests.hermes_cli.test_nfos_principal_acceptance import assessment
+        reviewed = assessment(evidence)
+        reviewed['criteria'][0]['id'] = 'AC1'
+        final = delivery.ask_principal(conn,task.id,task.current_run_id,
+            kind='final_review',question='Inspect the actual finding',context={})
+        delivery.resolve_decision(conn,final,action='continue',answer='Finding independently inspected',
+            author='Principal',assessment=reviewed)
         assert kb.complete_task(conn,task.id,result='Total reconciled') is True
 
 
@@ -274,7 +282,7 @@ def test_native_wait_returns_the_principal_answer_without_another_model_turn(boa
 def test_existing_report_card_can_materialize_its_real_code_workspace(board):
     repo=board.parent/'repo';repo.mkdir()
     def git(*args):
-        return subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True,
+        return subprocess.run(['git','-C',str(repo),*args],stdin=subprocess.DEVNULL,check=True,capture_output=True,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
     git('init','--initial-branch=main')
     git('-c','user.name=NFOS test','-c','user.email=nfos@example.test','commit','--allow-empty','-m','Fixture baseline')

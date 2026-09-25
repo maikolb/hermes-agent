@@ -623,9 +623,17 @@ class TestMacOSAudioOutputPolicy:
             popen_cmds.append(cmd)
             return _FakeProc()
 
-        # Only Popen is stubbed: the host resolves afplay for real, so the
-        # argv assertion below reflects real player selection.
-        monkeypatch.setattr("subprocess.Popen", _fake_popen)
+        # The player is mocked, so exercise routing without disarming the
+        # process-wide audio guard for any other test or background thread.
+        monkeypatch.setattr("tools.voice_mode._audio_disabled", lambda: False)
+        # Keep the fake local: lazy environment imports define Popen subclasses.
+        # Replacing subprocess.Popen globally breaks those imports.
+        import subprocess
+        from types import SimpleNamespace
+
+        monkeypatch.setattr("tools.voice_mode.subprocess", SimpleNamespace(
+            Popen=_fake_popen, DEVNULL=subprocess.DEVNULL,
+            TimeoutExpired=subprocess.TimeoutExpired))
 
         from tools.voice_mode import play_audio_file
 

@@ -44,7 +44,21 @@ def assessment(artifact=None):
     row = {'id': 'C1', 'verdict': 'accept', 'observation': 'Fixture observation: count equals requested 31'}
     if artifact:
         row['evidence'] = [str(artifact)]
-    return {'request_alignment': 'Count request covered by C1', 'scope_assessment': 'Only count verification', 'criteria': [row]}
+    result = {'request_alignment': 'Count request covered by C1', 'scope_assessment': 'Only count verification', 'criteria': [row]}
+    if artifact:
+        import hashlib
+        proof = dict(kind='technical', case='fixture-count', actor='fixture-reader', environment='fixture',
+                     target='fixture://count', version='fixture-v1', scope='count', coverage='full', data_scope='none')
+        row['proof'] = proof
+        result['quality_review'] = {
+            'policy_version': review.QUALITY_POLICY_VERSION,
+            'engineering': {'verdict': 'not_applicable', 'rationale': 'Read-only fixture count; no code change claimed',
+                            'evidence': [str(artifact)]},
+            'validation': {'reproduction': 'not_applicable', 'rationale': 'Read-only count finding, not a test claim', 'executions': []},
+            'artifacts': [dict(proof, ref=str(artifact),
+                               sha256=hashlib.sha256(artifact.read_bytes()).hexdigest() if artifact.exists() else 'missing',
+                               observed='Read the fixture count of 31')]}
+    return result
 
 
 def ask(conn, task, kind):
@@ -640,7 +654,7 @@ def test_decision_cli_persists_principal_assessment(task_context, tmp_path):
     payload = tmp_path / 'answer.json'
     payload.write_text(json.dumps({'answer': 'Reviewed', 'assessment': assessment()}))
     result = subprocess.run([sys.executable, str(Path(d.__file__)), 'decide', '--decision', decision,
-                             '--resolution', 'continue', '--input', str(payload)], capture_output=True, text=True,
+                             '--resolution', 'continue', '--input', str(payload)], stdin=subprocess.DEVNULL, capture_output=True, text=True,
                             timeout=30, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
     assert result.returncode == 0, result.stderr
     assert review.accepted(conn, task.id, 'spec_review')
@@ -686,3 +700,290 @@ def test_native_command_does_not_start_before_spec_acceptance(task_context):
     accept(conn,task,'spec_review')
     result=run_command(os.environ['HERMES_KANBAN_DB'],**kwargs)
     assert result['status']=='succeeded'
+
+
+def test_quality_unclassified_file_stays_with_principal(task_context):
+    conn, task, _, artifact = task_context
+    accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact)
+    decision = ask(conn, task, 'final_review')
+    old = assessment(artifact)
+    old.pop('quality_review')
+    # Existing acceptance sees only a linked file, without classification or scope.
+    with pytest.raises(d.WorkflowError, match='Principal review incomplete'):
+        d.resolve_decision(conn, decision, action='continue', answer='Reviewed', author='Principal', assessment=old)
+    assert d.get_decision(conn, decision)['status'] == 'pending'
+    assert not review.accepted(conn, task.id, 'final_review')
+
+
+# Synthetic requests and bytes exercise the real SQLite decision/closure paths.
+# These fixtures are NOT screenshots of a deployed product or live business proof.
+def quality_decision(ctx, change=None):
+    conn, task, _, artifact = ctx
+    accept(conn, task, 'spec_review')
+    save_report(conn, task, artifact)
+    value = assessment(artifact)
+    if change:
+        change(value)
+    decision = ask(conn, task, 'final_review')
+    d.resolve_decision(conn, decision, action='continue', answer='Inspected fixture', author='Principal', assessment=value)
+    return d.get_decision(conn, decision)
+
+
+@pytest.mark.parametrize('kind', ['rendered_report', 'source_document', 'technical'])
+def test_quality_report_or_source_is_not_a_platform_capture(task_context, kind):
+    def change(value):
+        value['criteria'][0]['proof']['kind'] = 'product_capture'
+        value['quality_review']['artifacts'][0]['kind'] = kind
+    decision = quality_decision(task_context, change)
+    assert decision['action'] == 'changes'
+    assert 'not a product capture' in decision['answer']
+    conn, task, _, _ = task_context
+    assert not kb.complete_task(conn, task.id, result='False visual success')
+    assert kb.get_task(conn, task.id).status == 'running'
+    assert not conn.execute("SELECT 1 FROM nfos_decisions WHERE status='human'").fetchone()
+    assert decision['answer'] in d.worker_context(conn, task.id)
+
+
+@pytest.mark.parametrize('field', ['case', 'actor', 'environment', 'target', 'version', 'scope'])
+def test_quality_wrong_case_environment_version_or_scope_returns_rework(task_context, field):
+    decision = quality_decision(task_context, lambda a: a['quality_review']['artifacts'][0].update({field: 'other'}))
+    assert decision['action'] == 'changes'
+    assert not review.accepted(task_context[0], task_context[1].id, 'final_review')
+
+
+def test_quality_partial_proof_is_not_integral(task_context):
+    decision = quality_decision(task_context, lambda a: a['criteria'][0]['proof'].update(coverage='partial'))
+    assert decision['action'] == 'changes'
+    assert 'partial evidence' in decision['answer']
+
+
+def test_quality_code_publication_is_not_backfill(task_context):
+    decision = quality_decision(task_context, lambda a: a['criteria'][0]['proof'].update(data_scope='historical'))
+    assert decision['action'] == 'changes'
+    assert 'saved-data repair' in decision['answer']
+
+
+def test_quality_case_patch_rejected_without_semantic_regex(task_context):
+    decision = quality_decision(task_context, lambda a: a['quality_review']['engineering'].update(
+        verdict='case_patch', rationale='Diff patches customer IDs instead of the domain rule'))
+    assert decision['action'] == 'changes'
+    assert 'mechanism/domain rule' in decision['answer']
+
+
+def test_quality_unexecuted_test_is_not_a_pass(task_context):
+    def change(value):
+        value['quality_review']['validation']['executions'] = ['invented-test-receipt']
+    decision = quality_decision(task_context, change)
+    assert decision['action'] == 'changes'
+    assert 'execution' in decision['answer']
+
+
+def test_quality_missing_visual_authenticity_returns_to_worker(task_context):
+    def change(value):
+        value['criteria'][0]['proof']['kind'] = 'product_capture'
+        value['quality_review']['artifacts'][0]['kind'] = 'product_capture'
+    decision = quality_decision(task_context, change)
+    assert decision['action'] == 'changes'
+    assert 'actual image bytes' in decision['answer']
+
+
+def test_quality_technical_finding_needs_no_artificial_ui(task_context):
+    conn, task, _, _ = task_context
+    decision = quality_decision(task_context)
+    assert decision['action'] == 'continue'
+    assert review.closeout_packet(conn, task.id)['images'] == []
+    publication = ask(conn, task, 'review')
+    d.resolve_decision(conn, publication, action='approve', answer='Finding ready', author='Principal')
+    assert kb.complete_task(conn, task.id, result='Read-only finding verified')
+
+
+def test_quality_nonfunctional_observation_is_honest_not_visual_success(task_context):
+    def change(value):
+        row = value['criteria'][0]
+        row['verdict'] = 'observe'
+        row['proof'].update(kind='product_capture', coverage='partial')
+        value['resolution'] = 'Technical finding verified; visual demonstration unavailable'
+    decision = quality_decision(task_context, change)
+    assert decision['action'] == 'continue'
+    packet = review.closeout_packet(task_context[0], task_context[1].id)
+    assert packet['fully_proven'] is False and packet['images'] == []
+
+
+def test_quality_profile_switch_cannot_bypass_final_review(task_context, monkeypatch):
+    conn, task, _, artifact = task_context
+    monkeypatch.setattr(review, 'settings', lambda: {'principal_validation': False, 'result_review': False})
+    save_report(conn, task, artifact)
+    decision = ask(conn, task, 'final_review')
+    assert d.get_decision(conn, decision)['status'] == 'pending'
+    assert not review.accepted(conn, task.id, 'final_review')
+    assert not d.completion_ready(conn, task.id)
+
+
+def test_quality_real_execution_receipt_reused_and_revalidated(task_context):
+    from hermes_cli import nfos_tool
+    conn, task, _, artifact = task_context
+    db_path = conn.execute('PRAGMA database_list').fetchone()['file']
+    accept(conn, task, 'spec_review')
+    result = nfos_tool.run_command(db_path, task_id=task.id, run_id=task.current_run_id,
+        argv=[sys.executable, '-c', 'assert 15 + 16 == 31; print("fixture test executed: 31")'],
+        cwd=str(artifact.parent), timeout_seconds=15)
+    assert result['status'] == 'succeeded' and result['returncode'] == 0
+    def change(value):
+        quality = value['quality_review']
+        quality['engineering'].update(verdict='general_rule', rationale='Fixture arithmetic independent of customer IDs')
+        quality['validation'].update(reproduction='reproduced', executions=[result['id']],
+            cases={k: 'Inspected fixture coverage: ' + k for k in ('positive', 'negative', 'conflict', 'unseen')})
+    decision = quality_decision(task_context, change)
+    assert decision['action'] == 'continue'
+    receipt = json.loads(decision['context'])['assessment']['quality_review']['execution_receipts'][0]
+    assert receipt['exit'] == 0 and receipt['argv_sha256'] and receipt['output_sha256']
+    assert review.accepted(conn, task.id, 'final_review')
+    conn.execute('UPDATE nfos_tool_chunks SET content=? WHERE call_id=?', (b'changed receipt', result['id']))
+    conn.commit()
+    assert not review.accepted(conn, task.id, 'final_review')
+
+
+def test_quality_review_cannot_be_forged_by_worker(task_context, monkeypatch):
+    conn, task, _, artifact = task_context
+    accept(conn, task, 'spec_review'); save_report(conn, task, artifact)
+    decision = ask(conn, task, 'final_review')
+    monkeypatch.setenv('HERMES_KANBAN_TASK', task.id)
+    with pytest.raises(d.WorkflowError, match='Principal'):
+        d.resolve_decision(conn, decision, action='continue', answer='I accept myself',
+                           author='Principal', assessment=assessment(artifact))
+    assert d.get_decision(conn, decision)['status'] == 'pending'
+
+
+def test_quality_policy_common_to_principal_workers_and_delegation(monkeypatch):
+    from hermes_cli import nfos_runtime as runtime
+    from tools.delegate_tool import _build_child_system_prompt
+    for settings in ({'principal_validation': True}, {'principal_validation': False}, {'result_review': True}):
+        monkeypatch.setattr(review, 'settings', lambda: settings)
+        assert review.QUALITY_POLICY in runtime.worker_instructions()
+        assert review.QUALITY_POLICY in runtime.principal_instructions()
+        assert review.QUALITY_POLICY in _build_child_system_prompt('Generic future project', board_bound=True)
+    monkeypatch.setattr(review, 'settings', lambda: {'projects': {'unrelated-future-project': {'enabled': True}}})
+    assert review.QUALITY_POLICY in _build_child_system_prompt('Principal delegation', board_bound=False)
+    assert 'Concursa' not in review.QUALITY_POLICY
+
+
+def test_quality_persisted_acceptance_survives_reopen_not_policy_change(task_context, monkeypatch):
+    conn, task, _, _ = task_context
+    quality_decision(task_context)
+    db_path = conn.execute('PRAGMA database_list').fetchone()['file']
+    import sqlite3
+    with sqlite3.connect(db_path) as reopened:
+        reopened.row_factory = sqlite3.Row
+        assert review.accepted(reopened, task.id, 'final_review')
+        monkeypatch.setattr(review, 'QUALITY_POLICY_VERSION', review.QUALITY_POLICY_VERSION + 1)
+        assert not review.accepted(reopened, task.id, 'final_review')
+
+
+@pytest.mark.parametrize('authentic,unaltered', [(False, True), (True, False), (None, None)])
+def test_quality_image_bytes_do_not_prove_authenticity(task_context, authentic, unaltered):
+    import base64
+    conn, task, _, artifact = task_context
+    # Explicit 1-pixel synthetic PNG for format checking, never product evidence.
+    artifact.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='))
+    def change(value):
+        value['criteria'][0]['proof']['kind'] = 'product_capture'
+        value['quality_review']['artifacts'][0].update(kind='product_capture',
+            authentic=authentic, unaltered=unaltered, source='https://fixture.invalid/count',
+            captured_at='2026-01-01T00:00:00Z')
+    decision = quality_decision(task_context, change)
+    assert decision['action'] == 'changes'
+    assert 'real unaltered platform capture' in decision['answer']
+
+
+def test_quality_explicit_capture_inspection_can_accept_matching_case(task_context):
+    import base64
+    conn, task, _, artifact = task_context
+    # Contract fixture exercises reviewer authority, not a claim of live visual proof.
+    artifact.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='))
+    def change(value):
+        value['criteria'][0]['proof']['kind'] = 'product_capture'
+        value['quality_review']['artifacts'][0].update(kind='product_capture',
+            authentic=True, unaltered=True, source='https://fixture.invalid/count',
+            captured_at='2026-01-01T00:00:00Z')
+    decision = quality_decision(task_context, change)
+    assert decision['action'] == 'continue'
+    assert review.closeout_packet(conn, task.id)['images'] == [str(artifact)]
+
+
+@pytest.mark.parametrize('field,value', [('artifacts', 'bad'), ('policy_version', 900), ('validation', [])])
+def test_quality_malformed_assessment_stays_with_principal(task_context, field, value):
+    with pytest.raises(d.WorkflowError, match='Principal review incomplete'):
+        quality_decision(task_context, lambda a: a['quality_review'].update({field: value}))
+    assert len(d.pending_decisions(task_context[0])) == 1
+    assert not task_context[0].execute("SELECT 1 FROM nfos_decisions WHERE status='human'").fetchone()
+
+
+def test_quality_policy_is_loaded_by_restarted_show_cli(task_context):
+    conn, task, _, _ = task_context
+    result = subprocess.run([sys.executable, str(Path(d.__file__)), 'show', '--task', task.id],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['quality_policy'] == review.QUALITY_POLICY
+    assert 'quality_policy' not in d.get_workflow(conn, task.id)['state_json']
+
+
+
+def test_quality_retained_active_acceptance_requeues_review_once(task_context):
+    conn, task, _, _ = task_context
+    decision = quality_decision(task_context)
+    context = json.loads(decision['context'])
+    context['acceptance_identity'].pop('quality_policy_version')
+    context['assessment'].pop('quality_review')
+    conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (json.dumps(context), decision['id']))
+    conn.commit()
+    before = conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0]
+    assert not review.complete_accepted(conn, decision['id'])
+    pending = d.pending_decisions(conn)
+    assert len(pending) == 1 and pending[0]['kind'] == 'final_review'
+    assert json.loads(pending[0]['context'])['quality_upgrade_of'] == decision['id']
+    assert not review.complete_accepted(conn, decision['id'])
+    assert conn.execute('SELECT count(*) FROM nfos_decisions').fetchone()[0] == before + 1
+    assert kb.get_task(conn, task.id).status == 'running'
+
+
+def test_quality_terminal_history_is_preserved_without_promoting_old_images(task_context):
+    conn, task, _, _ = task_context
+    decision = quality_decision(task_context)
+    publication = ask(conn, task, 'review')
+    d.resolve_decision(conn, publication, action='approve', answer='Finding ready', author='Principal')
+    assert kb.complete_task(conn, task.id, result='Historical completed finding')
+    context = json.loads(decision['context'])
+    context['acceptance_identity'].pop('quality_policy_version')
+    context['assessment'].pop('quality_review')
+    context['assessment']['criteria'][0].pop('proof')
+    conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (json.dumps(context), decision['id']))
+    conn.commit()
+    assert review.accepted(conn, task.id, 'final_review')
+    assert review.final_assessment(conn, task.id) == context['assessment']
+    assert review.closeout_packet(conn, task.id)['images'] == []
+    assert kb.get_task(conn, task.id).status == 'done'
+
+
+def test_quality_closeout_does_not_promote_technical_siblings(task_context):
+    import base64
+    conn, task, _, artifact = task_context
+    capture = artifact.with_name('capture.png')
+    # Synthetic image only tests receipt routing, not live product behavior.
+    capture.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='))
+    accept(conn, task, 'spec_review')
+    refs = [str(capture), str(artifact)]
+    d.save_report(conn, task.id, task.current_run_id, {'summary': 'Synthetic capture and technical count',
+        'criteria': [{'id': 'C1', 'status': 'PASS', 'evidence': refs}],
+        'artifacts': [{'id': 'capture', 'path': str(capture)}, {'id': 'count', 'path': str(artifact)}]})
+    value = assessment(capture)
+    value['criteria'][0]['evidence'] = refs
+    value['criteria'][0]['proof']['kind'] = 'product_capture'
+    value['quality_review']['artifacts'][0].update(kind='product_capture', authentic=True,
+        unaltered=True, source='https://fixture.invalid/count', captured_at='2026-01-01T00:00:00Z')
+    value['quality_review']['artifacts'].extend(assessment(artifact)['quality_review']['artifacts'])
+    d.resolve_decision(conn, ask(conn, task, 'final_review'), action='continue', answer='Inspected fixture',
+        author='Principal', assessment=value)
+    assert review.accepted(conn, task.id, 'final_review')
+    assert review.closeout_packet(conn, task.id)['images'] == [str(capture)]
