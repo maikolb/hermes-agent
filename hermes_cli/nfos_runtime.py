@@ -393,6 +393,14 @@ def reconcile_runtime(conn, *, worker_exit_grace_seconds=15):
     delivery.reconcile_incomplete_reviews(conn)
     delivery.reconcile_human_answers(conn)
     from hermes_cli.nfos_tool import reconcile_calls
+    # Blocked/completed cards never enter the ready/review dispatch loops.
+    # Their owner instructions still need recovery when a wake was accepted
+    # but the Principal turn ended without recording a decision.
+    for row in conn.execute(
+            "SELECT DISTINCT d.task_id FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
+            "WHERE d.status='pending' AND t.status!='archived' "
+            "AND json_extract(d.context,'$.owner_guidance') IS NOT NULL").fetchall():
+        delivery.nudge_open_decisions(conn, row['task_id'], owner_guidance_only=True)
     for call in reconcile_calls(conn):
         task=kb.get_task(conn,call['task_id'])
         if (call['status'] not in {'timed_out','interrupted'} or not task or task.status!='running'

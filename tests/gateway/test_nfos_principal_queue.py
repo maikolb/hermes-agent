@@ -127,3 +127,57 @@ def test_telegram_outage_does_not_block_principal_decision_delivery(tmp_path, mo
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
     assert len(adapter.sent) == 1
     assert len(adapter.handled) == 1
+
+
+def test_unanswered_owner_guidance_wakes_again_after_transport_ack(tmp_path, monkeypatch):
+    """A consumed notification must not strand the owner's blocked card."""
+    import json
+    from hermes_cli import nfos_runtime as runtime
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'kanban.db'))
+    monkeypatch.setattr('hermes_cli.config.load_config',
+        lambda: {'kanban': {'agent_wake_on_events': True}})
+    clock = [1800000000]
+    monkeypatch.setattr(delivery.time, 'time', lambda: clock[0])
+    source = {'platform': 'vigilia', 'actor': 'Maikol', 'message_id': 'reply-on-card'}
+    with kb.connect_closing() as conn:
+        rid = delivery.receive_request(conn,
+            source={'platform': 'telegram', 'chat_id': 'test', 'thread_id': '8',
+                    'message_id': '1', 'chat_type': 'group'},
+            text='Validate the requested result', project={'profile': 'default', 'delivery_type': 'report'})
+        request = delivery.reserve_request(conn, capacity=2)
+        task = delivery.bootstrap_card(conn, rid, request['claim_token'], pid=2147483647)
+        human = delivery.ask_principal(conn, task.id, task.current_run_id, kind='impediment',
+            question='Which test account should be used?', context={})
+        delivery.resolve_decision(conn, human, action='human',
+            answer='Which test account should be used?', author='Principal')
+        receipt = delivery.receive_owner_guidance(conn, task.id,
+            text='Use the authorized test account.', source=source)
+
+    adapter = RecordingAdapter()
+    adapter.fail = False
+    asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
+    assert len(adapter.handled) == 1
+    # The transport accepted the wake, but the Principal did not decide.
+    asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
+    assert len(adapter.handled) == 1
+    clock[0] += delivery.DECISION_REMINDER_GAP + 1
+    with kb.connect_closing() as conn:
+        runtime.reconcile_runtime(conn)
+        assert delivery.get_decision(conn, receipt['decision_id'])['status'] == 'pending'
+        assert kb.get_task(conn, task.id).status == 'blocked'
+    asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
+    assert len(adapter.handled) == 2
+    assert task.id in adapter.handled[-1].text
+    with kb.connect_closing() as conn:
+        delivery.resolve_decision(conn, receipt['decision_id'], action='continue',
+            answer='Use the supplied test account.', author='Principal')
+        assert delivery.resume_after_answer(conn, task.id,
+            answer='Use the authorized test account.', source=source)
+        assert kb.get_task(conn, task.id).status == 'ready'
+        assert json.loads(delivery.get_decision(conn, human)['context'])['human_reply']['source'] == source
+        clock[0] += delivery.DECISION_REMINDER_GAP + 1
+        runtime.reconcile_runtime(conn)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
+    assert len(adapter.handled) == 2
