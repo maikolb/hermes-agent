@@ -2191,9 +2191,10 @@ DECISION_MAX_REMINDERS = 3
 _MAINTENANCE_RX = re.compile(r'contrato git|git delivery|delivery_contract|policy_json|\bruntime\b|dispatcher|worktree|\blease\b|spawn|gate selado|tampered|mantenedor', re.I)
 
 
-def nudge_open_decisions(conn, task_id):
+def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
     """Chamado pelo dispatcher para card com decisão pendente: auto-continue por classe, lembretes idempotentes ao Principal
-    (evento nfos_principal_requested, que o acorda) e, esgotados, estado visível awaiting_principal com responsável e retomada."""
+    (evento nfos_principal_requested, que o acorda) e, esgotados, estado visível awaiting_principal com responsável e retomada.
+    Orientações do proprietário continuam recebendo lembretes até a decisão, sem autorização automática."""
     rows = [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status='pending' ORDER BY created_at", (task_id,))]
     out = []
     now = int(time.time())
@@ -2204,6 +2205,8 @@ def nudge_open_decisions(conn, task_id):
             ctx = {}
         if not isinstance(ctx, dict):
             ctx = {}
+        if owner_guidance_only and not ctx.get('owner_guidance'):
+            continue
         age = now - int(row.get('created_at') or now)
         if age < DECISION_REMINDER_AFTER:
             continue
@@ -2216,7 +2219,9 @@ def nudge_open_decisions(conn, task_id):
                 pass
         reminders = [int(x) for x in (ctx.get('reminders') or []) if str(x).isdigit()]
         last = reminders[-1] if reminders else int(row.get('created_at') or now)
-        if len(reminders) < DECISION_MAX_REMINDERS:
+        # Transport acceptance is not a Principal decision. An authenticated
+        # owner's instruction remains retryable until it is actually resolved.
+        if ctx.get('owner_guidance') or len(reminders) < DECISION_MAX_REMINDERS:
             if now - last >= DECISION_REMINDER_GAP or not reminders:
                 reminders.append(now); ctx['reminders'] = reminders
                 with _kb().write_txn(conn, allow_nested=True):
