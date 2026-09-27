@@ -169,6 +169,69 @@ class TestTelegramExecApproval:
         assert "Fix \\[issue\\]\\_1" in sent["text"]
         assert "alpha\\_beta" in sent["text"]
 
+
+class TestSupportApprovalButtons:
+    @pytest.mark.asyncio
+    async def test_sends_approve_reject_and_vigilia_in_project_topic(self, monkeypatch):
+        adapter = _make_adapter()
+        captured_rows = []
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+            lambda text, callback_data=None, url=None: {"text": text, "callback_data": callback_data, "url": url},
+        )
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+            lambda rows: captured_rows.extend(rows) or rows,
+        )
+        adapter._send_message_with_thread_fallback = AsyncMock(return_value=SimpleNamespace(message_id=88))
+        payload = {
+            "ticket": "CA-0042", "project": "concursa", "project_name": "Concursa AI",
+            "title": "Falha ao salvar", "reporter": "Ana",
+            "vigilia_url": "https://vigilia.test/lux/#kanban/pilot/t_deadbeef",
+        }
+
+        result = await adapter.send_support_approval("-1004309874643", payload, metadata={"thread_id": "41"})
+
+        assert result.success is True and result.message_id == "88"
+        sent = adapter._send_message_with_thread_fallback.call_args.kwargs
+        assert sent["chat_id"] == -1004309874643 and sent["message_thread_id"] == 41
+        assert "CA-0042" in sent["text"] and payload["vigilia_url"] in sent["text"]
+        assert captured_rows == [
+            [
+                {"text": "✅ Aprovar", "callback_data": "sa:a:concursa:CA-0042", "url": None},
+                {"text": "❌ Reprovar", "callback_data": "sa:r:concursa:CA-0042", "url": None},
+            ],
+            [{"text": "🔎 Vigília", "callback_data": None, "url": payload["vigilia_url"]}],
+        ]
+
+    @pytest.mark.asyncio
+    async def test_real_callback_identity_is_forwarded_and_keyboard_is_closed(self, monkeypatch):
+        adapter = _make_adapter({"support_approval_callback_url": "http://127.0.0.1:8790/api/suporte/telegram/callback"})
+        monkeypatch.setattr(adapter, "_is_callback_user_authorized", lambda *args, **kwargs: True)
+        submit = MagicMock(return_value={
+            "decision": "approved", "actor": "Jhonatan", "ticket": "CA-0042",
+            "vigilia_url": "https://vigilia.test/lux/#kanban/pilot/t_deadbeef",
+        })
+        monkeypatch.setattr(adapter, "_submit_support_approval_callback", submit)
+        query = AsyncMock()
+        query.data = "sa:a:concursa:CA-0042"
+        query.message = MagicMock(chat_id=-1004309874643, message_thread_id=41, message_id=88)
+        query.message.chat.type = "supergroup"
+        query.from_user = MagicMock(id=7550030839, first_name="Jhonatan")
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        update = MagicMock(callback_query=query)
+
+        await adapter._handle_callback_query(update, MagicMock())
+
+        submit.assert_called_once_with({
+            "action": "approve", "project": "concursa", "ticket": "CA-0042",
+            "telegram_user_id": "7550030839", "chat_id": "-1004309874643",
+            "thread_id": "41", "message_id": "88",
+        })
+        assert query.edit_message_text.call_args.kwargs["reply_markup"] is None
+        assert "Jhonatan" in query.edit_message_text.call_args.kwargs["text"]
+
 # _handle_callback_query — approval button clicks
 # ===========================================================================
 
@@ -329,4 +392,3 @@ class TestTelegramApprovalCallback:
         assert runner.last_source is not None
         assert runner.last_source.platform == Platform.TELEGRAM
         assert runner.last_source.user_id == "222"
-

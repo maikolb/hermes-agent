@@ -9,6 +9,8 @@ Uses python-telegram-bot library for:
 
 import asyncio
 import dataclasses
+import hashlib
+import hmac
 import inspect
 import json
 import logging
@@ -17,6 +19,8 @@ import html as _html
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
@@ -6515,6 +6519,75 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_exec_approval failed: %s", self.name, _redact_telegram_error_text(e))
             return SendResult(success=False, error=_redact_telegram_error_text(e))
 
+    async def send_support_approval(
+        self,
+        chat_id: str,
+        payload: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a project support approval prompt with a durable card link."""
+        if not self._bot:
+            return SendResult(success=False, error="Not connected")
+        ticket = str(payload.get("ticket") or "")
+        project = str(payload.get("project") or "")
+        url = str(payload.get("vigilia_url") or "")
+        if not re.fullmatch(r"[A-Z]{1,5}-\d{4,}", ticket) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", project) or not url:
+            return SendResult(success=False, error="Invalid support approval payload")
+        approve_data = f"sa:a:{project}:{ticket}"
+        reject_data = f"sa:r:{project}:{ticket}"
+        if max(len(approve_data.encode()), len(reject_data.encode())) > 64:
+            return SendResult(success=False, error="Support approval callback is too long")
+        title = _html.escape(str(payload.get("title") or ticket))
+        project_name = _html.escape(str(payload.get("project_name") or project))
+        reporter = _html.escape(str(payload.get("reporter") or ""))
+        text = f"<b>Novo chamado {ticket} em A FAZER</b>\nProjeto: {project_name}\nTítulo: {title}"
+        if reporter:
+            text += f"\nSolicitante: {reporter}"
+        text += f"\n\n<a href=\"{_html.escape(url, quote=True)}\">Abrir card na Vigília</a>"
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Aprovar", callback_data=approve_data),
+                InlineKeyboardButton("❌ Reprovar", callback_data=reject_data),
+            ],
+            [InlineKeyboardButton("🔎 Vigília", url=url)],
+        ])
+        try:
+            thread_id = self._metadata_thread_id(metadata)
+            kwargs: Dict[str, Any] = {
+                "chat_id": normalize_telegram_chat_id(chat_id), "text": text,
+                "parse_mode": ParseMode.HTML, "reply_markup": keyboard,
+                **self._link_preview_kwargs(),
+            }
+            kwargs.update(self._thread_kwargs_for_send(chat_id, thread_id, metadata, reply_to_mode=self._reply_to_mode))
+            msg = await self._send_message_with_thread_fallback(**kwargs)
+            return SendResult(success=True, message_id=str(msg.message_id))
+        except Exception as exc:
+            logger.warning("[%s] support approval send failed: %s", self.name, _redact_telegram_error_text(exc))
+            return SendResult(success=False, error=_redact_telegram_error_text(exc))
+
+    def _submit_support_approval_callback(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        url = str((self.config.extra or {}).get("support_approval_callback_url") or "").strip()
+        if not url or not self.config.token:
+            raise RuntimeError("Support approval callback is not configured")
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        signature = hmac.new(self.config.token.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+        request = urllib.request.Request(
+            url, data=raw, method="POST",
+            headers={"Content-Type": "application/json", "X-Support-Telegram-Signature": "sha256=" + signature},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read().decode("utf-8")).get("error")
+            except Exception:
+                detail = None
+            raise PermissionError(detail or f"Support approval rejected ({exc.code})") from exc
+        if not isinstance(result, dict) or result.get("decision") not in ("approved", "rejected"):
+            raise RuntimeError("Invalid support approval response")
+        return result
+
     async def send_slash_confirm(
         self, chat_id: str, title: str, message: str, session_key: str,
         confirm_id: str, metadata: Optional[Dict[str, Any]] = None,
@@ -7321,6 +7394,57 @@ class TelegramAdapter(BasePlatformAdapter):
         query_chat_type = getattr(query_chat, "type", None)
         query_thread_id = getattr(query_message, "message_thread_id", None)
         query_user_name = getattr(query.from_user, "first_name", None)
+
+        # --- Balcão support approval callbacks (sa:a|r:project:ticket) ---
+        if data.startswith("sa:"):
+            parts = data.split(":", 3)
+            if len(parts) != 4 or parts[1] not in ("a", "r"):
+                await query.answer(text="Botão de chamado inválido.")
+                return
+            caller_id = str(getattr(query.from_user, "id", ""))
+            if not self._is_callback_user_authorized(
+                caller_id,
+                chat_id=query_chat_id,
+                chat_type=str(query_chat_type) if query_chat_type is not None else None,
+                thread_id=str(query_thread_id) if query_thread_id is not None else None,
+                user_name=query_user_name,
+            ):
+                await query.answer(text="⛔ Você não está autorizado a decidir este chamado.", show_alert=True)
+                return
+            callback = {
+                "action": "approve" if parts[1] == "a" else "reject",
+                "project": parts[2], "ticket": parts[3],
+                "telegram_user_id": caller_id,
+                "chat_id": str(query_chat_id) if query_chat_id is not None else "",
+                "thread_id": str(query_thread_id) if query_thread_id is not None else "",
+                "message_id": str(getattr(query_message, "message_id", "") or ""),
+            }
+            try:
+                result = await asyncio.to_thread(self._submit_support_approval_callback, callback)
+            except PermissionError as exc:
+                await query.answer(text=f"⛔ {str(exc)[:160]}", show_alert=True)
+                return
+            except Exception as exc:
+                logger.warning("[%s] support approval callback failed: %s", self.name, _redact_telegram_error_text(exc))
+                await query.answer(text="Falha ao registrar a decisão. Tente novamente.", show_alert=True)
+                return
+            actor = _html.escape(str(result.get("actor") or "Administrador"))
+            ticket = _html.escape(str(result.get("ticket") or parts[3]))
+            vigilia_url = _html.escape(str(result.get("vigilia_url") or ""), quote=True)
+            if result["decision"] == "approved":
+                label = "✅ Aprovado"
+                text = f"<b>{ticket} aprovado</b> por {actor}.\nLiberado para Andamento conforme a capacidade do worker."
+            else:
+                label = "❌ Reprovado"
+                text = f"<b>{ticket} reprovado</b> por {actor}.\nCard cancelado sem worker."
+            if vigilia_url:
+                text += f"\n\n<a href=\"{vigilia_url}\">Abrir card na Vigília</a>"
+            await query.answer(text=label)
+            try:
+                await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=None)
+            except Exception:
+                logger.debug("[%s] support approval message edit failed", self.name, exc_info=True)
+            return
 
         # --- Model picker callbacks ---
         if data.startswith(("mp:", "mpg:", "mpv:", "mm:", "mc:", "mb", "mx", "mg:")):
