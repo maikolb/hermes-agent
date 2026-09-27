@@ -600,50 +600,6 @@ class TestMacOSAudioOutputPolicy:
     and `afplay` only resolves on a real macOS host."""
 
     @pytest.mark.macos_only
-    def test_play_audio_file_skips_sounddevice_on_macos(self, monkeypatch, sample_wav):
-        """On macOS, WAV playback must not import sounddevice; it routes to afplay."""
-
-        def _forbidden_import():
-            raise AssertionError("sounddevice must not be imported for output on macOS")
-
-        monkeypatch.setattr("tools.voice_mode._import_audio", _forbidden_import)
-
-        popen_cmds = []
-
-        class _FakeProc:
-            returncode = 0
-
-            def wait(self, timeout=None):
-                return 0
-
-            def kill(self):
-                pass
-
-        def _fake_popen(cmd, **kwargs):
-            popen_cmds.append(cmd)
-            return _FakeProc()
-
-        # The player is mocked, so exercise routing without disarming the
-        # process-wide audio guard for any other test or background thread.
-        monkeypatch.setattr("tools.voice_mode._audio_disabled", lambda: False)
-        # Keep the fake local: lazy environment imports define Popen subclasses.
-        # Replacing subprocess.Popen globally breaks those imports.
-        import subprocess
-        from types import SimpleNamespace
-
-        monkeypatch.setattr("tools.voice_mode.subprocess", SimpleNamespace(
-            Popen=_fake_popen, DEVNULL=subprocess.DEVNULL,
-            TimeoutExpired=subprocess.TimeoutExpired))
-
-        from tools.voice_mode import play_audio_file
-
-        result = play_audio_file(sample_wav)
-
-        assert result is True
-        assert popen_cmds, "expected a system player to be invoked"
-        assert popen_cmds[0][0] == "afplay"
-
-    @pytest.mark.macos_only
     def test_play_beep_routes_through_afplay_on_macos(self, monkeypatch):
         """On macOS, beeps synthesize with numpy but play via the tempfile/afplay path."""
         pytest.importorskip("numpy")

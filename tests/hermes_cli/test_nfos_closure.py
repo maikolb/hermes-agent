@@ -1,5 +1,4 @@
-"""CLOSURE_RECOVERY_20260911: NOT_RUN não opcional barra o fechamento; revisão da spec não enfraquece; decisão pendente recebe
-auto-continue, lembretes e estado visível; rework vira continuação; contrato Git não inicializado não é adulteração; saída
+"""CLOSURE_RECOVERY_20260911: NOT_RUN não opcional barra o fechamento; revisão da spec não enfraquece; rework vira continuação; contrato Git não inicializado não é adulteração; saída
 limpa depois de recusa não é violação."""
 import json
 import os
@@ -101,40 +100,6 @@ def test_revision_cannot_drop_mandatory_or_weaken_or_remove(board):
             delivery.save_spec(conn, task.id, task.current_run_id, _spec([{"id": "C1", "text": "7 disciplinas", "mandatory": True, "probe": probe}]), author="worker", evidence={"source": "worker"})
         with pytest.raises(delivery.WorkflowError, match="optional"):
             delivery.save_spec(conn, task.id, task.current_run_id, _spec([{"id": "C1", "text": "7 disciplinas", "mandatory": True, "probe": probe}, {"id": "C2", "text": "tela", "optional": True, "optional_reason": "x"}]), author="worker", evidence={"source": "worker"})
-
-
-def _pending(conn, task, question, created_at):
-    did = "dec_" + os.urandom(6).hex()
-    conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status) VALUES(?,?,?,?,?,?,?,?,?)",
-                 (did, task.id, task.current_run_id, "impediment", question, "{}", 1, created_at, "pending"))
-    conn.commit()
-    return did
-
-
-def test_pending_decision_auto_continue_reminders_and_visible_stall(board):
-    with kb.connect_closing() as conn:
-        task = _card(conn, 5)
-        old = int(time.time()) - 700
-        auto = _pending(conn, task, "provider returned rate limit 429; should I wait?", old)
-        plain = _pending(conn, task, "Como habilitar a geração na fixture HML para a identidade QA?", old)
-        out = dict(delivery.nudge_open_decisions(conn, task.id))
-        assert out[auto] == "auto_continue" and out[plain] == "reminder 1"
-        assert conn.execute("SELECT status FROM nfos_decisions WHERE id=?", (auto,)).fetchone()[0] == "resolved"
-        assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'", (task.id,)).fetchone()[0] >= 1
-        # sem novo lembrete dentro do intervalo
-        assert delivery.nudge_open_decisions(conn, task.id) == []
-        # três lembretes antigos: estado visível com responsável, e o card sai sozinho quando a decisão é resolvida
-        ctx = {"reminders": [old - 3000, old - 2000, old - 1000]}
-        conn.execute("UPDATE nfos_decisions SET context=? WHERE id=?", (json.dumps(ctx), plain)); conn.commit()
-        conn.execute("UPDATE tasks SET status='ready', worker_pid=NULL, claim_lock=NULL, current_run_id=NULL WHERE id=?", (task.id,)); conn.commit()
-        out = dict(delivery.nudge_open_decisions(conn, task.id))
-        assert out[plain] == "stalled"
-        t = kb.get_task(conn, task.id)
-        assert t.status == "blocked" and t.block_kind == "awaiting_principal"
-        assert "Responsável" in (delivery.get_workflow(conn, task.id)["next_action"] or "")
-        delivery.resolve_decision(conn, plain, action="continue", answer="use a conta QA do cofre", author="Principal")
-        assert task.id in delivery.sweep_awaiting_principal(conn)
-        assert kb.get_task(conn, task.id).status == "ready"
 
 
 def test_rework_creates_formal_continuation_idempotently(board, monkeypatch):

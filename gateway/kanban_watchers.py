@@ -569,7 +569,7 @@ def _notify_kind_allowed(kind, load_config):
     """Patch local 10/09/2026 (Maikol, modo quieto): `kanban.notify_kinds` lista os kinds que geram
     mensagem passiva no chat. Ausente ou vazio = todos (comportamento original). `completed` e
     `blocked` passam sempre, porque alimentam o wake com resumo do worker."""
-    if kind in ("completed", "blocked"):
+    if kind in ("completed", "blocked", "support_approval_requested"):
         return True
     try:
         kcfg = (load_config() or {}).get("kanban") or {}
@@ -2865,7 +2865,7 @@ class GatewayKanbanWatchersMixin:
         NOTIFY_KINDS = (
             "claimed", "completed", "blocked", "gave_up", "status",
             "block_loop_detected", "review_requested", "nfos_principal_requested",
-            "commented", "nfos_progress", "model_fallback",
+            "commented", "nfos_progress", "model_fallback", "support_approval_requested",
         )
         # Focus accounting consumes worker-run boundaries too, but these
         # internal retry/recovery events must never become chat messages.
@@ -3428,6 +3428,7 @@ class GatewayKanbanWatchersMixin:
                             "claimed": {"running"}, "completed": {"done", "archived"},
                             "blocked": {"blocked"}, "block_loop_detected": {"blocked"},
                             "review_requested": {"review"},
+                            "support_approval_requested": {"todo", "backlog", "triage"},
                         }
                         if task and ((task.task_role == "activity" and kind != "model_fallback") or (
                             kind in expected_states and task.status not in expected_states[kind]
@@ -3508,6 +3509,8 @@ class GatewayKanbanWatchersMixin:
                             decision_payload = ev.payload or {}
                             msg = (f"👀 {board_tag}Principal analisando {sub['task_id']}: "
                                    f"{str(decision_payload.get('question') or '')[:500]}")
+                        elif kind == "support_approval_requested":
+                            msg = f"Novo chamado aguardando aprovação: {sub['task_id']} — {title}"
                         elif kind == "review_requested":
                             # Implementation complete; task moved to the
                             # first-class review lane. Wake the origin thread.
@@ -3624,6 +3627,13 @@ class GatewayKanbanWatchersMixin:
                                 # proximidade de horário, que não é vínculo.
                                 await asyncio.to_thread(
                                     _record_client_delivery, board_slug, sub["task_id"], _send_res, sub)
+                            elif kind == "support_approval_requested":
+                                sender = getattr(adapter, "send_support_approval", None)
+                                if not callable(sender):
+                                    raise RuntimeError("adapter does not support support approval buttons")
+                                _send_res = await sender(
+                                    sub["chat_id"], dict(ev.payload or {}), metadata=metadata,
+                                )
                             else:
                                 _send_res = await adapter.send(
                                     sub["chat_id"], msg, metadata=metadata,
