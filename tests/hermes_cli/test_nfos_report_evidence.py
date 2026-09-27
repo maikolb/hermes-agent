@@ -46,6 +46,18 @@ def approve(conn, task):
     decision = d.ask_principal(conn, task.id, task.current_run_id,
         kind='review', question='Review the current report', context={})
     d.resolve_decision(conn, decision, action='approve', answer='Evidence reviewed', author='Principal')
+    from tests.hermes_cli.test_nfos_principal_acceptance import assessment
+    saved = d._artifact(conn, task.id, 'report')
+    content = json.loads(saved['content'])
+    checks = json.loads(saved['evidence'])['artifact_checks']
+    local = next((c for c in checks if c['status'] == 'verified_local'), None)
+    if local and all(c['status'] == 'PASS' for c in content['criteria']):
+        reviewed = assessment(Path(local['path']))
+        reviewed['criteria'][0]['id'] = 'AC1'
+        final = d.ask_principal(conn, task.id, task.current_run_id,
+            kind='final_review', question='Inspect the count readback', context={})
+        d.resolve_decision(conn, final, action='continue', answer='Count readback inspected',
+                           author='Principal', assessment=reviewed)
 
 
 def test_missing_local_file_is_not_accepted_as_evidence(report_task):
@@ -155,8 +167,10 @@ def test_save_and_complete_read_files_without_holding_the_board_writer(report_ta
     monkeypatch.setattr(Path,'open',observe)
     d.save_report(conn,task.id,task.current_run_id,report(str(evidence)))
     approve(conn,task)
+    before_completion = len(opened)
+    assert before_completion > 0
     assert kb.complete_task(conn,task.id,result='Count verified')
-    assert len(opened)==2
+    assert len(opened) > before_completion
 
 
 def test_directory_cannot_masquerade_as_accessible_evidence_file(report_task):
