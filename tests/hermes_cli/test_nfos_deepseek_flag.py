@@ -76,9 +76,13 @@ def test_coordinator_dispatch_keeps_original_flag_and_does_not_leak(trial):
         assert normal.model_override is None
 
 
-def test_persisted_pin_reaches_spawn_and_continuation(trial, monkeypatch, tmp_path):
+@pytest.mark.parametrize('tag,model,provider,effort', [
+    ('#deepseek', 'deepseek-v4.1-flash', 'opencode-go', 'max'),
+    ('#qwen', 'qwen/qwen3.8-27b', 'openrouter', 'high'),
+])
+def test_persisted_pin_reaches_spawn_and_continuation(trial, monkeypatch, tmp_path, tag, model, provider, effort):
     with kb.connect_closing() as conn:
-        task_id = claim(conn, receive(conn, '#deepseek, Audite o resultado somente em HML.')).id
+        task_id = claim(conn, receive(conn, tag + ', Audite o resultado somente em HML.')).id
     captured = []
     monkeypatch.setattr(kb, '_retag_legacy_worker_sessions', lambda path: None)
     monkeypatch.setattr(kb, '_resolve_worker_cli_toolsets', lambda path: [])
@@ -92,9 +96,37 @@ def test_persisted_pin_reaches_spawn_and_continuation(trial, monkeypatch, tmp_pa
         assert child.provider_override == task.provider_override
         assert child.reasoning_effort == task.reasoning_effort
     command = captured[0]
-    assert command[command.index('--provider') + 1] == 'opencode-go'
-    assert command[command.index('--reasoning') + 1] == 'max'
-    assert 'deepseek-v4.1-flash' in command
+    assert command[command.index('--provider') + 1] == provider
+    assert command[command.index('--reasoning') + 1] == effort
+    assert model in command
+
+
+@pytest.mark.parametrize('tag', ['#qwen', '#QWEN,', '#qwen.'])
+def test_qwen_opt_in_preserves_request_and_default(trial, tag):
+    trial.update(worker_model='deepseek-v4.1-flash', worker_provider='opencode-go',
+                 worker_reasoning_effort='max', worker_escalation=True)
+    original = tag + ' Confira o relatório.'
+    with kb.connect_closing() as conn:
+        rid = receive(conn, original, defer_to_principal=True)
+        assert receive(conn, original) == rid
+        assert json.loads(delivery.get_request(conn, rid)['payload'])['text'] == original
+        task = claim(conn, rid)
+        assert review.worker_model_args(task, conn) == [
+            '-m', 'qwen/qwen3.8-27b', '--provider', 'openrouter', '--reasoning', 'high']
+        normal = claim(conn, receive(conn, 'Confira outro relatório.', message='2'))
+        assert review.worker_model_args(normal, conn) == [
+            '-m', 'deepseek-v4.1-flash', '--provider', 'opencode-go', '--reasoning', 'max']
+
+
+@pytest.mark.parametrize('text,platform', [
+    ('#qwenish Confira.', 'telegram'), ('#qwen-other Confira.', 'telegram'),
+    ('#qwen_other Confira.', 'telegram'), ('#qwen123 Confira.', 'telegram'),
+    ('https://example.com/#qwen Confira.', 'telegram'), ('#qwen Confira.', 'fixture'),
+])
+def test_qwen_requires_exact_native_tag(trial, text, platform):
+    with kb.connect_closing() as conn:
+        task = claim(conn, receive(conn, text, platform=platform))
+        assert task.model_override is None
 
 
 @pytest.mark.parametrize('tag', ['#luna', '#LUNA,', '#luna.'])
