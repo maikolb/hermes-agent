@@ -25,12 +25,19 @@ class RecordingAdapter:
     def __init__(self):
         self.sent = []
         self.handled = []
+        self.support_sent = []
 
     async def send(self, chat_id, text, metadata=None):
         self.sent.append({"chat_id": chat_id, "text": text, "metadata": metadata or {}})
 
     async def handle_message(self, event):
         self.handled.append(event)
+
+    async def send_support_approval(self, chat_id, payload, metadata=None):
+        from gateway.platforms.base import SendResult
+
+        self.support_sent.append({"chat_id": chat_id, "payload": payload, "metadata": metadata or {}})
+        return SendResult(success=True, message_id=str(len(self.support_sent)))
 
 
 class EditableRecordingAdapter(RecordingAdapter):
@@ -178,6 +185,38 @@ def test_claimed_task_notifies_only_after_material_start(tmp_path, monkeypatch):
     assert len(adapter.sent) == 1
     assert tid in adapter.sent[0]["text"]
     assert "started" in adapter.sent[0]["text"].lower()
+
+
+def test_support_approval_event_delivers_once_to_exact_project_topic(tmp_path, monkeypatch):
+    monkeypatch.setattr(kb, "_resolve_executable_assignee", lambda value: value)
+    db_path = tmp_path / "support-approval.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    payload = {
+        "ticket": "CA-0042", "project": "concursa", "project_name": "Concursa AI",
+        "title": "Falha ao salvar", "reporter": "Ana",
+        "vigilia_url": "https://vigilia.test/lux/#kanban/pilot/t_deadbeef",
+    }
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title=payload["title"], assignee="worker")
+        conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (tid,))
+        kb.add_notify_sub(
+            conn, task_id=tid, platform="telegram", chat_id="-1004309874643",
+            thread_id="41", chat_type="group", notifier_profile="default", delivery_mode="notify",
+        )
+        kb._append_event(conn, tid, "support_approval_requested", payload)
+        conn.commit()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert adapter.sent == []
+    assert adapter.support_sent == [{
+        "chat_id": "-1004309874643", "payload": payload, "metadata": {"thread_id": "41"},
+    }]
+    runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    assert len(adapter.support_sent) == 1
 
 
 def test_retry_chain_converges_to_one_final_notification(tmp_path, monkeypatch):
