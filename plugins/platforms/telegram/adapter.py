@@ -9238,7 +9238,16 @@ class TelegramAdapter(BasePlatformAdapter):
     def _is_reply_to_bot(self, message: Message) -> bool:
         if not self._bot or not getattr(message, "reply_to_message", None):
             return False
-        reply_user = getattr(message.reply_to_message, "from_user", None)
+        reply = message.reply_to_message
+        # A forum message implicitly references its topic-creation service
+        # message. A bot-created topic is not an explicit reply to the bot.
+        if getattr(reply, "forum_topic_created", None) is not None:
+            return False
+        if (getattr(message, "is_topic_message", False)
+                and getattr(message, "message_thread_id", None) is not None
+                and getattr(reply, "message_id", None) == message.message_thread_id):
+            return False
+        reply_user = getattr(reply, "from_user", None)
         return bool(reply_user and getattr(reply_user, "id", None) == getattr(self._bot, "id", None))
 
     @classmethod
