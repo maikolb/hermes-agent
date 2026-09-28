@@ -226,6 +226,10 @@ def _is_delegated_child_context() -> bool:
 def _is_dispatcher_owned_worker() -> bool:
     """False for delegate_task children AND for cron jobs fired in-process from
     a worker — i.e. whenever HERMES_KANBAN_* is present but not ours."""
+    # Context ownership excludes delegated/cron execution; it does not prove
+    # that this process was actually assigned a Kanban task.
+    if not os.getenv("HERMES_KANBAN_TASK", "").strip():
+        return False
     try:
         from agent.delegation_context import is_dispatcher_owned_worker_context
 
