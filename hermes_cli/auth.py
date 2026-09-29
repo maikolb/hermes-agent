@@ -1422,6 +1422,10 @@ def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = N
     # write so the root auth.json gets the same TOCTOU-safe treatment.
     auth_file = target_path if target_path is not None else _auth_file_path()
     auth_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        owner = auth_file.stat()
+    except FileNotFoundError:
+        owner = auth_file.parent.stat()
     # Tighten parent dir to 0o700 so siblings can't traverse to creds.
     # No-op on Windows (POSIX mode bits not enforced); ignore failures.
     # secure_parent_dir refuses to chmod /, top-level dirs, or the
@@ -1442,6 +1446,10 @@ def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = N
             stat.S_IRUSR | stat.S_IWUSR,
         )
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            # Atomic replacement must not transfer a service-owned store to
+            # an administrator who refreshes or imports credentials.
+            if hasattr(os, "fchown"):
+                os.fchown(handle.fileno(), owner.st_uid, owner.st_gid)
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
