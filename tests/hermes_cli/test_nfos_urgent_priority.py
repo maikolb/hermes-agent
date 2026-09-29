@@ -50,6 +50,47 @@ def test_same_reference_attaches_instead_of_new_card(board):
         assert body.startswith("[reenvio]")
 
 
+def test_portal_tickets_sharing_url_keep_independent_identity(board):
+    project, existing = board
+    with kb.connect_closing() as conn:
+        ids = []
+        for chat, number in [('concursa', 'CS-0001'), ('concursa', 'CS-0002'), ('other', 'CS-0001')]:
+            source = dict(_source(number), platform='portal', chat_id=chat, thread_id='suporte')
+            origin = {'portal': {'chamado': number, 'projeto': chat}}
+            rid = d.receive_request(conn, source=source, text=URL, project=project, origin=origin)
+            assert _req(conn, rid)['task_id'] is None
+            req = d.reserve_request(conn, capacity=4)
+            task = d.bootstrap_card(conn, rid, req['claim_token'], pid=os.getpid())
+            conn.execute("UPDATE tasks SET status='todo',worker_pid=NULL WHERE id=?", (task.id,))
+            assert d.receive_request(conn, source=source, text=URL, project=project, origin=origin) == rid
+            assert _req(conn, rid)['task_id'] == task.id
+            ids.append(task.id)
+        assert len(set(ids)) == 3 and existing.id not in ids
+
+
+@pytest.mark.parametrize('origin', [None, {}, {'portal': {}}, {'portal': {'chamado': ''}}])
+def test_portal_without_ticket_keeps_reference_attachment(board, origin):
+    project, task = board
+    with kb.connect_closing() as conn:
+        source = dict(_source(2), platform='portal')
+        rid = d.receive_request(conn, source=source, text=URL, project=project, origin=origin)
+        assert _req(conn, rid)['task_id'] == task.id
+
+
+def test_portal_explicit_reply_still_attaches(board):
+    project, task = board
+    with kb.connect_closing() as conn:
+        source = dict(_source('CS-0001'), platform='portal', thread_id='suporte')
+        rid = d.receive_request(conn, source=source, text=URL, project=project,
+                                origin={'portal': {'chamado': 'CS-0001'}})
+        req = d.reserve_request(conn, capacity=4)
+        original = d.bootstrap_card(conn, rid, req['claim_token'], pid=os.getpid())
+        reply = dict(source, message_id='reply-1')
+        reply_id = d.receive_request(conn, source=reply, text='Mais contexto', project=project,
+                                    origin={'portal': {'chamado': 'CS-0001'}}, reply_to_message_id='CS-0001')
+        assert _req(conn, reply_id)['task_id'] == original.id != task.id
+
+
 def test_keyword_reply_attaches_but_only_the_principal_escalates(board):
     project, task = board
     with kb.connect_closing() as conn:
