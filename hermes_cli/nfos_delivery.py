@@ -297,7 +297,7 @@ def _client_ack_intake(conn, source, text, reply_to_message_id, *, author):
         return None  # nunca derruba o intake
 
 
-def _urgent_intake(conn, request_id, source, text, reply_to_message_id, *, author, urgency=None):
+def _urgent_intake(conn, request_id, source, text, reply_to_message_id, *, author, urgency=None, attach_by_reference=True):
     """URGENT_20260910 e URGENCY_CONTEXT_20260914: resposta a pedido de card aberto ou repetição da sua referência anexa ao
     card existente (sem card novo). A urgência vem só do julgamento do Principal (urgency com motivo), nunca de
     palavra-chave, e sobe o card anexado. Devolve o que fez."""
@@ -311,7 +311,7 @@ def _urgent_intake(conn, request_id, source, text, reply_to_message_id, *, autho
         if r is not None:
             target = r['task_id'] or _open_task_for_references(conn, _references(p.get('text') or '')); how = 'reply'
     refs = _references(text)
-    if target is None and refs:
+    if target is None and refs and attach_by_reference:
         target = _open_task_for_references(conn, refs); how = 'same_reference'
     if target is None:
         return {'urgent': urgent}
@@ -378,7 +378,11 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
             # antes do intake preserva as duas informações: a mensagem pode
             # confirmar E trazer demanda nova.
             _client_ack_intake(conn, source, text, reply_to_message_id, author=_author)
-            _urgent_intake(conn, request_id, source, text, reply_to_message_id, author=_author, urgency=urgency)
+            portal = origin.get('portal') if isinstance(origin, dict) else None
+            independent_ticket = (source.get('platform') == 'portal' and isinstance(portal, dict)
+                                  and bool(str(portal.get('chamado') or '').strip()))
+            _urgent_intake(conn, request_id, source, text, reply_to_message_id, author=_author, urgency=urgency,
+                           attach_by_reference=not independent_ticket)
         except Exception:
             if urgency is not None:
                 raise
