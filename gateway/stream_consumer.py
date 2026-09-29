@@ -2072,6 +2072,11 @@ class GatewayStreamConsumer:
         text = self._clean_for_display(text)
         if not text.strip():
             return False
+        # Commentary bypasses the turn-final response filter. Apply the same
+        # exact-marker rule here so autonomous wakes cannot publish a literal
+        # [SILENT]/NO_REPLY bubble before the final response is suppressed.
+        if _is_intentional_silence_response(text):
+            return False
         try:
             # Declare interim intent: this send is NOT the turn-final. A
             # stream-is-the-message adapter (relay Slack native streaming)
