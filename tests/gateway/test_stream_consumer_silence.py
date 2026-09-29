@@ -109,6 +109,17 @@ def _sent_and_edited(adapter):
 
 class TestStreamedSilenceSuppression:
     @pytest.mark.asyncio
+    async def test_interim_commentary_silence_marker_is_not_sent(self):
+        adapter = _make_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter, "chat_1",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=1),
+        )
+
+        assert await consumer._send_commentary("[SILENT]") is False
+        adapter.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_no_reply_only_stream_is_fully_suppressed(self):
         """A stream whose entire content is NO_REPLY sends nothing visible."""
         adapter = _make_adapter()
@@ -152,5 +163,4 @@ class TestStreamedSilenceSuppression:
         adapter.delete_message.assert_awaited_once_with("chat_1", "preview_1")
         assert consumer.final_content_delivered is False
         assert consumer.already_sent is False
-
 

@@ -2,6 +2,8 @@
 passiva (recibo e wake seguem), título público sem carimbo nem telefone, barra honesta."""
 import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -63,6 +65,111 @@ def test_progress_texts_are_public_and_closing_is_honest():
     assert kw._progress_render("t_x", 7, "parcial", 57, 64, 80, "P", done=True, title="Cargo", outcome="parcial").startswith("▰▰▰▰▰▰▰ 7/7 parcial · Cargo")
     text = kw._progress_recebido("t_x", "mais uma demanda: [11/09, 20:33] +55 38 9152-9909: Cargo 301", "M", "corpo\nCritério de aceite: filtro funciona\n")
     assert text == "Recebido: Cargo 301\nPronto quando: filtro funciona"
+
+
+def test_progress_state_uses_typed_workflow_and_current_block(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "progress.db"))
+    monkeypatch.setattr(kb, "_resolve_executable_assignee", lambda name: name)
+    kb.init_db()
+    from hermes_cli import nfos_delivery as delivery
+
+    conn = kb.connect()
+    try:
+        delivery.init_schema(conn)
+        tid = kb.create_task(conn, title="Publicar staging", assignee="worker")
+        conn.execute(
+            "INSERT INTO nfos_requests(id,source_key,payload,status,task_id,created_at) "
+            "VALUES('req_1','telegram:x','{}','attached',?,1)",
+            (tid,),
+        )
+        conn.execute(
+            "INSERT INTO nfos_workflows(task_id,request_id,state_json,stage,next_action,updated_at) "
+            "VALUES(?, 'req_1', '{}', 'report', 'Revisar o resultado salvo', 1)",
+            (tid,),
+        )
+        kb.add_comment(conn, tid, "worker", "[etapa 2/7 reproduzir] feito | próximo: editar")
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+        kb._append_event(
+            conn,
+            tid,
+            "blocked",
+            {"reason": "Manutenção ativa; execução pausada"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    state = kw._progress_state(None, tid)
+    assert state[0] == (7, "readback", "Revisar o resultado salvo")
+    assert state[8:] == ("blocked", "Manutenção ativa; execução pausada")
+
+    missing = kw._progress_state(None, "t_missing")
+    assert len(missing) == 10
+    assert missing[0] is None and missing[8:] == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_blocked_event_updates_existing_progress_message(monkeypatch):
+    monkeypatch.setattr(
+        kw,
+        "_progress_state",
+        lambda board, task_id: (
+            (7, "readback", "Revisar o resultado salvo"),
+            12,
+            4,
+            500,
+            "G",
+            "Publicar staging",
+            "",
+            3,
+            "blocked",
+            "Manutenção ativa; execução pausada",
+        ),
+    )
+    monkeypatch.setattr(kw, "_progress_meta_get", lambda board, sub: {"progress_message_id": "74"})
+    adapter = SimpleNamespace(
+        edit_message=AsyncMock(return_value=SimpleNamespace(success=True)),
+        send=AsyncMock(),
+    )
+
+    handled = await kw._kanban_progress_bar(
+        "blocked",
+        {"task_id": "t_1", "platform": "telegram", "chat_id": "-100", "thread_id": "16"},
+        "board",
+        adapter,
+        {},
+    )
+
+    assert handled is True
+    adapter.send.assert_not_awaited()
+    text = adapter.edit_message.await_args.args[2]
+    assert text.startswith("⏸ ▰▰▰▰▰▰▰ 7/7 bloqueado · readback")
+    assert "aguardando: Manutenção ativa; execução pausada" in text
+
+
+@pytest.mark.asyncio
+async def test_stale_blocked_event_does_not_overwrite_newer_task_state(monkeypatch):
+    monkeypatch.setattr(
+        kw,
+        "_progress_state",
+        lambda board, task_id: (
+            (3, "implementar", "Continuar"), 2, 1, 250, "M",
+            "Tarefa", "", 2, "running", "",
+        ),
+    )
+    adapter = SimpleNamespace(edit_message=AsyncMock(), send=AsyncMock())
+
+    handled = await kw._kanban_progress_bar(
+        "blocked",
+        {"task_id": "t_1", "platform": "telegram", "chat_id": "-100", "thread_id": "16"},
+        "board",
+        adapter,
+        {},
+    )
+
+    assert handled is True
+    adapter.edit_message.assert_not_awaited()
+    adapter.send.assert_not_awaited()
 
 
 def test_client_chat_rule_from_project_source(monkeypatch):
