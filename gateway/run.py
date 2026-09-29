@@ -6493,7 +6493,14 @@ class TurnRunner:
             if _plat_streaming is None
             else bool(_plat_streaming)
         )
-        _want_stream_deltas = _streaming_enabled
+        # Kanban wake publication is decided from complete text. Streaming
+        # partial tokens would bypass the same policy used by final delivery.
+        _publication_inbound = ctx.persist_user_message or ctx.message
+        _kanban_wake = (
+            isinstance(_publication_inbound, str)
+            and _publication_inbound.lstrip().startswith("[kanban]")
+        )
+        _want_stream_deltas = _streaming_enabled and not _kanban_wake
         _want_interim_messages = ctx.interim_assistant_messages_enabled
         _want_interim_consumer = _want_interim_messages
         if _want_stream_deltas or _want_interim_consumer:
@@ -6535,13 +6542,20 @@ class TurnRunner:
         # When text streaming is off but streaming TTS is active,
         # install a TTS-only delta callback so the consumer still
         # receives LLM deltas for audio synthesis (#60671).
-        if _stream_delta_cb is None and _stts_consumer_ref is not None:
+        if _stream_delta_cb is None and _stts_consumer_ref is not None and not _kanban_wake:
             def _stream_delta_cb(text: str) -> None:
                 if ctx._run_still_current():
                     _stts_consumer_ref.on_delta(text)
 
         def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
             if not ctx._run_still_current():
+                return
+            from gateway.response_filters import is_intentional_silence_response
+            if is_intentional_silence_response(text):
+                return
+            if _wake_narration_to_suppress(_publication_inbound, text):
+                return
+            if _wake_owner_question_in_client_chat(_publication_inbound, text, ctx.source):
                 return
             display_text = text
             if _stream_consumer is not None:

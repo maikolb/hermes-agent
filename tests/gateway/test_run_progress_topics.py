@@ -1023,6 +1023,7 @@ async def _run_with_agent(
     adapter_cls=ProgressCaptureAdapter,
     user_id=None,
     scope_id=None,
+    message="hello",
 ):
     if config_data:
         import yaml
@@ -1064,7 +1065,7 @@ async def _run_with_agent(
         )
 
     result = await runner._run_agent(
-        message="hello",
+        message=message,
         context_prompt="",
         history=[],
         source=source,
