@@ -200,3 +200,45 @@ def test_save_auth_store_uses_os_open_with_0o600_mode(tmp_path, monkeypatch):
             f"auth.json temp open mode 0o{mode:o} != 0o{expected:o} — "
             f"umask would apply and potentially expose tokens"
         )
+
+
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: -1)() != 0, reason="requires root to reproduce cross-user replacement")
+@pytest.mark.parametrize("existing", [True, False])
+def test_save_auth_store_preserves_profile_owner(existing, monkeypatch):
+    import tempfile
+    import subprocess
+    from pathlib import Path
+    from hermes_cli import auth
+
+    with tempfile.TemporaryDirectory(prefix="hermes-auth-owner-") as directory:
+        profile = Path(directory)
+        os.chown(profile, 65534, 65534)
+        path = profile / "auth.json"
+        if existing:
+            path.write_text('{"providers": {}}')
+            os.chmod(path, 0o600)
+            os.chown(path, 65534, 65534)
+        auth._save_auth_store({"providers": {"test": {"value": "dummy"}}}, target_path=path)
+        saved = path.stat()
+        assert (saved.st_uid, saved.st_gid) == (65534, 65534)
+        assert stat.S_IMODE(saved.st_mode) == 0o600
+        def as_profile_owner():
+            os.setgid(65534)
+            os.setuid(65534)
+        readback = subprocess.run([sys.executable, "-c", "import json,sys; assert json.load(open(sys.argv[1]))['providers']['test']['value']=='dummy'", str(path)], preexec_fn=as_profile_owner, capture_output=True, text=True)
+        assert readback.returncode == 0, readback.stderr
+
+
+def test_save_auth_store_ownership_failure_preserves_original(tmp_path, monkeypatch):
+    from hermes_cli import auth
+
+    path = tmp_path / "auth.json"
+    original = b'{"providers": {"test": {"value": "previous"}}}'
+    path.write_bytes(original)
+    def denied(*args):
+        raise PermissionError("ownership cannot be preserved")
+    monkeypatch.setattr(os, "fchown", denied)
+    with pytest.raises(PermissionError, match="ownership cannot be preserved"):
+        auth._save_auth_store({"providers": {}}, target_path=path)
+    assert path.read_bytes() == original
+    assert not list(tmp_path.glob("auth.json.tmp.*"))
