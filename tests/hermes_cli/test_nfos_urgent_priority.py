@@ -38,6 +38,18 @@ def _task(conn, tid):
     return conn.execute("SELECT status, priority FROM tasks WHERE id=?", (tid,)).fetchone()
 
 
+def _portal_card(conn, rid):
+    # Portal intake creates its card before approval, as Suporte._submit_request
+    # does. It must never bootstrap an unapproved worker to test card identity.
+    with kb.write_txn(conn):
+        tid = kb.create_task(conn, title=rid, assignee='default', requires_repo=False)
+        conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (tid,))
+        conn.execute('INSERT INTO nfos_workflows(task_id,request_id,updated_at) VALUES(?,?,?)',
+                     (tid, rid, int(time.time())))
+        conn.execute("UPDATE nfos_requests SET status='attached',task_id=? WHERE id=?", (tid, rid))
+    return kb.get_task(conn, tid)
+
+
 def test_same_reference_attaches_instead_of_new_card(board):
     project, task = board
     with kb.connect_closing() as conn:
@@ -59,9 +71,8 @@ def test_portal_tickets_sharing_url_keep_independent_identity(board):
             origin = {'portal': {'chamado': number, 'projeto': chat}}
             rid = d.receive_request(conn, source=source, text=URL, project=project, origin=origin)
             assert _req(conn, rid)['task_id'] is None
-            req = d.reserve_request(conn, capacity=4)
-            task = d.bootstrap_card(conn, rid, req['claim_token'], pid=os.getpid())
-            conn.execute("UPDATE tasks SET status='todo',worker_pid=NULL WHERE id=?", (task.id,))
+            assert d.reserve_request(conn, capacity=4) is None
+            task = _portal_card(conn, rid)
             assert d.receive_request(conn, source=source, text=URL, project=project, origin=origin) == rid
             assert _req(conn, rid)['task_id'] == task.id
             ids.append(task.id)
@@ -83,8 +94,8 @@ def test_portal_explicit_reply_still_attaches(board):
         source = dict(_source('CS-0001'), platform='portal', thread_id='suporte')
         rid = d.receive_request(conn, source=source, text=URL, project=project,
                                 origin={'portal': {'chamado': 'CS-0001'}})
-        req = d.reserve_request(conn, capacity=4)
-        original = d.bootstrap_card(conn, rid, req['claim_token'], pid=os.getpid())
+        assert d.reserve_request(conn, capacity=4) is None
+        original = _portal_card(conn, rid)
         reply = dict(source, message_id='reply-1')
         reply_id = d.receive_request(conn, source=reply, text='Mais contexto', project=project,
                                     origin={'portal': {'chamado': 'CS-0001'}}, reply_to_message_id='CS-0001')
