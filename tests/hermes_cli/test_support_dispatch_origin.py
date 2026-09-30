@@ -127,6 +127,15 @@ def test_portal_platform_alone_requires_approval():
     assert not delivery.support_approval_pending({'source': {'platform': 'telegram'}})
 
 
+def test_internal_sineta_installer_keeps_existing_route_but_cannot_override_approval():
+    payload = {'source': {'platform': 'portal', 'thread_id': 'sineta',
+                          'user_id': 'portal:sineta:instalador'},
+               'origin': {'portal': {'sineta': 'instalador'}}}
+    assert not delivery.support_approval_pending(payload)
+    payload['support_approval'] = {'required': True}
+    assert delivery.support_approval_pending(payload)
+
+
 def test_portal_followup_does_not_change_original_telegram_origin(board):
     with kb.connect_closing(board) as conn:
         rid = receive(conn, 'original-telegram')
