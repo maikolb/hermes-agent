@@ -5594,6 +5594,9 @@ def recompute_ready(
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            from hermes_cli.nfos_delivery import task_support_approval_pending
+            if task_support_approval_pending(conn, task_id):
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Worker / operator asked for explicit human intervention — do not
                 # silently auto-recover.  ``unblock_task`` is the only
@@ -5706,8 +5709,8 @@ def claim_task(
         task = get_task(conn, task_id)
         if task is None or (task.task_role != "work" and not allow_activity):
             return None
-        from hermes_cli.nfos_delivery import active_suspension
-        if active_suspension(conn, task_id):
+        from hermes_cli.nfos_delivery import active_suspension, task_support_approval_pending
+        if active_suspension(conn, task_id) or task_support_approval_pending(conn, task_id):
             return None
         from hermes_cli.nfos_workspace_repair import maintenance_pause_pending, execution_budget, request_execution_budget_review
         if maintenance_pause_pending(conn, task_id):
@@ -5857,6 +5860,9 @@ def claim_review_task(
     with write_txn(conn):
         task = get_task(conn, task_id)
         if task is None or task.task_role != "work":
+            return None
+        from hermes_cli.nfos_delivery import task_support_approval_pending
+        if task_support_approval_pending(conn, task_id):
             return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
@@ -9389,6 +9395,9 @@ def promote_task(
         ).fetchone()
         if candidate is None:
             return False, f"task {task_id} not found"
+        from hermes_cli.nfos_delivery import task_support_approval_pending
+        if task_support_approval_pending(conn, task_id):
+            return False, "Support approval is required before execution"
         try:
             _resolve_executable_assignee(candidate["assignee"])
         except ValueError as exc:
@@ -9452,6 +9461,9 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     kanban/boards/cookai/workspaces/t_a6acd07d/root-cause.md. Kept in one place
     so the two transitions can't drift.
     """
+    from hermes_cli.nfos_delivery import task_support_approval_pending
+    if task_support_approval_pending(conn, task_id):
+        return "todo"
     undone_parents = conn.execute(
         "SELECT 1 FROM task_links l "
         "JOIN tasks p ON p.id = l.parent_id "
