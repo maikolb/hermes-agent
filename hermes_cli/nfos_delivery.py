@@ -506,10 +506,15 @@ def support_approval_pending(payload):
 def task_support_approval_pending(conn, task_id):
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_requests'").fetchone():
         return False
-    rows = conn.execute(
-        'SELECT q.payload FROM nfos_requests q LEFT JOIN nfos_workflows w ON w.request_id=q.id '
-        'WHERE q.task_id=? OR w.task_id=?', (task_id, task_id))
-    return any(support_approval_pending(json.loads(row['payload'])) for row in rows)
+    # The original workflow defines the task's origin. A later portal note
+    # attached to a Telegram task must not turn it into an approval-gated ticket.
+    row = conn.execute(
+        'SELECT q.payload FROM nfos_workflows w JOIN nfos_requests q ON q.id=w.request_id '
+        'WHERE w.task_id=?', (task_id,)).fetchone()
+    if row is None:
+        row = conn.execute('SELECT payload FROM nfos_requests WHERE task_id=? ORDER BY created_at,id LIMIT 1',
+                           (task_id,)).fetchone()
+    return bool(row and support_approval_pending(json.loads(row['payload'])))
 
 
 def reserve_request(conn, *, capacity):
