@@ -122,6 +122,11 @@ def test_watchdog_recognizes_portal_hold(board):
         assert 'Balcão' in GatewayKanbanWatchersMixin._ready_watchdog_guard_reason(conn, tid)
 
 
+def test_portal_platform_alone_requires_approval():
+    assert delivery.support_approval_pending({'source': {'platform': 'portal'}})
+    assert not delivery.support_approval_pending({'source': {'platform': 'telegram'}})
+
+
 def test_real_dispatch_tick_starts_only_approved_card(board):
     with kb.connect_closing(board) as conn:
         _, pending = materialize(conn, 'pending-tick')
