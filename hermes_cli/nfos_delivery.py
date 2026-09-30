@@ -495,6 +495,14 @@ def support_approval_pending(payload):
     approval = payload.get('support_approval') or {}
     origin = payload.get('origin') or {}
     source = payload.get('source') or {}
+    portal = origin.get('portal') or {}
+    # Sineta's internal installer is not a customer ticket. Its server-owned
+    # envelope predates support approval and retains the normal NFOS route.
+    if (not approval.get('required') and not portal.get('chamado')
+            and portal.get('sineta') == 'instalador'
+            and source.get('platform') == 'portal' and source.get('thread_id') == 'sineta'
+            and source.get('user_id') == 'portal:sineta:instalador'):
+        return False
     is_support = (bool(approval.get('required')) or isinstance(origin.get('portal'), dict)
                   or source.get('chat_type') == 'portal' or source.get('platform') == 'portal')
     if not is_support:
