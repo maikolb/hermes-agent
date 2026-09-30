@@ -127,6 +127,17 @@ def test_portal_platform_alone_requires_approval():
     assert not delivery.support_approval_pending({'source': {'platform': 'telegram'}})
 
 
+def test_portal_followup_does_not_change_original_telegram_origin(board):
+    with kb.connect_closing(board) as conn:
+        rid = receive(conn, 'original-telegram')
+        request = delivery.reserve_request(conn, capacity=2)
+        task = delivery.bootstrap_card(conn, rid, request['claim_token'], pid=os.getpid())
+        note = receive(conn, 'portal-note', portal=True)
+        conn.execute("UPDATE nfos_requests SET task_id=?,status='attached' WHERE id=?", (task.id, note))
+        conn.commit()
+        assert not delivery.task_support_approval_pending(conn, task.id)
+
+
 def test_real_dispatch_tick_starts_only_approved_card(board):
     with kb.connect_closing(board) as conn:
         _, pending = materialize(conn, 'pending-tick')
