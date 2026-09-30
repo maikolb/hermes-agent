@@ -496,7 +496,7 @@ def support_approval_pending(payload):
     origin = payload.get('origin') or {}
     source = payload.get('source') or {}
     is_support = (bool(approval.get('required')) or isinstance(origin.get('portal'), dict)
-                  or source.get('chat_type') == 'portal')
+                  or source.get('chat_type') == 'portal' or source.get('platform') == 'portal')
     if not is_support:
         return False
     return not (approval.get('approved_at') and approval.get('approved_by')
