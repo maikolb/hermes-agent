@@ -4228,6 +4228,9 @@ class GatewayKanbanWatchersMixin:
         ``respawn_guarded {"reason": "active_pr"}`` every ~90s. When the
         latest event is a dispatcher guard, name it instead of guessing.
         """
+        from hermes_cli.nfos_delivery import task_support_approval_pending
+        if task_support_approval_pending(conn, task_id):
+            return "aguardando aprovação do Balcão"
         row = conn.execute(
             "SELECT kind, payload FROM task_events WHERE task_id = ? "
             "ORDER BY id DESC LIMIT 1",

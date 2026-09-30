@@ -486,6 +486,28 @@ def retry_coordinator_input(conn, receipt, *, error=None):
         conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(payload),row['id']))
 
 
+def support_approval_pending(payload):
+    """Portal execution requires its stored approval, never a global dispatch stop."""
+    approval = payload.get('support_approval') or {}
+    origin = payload.get('origin') or {}
+    source = payload.get('source') or {}
+    is_support = (bool(approval.get('required')) or isinstance(origin.get('portal'), dict)
+                  or source.get('chat_type') == 'portal')
+    if not is_support:
+        return False
+    return not (approval.get('approved_at') and approval.get('approved_by')
+                and approval.get('decision') not in {'rejected', 'cancelled'})
+
+
+def task_support_approval_pending(conn, task_id):
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_requests'").fetchone():
+        return False
+    rows = conn.execute(
+        'SELECT q.payload FROM nfos_requests q LEFT JOIN nfos_workflows w ON w.request_id=q.id '
+        'WHERE q.task_id=? OR w.task_id=?', (task_id, task_id))
+    return any(support_approval_pending(json.loads(row['payload'])) for row in rows)
+
+
 def reserve_request(conn, *, capacity):
     if capacity<1:
         return None
@@ -500,11 +522,12 @@ def reserve_request(conn, *, capacity):
             busy+=conn.execute("SELECT count(*) FROM nfos_requests WHERE status='starting' AND json_extract(payload,'$.urgent') IS 1").fetchone()[0]
             if busy:
                 return None
-            row=conn.execute("SELECT id FROM nfos_requests WHERE status='pending' AND json_extract(payload,'$.urgent') IS 1 "
-                             "ORDER BY created_at,id LIMIT 1").fetchone()
+            rows=conn.execute("SELECT id,payload FROM nfos_requests WHERE status='pending' AND json_extract(payload,'$.urgent') IS 1 "
+                              "ORDER BY created_at,id")
         else:
-            row=conn.execute("SELECT id FROM nfos_requests WHERE status='pending' "
-                             "ORDER BY (json_extract(payload,'$.urgent') IS 1) DESC,created_at,id LIMIT 1").fetchone()  # URGENCY_CONTEXT_20260914: urgente primeiro
+            rows=conn.execute("SELECT id,payload FROM nfos_requests WHERE status='pending' "
+                              "ORDER BY (json_extract(payload,'$.urgent') IS 1) DESC,created_at,id")
+        row=next((row for row in rows if not support_approval_pending(json.loads(row['payload']))), None)
         if row is None:
             return None
         conn.execute("UPDATE nfos_requests SET status='starting',claim_token=?,claimed_at=? WHERE id=?",
@@ -610,6 +633,8 @@ def bootstrap_card(conn, request_id, token, *, pid):
         request=get_request(conn,request_id)
         if not request or request['claim_token']!=token:
             raise OwnershipConflict('The request belongs to another worker')
+        if support_approval_pending(json.loads(request['payload'])):
+            raise WorkflowError('Support approval is required before execution')
         if request['task_id']:
             task=kb.get_task(conn,request['task_id'])
             if task.claim_lock!=token or task.worker_pid!=pid:
