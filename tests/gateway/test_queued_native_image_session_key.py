@@ -17,6 +17,7 @@ _ONE_BY_ONE_PNG = base64.b64decode(
 
 
 class CaptureAdapter(BasePlatformAdapter):
+    supports_exact_text_delivery = True
     def __init__(self):
         super().__init__(PlatformConfig(enabled=True, token="***"), Platform.TELEGRAM)
         self.sent = []
@@ -58,11 +59,11 @@ class CaptureQueuedNativeImageAgent:
 
     def run_conversation(self, message, conversation_history=None, task_id=None):
         type(self).calls.append(message)
-        return {
-            "final_response": f"done-{len(type(self).calls)}",
-            "messages": [],
-            "api_calls": 1,
-        }
+        from tests.gateway.test_queued_primary_delivery import _checkpointed_result
+        return _checkpointed_result(
+            self.delivery_home, f"done-{len(type(self).calls)}",
+            self.delivery_source, "sess-native-image-followup",
+        )
 
 
 def _make_runner(adapter):
@@ -123,6 +124,8 @@ async def test_queued_followup_uses_pending_event_session_key_for_native_images(
         chat_type="group",
         thread_id="17585",
     )
+    CaptureQueuedNativeImageAgent.delivery_home = tmp_path
+    CaptureQueuedNativeImageAgent.delivery_source = source
 
     adapter._pending_messages["agent:main:telegram:group:-1001"] = MessageEvent(
         text="describe this",

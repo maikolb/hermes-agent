@@ -137,3 +137,5 @@ def test_dispatch_cards_explicit_context_never_sacrificed(board, monkeypatch):
         assert (task.body or "").count("C") >= dk._BODY_MAX - 40
     finally:
         conn.close()
+
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

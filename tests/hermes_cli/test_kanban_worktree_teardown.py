@@ -402,3 +402,6 @@ def test_archived_parent_worktree_remains_preserved_after_children_done(
         assert kb.complete_task(conn, child, summary="child done")
     # A terminal child cannot turn an unverified parent into cleanup authority.
     assert parent_wt.is_dir()
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

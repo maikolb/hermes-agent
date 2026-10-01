@@ -287,3 +287,6 @@ def test_cli_repair_json_shape(cli_home, capsys):
     assert Path(payload["backup_path"]).exists()
 
 
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

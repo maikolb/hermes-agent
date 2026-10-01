@@ -320,3 +320,6 @@ def test_swarm_verifier_and_synthesis_are_dependency_gated(tmp_path):
         assert synthesizer.status == "ready"
     finally:
         conn.close()
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

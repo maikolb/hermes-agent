@@ -1237,3 +1237,6 @@ def test_failed_worktree_cleanup_stays_pending_and_dispatch_retries(
             f"refs/heads/{cleanup_branch}",
         )
         assert branch_probe.returncode == 1
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = [*(pytestmark if isinstance(pytestmark, list) else [pytestmark]), pytest.mark.usefixtures("kanban_executor_catalog")]

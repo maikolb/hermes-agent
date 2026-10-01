@@ -100,3 +100,5 @@ def test_estimate_from_text_no_task(client, monkeypatch):
 
 def test_estimate_from_text_requires_title(client):
     assert client.post("/api/plugins/kanban/estimate", json={"title": "  ", "body": "x"}).json()["ok"] is False
+
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

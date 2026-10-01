@@ -208,3 +208,6 @@ def test_no_subscriber_short_circuits_worker_hooks(
     assert "on_kanban_worker_spawned" not in invoked
     # The shipped claimed hook has no short-circuit and still fires.
     assert "kanban_task_claimed" in invoked
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

@@ -407,3 +407,5 @@ def test_mirror_cards_without_origin_behave_as_before(kanban_env):
             (cards[0],),
         ).fetchone()[0]
     assert count == 0
+
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

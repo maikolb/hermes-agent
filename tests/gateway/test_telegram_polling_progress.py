@@ -107,6 +107,8 @@ def _configure_lifecycle_connect(monkeypatch, adapter, apps):
 
     monkeypatch.setattr(tg_adapter, "Application", _Application)
     monkeypatch.setattr(tg_adapter, "HTTPXRequest", _ControlledRequest)
+    from plugins.platforms.telegram import telegram_sync_request
+    monkeypatch.setattr(telegram_sync_request, "ThreadedUrllibRequest", _ControlledRequest)
     monkeypatch.setattr(tg_adapter, "discover_fallback_ips", _no_fallback_ips)
     monkeypatch.setattr(tg_adapter, "resolve_proxy_url", lambda *args, **kwargs: None)
     monkeypatch.setattr(adapter, "_acquire_platform_lock", lambda *args, **kwargs: True)
@@ -309,8 +311,8 @@ async def test_non_finite_fallback_discovery_timeout_uses_finite_default(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_fallback_disabled_excludes_configured_ips_from_proxy_targets(monkeypatch):
-    """Disabled fallback IPs must not affect proxy bypass decisions."""
+async def test_fallback_disabled_uses_direct_transport_without_proxy(monkeypatch):
+    """The threaded direct transport bypasses both fallback IPs and proxies."""
     adapter = _make_adapter()
     polling_app = _lifecycle_app()
 
@@ -333,8 +335,8 @@ async def test_fallback_disabled_excludes_configured_ips_from_proxy_targets(monk
     monkeypatch.setattr(tg_adapter, "resolve_proxy_url", resolve_proxy)
 
     assert await adapter.connect() is True
-    assert proxy_targets == [["api.telegram.org"]]
-    assert builders[0].polling_request.kwargs.get("proxy") == "http://127.0.0.1:8080"
+    assert proxy_targets == []
+    assert builders[0].polling_request.kwargs.get("proxy") is None
     assert "transport" not in (
         builders[0].polling_request.kwargs.get("httpx_kwargs") or {}
     )

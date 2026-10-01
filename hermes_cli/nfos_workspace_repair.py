@@ -171,10 +171,10 @@ def _idle(conn, task_id):
 
 def execution_budget(conn, task):
     """Compute the next native worker's balance without launching a process."""
-    import yaml
     from hermes_cli import nfos_principal_review as review
-    from hermes_cli.config import resolve_turn_limit
+    from hermes_cli.config import load_config_readonly, resolve_turn_limit
     from hermes_cli.profiles import get_profile_dir
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     first = review.worker_escalation(conn, task.id).get('first_run_id')
     if not first:
         return None
@@ -182,7 +182,11 @@ def execution_budget(conn, task):
     usage = review.escalation_usage(conn, task.id, last + 1)
     config_path = get_profile_dir(task.assignee or 'default') / 'config.yaml'
     raw = config_path.read_bytes() if config_path.is_file() else b''
-    cfg = yaml.safe_load(raw) or {}
+    token = set_hermes_home_override(config_path.parent)
+    try:
+        cfg = load_config_readonly()
+    finally:
+        reset_hermes_home_override(token)
     limit = (cfg.get('agent') or {}).get('max_turns', cfg.get('max_turns'))
     base = resolve_turn_limit(limit if limit is not None else os.environ.get('HERMES_MAX_ITERATIONS'))
     grants = [g for g in review.iteration_grants(conn, task.id) if g['first_run_id'] == first]

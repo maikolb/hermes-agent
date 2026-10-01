@@ -115,3 +115,6 @@ def test_no_subscriber_short_circuits_task_updated(kanban_home, monkeypatch):
     finally:
         conn.close()
     assert "on_kanban_task_updated" not in invoked
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

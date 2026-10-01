@@ -293,3 +293,6 @@ def test_cli_attach_attachments_and_rm(kanban_home, tmp_path):
         conn.close()
 
 
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

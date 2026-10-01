@@ -111,3 +111,6 @@ def test_genuine_crash_still_reclaims(conn):
     assert tid in crashed
     final = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
     assert final["status"] in ("ready", "blocked", "todo")
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

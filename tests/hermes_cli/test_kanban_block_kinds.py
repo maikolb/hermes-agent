@@ -110,3 +110,6 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

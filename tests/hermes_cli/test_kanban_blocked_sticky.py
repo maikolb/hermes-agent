@@ -161,3 +161,6 @@ def test_protocol_violation_loop_is_broken(kanban_home: Path) -> None:
 # (landed via #28754 / #28781).  The original PR shipped a duplicate test
 # here; dropped during salvage to avoid two assertions of the same contract.
 # ---------------------------------------------------------------------------
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

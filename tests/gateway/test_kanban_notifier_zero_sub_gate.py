@@ -16,6 +16,8 @@ suppress delivery entirely. The read-only probe captures the per-tick cost
 win without that risk.)
 """
 
+import pytest
+
 import asyncio
 
 from unittest.mock import patch
@@ -83,3 +85,6 @@ def test_zero_sub_board_is_never_opened_writable(tmp_path, monkeypatch):
     assert adapter.sent == []
 
 
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

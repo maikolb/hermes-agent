@@ -662,19 +662,20 @@ def test_delete_task_removes_task_and_cascades(kanban_home):
 def test_worktree_workspace_explicit_target_materializes_linked_worktree(kanban_home, tmp_path):
     repo = tmp_path / "repo"
     _init_git_repo(repo)
-    target = repo / ".worktrees" / "custom-task"
-    branch = "wt/custom-task"
     with kb.connect() as conn:
         t = kb.create_task(
             conn,
             title="ship",
             workspace_kind="worktree",
-            workspace_path=str(target),
-            branch_name=branch,
         )
+        target = repo / ".worktrees" / t
+        branch = f"wt/{t}-custom-task"
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET workspace_path=?, branch_name=? WHERE id=?",
+                         (str(target), branch, t))
         task = kb.get_task(conn, t)
         assert task is not None
-        ws = kb.resolve_workspace(task)
+        ws = kb.resolve_workspace(task, conn=conn)
 
     assert ws == target
     assert ws.exists()
@@ -1151,7 +1152,7 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
     with kb.connect() as conn:
         # A is done.
         a = kb.create_task(conn, title="parent-done")
-        kb.complete_task(conn, a)
+        kb.complete_task(conn, a, summary="Fixture work completed")
 
         # C is running (not done) — blocks child B.
         c = kb.create_task(conn, title="parent-running")
@@ -1189,7 +1190,7 @@ def test_add_column_if_missing_is_idempotent_on_race(kanban_home):
     """
     import sqlite3
 
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute(
         "CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL)"
@@ -1217,13 +1218,25 @@ def test_migrate_add_optional_columns_tolerates_concurrent_migration(kanban_home
     import sqlite3
 
     # Schema already in fully-migrated state (all optional columns present).
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute(
         """
         CREATE TABLE tasks (
             id INTEGER PRIMARY KEY,
             title TEXT NOT NULL,
+            body TEXT,
+            assignee TEXT,
+            priority INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT,
+            started_at INTEGER,
+            completed_at INTEGER,
+            workspace_kind TEXT NOT NULL DEFAULT 'scratch',
+            workspace_path TEXT,
+            claim_lock TEXT,
+            claim_expires INTEGER,
+            status TEXT NOT NULL DEFAULT 'ready',
+            created_at INTEGER NOT NULL DEFAULT 0,
             tenant TEXT,
             result TEXT,
             idempotency_key TEXT,
@@ -1256,6 +1269,7 @@ def test_migrate_add_optional_columns_tolerates_concurrent_migration(kanban_home
     )
 
     # Running migration on an already-migrated schema must not raise.
+    conn.executescript(kb.SCHEMA_SQL)
     kb._migrate_add_optional_columns(conn)
     conn.close()
 
@@ -1745,3 +1759,6 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

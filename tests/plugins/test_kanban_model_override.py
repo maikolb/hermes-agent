@@ -320,3 +320,6 @@ def test_bulk_reasoning_effort(client):
     for tid in (t1["id"], t2["id"]):
         got = client.get(f"/api/plugins/kanban/tasks/{tid}").json()["task"]
         assert got["reasoning_effort"] == "max"
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

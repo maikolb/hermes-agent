@@ -100,6 +100,18 @@ def test_progress_output_tolerates_legacy_stdout_encoding(tmp_path: Path) -> Non
     assert "1 tests passed" in proc.stdout
 
 
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_help_exits_before_test_discovery(flag):
+    runner = Path(__file__).resolve().parent.parent / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner), flag], capture_output=True,
+        text=True, timeout=15,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "--file-timeout" in proc.stdout
+    assert "Discovered" not in proc.stdout
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only probe")
 @pytest.mark.live_system_guard_bypass
 def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:

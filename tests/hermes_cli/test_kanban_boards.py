@@ -689,6 +689,9 @@ class TestCLI:
 
 
     def test_per_board_task_isolation_via_cli(self, tmp_path):
+        profile = tmp_path / "profiles" / "dev"
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text("{}\n", encoding="utf-8")
         env = {"HERMES_HOME": str(tmp_path)}
         assert _cli(["boards", "create", "projA"], env_extra=env).returncode == 0
         assert _cli(["boards", "create", "projB"], env_extra=env).returncode == 0
@@ -711,3 +714,6 @@ class TestCLI:
         assert titlesA == ["Task A"]
         assert titlesB == ["Task B"]
         assert titlesD == []
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

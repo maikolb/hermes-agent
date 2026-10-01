@@ -272,16 +272,13 @@ def test_nonspawnable_review_does_not_tax_ready_budget(
         cfgmod, "load_config",
         lambda *a, **k: {"kanban": {"review_dispatch": True}},
     )
-    # Only 'alice' is a real profile; the review assignee is a human lane.
-    monkeypatch.setattr(
-        profmod, "profile_exists", lambda name: name == "alice"
-    )
-
     spawns: list = []
     with kb.connect() as conn:
         for title in ("ready-1", "ready-2"):
             kb.create_task(conn, title=title, assignee="alice")
         _park_in_review(conn, "human-review", "some-human")
+        # A retained review can outlive its installed executor profile.
+        monkeypatch.setattr(profmod, "profile_exists", lambda name: name == "alice")
         res = kb.dispatch_once(
             conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=2,
         )
@@ -311,3 +308,6 @@ def test_review_budget_still_bounded_by_shared_cap(
 
     # Budget 2 total across both lanes, reservation notwithstanding.
     assert len(res.spawned) == 2
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

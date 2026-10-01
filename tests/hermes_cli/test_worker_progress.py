@@ -46,7 +46,7 @@ def test_task_model_exposes_worker_started_at(tmp_path, monkeypatch):
     kb._INITIALIZED_PATHS = set()
     conn = kb.connect()
     try:
-        task_id = kb.create_task(conn, title="w", assignee="hermes")
+        task_id = kb.create_task(conn, title="w", assignee="default")
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET started_at=1000, worker_started_at=2000.5 "

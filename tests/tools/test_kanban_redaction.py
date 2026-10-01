@@ -140,3 +140,6 @@ def test_kanban_complete_result_field_scrubbed(worker_env):
     assert run is not None
     stored = run.summary or run.result if hasattr(run, "result") else run.summary or ""
     assert secret not in (stored or "")
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

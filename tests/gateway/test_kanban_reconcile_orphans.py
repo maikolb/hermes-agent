@@ -176,3 +176,6 @@ class TestDispatchOnceReconciles:
         assert conn.execute(
             "SELECT status FROM tasks WHERE id=?", (tid,)
         ).fetchone()["status"] == "running"
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

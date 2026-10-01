@@ -58,7 +58,8 @@ def test_binding_rejects_foreign_run_claim_and_task(board):
     assert not bind(board, task, claim_lock="wrong")
     assert not kb.bind_worker_session(board, "missing", run_id=task.current_run_id,
                                       claim_lock=task.claim_lock, session_id="worker")
-    assert metadata(board, task.current_run_id) == {}
+    assert "worker_session_id" not in metadata(board, task.current_run_id)
+    assert metadata(board, task.current_run_id)["runtime_identity"]["code"]["digest"].startswith("sha256:")
 
 
 def test_retry_fence_rejects_old_attempt_and_terminal_keeps_binding(board):
@@ -96,7 +97,8 @@ def test_dispatcher_existing_env_handoff_and_delegated_context_isolation(board, 
     monkeypatch.setenv("HERMES_KANBAN_BOARD", "default")
     with delegated_child_context("nested-child"):
         assert not kb.bind_dispatcher_session("nested-child")
-    assert metadata(board, task.current_run_id) == {}
+    assert "worker_session_id" not in metadata(board, task.current_run_id)
+    assert metadata(board, task.current_run_id)["runtime_identity"]["code"]["digest"].startswith("sha256:")
     assert kb.bind_dispatcher_session("dispatcher-session")
     assert metadata(board, task.current_run_id)["worker_session_id"] == "dispatcher-session"
     monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", "expired")

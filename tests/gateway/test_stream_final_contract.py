@@ -13,15 +13,18 @@ Three invariants:
    mid-turn commentary must never seal the live native stream (which
    orphaned the true final into a plain-send duplicate).
 
-3. The queued-follow-up lane reconciles an unconfirmed final by EDITING the
-   consumer's delivered message in place, not by plain-sending a duplicate.
+3. The durable queued-follow-up lane sends the exact sealed payload when
+   streaming delivery remains unconfirmed; an edit cannot establish that ACK.
 """
 
 import asyncio
 from types import SimpleNamespace
 
 import pytest
+from tests.gateway.test_queued_primary_delivery import _delivery_namespace
+from gateway.run import _strip_response_attachments_for_direct_send
 
+from gateway.config import Platform
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
 
@@ -35,6 +38,7 @@ def _make_draft_adapter():
     a._typing_paused = set()
     a._fatal_error_message = None
     a.draft_stream_is_message = True
+    a.supports_exact_text_delivery = True
     a.draft_calls = []
     a.send_calls = []
     a.edit_calls = []
@@ -223,13 +227,13 @@ class TestFinalAdoptionGuards:
 
 class TestQueuedLaneReconcile:
     @pytest.mark.asyncio
-    async def test_queued_first_response_edits_in_place(self):
+    async def test_queued_unconfirmed_stream_sends_exact_sealed_payload(self, tmp_path):
         from gateway.run import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
         adapter = _make_draft_adapter()
         sc = SimpleNamespace(message_id="sealed_ts_9", _turn_split_delivery=False)
-        source = SimpleNamespace(chat_id="D1")
+        source = SimpleNamespace(chat_id="D1", platform=Platform.TELEGRAM, thread_id=None)
         await GatewayRunner._deliver_queued_first_response(
             runner,
             "the complete final with footer",
@@ -239,21 +243,22 @@ class TestQueuedLaneReconcile:
             text_already_delivered=False,
             deliver_media=False,
             stream_consumer=sc,
+            session_key="queued-delivery-test",
+            **_delivery_namespace(tmp_path, _strip_response_attachments_for_direct_send("the complete final with footer", adapter), source=source),
         )
-        # Edited the sealed message; did NOT plain-send a duplicate.
-        assert adapter.edit_calls == [
-            {"message_id": "sealed_ts_9", "content": "the complete final with footer"}
-        ]
-        assert adapter.send_calls == []
+        # Unconfirmed edits can reformat/truncate. The durable rail sends the
+        # exact sealed payload and acknowledges that new message instead.
+        assert adapter.edit_calls == []
+        assert [call["content"] for call in adapter.send_calls] == ["the complete final with footer"]
 
     @pytest.mark.asyncio
-    async def test_queued_first_response_falls_back_without_message(self):
+    async def test_queued_first_response_falls_back_without_message(self, tmp_path):
         from gateway.run import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
         adapter = _make_draft_adapter()
         sc = SimpleNamespace(message_id=None, _turn_split_delivery=False)
-        source = SimpleNamespace(chat_id="D1")
+        source = SimpleNamespace(chat_id="D1", platform=Platform.TELEGRAM, thread_id=None)
         await GatewayRunner._deliver_queued_first_response(
             runner,
             "final text",
@@ -263,6 +268,8 @@ class TestQueuedLaneReconcile:
             text_already_delivered=False,
             deliver_media=False,
             stream_consumer=sc,
+            session_key="queued-delivery-test",
+            **_delivery_namespace(tmp_path, _strip_response_attachments_for_direct_send("final text", adapter), source=source),
         )
         assert adapter.edit_calls == []
         assert len(adapter.send_calls) == 1

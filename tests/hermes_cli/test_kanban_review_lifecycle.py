@@ -572,7 +572,7 @@ def test_review_dispatch_honors_global_and_per_profile_caps(
             conn,
             running_id,
             expected_run_id=running.current_run_id,
-        )
+         summary="Fixture work completed")
         global_dry_run = kb.dispatch_once(
             conn,
             dry_run=True,
@@ -708,3 +708,6 @@ def test_reviewer_reassigns_for_autonomous_dispatch(kanban_home: Path) -> None:
         ev = _events(conn, tid, kind="review_requested")[0][1]
         assert ev["reviewer"] == "lead-reviewer"
         assert ev["implementer"] == "worker"
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")
