@@ -25,34 +25,50 @@ def _source():
     )
 
 
-def _delivery_namespace(tmp_path, content):
+def _delivery_namespace(tmp_path, content, *, source=None, session_id="session-1"):
     from agent.turn_checkpoint import TurnCheckpointStore, checkpoint_delivery_fence
+    from uuid import uuid4
 
     storage_home = tmp_path / ".hermes"
     store = TurnCheckpointStore(storage_home / "sessions" / "turn-checkpoints")
     store.start_turn(
-        "session-1",
-        "turn-1",
+        session_id,
+        str(uuid4()),
         "deliver queued answer",
         [{"role": "user", "content": "deliver queued answer"}],
         routing={
             "platform": "telegram",
-            "chat_id": "chat-1",
-            "thread_id": "thread-1",
+            "chat_id": source.chat_id if source else "chat-1",
+            "thread_id": getattr(source, "thread_id", None) if source else "thread-1",
         },
     )
     state = store.mark_deliverable(
-        "session-1",
+        session_id,
         content,
         verification_pending=False,
         verification_kind="ordinary_final",
     )
     namespace = store.delivery_namespace()
     return {
-        "session_id": "session-1",
+        "session_id": session_id,
         "checkpoint_fence": checkpoint_delivery_fence(state),
         "checkpoint_root": namespace["checkpoint_root"],
         "storage_home": namespace["storage_home"],
+    }
+
+
+def _checkpointed_result(tmp_path, content, source, session_id):
+    """Native deliverable envelope for fake agents used by queue/routing tests."""
+    from hermes_state import SessionDB
+    with SessionDB(tmp_path / ".hermes" / "state.db") as db:
+        db.create_session(session_id, "telegram")
+    delivery = _delivery_namespace(tmp_path, content, source=source, session_id=session_id)
+    return {
+        "final_response": content, "messages": [], "api_calls": 1,
+        "session_id": delivery["session_id"],
+        "turn_checkpoint_fence": delivery["checkpoint_fence"],
+        "turn_checkpoint_root": delivery["checkpoint_root"],
+        "storage_home": delivery["storage_home"],
     }
 
 

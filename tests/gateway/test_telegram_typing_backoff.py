@@ -35,7 +35,7 @@ async def test_typing_transient_failure_enters_cooldown(monkeypatch):
     await adapter.send_typing("123")
 
     assert adapter._bot.send_chat_action.await_count == 1
-    assert adapter._telegram_typing_cooldown_until["123"] == pytest.approx(1030.0)
+    assert adapter._telegram_typing_cooldown_until[("123", None)] == pytest.approx(1030.0)
 
     now["value"] = 1031.0
     adapter._bot.send_chat_action = AsyncMock(return_value=None)

@@ -65,7 +65,10 @@ def test_stale_acceptance_or_evidence_cannot_close(task_context,mutation):
     if mutation=='spec':
         spec=json.loads(d.get_spec(conn,task.id)['content']);spec['delivery_destination']=scope('OTHER')
         d.save_spec(conn,task.id,task.current_run_id,spec,author='Claude TL',evidence={'session':'updated'})
-    elif mutation=='report':save_report(conn,task,artifact)
+    elif mutation=='report':
+        report=json.loads(d._artifact(conn,task.id,'report')['content'])
+        report['summary']='Updated outcome claim requiring a new review'
+        d.save_report(conn,task.id,task.current_run_id,report)
     elif mutation=='evidence':artifact.write_text('changed')
     else:
         effect=conn.execute("select * from nfos_effects where operation='homolog'").fetchone()

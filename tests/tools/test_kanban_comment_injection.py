@@ -122,3 +122,6 @@ def test_skips_own_authored_comments(worker_home, monkeypatch):
     _unthrottle()
     assert kt.inject_new_comments_from_env(agent) is False
     assert agent.steers == []
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

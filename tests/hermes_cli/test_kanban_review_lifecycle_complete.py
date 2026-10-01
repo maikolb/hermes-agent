@@ -95,7 +95,8 @@ def test_same_card_review_supports_changes_and_approval_without_block_loop(conn)
     assert requested.payload["summary"] == "Implementation and focused tests are ready."
     implementation_run = _run(kb.list_runs(conn, task_id), "review_requested")
     assert implementation_run.summary == "Implementation and focused tests are ready."
-    assert implementation_run.metadata == {"commit": "abc123"}
+    assert implementation_run.metadata["runtime_identity"]["code"]["digest"].startswith("sha256:")
+    assert {k: v for k, v in implementation_run.metadata.items() if k != "runtime_identity"} == {"commit": "abc123"}
 
     review = kb.claim_review_task(conn, task_id, claimer="reviewer:1")
     assert review is not None
@@ -214,7 +215,7 @@ def test_review_changes_reapply_parent_gate(conn):
 
     # Move the task through review while its parent is temporarily terminal,
     # then make the parent non-terminal again before changes are requested.
-    assert kb.complete_task(conn, parent_id)
+    assert kb.complete_task(conn, parent_id, summary="Fixture work completed")
     implementation = kb.claim_task(conn, task_id, claimer="builder:1")
     assert implementation is not None
     assert kb.request_review(
@@ -242,7 +243,7 @@ def test_review_changes_reapply_parent_gate(conn):
 
 def test_parent_reopen_blocks_request_review_until_parent_is_done(conn) -> None:
     parent_id = kb.create_task(conn, title="Parent", assignee="planner")
-    assert kb.complete_task(conn, parent_id)
+    assert kb.complete_task(conn, parent_id, summary="Fixture work completed")
     task_id = kb.create_task(
         conn,
         title="Implementation with reopened parent",
@@ -262,7 +263,7 @@ def test_parent_reopen_blocks_request_review_until_parent_is_done(conn) -> None:
     still_running = kb.get_task(conn, task_id)
     assert still_running is not None
     assert still_running.status == "running"
-    assert kb.complete_task(conn, parent_id)
+    assert kb.complete_task(conn, parent_id, summary="Fixture work completed")
     assert kb.request_review(
         conn,
         task_id,
@@ -418,7 +419,7 @@ def test_review_escalation_unblocks_back_to_review(conn) -> None:
 
 def test_review_dependency_wait_reenters_review_after_parent_finishes(conn) -> None:
     parent_id = kb.create_task(conn, title="Parent", assignee="planner")
-    assert kb.complete_task(conn, parent_id)
+    assert kb.complete_task(conn, parent_id, summary="Fixture work completed")
     task_id = kb.create_task(
         conn,
         title="Review after dependency refresh",
@@ -448,7 +449,7 @@ def test_review_dependency_wait_reenters_review_after_parent_finishes(conn) -> N
     waiting = kb.get_task(conn, task_id)
     assert waiting is not None
     assert waiting.status == "todo"
-    assert kb.complete_task(conn, parent_id)
+    assert kb.complete_task(conn, parent_id, summary="Fixture work completed")
     resumed = kb.get_task(conn, task_id)
     assert resumed is not None
     assert resumed.status == "review"
@@ -543,6 +544,8 @@ def test_goal_run_status_is_bound_to_original_run(conn) -> None:
 def test_parked_review_approval_without_evidence_still_creates_audit_run(conn) -> None:
     task_id = kb.create_task(conn, title="Manual approval", assignee="reviewer")
     assert kb.request_review(conn, task_id, summary="implementation handoff")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET delivery_type=NULL WHERE id=?", (task_id,))
     assert kb.complete_task(conn, task_id)
     completed_event = _event(kb.list_events(conn, task_id), "completed")
     assert completed_event.run_id is not None
@@ -552,7 +555,8 @@ def test_parked_review_approval_without_evidence_still_creates_audit_run(conn) -
     assert run.outcome == "completed"
     assert run.profile == "reviewer"
     assert run.summary == "Review approved without additional evidence."
-    assert run.metadata == {
+    assert run.metadata["runtime_identity"]["code"]["digest"].startswith("sha256:")
+    assert {k: v for k, v in run.metadata.items() if k != "runtime_identity"} == {
         "source_status": "review",
         "approval": "manual",
     }
@@ -707,3 +711,6 @@ def test_review_transitions_preserve_consecutive_failures(conn) -> None:
         )
     assert kb.complete_task(conn, ok_id, summary="done")
     assert _failures(conn, ok_id) == 0
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

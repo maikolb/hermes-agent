@@ -63,7 +63,8 @@ def _make_running(
 ):
     conn = kb.connect()
     try:
-        task_id = kb.create_task(conn, title="card", assignee="hermes")
+        task_id = kb.create_task(conn, title="card", assignee="default",
+                                 task_role="activity" if mirror_comment else "work")
         hb = None if heartbeat_age is None else int(time.time() - heartbeat_age)
         with kb.write_txn(conn):
             conn.execute(
@@ -136,7 +137,7 @@ def test_live_pid_wins_over_stale_heartbeat(board, monkeypatch):
     )
 
 
-def test_foreign_host_reaped_by_heartbeat_only(board, monkeypatch):
+def test_foreign_host_requires_its_owner_to_recover_even_with_stale_heartbeat(board, monkeypatch):
     monkeypatch.setattr(
         gs, "_pid_exists",
         lambda pid: (_ for _ in ()).throw(AssertionError("no PID check")),
@@ -150,7 +151,7 @@ def test_foreign_host_reaped_by_heartbeat_only(board, monkeypatch):
 
     asyncio.run(_runner()._kanban_claim_reaper())
 
-    assert _status(stale)[0] == "ready"
+    assert _status(stale)[0] == "running"
     assert _status(fresh)[0] == "running"
 
 

@@ -929,6 +929,50 @@ def tmp_dir(tmp_path):
     return tmp_path
 
 
+@pytest.fixture
+def kanban_executor_catalog(tmp_path, monkeypatch):
+    """Install the named executors used by general Kanban behavior tests.
+
+    Opt-in only: executor validation tests keep their own catalog/config.
+    Use real directories and the real profile validator, never accept every
+    name via a profile_exists stub. Missing/invalid names still fail closed.
+    Tests replacing load_config explicitly own that configuration themselves.
+    """
+    from copy import deepcopy
+    from hermes_cli import config, profiles
+
+    root = tmp_path / "kanban-executor-catalog"
+    for name in (
+        "worker", "test-worker", "builder", "w", "worker1", "worker2",
+        "alice", "bob", "planner", "h", "worker-a", "worker-b",
+        "parent-worker", "a", "b", "researcher", "dev", "x", "elias",
+        "factory", "reviewer", "w1", "w2", "coder", "ops",
+        "review-worker", "reviewer-a", "creator", "agent-a", "some-human",
+        "hpf", "executor", "implementer", "reviewer-profile", "orig", "peer",
+        "publisher", "worker-other",
+        "some-profile", "broken", "broken-model", "engineer", "setup", "writer",
+        "researcher-a", "researcher-b", "synth", "newbie",
+        "old", "new", "worker-d", "test-orchestrator",
+        "qa",
+    ):
+        profiles.validate_profile_name(name)
+        home = root / name
+        home.mkdir(parents=True)
+        (home / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_get_profiles_root", lambda: root)
+    original = config.load_config
+
+    def load_test_config(*args, **kwargs):
+        cfg = deepcopy(original(*args, **kwargs))
+        kanban = cfg.setdefault("kanban", {})
+        if not kanban.get("default_assignee"):
+            kanban["default_assignee"] = "default"
+        return cfg
+
+    monkeypatch.setattr(config, "load_config", load_test_config)
+    return root
+
+
 @pytest.fixture()
 def mock_config():
     """Return a minimal hermes config dict suitable for unit tests."""
@@ -1761,7 +1805,7 @@ def _live_system_guard(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _audio_playback_guard(request, monkeypatch):
+def _audio_playback_guard(request, monkeypatch, _live_system_guard):
     """Stub TTS synthesis + speaker playback for every test.
 
     See the block comment above for the incident this closes. Defence in

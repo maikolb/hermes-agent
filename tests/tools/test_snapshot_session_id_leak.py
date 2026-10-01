@@ -50,6 +50,8 @@ def test_export_snippet_shape():
     assert "${!HERMES_SESSION_*}" in snippet
     assert "${!HERMES_CRON_AUTO_DELIVER_*}" in snippet
     assert "${!HERMES_BROWSER_CONTROL_*}" in snippet
+    assert "${!HERMES_PROJECT_*}" in snippet
+    assert "HERMES_CRON_SESSION" in snippet
     assert "HERMES_UI_SESSION_ID" in snippet
     assert "grep -vE" not in snippet
     assert '"$__hermes_snap_tmp"' in snippet
@@ -84,8 +86,8 @@ def test_shared_snapshot_no_cross_session_leak(tmp_path):
             def worker():
                 for v in _VAR_MAP.values():
                     v.set(_UNSET)
-                set_session_vars(session_key="k" + sid, session_id=sid, source="desktop")
-                out["r"] = env.execute('echo "[$HERMES_SESSION_ID]"')
+                set_session_vars(session_key="k" + sid, session_id=sid, source="desktop", project_id="project-" + sid)
+                out["r"] = env.execute('echo "[$HERMES_SESSION_ID][$HERMES_PROJECT_ID]"')
 
             t = threading.Thread(target=worker)
             t.start()
@@ -98,12 +100,15 @@ def test_shared_snapshot_no_cross_session_leak(tmp_path):
         assert "SIDAAA" in out_a, f"session A saw {out_a!r}"
         # The core assertion: B must see its OWN id, not A's leaked via snapshot.
         assert "SIDBBB" in out_b, f"session B saw {out_b!r}"
+        assert "project-SIDBBB" in out_b
         assert "SIDAAA" not in out_b, f"session B leaked A's id: {out_b!r}"
 
         # And the snapshot file must not carry the session id at all.
         snap = env._snapshot_path
         if os.path.exists(snap):
             with open(snap) as f:
-                assert "HERMES_SESSION_ID" not in f.read()
+                contents = f.read()
+                assert "HERMES_SESSION_ID" not in contents
+                assert "HERMES_PROJECT_ID" not in contents
     finally:
         env.cleanup()

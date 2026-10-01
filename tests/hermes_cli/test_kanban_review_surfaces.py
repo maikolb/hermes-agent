@@ -143,7 +143,8 @@ def test_review_cli_round_trip_preserves_handoff(
         assert task.assignee == "reviewer"
         handoff = kb.latest_run(conn, task_id)
         assert handoff is not None
-        assert handoff.metadata == {"tests_run": 3}
+        assert handoff.metadata["runtime_identity"]["code"]["digest"].startswith("sha256:")
+        assert {k: v for k, v in handoff.metadata.items() if k != "runtime_identity"} == {"tests_run": 3}
         review = kb.claim_review_task(conn, task_id, claimer="reviewer:1")
         assert review is not None
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(review.current_run_id))
@@ -425,3 +426,6 @@ def test_cli_and_dashboard_receive_graph_aware_deadlock_diagnostic(
         dashboard = _compute_task_diagnostics(conn, task_ids=[parent_id])
     assert dashboard[parent_id][0]["kind"] == "review_dependency_deadlock"
     assert dashboard[parent_id][0]["data"]["waiting_child_ids"] == [child_id]
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

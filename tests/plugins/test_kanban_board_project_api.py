@@ -117,3 +117,5 @@ def test_task_on_scoped_board_inherits_project(client, project):
         assert kb.get_task(conn, task_id).project_id == project["id"]
     finally:
         conn.close()
+
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

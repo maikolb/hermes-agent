@@ -25,5 +25,7 @@
   "session_key": "stored-running",
   "started_at": 1700000000.0,
   "status": "working",
+  "state": "ready",
+  "stored_session_id": "stored-running",
   "turn_started_at": 1700000123.5
 }

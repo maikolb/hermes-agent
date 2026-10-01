@@ -72,3 +72,6 @@ def test_heartbeats_do_not_break_the_streak(board):
     remaining = kb._respawn_guard_backoff_remaining(board, task_id)
     # streak 2 → intervalo 180s; restante ~160s
     assert 140 <= remaining <= 180
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

@@ -85,3 +85,6 @@ def test_create_task_explicit_project_beats_board(fresh_home, tmp_path):
         assert kb.get_task(conn, tid).project_id == task_proj
     finally:
         conn.close()
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

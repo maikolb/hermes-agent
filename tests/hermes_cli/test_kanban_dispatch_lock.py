@@ -77,3 +77,6 @@ def test_lock_is_board_scoped(conn):
             assert held_b is True, "a lock on a different board must be independent"
 
 
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

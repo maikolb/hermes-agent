@@ -129,3 +129,6 @@ def test_count_notify_subs_filters_profile_owners(tmp_path):
         notifier_profiles={"default"},
         include_unowned=True,
     ) == 2
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

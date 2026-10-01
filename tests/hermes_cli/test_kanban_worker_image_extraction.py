@@ -134,3 +134,6 @@ class TestBuildPartsFromTaskBody:
 
         assert paths == [str(real)]
         assert urls == []
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

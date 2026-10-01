@@ -20,6 +20,7 @@ def test_play_audio_file_scrubbed_env(tmp_path, monkeypatch):
         return proc
 
     import tools.voice_mode as vm
+    monkeypatch.setattr(vm, "_audio_disabled", lambda: False)
 
     with patch.object(vm, "platform") as plat, patch.object(
         vm.shutil, "which", return_value="/usr/bin/ffplay"

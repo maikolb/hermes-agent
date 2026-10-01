@@ -307,7 +307,7 @@ def test_reopening_parent_demotes_ready_child(client):
 
     r = client.patch(
         f"/api/plugins/kanban/tasks/{parent['id']}",
-        json={"status": "done"},
+        json={"status": "done", "summary": "Fixture work completed"},
     )
     assert r.status_code == 200
 
@@ -331,7 +331,7 @@ def test_reopening_parent_demotes_ready_child(client):
 def test_reopening_parent_retracts_review_and_blocks_approval(client):
     with kb.connect() as conn:
         parent_id = kb.create_task(conn, title="parent", assignee="planner")
-        assert kb.complete_task(conn, parent_id)
+        assert kb.complete_task(conn, parent_id, summary="Fixture work completed")
         child_id = kb.create_task(
             conn,
             title="child in review",
@@ -376,7 +376,7 @@ def test_reopening_parent_retracts_review_and_blocks_approval(client):
 
     response = client.patch(
         f"/api/plugins/kanban/tasks/{parent_id}",
-        json={"status": "done"},
+        json={"status": "done", "summary": "Fixture work completed"},
     )
     assert response.status_code == 200, response.text
 
@@ -400,14 +400,14 @@ def test_reopening_parent_retracts_review_and_blocks_approval(client):
 def test_reopening_parent_recursively_retracts_done_and_running_descendants(client):
     with kb.connect() as conn:
         parent_id = kb.create_task(conn, title="root", assignee="planner")
-        assert kb.complete_task(conn, parent_id)
+        assert kb.complete_task(conn, parent_id, summary="Fixture work completed")
         child_id = kb.create_task(
             conn,
             title="accepted child",
             assignee="builder",
             parents=[parent_id],
         )
-        assert kb.complete_task(conn, child_id)
+        assert kb.complete_task(conn, child_id, summary="Fixture work completed")
         grandchild_id = kb.create_task(
             conn,
             title="running grandchild",
@@ -436,7 +436,7 @@ def test_reopening_parent_recursively_retracts_done_and_running_descendants(clie
 
     response = client.patch(
         f"/api/plugins/kanban/tasks/{parent_id}",
-        json={"status": "done"},
+        json={"status": "done", "summary": "Fixture work completed"},
     )
     assert response.status_code == 200, response.text
     with kb.connect() as conn:
@@ -698,7 +698,8 @@ def test_bulk_status_done_forwards_completion_summary(client):
             assert task.status == "done"
             assert task.result == "DECIDED: ship it"
             assert run.summary == "DECIDED: ship it"
-            assert run.metadata == {"source": "dashboard"}
+            assert run.metadata["runtime_identity"]["code"]["digest"].startswith("sha256:")
+            assert {k: v for k, v in run.metadata.items() if k != "runtime_identity"} == {"source": "dashboard"}
     finally:
         conn.close()
 
@@ -946,14 +947,14 @@ def test_bulk_reassign(client):
         assert t["assignee"] == "new"
 
 
-def test_bulk_unassign_via_empty_string(client):
+def test_bulk_empty_assignee_uses_configured_default(client):
     a = client.post("/api/plugins/kanban/tasks",
                     json={"title": "a", "assignee": "x"}).json()["task"]
     r = client.post("/api/plugins/kanban/tasks/bulk",
                     json={"ids": [a["id"]], "assignee": ""})
     assert r.status_code == 200
     t = client.get(f"/api/plugins/kanban/tasks/{a['id']}").json()["task"]
-    assert t["assignee"] is None
+    assert t["assignee"] == "default"
 
 
 def test_bulk_partial_failure_doesnt_abort_siblings(client):
@@ -1272,3 +1273,6 @@ def test_specify_happy_path(client, monkeypatch):
 # Final result visibility for Done cards
 # ---------------------------------------------------------------------------
 
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

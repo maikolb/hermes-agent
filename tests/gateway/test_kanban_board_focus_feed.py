@@ -9,6 +9,8 @@ router's persisted topic bindings, independent of subscriptions.
 
 from __future__ import annotations
 
+import pytest
+
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -515,3 +517,6 @@ def test_trace_includes_result_summary(tmp_path, monkeypatch):
     final = adapter.edits[-1]["content"]
     assert "Worker concluído" in final
     assert "Mapeei as rotas" in final
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

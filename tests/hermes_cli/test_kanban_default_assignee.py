@@ -44,7 +44,11 @@ def test_unassigned_task_auto_assigned_with_default_assignee(isolated_kanban_hom
     kb, _home = isolated_kanban_home
     with kb.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
-        task_id = kb.create_task(conn, title="t1", assignee=None)
+        task_id = kb.create_task(conn, title="t1", assignee="default")
+        # Recovery operates on a retained legacy row. New ready tasks already
+        # require an executor and cannot be created unassigned.
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET assignee=NULL WHERE id=?", (task_id,))
     with kb.connect_closing() as conn:
         res = kb.dispatch_once(
             conn, spawn_fn=_fake_spawn, dry_run=False,
@@ -91,5 +95,3 @@ def test_explicitly_assigned_task_untouched_by_default_assignee(isolated_kanban_
         )
     assert task_id not in res.auto_assigned_default
     assert any(s[0] == task_id and s[1] == "default" for s in res.spawned)
-
-

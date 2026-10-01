@@ -98,3 +98,6 @@ def test_bulk_priority_fires_task_updated_per_task(client, captured_updates):
     fired = {kw["task_id"]: kw for kw in captured_updates}
     assert set(fired) == {tid1, tid2}
     assert all(kw["changed_fields"] == ["priority"] for kw in fired.values())
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

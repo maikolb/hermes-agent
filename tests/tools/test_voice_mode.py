@@ -581,6 +581,7 @@ class TestPlayAudioFile:
             return mock_sd_obj, np
 
         monkeypatch.setattr("tools.voice_mode._import_audio", _fake_import)
+        monkeypatch.setattr("tools.voice_mode._audio_disabled", lambda: False)
 
         from tools.voice_mode import play_audio_file
 
@@ -1377,7 +1378,8 @@ class TestWSL2PowerShellFallback:
             m.wait = MagicMock(return_value=m.returncode)
             return m
 
-        with patch("tools.voice_mode._is_wsl2_env", return_value=True), \
+        with patch("tools.voice_mode._audio_disabled", return_value=False), \
+             patch("tools.voice_mode._is_wsl2_env", return_value=True), \
              patch("tools.voice_mode._import_audio", side_effect=ImportError), \
              patch("tools.voice_mode.shutil.which",
                    side_effect=lambda x: f"/bin/{x}" if x in ("powershell.exe", "ffmpeg", "ffplay", "sh") else (x if x.startswith("/") else None)), \
@@ -1429,7 +1431,8 @@ class TestWSL2PowerShellFallback:
                 return io.StringIO("Linux Microsoft WSL2")
             return open(path, *args, **kwargs)
 
-        with patch("builtins.open", side_effect=_fake_open), \
+        with patch("tools.voice_mode._audio_disabled", return_value=False), \
+             patch("builtins.open", side_effect=_fake_open), \
              patch("shutil.which", side_effect=lambda x: f"/bin/{x}" if x in ("powershell.exe", "ffmpeg", "ffplay") else None), \
              patch("subprocess.check_output", side_effect=_capture_check_output), \
              patch("subprocess.Popen", return_value=MagicMock(returncode=0, wait=lambda **k: 0)), \

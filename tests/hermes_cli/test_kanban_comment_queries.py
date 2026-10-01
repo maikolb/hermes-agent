@@ -52,3 +52,6 @@ def test_list_comments_after_cursor(fresh_home):
         assert kb.list_comments_after(conn, tid, after_id=c2) == []
     finally:
         conn.close()
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

@@ -370,6 +370,8 @@ async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
             return True  # reclaim/redispatch: silêncio
         text = _progress_recebido(task_id, title, cls, body)
         res = await adapter.send(sub["chat_id"], text, metadata=metadata)
+        if res is not None and getattr(res, "success", True) is False:
+            raise RuntimeError("progress send reported failure")
         mid = getattr(res, "message_id", None)
         if getattr(res, "success", False) and mid:
             await asyncio.to_thread(_progress_meta_set, board, sub, progress_message_id=str(mid))
@@ -395,6 +397,8 @@ async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
             if getattr(res, "success", False):
                 return True
         res = await adapter.send(sub["chat_id"], text, metadata=metadata)
+        if res is not None and getattr(res, "success", True) is False:
+            raise RuntimeError("progress send reported failure")
         mid = getattr(res, "message_id", None)
         if getattr(res, "success", False) and mid:
             await asyncio.to_thread(_progress_meta_set, board, sub, progress_message_id=str(mid))
@@ -3476,11 +3480,22 @@ class GatewayKanbanWatchersMixin:
                             # or progress bubble belongs to this internal wake.
                             continue
                         try:
-                            _pb_handled = await _kanban_progress_bar(kind, sub, board_slug, adapter, _pb_metadata)
+                            # Retrying a wake must not re-publish progress. Keep
+                            # building its handoff below from the original event.
+                            reassessment = kind == "blocked" and (ev.payload or {}).get("reassessment_requested")
+                            _pb_handled = (
+                                send_passive and not sub.get("_notified") and not reassessment
+                                and await _kanban_progress_bar(kind, sub, board_slug, adapter, _pb_metadata)
+                            )
                         except Exception as _pb_err:
                             logger.debug("kanban progress bar: %s", _pb_err)
                             _pb_handled = False
                         if _pb_handled:
+                            from gateway.wake import record_notify_progress
+                            await asyncio.to_thread(
+                                record_notify_progress, sub["_notify_receipt"], notified=True,
+                            )
+                            sub["_notified"] = True
                             continue
                         if not _notify_kind_allowed(kind, _load_config):
                             continue  # patch local 10/09/2026: modo quieto (kanban.notify_kinds)

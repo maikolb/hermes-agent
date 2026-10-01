@@ -36,7 +36,7 @@ def board(tmp_path, monkeypatch):
 def _make_claimed_task():
     conn = kb.connect()
     try:
-        task_id = kb.create_task(conn, title="w", assignee="hermes")
+        task_id = kb.create_task(conn, title="w", assignee="default")
         kb.claim_task(conn, task_id, ttl_seconds=3600)
     finally:
         conn.close()

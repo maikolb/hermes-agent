@@ -191,6 +191,7 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
             platform="telegram",
             chat_id="123",
             kinds=["completed", "blocked"],
+            claim_token="first-notifier",
         )
         assert old_cursor == initial_cursor
         assert claimed_cursor > old_cursor
@@ -214,6 +215,7 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
             chat_id="123",
             claimed_cursor=claimed_cursor,
             old_cursor=old_cursor,
+            claim_token="first-notifier",
         ) is True
         _, retried_events = kb.unseen_events_for_sub(
             conn2,
@@ -781,7 +783,7 @@ def test_legacy_db_without_skills_column_migrates(tmp_path):
     when absent. Run it twice on a pared-down schema to confirm."""
     import sqlite3
     db_path = tmp_path / "legacy.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
     conn.row_factory = sqlite3.Row
     # Build a pared-down legacy tasks table that lacks all the
     # optional columns _migrate_add_optional_columns knows how to
@@ -791,6 +793,16 @@ def test_legacy_db_without_skills_column_migrates(tmp_path):
         CREATE TABLE tasks (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
+            body TEXT,
+            assignee TEXT,
+            priority INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT,
+            started_at INTEGER,
+            completed_at INTEGER,
+            workspace_kind TEXT NOT NULL DEFAULT 'scratch',
+            workspace_path TEXT,
+            claim_lock TEXT,
+            claim_expires INTEGER,
             status TEXT NOT NULL,
             created_at INTEGER NOT NULL
         )
@@ -815,11 +827,13 @@ def test_legacy_db_without_skills_column_migrates(tmp_path):
     assert "skills" not in before
 
     # Run the migrator directly — the same function connect() calls.
+    conn.executescript(kb.SCHEMA_SQL)
     kb._migrate_add_optional_columns(conn)
     after = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
     assert "skills" in after, f"migration did not add skills column: {after}"
 
     # Idempotent: running again must not raise.
+    conn.executescript(kb.SCHEMA_SQL)
     kb._migrate_add_optional_columns(conn)
 
     # Legacy row has skills=NULL -> Task.skills=None.
@@ -836,7 +850,7 @@ def test_legacy_spawn_failure_columns_are_copied_not_renamed(tmp_path):
     """Legacy failure counters survive migration without fragile column renames."""
     import sqlite3
     db_path = tmp_path / "legacy-failures.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("""
         CREATE TABLE tasks (
@@ -886,6 +900,7 @@ def test_legacy_spawn_failure_columns_are_copied_not_renamed(tmp_path):
     )
     conn.commit()
 
+    conn.executescript(kb.SCHEMA_SQL)
     kb._migrate_add_optional_columns(conn)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
     assert "spawn_failures" in cols
@@ -900,6 +915,7 @@ def test_legacy_spawn_failure_columns_are_copied_not_renamed(tmp_path):
     assert task.consecutive_failures == 4
     assert task.last_failure_error == "missing profile"
 
+    conn.executescript(kb.SCHEMA_SQL)
     kb._migrate_add_optional_columns(conn)
     row_again = conn.execute("SELECT * FROM tasks WHERE id = 'legacy'").fetchone()
     assert row_again["consecutive_failures"] == 4
@@ -918,12 +934,22 @@ def test_legacy_migration_no_legacy_columns_at_all(tmp_path):
     import sqlite3
 
     db_path = tmp_path / "ancient.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("""
         CREATE TABLE tasks (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
+            body TEXT,
+            assignee TEXT,
+            priority INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT,
+            started_at INTEGER,
+            completed_at INTEGER,
+            workspace_kind TEXT NOT NULL DEFAULT 'scratch',
+            workspace_path TEXT,
+            claim_lock TEXT,
+            claim_expires INTEGER,
             status TEXT NOT NULL,
             created_at INTEGER NOT NULL
         )
@@ -947,6 +973,7 @@ def test_legacy_migration_no_legacy_columns_at_all(tmp_path):
     conn.commit()
 
     # Must not raise (this was the crash before this fix).
+    conn.executescript(kb.SCHEMA_SQL)
     kb._migrate_add_optional_columns(conn)
 
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
@@ -959,6 +986,7 @@ def test_legacy_migration_no_legacy_columns_at_all(tmp_path):
     assert row["last_failure_error"] is None
 
     # Idempotent second run must not raise either.
+    conn.executescript(kb.SCHEMA_SQL)
     kb._migrate_add_optional_columns(conn)
     row_again = conn.execute("SELECT * FROM tasks WHERE id = 't1'").fetchone()
     assert row_again["consecutive_failures"] == 0
@@ -1429,3 +1457,6 @@ def test_notify_sub_starts_caught_up_on_active_task(kanban_home):
         assert events == [], "historical events must not replay to a new sub"
     finally:
         conn.close()
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

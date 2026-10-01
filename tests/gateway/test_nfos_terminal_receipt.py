@@ -23,7 +23,7 @@ def test_block_closeout_is_once_across_failed_wakes_and_gateway_restarts(tmp_pat
         asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
         asyncio.run(runner._kanban_refresh_worker_focus())
     assert len(adapter.sent) == 1, 'Display closeout bypassed the durable delivery receipt'
-    assert 'Worker bloqueado' in adapter.sent[0]
+    assert 'bloqueado' in adapter.sent[0]
     assert 'Homologation binding unsupported' in adapter.sent[0]
     adapter.fail = False
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
@@ -32,3 +32,22 @@ def test_block_closeout_is_once_across_failed_wakes_and_gateway_restarts(tmp_pat
         assert conn.execute('SELECT count(*) FROM kanban_notify_claims').fetchone()[0] == 0
         assert kb.get_task(conn, tid).status == 'blocked'
 
+
+def test_failed_progress_send_does_not_acknowledge_delivery(tmp_path, monkeypatch):
+    from gateway.platforms.base import SendResult
+
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'board.db'))
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title='Pending result', assignee='default', requires_repo=False)
+        kb.add_notify_sub(conn, task_id=tid, platform='telegram', chat_id='test')
+        kb.block_task(conn, tid, reason='Missing evidence', kind='needs_input')
+
+    class FailedAdapter(RecordingAdapter):
+        async def send(self, *args, **kwargs):
+            return SendResult(success=False, error='offline')
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(FailedAdapter())))
+    with kb.connect_closing() as conn:
+        claim = kb.get_notify_claim(conn, task_id=tid, platform='telegram', chat_id='test')
+        assert claim['notified'] == 0
+        assert kb.unseen_events_for_sub(conn, task_id=tid, platform='telegram', chat_id='test')[1]

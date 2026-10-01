@@ -120,6 +120,9 @@ def test_flush_persist_override_replaces_api_local_multimodal_note(agent):
 def test_direct_session_db_flushes_share_marker_claim(agent):
     """A direct flush cannot interleave its marker check with `_persist_session`."""
     class _BarrierDB:
+        def flush_token_counts(self, *args, **kwargs):
+            pass
+
         def __init__(self):
             self.rows = []
             self.entered = threading.Event()
@@ -4573,6 +4576,8 @@ class TestRunConversation:
         agent.max_iterations = 2
 
         monkeypatch.setenv("HERMES_KANBAN_TASK", "t_test_task_123")
+        monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "1")
+        monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", "test-claim")
 
         # Return a tool call for every iteration to exhaust the budget.
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
@@ -4595,6 +4600,7 @@ class TestRunConversation:
             patch("hermes_cli.kanban_db._record_task_failure",
                   mock_record_failure),
             patch("hermes_cli.kanban_db.connect", mock_connect),
+            patch("hermes_cli.nfos_principal_review._owned_worker_run", return_value={"id": 1}),
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
@@ -4612,6 +4618,7 @@ class TestRunConversation:
             f"Calls: {mock_record_failure.call_args_list}"
         )
         call = mock_record_failure.call_args_list[0]
+        assert call.kwargs["worker_claim"] == (1, "test-claim")
         # Positional: (conn, task_id, ...)
         assert call.args[1] == "t_test_task_123"
         assert call.kwargs.get("outcome") == "timed_out"

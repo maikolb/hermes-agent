@@ -10095,6 +10095,11 @@ def decompose_triage_task(
                 child_ws_path = None
             repo_required = child.get("requires_repo", root_row["requires_repo"])
             delivery_type = child.get("delivery_type") or root_row["delivery_type"]
+            if child.get("workspace_kind") == "worktree":
+                # An explicit code child overrides a non-code triage root.
+                # Explicit contradictory child fields still fail in create_task.
+                repo_required = child.get("requires_repo", True)
+                delivery_type = child.get("delivery_type") or "code"
             if repo_required is not None:
                 if not isinstance(repo_required, (bool, int)) or repo_required not in (0, 1):
                     raise ValueError("requires_repo must be a boolean")

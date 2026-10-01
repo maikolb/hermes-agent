@@ -90,3 +90,6 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
 
 
 
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

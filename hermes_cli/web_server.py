@@ -1303,6 +1303,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
 _CATEGORY_MERGE: Dict[str, str] = {
     "privacy": "security",
     "context": "agent",
+    "dispatch": "agent",
     "skills": "agent",
     "cron": "agent",
     "network": "agent",

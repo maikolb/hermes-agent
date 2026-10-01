@@ -64,3 +64,6 @@ def test_unlinked_task_unchanged(kanban_conn):
     assert task.branch_name is None
 
 
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

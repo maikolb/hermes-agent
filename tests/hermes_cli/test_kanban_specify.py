@@ -71,7 +71,7 @@ def _patch_aux_client(content: str, *, model: str = "test-model"):
 
 def test_specify_task_happy_path(kanban_home):
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="rough", triage=True)
+        tid = kb.create_task(conn, title="rough", triage=True, assignee="default")
 
     content = jsonlib.dumps({
         "title": "Refined rough",

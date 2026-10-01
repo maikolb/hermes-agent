@@ -1,3 +1,4 @@
+import pytest
 import asyncio
 import sqlite3
 import time
@@ -32,6 +33,10 @@ class RecordingAdapter:
 
     async def handle_message(self, event):
         self.handled.append(event)
+        receipt = (event.metadata or {}).get("kanban_wake_delivery")
+        if receipt:
+            from gateway.wake import record_notify_progress
+            record_notify_progress(receipt, wake_accepted=True)
 
     async def send_support_approval(self, chat_id, payload, metadata=None):
         from gateway.platforms.base import SendResult
@@ -183,8 +188,7 @@ def test_claimed_task_notifies_only_after_material_start(tmp_path, monkeypatch):
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     assert len(adapter.sent) == 1
-    assert tid in adapter.sent[0]["text"]
-    assert "started" in adapter.sent[0]["text"].lower()
+    assert adapter.sent[0]["text"] == "Recebido: material start"
 
 
 def test_support_approval_event_delivers_once_to_exact_project_topic(tmp_path, monkeypatch):
@@ -306,7 +310,7 @@ def test_kanban_notifier_delivers_dm_metadata_without_waking_agent(tmp_path, mon
     assert adapter.handled == []
 
 
-def test_notifier_suppresses_pre_start_backlog_and_advances_cursor(
+def test_notifier_delivers_unacknowledged_pre_start_backlog_and_advances_cursor(
     tmp_path, monkeypatch,
 ):
     db_path = tmp_path / "pre-start-backlog.db"
@@ -325,7 +329,8 @@ def test_notifier_suppresses_pre_start_backlog_and_advances_cursor(
     runner._gateway_started_at = time.time() + 60
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
-    assert adapter.sent == []
+    assert len(adapter.sent) == 1
+    assert "historical completion" in adapter.sent[0]["text"]
     assert adapter.handled == []
     assert _unseen_terminal_events(tid) == []
 
@@ -1233,8 +1238,8 @@ def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):
 
     assert len(adapter.sent) == 1
     message = adapter.sent[0]["text"]
-    assert tid in message
-    assert "blocked" in message
+    assert "approval" in message
+    assert "bloqueado" in message
 
 
 def test_non_dispatch_gateway_claims_only_its_profile_subscriptions(
@@ -1546,8 +1551,9 @@ def test_completed_then_archived_same_tick_delivers_completion_and_unsubscribes(
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
 
     assert len(adapter.sent) == 1
-    assert "done" in adapter.sent[0]["text"]
-    assert "delivered result" in adapter.sent[0]["text"]
+    assert "concluído" in adapter.sent[0]["text"]
+    assert "deliver before archive" in adapter.sent[0]["text"]
+    assert tid in adapter.sent[0]["text"]
     conn = kb.connect()
     try:
         assert kb.list_notify_subs(conn, tid) == []
@@ -1679,17 +1685,8 @@ def test_kanban_notifier_isolates_per_subscription_failure(tmp_path, monkeypatch
     assert tid_good in adapter.sent[0]["text"]
 
 
-def test_notifier_delivers_block_loop_detected_triage_ping(tmp_path, monkeypatch):
-    """A `block_loop_detected` event must reach the subscriber as a triage ping.
-
-    Regression for the silent-triage gap (PR #62712): kanban_db routes a task
-    to `triage` after BLOCK_RECURRENCE_LIMIT re-blocks for the same cause and
-    emits ONLY a `block_loop_detected` event — no `blocked`/`status` event.
-    Before `block_loop_detected` joined TERMINAL_KINDS with its own message
-    branch, that one transition (the whole point of which is to force human
-    attention) produced zero notification and the task stalled in triage
-    silently.
-    """
+def test_notifier_delivers_block_loop_detected_for_current_block(tmp_path, monkeypatch):
+    """A repeated impediment preserves the blocked card and notifies its origin."""
     db_path = tmp_path / "block-loop.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
@@ -1698,11 +1695,10 @@ def test_notifier_delivers_block_loop_detected_triage_ping(tmp_path, monkeypatch
     try:
         tid = kb.create_task(conn, title="loops forever", assignee="worker")
         kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
-        kb._append_event(
-            conn, tid, "block_loop_detected",
-            {"reason": "needs credentials", "kind": "needs_input",
-             "recurrences": 2, "limit": kb.BLOCK_RECURRENCE_LIMIT},
-        )
+        for attempt in range(kb.BLOCK_RECURRENCE_LIMIT):
+            assert kb.block_task(conn, tid, reason="needs credentials", kind="needs_input")
+            if attempt < kb.BLOCK_RECURRENCE_LIMIT - 1:
+                assert kb.unblock_task(conn, tid)
     finally:
         conn.close()
 
@@ -1713,7 +1709,7 @@ def test_notifier_delivers_block_loop_detected_triage_ping(tmp_path, monkeypatch
 
     assert len(adapter.sent) == 1, "block_loop_detected must produce a notification"
     text = adapter.sent[0]["text"]
-    assert "TRIAGE" in text
+    assert "continua aguardando" in text
     assert tid in text
     assert "needs credentials" in text
     # Cursor advanced: the event is claimed and not re-delivered.
@@ -1726,3 +1722,6 @@ def test_notifier_delivers_block_loop_detected_triage_ping(tmp_path, monkeypatch
     finally:
         conn.close()
     assert remaining == []
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

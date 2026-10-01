@@ -24907,6 +24907,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "session identity is missing"
                     )
                     return False
+                if text_content != response and checkpoint_fence and checkpoint_root and storage_home:
+                    try:
+                        sealed = await asyncio.to_thread(
+                            _reseal_gateway_delivery_response,
+                            {"session_id": session_id,
+                             "turn_checkpoint_fence": checkpoint_fence,
+                             "turn_checkpoint_root": checkpoint_root,
+                             "storage_home": storage_home},
+                            text_content,
+                        )
+                        if sealed is None:
+                            return False
+                        checkpoint_fence = sealed["fence"]
+                    except Exception:
+                        logger.exception("Queued attachment-stripped final could not be resealed")
+                        return False
                 text_delivered = await _send_queued_response_durably(
                     adapter,
                     source,

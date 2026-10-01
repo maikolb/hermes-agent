@@ -1,6 +1,11 @@
 ---
 name: autonomous-project-factory
-description: Create a private GitHub repository, build one immutable GHCR image, deploy it through Dokploy, and return the live HTTPS URL.
+description: Build and deploy projects through Workflow Factory.
+version: 1.0.0
+author: Nexa Factory
+license: MIT
+platforms: [linux, macos, windows]
+tags: [deployment, docker, github]
 ---
 
 # Autonomous Project Factory

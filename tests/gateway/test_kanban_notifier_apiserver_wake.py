@@ -8,6 +8,8 @@ Covers the wrong-session-wake / silent-loss fixes:
   handle_message (which would derive a different session key).
 """
 
+import pytest
+
 import asyncio
 
 from gateway.config import Platform
@@ -141,8 +143,9 @@ def test_apiserver_sub_wakes_subscription_destination_via_self_post(tmp_path, mo
     # worker's completion handoff and the don't-recreate guidance so a
     # woken orchestrator doesn't re-decompose existing work.
     assert "done once" in wake_text, "creator wake must carry the worker handoff"
-    assert "not a request to decompose" in wake_text.lower()
-    assert "do not recreate" in wake_text.lower()
+    assert "automatic continuation of already authorized work" in wake_text.lower()
+    assert "do not relaunch" in wake_text.lower()
+    assert "recreate task graphs" in wake_text.lower()
     # The wake self-post IS the delivery on this path (no separate text-ping
     # fallback is attempted for stateless api_server subs) — cursor advances
     # once the wake succeeds.
@@ -264,3 +267,6 @@ def test_apiserver_sub_is_passive_without_explicit_agent_wake_opt_in(
 
     assert posts == []
     assert adapter.handle_message_calls == []
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

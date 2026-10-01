@@ -14,6 +14,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from tests.gateway.test_queued_primary_delivery import _delivery_namespace
+from gateway.run import _strip_response_attachments_for_direct_send
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
@@ -116,6 +118,7 @@ async def test_streaming_delivery_blocks_media_path_outside_allowed_roots(tmp_pa
     monkeypatch.setenv("HERMES_MEDIA_TRUST_RECENT_FILES", "0")
     adapter = SimpleNamespace(
         name="test",
+        supports_exact_text_delivery=True,
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,
@@ -213,6 +216,7 @@ async def test_queued_followup_delivery_strips_media_tag_from_text_and_sends_ima
 
     adapter = SimpleNamespace(
         name="test",
+        supports_exact_text_delivery=True,
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,
@@ -230,6 +234,8 @@ async def test_queued_followup_delivery_strips_media_tag_from_text_and_sends_ima
         adapter=adapter,
         metadata={"thread_id": "topic-1"},
         event_message_id=event.message_id,
+        session_key="queued-delivery-test",
+        **_delivery_namespace(tmp_path, _strip_response_attachments_for_direct_send(f"Quote here\nMEDIA:{media_file}", adapter), source=event.source),
     )
 
     adapter.send.assert_awaited_once_with(
@@ -239,7 +245,7 @@ async def test_queued_followup_delivery_strips_media_tag_from_text_and_sends_ima
     )
     adapter.send_multiple_images.assert_awaited_once_with(
         chat_id="chat-1",
-        images=[(f"file://{media_file.as_posix()}", "")],
+        images=[(media_file.as_uri(), "")],
         metadata={"thread_id": "topic-1"},
     )
 
@@ -263,6 +269,7 @@ async def test_queued_followup_delivery_reuses_routing_metadata_for_media(
 
     adapter = SimpleNamespace(
         name="test",
+        supports_exact_text_delivery=True,
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,
@@ -280,6 +287,8 @@ async def test_queued_followup_delivery_reuses_routing_metadata_for_media(
         adapter=adapter,
         metadata=routing_metadata,
         event_message_id=event.message_id,
+        session_key="queued-delivery-test",
+        **_delivery_namespace(tmp_path, _strip_response_attachments_for_direct_send(f"Threaded image\nMEDIA:{media_file}", adapter), source=event.source),
     )
 
     adapter.send.assert_awaited_once_with(
@@ -289,13 +298,13 @@ async def test_queued_followup_delivery_reuses_routing_metadata_for_media(
     )
     adapter.send_multiple_images.assert_awaited_once_with(
         chat_id="chat-1",
-        images=[(f"file://{media_file.as_posix()}", "")],
+        images=[(media_file.as_uri(), "")],
         metadata=routing_metadata,
     )
 
 
 @pytest.mark.asyncio
-async def test_queued_followup_delivery_keeps_remote_image_url_in_text():
+async def test_queued_followup_delivery_keeps_remote_image_url_in_text(tmp_path):
     event = _event(thread_id="topic-1")
     runner = object.__new__(GatewayRunner)
     runner._thread_metadata_for_source = lambda source, anchor=None: {"thread_id": "topic-1"}
@@ -303,6 +312,7 @@ async def test_queued_followup_delivery_keeps_remote_image_url_in_text():
 
     adapter = SimpleNamespace(
         name="test",
+        supports_exact_text_delivery=True,
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,
@@ -321,6 +331,8 @@ async def test_queued_followup_delivery_keeps_remote_image_url_in_text():
         adapter=adapter,
         metadata={"thread_id": "topic-1"},
         event_message_id=event.message_id,
+        session_key="queued-delivery-test",
+        **_delivery_namespace(tmp_path, _strip_response_attachments_for_direct_send(response, adapter), source=event.source),
     )
 
     adapter.send.assert_awaited_once_with(
@@ -346,6 +358,7 @@ async def test_queued_followup_delivery_keeps_bare_local_path_in_text(
 
     adapter = SimpleNamespace(
         name="test",
+        supports_exact_text_delivery=True,
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,
@@ -364,6 +377,8 @@ async def test_queued_followup_delivery_keeps_bare_local_path_in_text(
         adapter=adapter,
         metadata={"thread_id": "topic-1"},
         event_message_id=event.message_id,
+        session_key="queued-delivery-test",
+        **_delivery_namespace(tmp_path, _strip_response_attachments_for_direct_send(response, adapter), source=event.source),
     )
 
     adapter.send.assert_awaited_once_with(
@@ -376,7 +391,7 @@ async def test_queued_followup_delivery_keeps_bare_local_path_in_text(
 
 
 @pytest.mark.asyncio
-async def test_queued_followup_delivery_preserves_protected_media_example():
+async def test_queued_followup_delivery_preserves_protected_media_example(tmp_path):
     """Inline-code MEDIA examples must remain visible after queued text cleanup."""
     event = _event(thread_id="topic-1")
     runner = object.__new__(GatewayRunner)
@@ -385,6 +400,7 @@ async def test_queued_followup_delivery_preserves_protected_media_example():
 
     adapter = SimpleNamespace(
         name="test",
+        supports_exact_text_delivery=True,
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,
@@ -403,6 +419,8 @@ async def test_queued_followup_delivery_preserves_protected_media_example():
         adapter=adapter,
         metadata={"thread_id": "topic-1"},
         event_message_id=event.message_id,
+        session_key="queued-delivery-test",
+        **_delivery_namespace(tmp_path, _strip_response_attachments_for_direct_send(response, adapter), source=event.source),
     )
 
     adapter.send.assert_awaited_once_with(
@@ -415,7 +433,7 @@ async def test_queued_followup_delivery_preserves_protected_media_example():
 
 
 @pytest.mark.asyncio
-async def test_queued_followup_delivery_skips_media_when_turn_failed():
+async def test_queued_followup_delivery_skips_media_when_turn_failed(tmp_path):
     """A failed first turn delivers its (failure) text but never uploads
     attachments as if the turn succeeded — deliver_media=False mirrors the
     completed-turn path's ``not agent_result.get("failed")`` guard."""
@@ -426,6 +444,7 @@ async def test_queued_followup_delivery_skips_media_when_turn_failed():
 
     adapter = SimpleNamespace(
         name="test",
+        supports_exact_text_delivery=True,
         extract_media=BasePlatformAdapter.extract_media,
         extract_images=BasePlatformAdapter.extract_images,
         extract_local_files=BasePlatformAdapter.extract_local_files,
@@ -444,6 +463,8 @@ async def test_queued_followup_delivery_skips_media_when_turn_failed():
         metadata={"thread_id": "topic-1"},
         event_message_id=event.message_id,
         deliver_media=False,
+        session_key="queued-delivery-test",
+        **_delivery_namespace(tmp_path, _strip_response_attachments_for_direct_send("The request failed: provider exploded\nMEDIA:/tmp/pricelist.png", adapter), source=event.source),
     )
 
     adapter.send.assert_awaited_once()
@@ -454,6 +475,7 @@ async def test_queued_followup_delivery_skips_media_when_turn_failed():
 
 class _QueuedMediaCaptureAdapter(BasePlatformAdapter):
     """Adapter that records text + native image delivery for queued-resend tests."""
+    supports_exact_text_delivery = True
 
     def __init__(self):
         super().__init__(PlatformConfig(enabled=True, token="test"), Platform.TELEGRAM)
@@ -475,10 +497,12 @@ class _QueuedMediaCaptureAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=f"img-{len(self.images)}")
 
     async def send_multiple_images(self, chat_id, images, metadata=None, human_delay=0.0):
+        from urllib.parse import urlparse
+        from urllib.request import url2pathname
         for image_url, _alt in images:
             path = image_url
             if path.startswith("file://"):
-                path = path[len("file://"):]
+                path = url2pathname(urlparse(path).path)
             self.images.append({"chat_id": chat_id, "image_path": path, "metadata": metadata})
 
     async def get_chat_info(self, chat_id):
@@ -494,17 +518,11 @@ class _QueuedMediaAgent:
 
     def run_conversation(self, message, conversation_history=None, task_id=None):
         type(self).calls += 1
-        if type(self).calls == 1:
-            return {
-                "final_response": type(self).first_response,
-                "messages": [],
-                "api_calls": 1,
-            }
-        return {
-            "final_response": "follow-up processed",
-            "messages": [],
-            "api_calls": 1,
-        }
+        from tests.gateway.test_queued_primary_delivery import _checkpointed_result
+        content = type(self).first_response if type(self).calls == 1 else "follow-up processed"
+        return _checkpointed_result(
+            self.delivery_home, content, self.delivery_source, "sess-queued-media",
+        )
 
 
 @pytest.mark.asyncio
@@ -555,6 +573,8 @@ async def test_queued_resend_branch_delivers_media_and_preserves_protected_examp
         thread_id="topic-1",
     )
     session_key = build_session_key(source)
+    _QueuedMediaAgent.delivery_home = tmp_path
+    _QueuedMediaAgent.delivery_source = source
     adapter._pending_messages[session_key] = MessageEvent(
         text="queued follow-up",
         message_type=MessageType.TEXT,

@@ -12,7 +12,7 @@ def test_reserved_card_does_not_claim_process_started(tmp_path, monkeypatch):
     adapter = RecordingAdapter()
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
     assert len(adapter.sent) == 1
-    assert "reservado" in adapter.sent[0]["text"]
+    assert adapter.sent[0]["text"] == "Recebido: Report"
     assert "started" not in adapter.sent[0]["text"]
 
 

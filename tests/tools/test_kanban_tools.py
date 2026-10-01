@@ -128,7 +128,8 @@ def test_complete_happy_path(worker_env):
         run = kb.latest_run(conn, worker_env)
         assert run.outcome == "completed"
         assert run.summary == "got the thing done: tests green, scope kept as asked."
-        assert run.metadata == {"files": 2}
+        assert run.metadata["runtime_identity"]["code"]["digest"].startswith("sha256:")
+        assert {k: v for k, v in run.metadata.items() if k != "runtime_identity"} == {"files": 2}
     finally:
         conn.close()
 
@@ -316,6 +317,8 @@ def test_complete_entrypoint_verifies_sealed_required_delivery(
         )
     )
     assert review.get("ok") is True
+    # Review approval is a new caller, not the now-ended implementation run.
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
     called: list[str] = []
 
     def _not_merged(_conn, seen_task_id, _config=None, **_kwargs):
@@ -364,6 +367,8 @@ def test_complete_requeries_remote_even_when_prior_receipt_exists(
         )
     )
     assert review.get("ok") is True
+    # Review approval is a new caller, not the now-ended implementation run.
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
     conn = kb.connect()
     try:
         import hashlib
@@ -838,7 +843,8 @@ def test_worker_lifecycle_through_tools(worker_env):
         assert parent.current_run_id is None
         run = kb.latest_run(conn, worker_env)
         assert run.outcome == "completed"
-        assert run.metadata == {"child_task": child_out["task_id"]}
+        assert run.metadata["runtime_identity"]["code"]["digest"].startswith("sha256:")
+        assert {k: v for k, v in run.metadata.items() if k != "runtime_identity"} == {"child_task": child_out["task_id"]}
         # Child is todo (parent just finished, but recompute_ready may
         # have promoted it — complete_task runs recompute internally).
         child = kb.get_task(conn, child_out["task_id"])
@@ -1258,11 +1264,8 @@ def test_create_respects_auto_subscribe_on_create_false(monkeypatch, worker_env,
     assert _list_subs_for_task(d["task_id"]) == []
 
 
-def test_maybe_auto_subscribe_swallows_add_notify_sub_failure(monkeypatch, worker_env):
-    """If add_notify_sub itself raises (e.g. DB locked, schema drift),
-    _maybe_auto_subscribe must NOT bubble that up and fail the parent
-    kanban_create. The function returns False and the parent create
-    still succeeds with subscribed=False."""
+def test_create_rolls_back_when_origin_subscription_fails(monkeypatch, worker_env):
+    """A card and its origin subscription commit atomically or both roll back."""
     from tools import kanban_tools as kt
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
     monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-42")
@@ -1279,8 +1282,9 @@ def test_maybe_auto_subscribe_swallows_add_notify_sub_failure(monkeypatch, worke
         "assignee": "peer",
     })
     d = json.loads(out)
-    assert d["ok"] is True, d
-    assert d["subscribed"] is False, d
+    assert "simulated DB failure" in d["error"]
+    with kb.connect_closing() as conn:
+        assert not any(t.title == "auto-sub tolerates add_notify_sub failure" for t in kb.list_tasks(conn))
 
 
 # ---------------------------------------------------------------------------
@@ -1442,3 +1446,6 @@ def test_attach_url_happy_path_public_host(worker_env, default_url_guard, monkey
         assert Path(atts[0].stored_path).read_bytes() == payload
     finally:
         conn.close()
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

@@ -232,7 +232,7 @@ def test_progress_outcome_only_claims_delivery_with_a_report(tmp_path, monkeypat
 
 
 def _notifier_setup(tmp_path, monkeypatch, name):
-    from tests.gateway.test_kanban_notifier import RecordingAdapter, _make_runner, _run_one_notifier_tick
+    from tests.gateway.test_kanban_notifier import EditableRecordingAdapter, _make_runner, _run_one_notifier_tick
     db_path = tmp_path / f"{name}.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     monkeypatch.setattr(kb, "_resolve_executable_assignee", lambda name: name)  # sem perfil real na máquina de teste
@@ -244,20 +244,23 @@ def _notifier_setup(tmp_path, monkeypatch, name):
         assert kb.complete_task(conn, tid, summary="Tempo total: n/a\nFuso: America/Sao_Paulo\nCloseout: abc123")
     finally:
         conn.close()
-    adapter = RecordingAdapter()
+    adapter = EditableRecordingAdapter()
     return tid, adapter, lambda: asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
 
 
-def test_completed_in_client_chat_publishes_nothing_but_keeps_receipt_and_trace(tmp_path, monkeypatch):
+def test_completed_in_client_chat_publishes_one_outcome_with_receipt(tmp_path, monkeypatch):
     tid, adapter, tick = _notifier_setup(tmp_path, monkeypatch, "client")
     monkeypatch.setattr(kw, "_client_source_for_board", lambda board: ({"platform": "telegram", "chat_id": "origin-chat", "thread_id": None}, True))
     tick()
     tick()  # segundo tick: recibo já processado, nada se repete
-    assert adapter.sent == []
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]['text'] == 'Concluído: Cargo 301 sem disciplinas'
+    assert adapter.sent[0]['chat_id'] == 'origin-chat'
     conn = kb.connect()
     try:
         kinds = [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id=? ORDER BY id", (tid,))]
-        assert kinds.count("client_publication_suppressed") == 1
+        assert kinds.count("nfos_client_delivery_published") == 1
+        assert kinds.count("client_publication_suppressed") == 0
     finally:
         conn.close()
 

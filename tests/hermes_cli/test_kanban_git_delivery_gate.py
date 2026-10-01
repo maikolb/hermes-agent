@@ -731,3 +731,6 @@ def test_legacy_worktree_requirement_backfill_is_idempotent(tmp_path: Path) -> N
     finally:
         raw.close()
     assert row == (1, 1)
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

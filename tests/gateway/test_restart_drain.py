@@ -319,7 +319,8 @@ async def test_windows_detached_restart_watcher_replaces_pythonw_with_console_si
     (venv_dir / "Lib" / "site-packages").mkdir(parents=True)
 
     monkeypatch.setattr(gateway_run.sys, "platform", "win32")
-    monkeypatch.setattr(gateway_run.sys, "executable", r"C:\base\pythonw.exe")
+    # Use the host's path syntax; only the Windows subprocess branch is mocked.
+    monkeypatch.setattr(gateway_run.sys, "executable", str(tmp_path / "pythonw.exe"))
     monkeypatch.setattr(gateway_run, "_resolve_hermes_bin", lambda: ["hermes"])
     monkeypatch.setattr(gateway_run.os, "getpid", lambda: 321)
     monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
@@ -337,7 +338,7 @@ async def test_windows_detached_restart_watcher_replaces_pythonw_with_console_si
 
     assert len(popen_calls) == 1
     cmd, kwargs = popen_calls[0]
-    assert cmd[0] == r"C:\base\python.exe"
+    assert cmd[0] == str(tmp_path / "python.exe")
     assert kwargs["creationflags"] == 0x08000200
 
 

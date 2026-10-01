@@ -105,3 +105,6 @@ def test_cli_promote_bulk_ids_promotes_all(kanban_home, capsys):
             assert kb.get_task(conn, c).status == "ready"
 
 
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

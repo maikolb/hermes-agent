@@ -17,6 +17,11 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (home / "config.yaml").write_text(
+        "kanban:\n  default_assignee: default\n  agent_wake_on_events: true\n"
+        "  notify_kinds: [completed, blocked, gave_up, crashed, timed_out, review_requested, status]\n",
+        encoding="utf-8",
+    )
     # Allow the kanban notifier path-validator to upload artifacts the
     # tests write under ``tmp_path``. Without this, every artifact-delivery
     # test silently drops files because ``tmp_path`` isn't inside the
@@ -489,16 +494,8 @@ async def test_notifier_wake_only_skips_send_and_advances_cursor(kanban_home):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('kind', ["gave_up", "crashed", "timed_out"])
-async def test_notifier_unsubs_after_abnormal_events(kind, kanban_home):
-    """
-    Event kinds gave_up / crashed / timed_out send a notification but DO
-    NOT delete the subscription. The dispatcher may respawn the task and
-    fire the same event kind again (e.g. a worker that crashes, gets
-    reclaimed, and crashes a second time); the user must hear about the
-    second event too. Subscriptions are removed only when the task hits
-    a truly final status (done / archived) — see the comment on
-    TERMINAL_KINDS in gateway/run.py and PR #21398.
-    """
+async def test_notifier_retains_subscriptions_after_abnormal_events(kind, kanban_home):
+    """Retries stay silent; exhausted retries notify, and both retain subscriptions."""
     import hermes_cli.kanban_db as kb
     from gateway.run import GatewayRunner
     from gateway.config import Platform
@@ -529,6 +526,8 @@ async def test_notifier_unsubs_after_abnormal_events(kind, kanban_home):
 
     async def _fast_sleep(_):
         await _orig_sleep(0)
+        if _ != 5:  # Let the watcher pass its initial startup delay.
+            runner._running = False
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
@@ -536,9 +535,11 @@ async def test_notifier_unsubs_after_abnormal_events(kind, kanban_home):
             timeout=10.0,
         )
 
-    # The user is notified about the abnormal event...
-    fake_adapter.send.assert_called_once()
-    assert kind.replace('_', ' ') in fake_adapter.send.call_args[0][1]
+    if kind == "gave_up":
+        fake_adapter.send.assert_called_once()
+        assert 'gave up' in fake_adapter.send.call_args[0][1]
+    else:
+        fake_adapter.send.assert_not_called()
 
     # ...but the subscription survives so a respawn-then-same-event cycle
     # reaches the user too. The cursor (last_event_id) advanced inside
@@ -824,7 +825,7 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     os.environ["HERMES_KANBAN_TASK"] = tid
     try:
         kt._handle_complete({
-            "summary": "one real, one ghost",
+            "summary": "Completed the report; one real artifact is available and one referenced path is missing.",
             "artifacts": [str(real_pdf), "/tmp/definitely-does-not-exist.pdf"],
         })
     finally:
@@ -1130,3 +1131,6 @@ def test_gc_archived_rows_already_removed_by_unsub(kanban_home):
         assert kb.list_notify_subs(conn, tid) == []
     finally:
         conn.close()
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

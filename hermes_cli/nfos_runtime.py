@@ -15,6 +15,7 @@ import uuid
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import nfos_delivery as delivery
+from hermes_cli.nfos_knowledge import NFOS_KNOWLEDGE
 
 
 def project_config(board, config=None):
@@ -553,7 +554,7 @@ def _record_mode():  # RECORD_MODE_TEXT_20260911
 
 def worker_instructions():
     _cli=('Exact workflow CLI prefix: '+workflow_command()+'\n'
-          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n'+OUTCOME_CLOSURE_POLICY+'\n'+AUXILIARY_CLOSURE_POLICY+'\n'+"""
+          'Exact native tool CLI prefix: '+_script_command(Path(__file__).with_name('nfos_tool.py'))+'\n\n'+NFOS_KNOWLEDGE+'\n'+OUTCOME_CLOSURE_POLICY+'\n'+AUXILIARY_CLOSURE_POLICY+'\n'+"""
 Progress discipline applies to normal and urgent cards:
 - Before polling a submitted job, check the submission exit status and its returned
   job identifier. A failed submission or empty identifier is not a running job:
@@ -865,7 +866,7 @@ def coordinator_intake_instructions(context, *, reply_to=None):
 
 
 def principal_instructions():
-    return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+OUTCOME_CLOSURE_POLICY+'\n'+AUXILIARY_CLOSURE_POLICY+'\n'+"""NFOS project coordinator, the owner's active instructions:
+    return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+NFOS_KNOWLEDGE+'\n'+OUTCOME_CLOSURE_POLICY+'\n'+AUXILIARY_CLOSURE_POLICY+'\n'+"""NFOS project coordinator, the owner's active instructions:
 You are the Principal, responsible for intake, dispatch, board visibility,
 impediments and review. Project implementation belongs to full Hermes workers.
 The owner's priority is delivery from the request through verification at the requested destination

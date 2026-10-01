@@ -296,3 +296,6 @@ def test_child_attempting_default_complete_does_not_finish_parent_or_delete_work
     assert task.status == "running"
     assert run.status == "running"
     assert workspace.is_dir()
+
+# General behavior tests require a configured host with real executor profiles.
+pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")
