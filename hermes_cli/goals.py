@@ -2190,6 +2190,7 @@ def run_kanban_goal_loop(
     first_response: str = "",
     log=None,
     pending_decision_fn=None,
+    resolved_decision_fn=None,
 ) -> Dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
 
@@ -2239,6 +2240,7 @@ def run_kanban_goal_loop(
     turns_used = 1
     nudged_to_finalize = False
     waited_decision_id = None  # IMPEDIMENT_RACE_20260911
+    followed_decisions = set()
 
     while True:
         # Did the worker terminate the task itself this turn?
@@ -2291,6 +2293,22 @@ def run_kanban_goal_loop(
             turns_used += 1
             continue
 
+        # An authoritative continue/changes answer takes precedence over the
+        # judge's interpretation of an optimistic worker summary. Consume each
+        # answer once, within the existing turn budget.
+        if resolved_decision_fn is not None and turns_used < max_turns:
+            decision = resolved_decision_fn()
+            if decision and decision['id'] not in followed_decisions:
+                followed_decisions.add(decision['id'])
+                nudged_to_finalize = False
+                last_response = run_turn(
+                    "[Principal decision " + str(decision['id']) + "]\n"
+                    + str(decision['answer'])
+                    + "\nCarry out this instruction. A rejected review is not a completed handoff."
+                ) or ""
+                turns_used += 1
+                continue
+
         # Still open — judge whether the latest response satisfies the card.
         # The kanban worker loop has no wait-barrier concept (workers finish
         # via kanban_complete / kanban_block, not by parking), so a WAIT
@@ -2312,6 +2330,14 @@ def run_kanban_goal_loop(
                     )
                 except Exception as exc:
                     _log(f"kanban goal loop: block_fn failed ({exc})")
+                if pending_decision_fn is not None and pending_decision_fn():
+                    # NFOS block files a question; it does not terminate the run.
+                    # Re-enter the decision wait instead of silently exiting.
+                    continue
+                if resolved_decision_fn is not None and turns_used < max_turns:
+                    decision = resolved_decision_fn()
+                    if decision and decision['id'] not in followed_decisions:
+                        continue
                 return {"outcome": "blocked_budget", "turns_used": turns_used, "reason": "judged done, never finalized"}
             prompt = KANBAN_GOAL_FINALIZE_TEMPLATE.format(reason=_truncate(reason, 400))
             nudged_to_finalize = True
@@ -2329,6 +2355,8 @@ def run_kanban_goal_loop(
                 )
             except Exception as exc:
                 _log(f"kanban goal loop: block_fn failed ({exc})")
+            if pending_decision_fn is not None and pending_decision_fn():
+                return {"outcome": "awaiting_decision", "turns_used": turns_used, "reason": "turn budget exhausted; Principal decision pending"}
             return {"outcome": "blocked_budget", "turns_used": turns_used, "reason": "turn budget exhausted"}
 
         # Run another turn in the same session.
