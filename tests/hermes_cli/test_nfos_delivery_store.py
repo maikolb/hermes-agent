@@ -272,6 +272,35 @@ def test_portal_reply_waits_for_principal_and_retries_without_duplicate(board, m
         assert kb.get_task(conn, task.id).status == 'ready'
 
 
+def test_legacy_portal_reply_requires_actual_principal_review(board, monkeypatch):
+    from hermes_cli import nfos_runtime
+    monkeypatch.setattr(delivery, '_run_process_alive', lambda *args:False)
+    monkeypatch.setattr(nfos_runtime, 'run_termination_pending', lambda *args:False)
+    monkeypatch.setattr(nfos_runtime, 'previous_runs_termination_pending', lambda *args:False)
+    with kb.connect_closing(board) as conn:
+        task = started(conn); spec(conn, task)
+        decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind='impediment', question='Which record?', context={})
+        delivery.resolve_decision(conn, decision, action='human', answer='Ask the requester', author='Principal',
+                                  public_message={'kind':'question','to':'solicitante','text':'Qual registro?'})
+        delivery.reconcile_human_answers(conn)
+        # Historical runtime stored the human's answer as the resolved decision.
+        context = json.loads(delivery.get_decision(conn, decision)['context'])
+        context['human_reply'] = {'answer':'Registro dois','author':'Lucas','received_at':12,
+                                  'source':{'platform':'portal','actor':'Lucas','ticket':'DV-0011','message_id':'legacy-note-7'}}
+        with kb.write_txn(conn):
+            conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',author='Lucas',answer='Registro dois',resolved_at=12,context=? WHERE id=?",
+                         (json.dumps(context), decision))
+        delivery.reconcile_human_answers(conn)
+        assert kb.get_task(conn, task.id).status == 'blocked'
+        saved = delivery.get_decision(conn, decision)
+        assert saved['status'] == 'pending' and saved['author'] is None
+        assert json.loads(saved['context'])['legacy_human_resolution']['author'] == 'Lucas'
+        delivery.reconcile_human_answers(conn)
+        assert len(delivery.pending_decisions(conn)) == 1
+        delivery.resolve_decision(conn, decision, action='continue', answer='Analyze record two', author='Principal')
+        assert kb.get_task(conn, task.id).status == 'ready'
+
+
 def test_portal_followup_question_needs_a_new_reply(board, monkeypatch):
     from hermes_cli import nfos_runtime
     monkeypatch.setattr(delivery, '_run_process_alive', lambda *args:False)

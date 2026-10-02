@@ -4070,6 +4070,14 @@ def _resume_reviewed_support_input(conn):
             task = _kb().get_task(conn, row['task_id'])
             if not task or task.status in {'done','archived','todo','backlog'} or task_support_approval_pending(conn, task.id):
                 continue
+            if row['author'] != 'Principal':
+                if task.status == 'blocked' and (context.get('human_reply', {}).get('source') or {}).get('platform') == 'portal':
+                    context['legacy_human_resolution'] = {key:row[key] for key in ('author','answer','action','resolved_at')}
+                    conn.execute("UPDATE nfos_decisions SET status='pending',action=NULL,answer=NULL,author=NULL,resolved_at=NULL,dispatched_at=NULL,context=? WHERE id=?",
+                                 (_json(context), row['id']))
+                    _event(conn, task.id, None, 'nfos_principal_requested',
+                           {'decision_id':row['id'],'kind':row['kind'],'question':row['question'],'human_reply_available':True})
+                continue
             if conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human') LIMIT 1", (task.id,)).fetchone():
                 continue
             if task.status == 'blocked':
