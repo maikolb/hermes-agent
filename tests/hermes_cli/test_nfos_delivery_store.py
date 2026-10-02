@@ -247,6 +247,81 @@ def test_bootstrap_claim_is_recognized_as_host_local_by_recovery(board):
         assert task.claim_lock.startswith(kb._claimer_id().split(':',1)[0]+':')
 
 
+def test_portal_reply_waits_for_principal_and_retries_without_duplicate(board, monkeypatch):
+    from hermes_cli import nfos_runtime
+    with kb.connect_closing(board) as conn:
+        task = started(conn); spec(conn, task)
+        decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind='impediment', question='Which record?', context={})
+        delivery.resolve_decision(conn, decision, action='human', answer='Internal diagnostic detail', author='Principal',
+                                  public_message={'kind':'question','to':'solicitante','text':'Qual registro foi afetado?'})
+        assert kb.block_task(conn, task.id, reason='Human question', kind='needs_input', expected_run_id=task.current_run_id)
+        monkeypatch.setattr(delivery, '_run_process_alive', lambda *args:False)
+        monkeypatch.setattr(nfos_runtime, 'run_termination_pending', lambda *args:False)
+        monkeypatch.setattr(nfos_runtime, 'previous_runs_termination_pending', lambda *args:False)
+        source = {'platform':'portal','actor':'Lucas','ticket':'DV-0011','message_id':'portal-note-7'}
+        assert not delivery.resume_after_answer(conn, task.id, answer='Registro 2', source=source)
+        assert kb.get_task(conn, task.id).status == 'blocked'
+        assert delivery.get_decision(conn, decision)['status'] == 'pending'
+        assert not kb.claim_task(conn, task.id, claimer='default')
+        delivery.resolve_decision(conn, decision, action='continue', answer='Use the supplied record, retaining evidence.', author='Principal')
+        assert kb.get_task(conn, task.id).status == 'ready'
+        assert delivery.get_decision(conn, decision)['author'] == 'Principal'
+        assert json.loads(delivery.get_decision(conn, decision)['context'])['human_reply']['author'] == 'Lucas'
+        assert not delivery.resume_after_answer(conn, task.id, answer='Registro 2', source=source)
+        assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_human_answer_received'", (task.id,)).fetchone()[0] == 1
+        assert kb.get_task(conn, task.id).status == 'ready'
+
+
+def test_portal_followup_question_needs_a_new_reply(board, monkeypatch):
+    from hermes_cli import nfos_runtime
+    monkeypatch.setattr(delivery, '_run_process_alive', lambda *args:False)
+    monkeypatch.setattr(nfos_runtime, 'run_termination_pending', lambda *args:False)
+    monkeypatch.setattr(nfos_runtime, 'previous_runs_termination_pending', lambda *args:False)
+    with kb.connect_closing(board) as conn:
+        task = started(conn); spec(conn, task)
+        decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind='impediment', question='Identify record', context={})
+        delivery.resolve_decision(conn, decision, action='human', answer='Ask the requester', author='Principal',
+                                  public_message={'kind':'question','to':'solicitante','text':'Qual registro?'})
+        source = {'platform':'portal','actor':'Lucas','message_id':'first'}
+        delivery.resume_after_answer(conn, task.id, answer='Registro dois', source=source)
+        delivery.resolve_decision(conn, decision, action='human', answer='Need the preceding action', author='Principal',
+                                  public_message={'kind':'question','to':'solicitante','text':'Qual foi a ação anterior?'})
+        delivery.reconcile_human_answers(conn)
+        saved = delivery.get_decision(conn, decision)
+        assert saved['status'] == 'human' and kb.get_task(conn, task.id).status == 'blocked'
+        context = json.loads(saved['context'])
+        assert 'human_reply' not in context and context['human_reply_history'][0]['answer'] == 'Registro dois'
+        assert context['public_message_history'][0]['text'] == 'Qual registro?'
+        delivery.resume_after_answer(conn, task.id, answer='Cliquei em salvar', source={**source,'message_id':'second'})
+        assert delivery.get_decision(conn, decision)['status'] == 'pending'
+        delivery.resolve_decision(conn, decision, action='continue', answer='Reproduce save on record two', author='Principal')
+        assert kb.get_task(conn, task.id).status == 'ready'
+
+
+def test_portal_reopening_retains_attempt_and_requires_new_approval(board):
+    with kb.connect_closing(board) as conn:
+        task = started(conn); spec(conn, task)
+        workflow = delivery.get_workflow(conn, task.id)
+        request = delivery.get_request(conn, workflow['request_id'])
+        payload = json.loads(request['payload'])
+        payload['origin'] = {'portal':{'chamado':'DV-0011'}}
+        payload['support_approval'] = {'required':True,'approved_at':1,'approved_by':'Maikol'}
+        with kb.write_txn(conn):
+            conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?', (json.dumps(payload), request['id']))
+            conn.execute("UPDATE tasks SET status='done',completed_at=12,worker_pid=NULL,current_run_id=NULL WHERE id=?", (task.id,))
+        source = {'platform':'portal','actor':'Lucas','message_id':'portal-note-8','ticket':'DV-0011'}
+        assert not delivery.reopen_support_task(conn, task.id, text='Ainda falha no registro 2', source=source)['duplicate']
+        reopened = kb.get_task(conn, task.id)
+        assert reopened.status == 'todo' and reopened.current_run_id is None
+        assert reopened.instruction_revision > task.instruction_revision
+        assert 'Ainda falha' in reopened.body
+        assert delivery.task_support_approval_pending(conn, task.id)
+        assert not kb.claim_task(conn, task.id, claimer='default')
+        assert delivery.get_spec(conn, task.id)['revision'] == 1
+        assert delivery.reopen_support_task(conn, task.id, text='Ainda falha no registro 2', source=source)['duplicate']
+        assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
+
+
 def test_worker_recovers_explicit_existing_card_without_recreating_history(board):
     with kb.connect_closing(board) as conn:
         tid=kb.create_task(conn,title='Existing authorized report',body='Original request',assignee='default',

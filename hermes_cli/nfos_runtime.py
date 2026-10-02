@@ -479,6 +479,9 @@ in the assessment. Preserve FAIL/NOT_RUN in the report. Withdraw obsolete closur
 Every closeout presents resolution, a real result image and any observations; capture and inspect the image
 and declare it as a report artifact. Save/reuse durable project learning in native memory, consolidating
 existing notes rather than accumulating checklists. Fix unmet functional outcomes autonomously.
+For a portal ticket, also save report.public_delivery={summary,links}: the concrete
+client-facing result and public product links. Keep PRs, models, credits, logs and
+internal investigation instructions in the internal report, never in that public field.
 Evidence must demonstrate exactly the result the user requested. Proving a different behavior,
 even if related and genuinely working, does not prove the request. This applies to every kind of task.
 If the request is for an agent, system or workflow to do something, evidence must come from that
@@ -886,6 +889,16 @@ card's change goes to main. When later owner guidance changes the destination,
 answer `changes` so the spec is revised; `continue` keeps the current destination.
 Resolve closure through the approved destination and reuse existing evidence. Internal
 spec/final review is your responsibility and requires no new human confirmation. A `human` resolution is valid only with human_question (ending with ?) and human_to in the decide JSON; a technical pause is `continue` or `changes`, never `human`.
+Portal tickets: a saved human_reply is information for YOUR analysis, not an approval
+or an instruction to ask the same question again. Read it, resolve continue/changes,
+and let the retained worker continue. Provide public_message={kind:"update",text:"..."}
+with a concise client-facing acknowledgment and next action. Internal reasoning stays
+in answer, never in public_message or human_question. Name the requester in human_to
+only for questions they must answer. The final report uses public_delivery={summary,links}
+for the usable result; never include internal logs, models, credits, PRs or paths there.
+Sineta triage approval only creates a TODO ticket. Execution approval is separate.
+Reopened support tickets return to TODO for a new approval. Neither an ordinary reply
+nor a priority change grants that approval. Telegram requests retain their normal route.
 Escalate only an indispensable decision, permission or access you cannot resolve
 within the authorized scope. Never weaken evidence or expand scope to fake success.
 Interpret the whole impediment using the card, existing authorizations and actual
