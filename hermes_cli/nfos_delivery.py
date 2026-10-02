@@ -2251,12 +2251,13 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
             ctx = {}
         if not isinstance(ctx, dict):
             ctx = {}
-        if owner_guidance_only and not ctx.get('owner_guidance'):
+        needs_principal = bool(ctx.get('owner_guidance') or (ctx.get('human_reply', {}).get('source') or {}).get('platform') == 'portal')
+        if owner_guidance_only and not needs_principal:
             continue
         age = now - int(row.get('created_at') or now)
         if age < DECISION_REMINDER_AFTER:
             continue
-        auto = None if ctx.get('owner_guidance') else _auto_continue_answer(row.get('kind'), row.get('question'))
+        auto = None if needs_principal else _auto_continue_answer(row.get('kind'), row.get('question'))
         if auto:
             try:
                 resolve_decision(conn, row['id'], action='continue', answer=auto + f' (aplicado pelo runtime após {age // 60} min sem resposta do Principal)', author='Principal')
@@ -2267,7 +2268,7 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
         last = reminders[-1] if reminders else int(row.get('created_at') or now)
         # Transport acceptance is not a Principal decision. An authenticated
         # owner's instruction remains retryable until it is actually resolved.
-        if ctx.get('owner_guidance') or len(reminders) < DECISION_MAX_REMINDERS:
+        if needs_principal or len(reminders) < DECISION_MAX_REMINDERS:
             if now - last >= DECISION_REMINDER_GAP or not reminders:
                 reminders.append(now); ctx['reminders'] = reminders
                 with _kb().write_txn(conn, allow_nested=True):

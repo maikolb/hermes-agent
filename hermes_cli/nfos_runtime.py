@@ -400,7 +400,8 @@ def reconcile_runtime(conn, *, worker_exit_grace_seconds=15):
     for row in conn.execute(
             "SELECT DISTINCT d.task_id FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
             "WHERE d.status='pending' AND t.status!='archived' "
-            "AND json_extract(d.context,'$.owner_guidance') IS NOT NULL").fetchall():
+            "AND (json_extract(d.context,'$.owner_guidance') IS NOT NULL "
+            "OR json_extract(d.context,'$.human_reply.source.platform')='portal')").fetchall():
         delivery.nudge_open_decisions(conn, row['task_id'], owner_guidance_only=True)
     for call in reconcile_calls(conn):
         task=kb.get_task(conn,call['task_id'])
