@@ -21046,17 +21046,34 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
             except Exception:
                 pass
 
-    _run_loop(
+    def _resolved_decision():
+        with _kb.connect_closing() as c:
+            if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_decisions'").fetchone():
+                return None
+            row = c.execute(
+                "SELECT id,answer FROM nfos_decisions WHERE task_id=? AND run_id=? "
+                "AND status='resolved' AND action IN ('continue','changes') ORDER BY rowid DESC LIMIT 1",
+                (task_id, worker_run_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    outcome = _run_loop(
         task_id=task_id,
         goal_text=goal_text,
         run_turn=_run_turn,
         task_status_fn=_task_status,
         block_fn=_block,
         pending_decision_fn=_pending_decision,
+        resolved_decision_fn=_resolved_decision,
         max_turns=max_turns,
         first_response=first_response or "",
         log=lambda m: logger.info("%s", m),
     )
+    if outcome['outcome'] == 'awaiting_decision':
+        with _kb.connect_closing() as c, _kb.write_txn(c):
+            current = _kb.get_task(c, task_id)
+            if current and current.current_run_id == worker_run_id:
+                _kb._append_event(c, task_id, 'nfos_goal_yield', outcome, run_id=worker_run_id)
 
 
 def main(

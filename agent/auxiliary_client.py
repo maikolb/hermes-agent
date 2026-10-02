@@ -2738,7 +2738,7 @@ def _resolve_xai_oauth_for_aux() -> Optional[Tuple[str, str]]:
 def _read_codex_reserve_access_token(exclude_tokens: Optional[set[str]] = None) -> Optional[str]:
     """Use an eligible reserve only after every account's normal quota is empty."""
     import httpx
-    from hermes_cli.auth import _codex_usage_probe_url, _decode_jwt_claims
+    from hermes_cli.auth import _codex_usage_probe_url, _decode_jwt_claims, _codex_credits_authorized, _codex_has_credits
 
     pool = load_pool("openai-codex")
     entries = list(pool._entries)
@@ -2771,6 +2771,12 @@ def _read_codex_reserve_access_token(exclude_tokens: Optional[set[str]] = None) 
             logger.warning("Codex reserve: account quota could not be verified")
             return None
         normal = usage.get("rate_limit") or {}
+        # A depleted subscription window does not mean the account has no
+        # credits. Do not silently downgrade such an account to reserve.
+        # This check never enables paid inference or changes its authorization.
+        if _codex_credits_authorized() and _codex_has_credits(usage):
+            logger.info("Codex reserve not selected: authorized credits are available")
+            return None
         if normal.get("allowed") is not False or normal.get("limit_reached") is not True:
             return None
         for limit in usage.get("additional_rate_limits") or []:

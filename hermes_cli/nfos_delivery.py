@@ -2251,12 +2251,13 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
             ctx = {}
         if not isinstance(ctx, dict):
             ctx = {}
-        if owner_guidance_only and not ctx.get('owner_guidance'):
+        needs_principal = bool(ctx.get('owner_guidance') or (ctx.get('human_reply', {}).get('source') or {}).get('platform') == 'portal')
+        if owner_guidance_only and not needs_principal:
             continue
         age = now - int(row.get('created_at') or now)
         if age < DECISION_REMINDER_AFTER:
             continue
-        auto = None if ctx.get('owner_guidance') else _auto_continue_answer(row.get('kind'), row.get('question'))
+        auto = None if needs_principal else _auto_continue_answer(row.get('kind'), row.get('question'))
         if auto:
             try:
                 resolve_decision(conn, row['id'], action='continue', answer=auto + f' (aplicado pelo runtime após {age // 60} min sem resposta do Principal)', author='Principal')
@@ -2267,7 +2268,7 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
         last = reminders[-1] if reminders else int(row.get('created_at') or now)
         # Transport acceptance is not a Principal decision. An authenticated
         # owner's instruction remains retryable until it is actually resolved.
-        if ctx.get('owner_guidance') or len(reminders) < DECISION_MAX_REMINDERS:
+        if needs_principal or len(reminders) < DECISION_MAX_REMINDERS:
             if now - last >= DECISION_REMINDER_GAP or not reminders:
                 reminders.append(now); ctx['reminders'] = reminders
                 with _kb().write_txn(conn, allow_nested=True):
@@ -4022,7 +4023,28 @@ def resume_after_answer(conn,task_id,*,answer,source):
     with _kb().write_txn(conn):
         if not get_workflow(conn,task_id):
             raise WorkflowError('Unknown NFOS card')
+        message_id = source.get('message_id')
+        if source.get('platform') == 'portal' and message_id:
+            saved = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_human_answer_received' AND json_extract(payload,'$.source.message_id')=?",
+                                 (task_id, str(message_id))).fetchone()
+            if saved:
+                if json.loads(saved['payload']).get('answer') != answer:
+                    raise WorkflowError('This message id already names a different answer')
+                return False  # Already durable, including after the Principal resolved it.
         rows=conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status='human'",(task_id,)).fetchall()
+        if source.get('platform') == 'portal':
+            selected = []
+            for row in rows:
+                public = json.loads(row['context']).get('public_message') or {}
+                recipient = str(public.get('to') or '') if public.get('kind') == 'question' else ''
+                if not recipient:
+                    legacy = re.match(r'\s*PERGUNTA para\s+([^:]+):', str(row['answer'] or ''), re.I)
+                    recipient = legacy[1] if legacy else ''
+                actor = str(source.get('actor') or '').strip().split()
+                if (re.search(r'solicitante|suporte|chamado|cliente', recipient, re.I)
+                        or (actor and re.search(r'\b'+re.escape(actor[0])+r'\b', recipient, re.I))):
+                    selected.append(row)
+            rows = selected
         if not rows:
             raise WorkflowError('No pending human question on this card')
         for row in rows:
@@ -4033,10 +4055,86 @@ def resume_after_answer(conn,task_id,*,answer,source):
     return task_id in reconcile_human_answers(conn)
 
 
+def _resume_reviewed_support_input(conn):
+    """A saved Principal decision, not receipt of a portal message, releases work."""
+    from hermes_cli.nfos_runtime import previous_runs_termination_pending
+    resumed = []
+    rows = conn.execute("SELECT * FROM nfos_decisions WHERE status='resolved' AND action IN ('continue','changes') "
+                        "AND (json_extract(context,'$.human_reply.source.platform')='portal' "
+                        "OR json_extract(context,'$.source.platform')='portal') ORDER BY resolved_at,id").fetchall()
+    for row in rows:
+        context = json.loads(row['context'])
+        if context.get('support_resume_applied_at') or not (context.get('human_reply') or context.get('owner_guidance')):
+            continue
+        with _kb().write_txn(conn, allow_nested=True):
+            task = _kb().get_task(conn, row['task_id'])
+            if not task or task.status in {'done','archived','todo','backlog'} or task_support_approval_pending(conn, task.id):
+                continue
+            if row['author'] != 'Principal':
+                if task.status == 'blocked' and (context.get('human_reply', {}).get('source') or {}).get('platform') == 'portal':
+                    context['legacy_human_resolution'] = {key:row[key] for key in ('author','answer','action','resolved_at')}
+                    conn.execute("UPDATE nfos_decisions SET status='pending',action=NULL,answer=NULL,author=NULL,resolved_at=NULL,dispatched_at=NULL,context=? WHERE id=?",
+                                 (_json(context), row['id']))
+                    _event(conn, task.id, None, 'nfos_principal_requested',
+                           {'decision_id':row['id'],'kind':row['kind'],'question':row['question'],'human_reply_available':True})
+                continue
+            if conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human') LIMIT 1", (task.id,)).fetchone():
+                continue
+            if task.status == 'blocked':
+                if previous_runs_termination_pending(conn, task.id) or _run_process_alive(conn, task.id, row['run_id']):
+                    continue
+                if not _kb().unblock_task(conn, task.id):
+                    continue
+                resumed.append(task.id)
+            context['support_resume_applied_at'] = int(time.time())
+            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(context), row['id']))
+            _event(conn, task.id, None, 'nfos_support_input_reviewed', {'decision_id':row['id'],'status':_kb().get_task(conn, task.id).status})
+    return resumed
+
+
+def reopen_support_task(conn, task_id, *, text, source):
+    """Retain the completed attempt and require a new execution approval."""
+    if os.environ.get('HERMES_KANBAN_TASK') or source.get('platform') != 'portal' or not source.get('message_id') or not source.get('actor'):
+        raise WorkflowError('Reopening requires an authenticated support message')
+    if not str(text or '').strip():
+        raise WorkflowError('Describe what remains unresolved')
+    with _kb().write_txn(conn, allow_nested=True):
+        saved = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='support_reopened' AND json_extract(payload,'$.source.message_id')=?",
+                             (task_id, str(source['message_id']))).fetchone()
+        if saved:
+            if json.loads(saved['payload']).get('text') != text:
+                raise WorkflowError('This message id already names a different reopening')
+            return {'duplicate':True}
+        task = _kb().get_task(conn, task_id)
+        workflow = get_workflow(conn, task_id)
+        request = get_request(conn, workflow['request_id']) if workflow else None
+        if not task or not request or task.status != 'done':
+            raise WorkflowError('Only a completed support card can be reopened')
+        payload = json.loads(request['payload'])
+        if not (payload.get('origin') or {}).get('portal', {}).get('chamado'):
+            raise WorkflowError('This card did not originate in a support ticket')
+        report = _artifact(conn, task_id, 'report')
+        if (workflow['stage'] == 'cancelled' or (report and json.loads(report['content']).get('disposition') in {'cancelled_by_owner','canceled_by_owner'})):
+            raise WorkflowError('A cancelled ticket requires a new request')
+        previous_approval = dict(payload.get('support_approval') or {})
+        if not _kb().reopen_completed_task(conn, task_id, expected_completed_at=task.completed_at, actor=source['actor'], reason=text):
+            raise WorkflowError('Card changed while reopening')
+        conn.execute("UPDATE tasks SET status='todo',block_kind=NULL WHERE id=?", (task_id,))
+        payload.setdefault('support_approval', {}).update(required=True, approved_at=None, approved_by=None, decision='pending')
+        conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?', (_json(payload), request['id']))
+        _kb().update_task_instruction(conn, task_id, body=(task.body or '')+'\n\nReabertura pelo suporte:\n'+text,
+                                      author=source['actor'], expected_revision=task.instruction_revision)
+        conn.execute("UPDATE nfos_workflows SET stage='analysis',updated_at=? WHERE task_id=?", (int(time.time()), task_id))
+        _event(conn, task_id, None, 'support_reopened', {'text':text,'source':source,'previous_completed_at':task.completed_at,
+               'previous_approval':previous_approval,'approval_required':True})
+        _kb().add_comment(conn, task_id, source['actor'], text)
+    return {'duplicate':False}
+
+
 def reconcile_human_answers(conn):
     from hermes_cli.nfos_runtime import run_termination_pending
     """The same runtime tick retains human blocks and applies saved replies."""
-    resumed=[]
+    resumed=_resume_reviewed_support_input(conn)
     sweep_awaiting_principal(conn)  # CLOSURE_RECOVERY_20260911
     try:  # HUMAN_LAST_RESORT_20260914: pergunta de manutenção parada volta ao Principal; destino fora do ar espera e volta sozinho
         review_maintenance_human_decisions(conn)
@@ -4069,6 +4167,15 @@ def reconcile_human_answers(conn):
             current=get_decision(conn,row['id'])
             if current['status']!='human':
                 continue
+            if (reply.get('source') or {}).get('platform') == 'portal':
+                # All questions answered by this reply go back to their Principal.
+                questions = [question for question in conn.execute("SELECT id,kind,question,context FROM nfos_decisions WHERE task_id=? AND status='human'", (row['task_id'],))
+                             if json.loads(question['context']).get('human_reply') == reply]
+                for question in questions:
+                    conn.execute("UPDATE nfos_decisions SET status='pending',action=NULL,answer=NULL,author=NULL,resolved_at=NULL,dispatched_at=NULL WHERE id=?", (question['id'],))
+                    _event(conn, row['task_id'], None, 'nfos_principal_requested',
+                           {'decision_id':question['id'],'kind':question['kind'],'question':question['question'],'human_reply_available':True})
+                continue
             if not _kb().unblock_task(conn,row['task_id']):
                 continue
             splits=conn.execute("SELECT id,question FROM nfos_decisions WHERE task_id=? AND status='human' AND kind='additional_tasks'",
@@ -4095,7 +4202,7 @@ def _human_question_valid(question, to):
     return bool(q) and '?' in q and bool(t)
 
 
-def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None, assessment=None):
+def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None, assessment=None, public_message=None):
     if os.environ.get('HERMES_KANBAN_TASK'):
         raise WorkflowError('The Principal resolves reviews in its own coordinator session')
     if action not in {'continue','approve','changes','human'} or not answer.strip() or author!='Principal':
@@ -4201,6 +4308,28 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
         if action == 'changes':
             from hermes_cli.nfos_principal_review import escalate_rework
             escalate_rework(conn, row, assessment)
+        context = json.loads(get_decision(conn, decision_id)['context'])
+        previous_public = context.get('public_message')
+        if public_message is not None and previous_public:
+            context.setdefault('public_message_history', []).append(previous_public)
+        if action == 'human' and context.get('human_reply'):
+            context.setdefault('human_reply_history', []).append(context.pop('human_reply'))
+            context.pop('support_resume_applied_at', None)
+        if public_message is not None:
+            if (not isinstance(public_message, dict) or public_message.get('kind') not in {'question','update'}
+                    or not isinstance(public_message.get('text'), str) or not public_message['text'].strip()
+                    or len(public_message['text']) > 4000):
+                raise WorkflowError('Public message needs kind and client-facing text of at most 4000 characters')
+            if (public_message['kind'] == 'question') != (action == 'human'):
+                raise WorkflowError('A public question requires a human decision')
+            context['public_message'] = {key:public_message[key] for key in ('kind','text','to') if key in public_message}
+        elif (context.get('human_reply', {}).get('source') or {}).get('platform') == 'portal' and action in {'continue','changes'}:
+            if previous_public:
+                context.setdefault('public_message_history', []).append(previous_public)
+            context['public_message'] = {'kind':'update','text':'Sua resposta foi analisada pela equipe. O atendimento foi encaminhado para continuação.'}
+        if context.get('public_message'):
+            context['public_message']['created_at'] = int(time.time())
+        conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(context), decision_id))
         conn.execute('UPDATE nfos_decisions SET status=?,answer=?,author=?,action=?,resolved_at=? WHERE id=?',
                      ('human' if action=='human' else 'resolved',answer,author,action,int(time.time()),decision_id))
         if action == 'human':
@@ -4211,7 +4340,7 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
         _event(conn,row['task_id'],row['run_id'],'nfos_principal_resolved',
                {'decision_id':decision_id,'action':action,'answer':answer,
                 'asked_spec_revision':row['spec_revision'],'resolved_spec_revision':current_spec_revision})
-        context=json.loads(row['context'])
+        context=json.loads(get_decision(conn, decision_id)['context'])
         if (context.get('legacy_adoption') and not context.get('reconsideration_identity')
                 and action in {'continue','changes'}):
             from hermes_cli.nfos_runtime import previous_runs_termination_pending
@@ -4222,6 +4351,8 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                 _kb().reopen_review_task(conn,row['task_id'])
     if action=='changes' and context.get('owner_guidance'):
         reconcile_owner_guidance(conn)
+    if action in {'continue','changes'}:
+        _resume_reviewed_support_input(conn)
     if action=='human':  # HUMAN_BLOCK_NOW_20260910 / HUMAN_BLOCK_NOW2_20260910: bloqueia na hora só se não há worker vivo neste run
         _t=_kb().get_task(conn,row['task_id'])
         if _t and (_t.status=='ready' or (_t.status=='running' and not _run_process_alive(conn,_t.id,_t.current_run_id))):
@@ -5000,8 +5131,9 @@ def main():
                 if not _human_question_valid(payload.get('human_question'),payload.get('human_to')):
                     raise WorkflowError('human exige human_question (com "?") e human_to (quem responde). Pausa técnica não é human: use continue ou changes.')
                 payload['answer']='PERGUNTA para '+str(payload['human_to']).strip()+': '+str(payload['human_question']).strip()+'\n'+str(payload.get('answer') or '').strip()
+                payload['public_message'] = {'kind':'question','text':str(payload['human_question']).strip(),'to':str(payload['human_to']).strip()}
             resolve_decision(conn,args.decision,action=args.resolution,answer=payload['answer'],author='Principal',
-                             proposal=payload.get('proposal'),assessment=payload.get('assessment'))
+                             proposal=payload.get('proposal'),assessment=payload.get('assessment'),public_message=payload.get('public_message'))
             result={'saved':True,'decision':get_decision(conn,args.decision)}
         elif args.action=='reconsider':
             decision_id=reconsider_decision(conn,args.decision,action=args.resolution,

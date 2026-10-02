@@ -1301,6 +1301,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
 
 # Categories with fewer fields get merged into "general" to avoid tab sprawl.
 _CATEGORY_MERGE: Dict[str, str] = {
+    "codex": "agent",
     "privacy": "security",
     "context": "agent",
     "dispatch": "agent",

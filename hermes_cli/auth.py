@@ -4406,6 +4406,17 @@ def _codex_usage_probe_url(base_url: Optional[str]) -> str:
     return prefix + "/usage"
 
 
+def _codex_credits_authorized() -> bool:
+    """Purchased credits are an explicit profile opt-in, never inferred from balance."""
+    from hermes_cli.config import load_config
+    return ((load_config() or {}).get("codex") or {}).get("use_credits") is True
+
+
+def _codex_has_credits(payload: dict) -> bool:
+    credits = payload.get("credits") or {}
+    return credits.get("has_credits") is True or credits.get("unlimited") is True
+
+
 def _probe_codex_quota_restored(
     access_token: Any,
     *,
@@ -4441,7 +4452,8 @@ def _probe_codex_quota_restored(
     # keeps hermetic test fixtures with dummy tokens offline).
     if not _decode_jwt_claims(token):
         return None
-    cache_key = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    allow_credits = _codex_credits_authorized()
+    cache_key = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16] + (":credits" if allow_credits else "")
     now = time.monotonic()
     with _codex_quota_probe_lock:
         cached = _codex_quota_probe_cache.get(cache_key)
@@ -4480,6 +4492,8 @@ def _probe_codex_quota_restored(
                     worst_used = max(worst_used or 0.0, float(used))
             if worst_used is not None:
                 result = worst_used < 100.0
+            if allow_credits and _codex_has_credits(payload):
+                result = True
         elif response.status_code == 429:
             result = False
     except Exception:

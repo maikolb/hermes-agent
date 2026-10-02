@@ -66,6 +66,32 @@ def test_owner_guidance_retried_until_decided_without_resuming_card(tmp_path, mo
             assert json.loads(delivery.get_decision(conn, decision_id)['context'])['source'] == source
 
 
+def test_portal_reply_retries_principal_wake_without_automatic_resolution(tmp_path, monkeypatch):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'kanban.db'))
+    monkeypatch.setattr(delivery, '_run_process_alive', lambda *args:False)
+    monkeypatch.setattr(runtime, 'run_termination_pending', lambda *args:False)
+    clock = [1800000000]
+    monkeypatch.setattr(delivery.time, 'time', lambda:clock[0])
+    with kb.connect_closing() as conn:
+        rid = request(conn)
+        reserved = delivery.reserve_request(conn, capacity=1)
+        task = delivery.bootstrap_card(conn, rid, reserved['claim_token'], pid=os.getpid())
+        decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind='impediment',
+            question='Continue with the next step?', context={})
+        delivery.resolve_decision(conn, decision, action='human', answer='Ask requester', author='Principal',
+            public_message={'kind':'question','to':'solicitante','text':'Qual registro?'})
+        delivery.resume_after_answer(conn, task.id, answer='Registro dois',
+            source={'platform':'portal','actor':'Lucas','message_id':'reply-1'})
+        for _ in range(delivery.DECISION_MAX_REMINDERS + 2):
+            clock[0] += delivery.DECISION_REMINDER_GAP + 1
+            runtime.reconcile_runtime(conn)
+            saved = delivery.get_decision(conn, decision)
+            assert saved['status'] == 'pending' and saved['author'] is None
+            assert kb.get_task(conn, task.id).status == 'blocked'
+        assert len(json.loads(saved['context'])['reminders']) > delivery.DECISION_MAX_REMINDERS
+
+
 def test_worker_cannot_switch_to_another_path_release(tmp_path,monkeypatch):
     monkeypatch.setenv('HERMES_HOME',str(tmp_path))
     monkeypatch.setenv('HERMES_KANBAN_DB',str(tmp_path/'kanban.db'))

@@ -2911,8 +2911,9 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         )
         if fb_provider == "openai-codex" and fb_model == "gpt-reserve":
             notice = (
-                f"🌙 Reserva Luna ativada: cota normal esgotada em todas as contas. "
-                f"{old_model} → Luna com raciocínio médio."
+                f"🌙 Fallback: {old_model} via {old_provider} indisponível "
+                f"({_fallback_reason_text(reason)}). Reserva Codex ativada após verificar a cota normal; "
+                f"usando gpt-reserve com raciocínio médio."
             )
         # The buffered switch is surfaced on terminal failure. A successful
         # fallback clears retry chatter, so retain every switch as a durable

@@ -12694,11 +12694,29 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             rate_limited_exit = False
             awaiting_decision = False  # IMPEDIMENT_RACE_20260911
             open_decision = _nfos_open_decision(conn, row["id"]) if kind == "clean_exit" else None
+            # A worker can exit outside this dispatcher's child-process registry.
+            # Use its durable, run-scoped yield receipt, never a generic pending
+            # question, to distinguish an intentional handoff from a crash.
+            yielded = None
+            if kind in ("clean_exit", "unknown") and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_decisions'"
+            ).fetchone():
+                yielded = conn.execute(
+                    "SELECT d.id,d.status,d.answer,d.question FROM nfos_decisions d "
+                    "JOIN tasks t ON t.id=d.task_id AND t.current_run_id=d.run_id "
+                    "WHERE t.id=? AND (d.status IN ('pending','human') OR "
+                    "(d.status='resolved' AND d.action IN ('continue','changes'))) "
+                    "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id "
+                    "AND e.run_id=t.current_run_id AND e.kind='nfos_goal_yield') "
+                    "ORDER BY d.rowid DESC LIMIT 1", (row["id"],),
+                ).fetchone()
+                if yielded:
+                    open_decision = dict(yielded)
             refused_exit = bool(kind == "clean_exit" and not open_decision and _nfos_refused_in_run(conn, row))  # CLOSURE_RECOVERY_20260911
             refused_streak = _nfos_refused_streak(conn, row["id"]) if refused_exit else 0
             refused_escalated = bool(refused_exit and refused_streak >= 2)  # terceira saída seguida após recusa: violação limitada, não loop
             refused_exit = refused_exit and not refused_escalated
-            if kind == "clean_exit" and open_decision:
+            if (kind == "clean_exit" or yielded) and open_decision:
                 # IMPEDIMENT_RACE_20260911: the worker left with its question open (pending with the
                 # Principal, or answered 'human'). That is the contract, not a protocol violation: the
                 # card goes back to its source phase without a failure; OPEN_DECISION_SKIP holds it

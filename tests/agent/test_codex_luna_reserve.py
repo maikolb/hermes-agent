@@ -59,6 +59,33 @@ def test_unknown_quota_does_not_enable_reserve(monkeypatch):
     assert aux._read_codex_reserve_access_token() is None
 
 
+@pytest.mark.parametrize('credits', [{'has_credits': True}, {'unlimited': True}])
+@pytest.mark.parametrize('authorized', [False, True])
+def test_credits_prevent_silent_reserve_downgrade_only_when_authorized(monkeypatch, credits, authorized):
+    monkeypatch.setattr('hermes_cli.auth._codex_credits_authorized', lambda: authorized)
+    pool = SimpleNamespace(_entries=[entry('account')], _entry_needs_refresh=lambda e: False)
+    monkeypatch.setattr(aux, 'load_pool', lambda provider: pool)
+    monkeypatch.setattr(aux, '_codex_cloudflare_headers', lambda token: {})
+    payload = dict(usage(), credits=credits)
+    monkeypatch.setattr('httpx.get', lambda *a, **kw: SimpleNamespace(
+        raise_for_status=lambda: None, json=lambda: payload))
+    assert aux._read_codex_reserve_access_token() == (None if authorized else 'account')
+
+
+@pytest.mark.parametrize('authorized', [False, True])
+def test_credit_authorization_controls_exhausted_account_recovery(monkeypatch, authorized):
+    from hermes_cli import auth
+    monkeypatch.setattr(auth, '_codex_credits_authorized', lambda: authorized)
+    monkeypatch.setattr(auth, '_decode_jwt_claims', lambda token: {'sub': 'test'})
+    payload = {'rate_limit': {'primary_window': {'used_percent': 100}}, 'credits': {'has_credits': True}}
+    client = Mock()
+    client.__enter__ = Mock(return_value=client)
+    client.__exit__ = Mock(return_value=None)
+    client.get.return_value = SimpleNamespace(status_code=200, json=lambda: payload)
+    monkeypatch.setattr('httpx.Client', lambda **kw: client)
+    assert auth._probe_codex_quota_restored('test-token', min_interval_seconds=0) is authorized
+
+
 def test_switch_survives_completion_in_same_poll():
     from gateway.kanban_watchers import _coalesce_notify_events, _notify_kind_allowed
     events = [SimpleNamespace(id=1, kind="claimed"),

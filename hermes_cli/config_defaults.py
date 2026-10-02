@@ -8,6 +8,9 @@ DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
     "fallback_providers": [],
+    # Enable only with the owner's authorization to spend existing Codex credits.
+    # This does not purchase credits or enable automatic recharge.
+    "codex": {"use_credits": False},
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
     # SQLite journal mode used by every Hermes database opener. WAL is the

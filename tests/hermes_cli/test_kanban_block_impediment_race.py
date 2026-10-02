@@ -77,6 +77,45 @@ def _worker_gone_cleanly(monkeypatch):
     monkeypatch.setattr(kb, "_resolve_crash_grace_seconds", lambda: 0)
 
 
+@pytest.mark.parametrize("answered", [False, True])
+def test_recorded_goal_yield_survives_missing_exit_registry(board, monkeypatch, answered):
+    with kb.connect_closing() as conn:
+        task = _running_card(conn)
+        kb.block_task(conn, task.id, reason=PAUSE, expected_run_id=task.current_run_id)
+        decision = kb._nfos_pending_decision(conn, task.id, task.current_run_id)
+        with kb.write_txn(conn):
+            kb._append_event(conn, task.id, 'nfos_goal_yield', {}, run_id=task.current_run_id)
+        if answered:
+            delivery.resolve_decision(conn, decision, action='continue', answer='Continue no mesmo card', author='Principal')
+        _worker_gone_cleanly(monkeypatch)
+        monkeypatch.setattr(kb, '_classify_worker_exit', lambda pid: ('unknown', None))
+        assert kb.detect_crashed_workers(conn) == []
+        assert kb.get_task(conn, task.id).consecutive_failures == 0
+        assert kb.get_task(conn, task.id).status == 'ready'
+
+
+def test_finalize_block_waits_for_principal_and_follows_answer(monkeypatch):
+    state = {'status': 'running', 'pending': None, 'resolved': None}
+    prompts = []
+    monkeypatch.setattr(goals, 'judge_goal', lambda *a, **k: ('done', 'looks complete', False, None, False))
+    def block(reason):
+        state['pending'] = 'decision-1'
+    def turn(prompt):
+        prompts.append(prompt)
+        if 'still pending' in prompt:
+            state['pending'] = None
+            state['resolved'] = {'id': 'decision-1', 'answer': 'Register the existing PR candidate before review.'}
+        elif 'Principal decision decision-1' in prompt:
+            state['status'] = 'done'
+        return 'review requested'
+    result = goals.run_kanban_goal_loop(task_id='task', goal_text='deliver', run_turn=turn,
+        task_status_fn=lambda: state['status'], block_fn=block, max_turns=6,
+        pending_decision_fn=lambda: state['pending'], resolved_decision_fn=lambda: state['resolved'])
+    assert result['outcome'] == 'completed_by_worker'
+    assert len(prompts) == 3
+    assert 'Register the existing PR' in prompts[-1]
+
+
 # ----------------------------------------------------------------------------- block_task
 
 

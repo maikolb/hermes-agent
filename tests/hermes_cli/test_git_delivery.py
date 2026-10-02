@@ -726,8 +726,12 @@ def test_squash_result_without_task_head_ancestry_is_rejected(
     _git(squasher, "remote", "add", "origin", str(bare))
     _git(squasher, "fetch", "origin")
     _git(squasher, "checkout", "-b", "main", base_sha)
-    _git(squasher, "cherry-pick", head_sha)
+    # A plain cherry-pick can reproduce the exact original commit when both
+    # operations fall in the same second. Make a distinct squash commit.
+    _git(squasher, "cherry-pick", "--no-commit", head_sha)
+    _git(squasher, "commit", "-m", "squashed task change")
     squash_sha = _git(squasher, "rev-parse", "HEAD")
+    assert squash_sha != head_sha
     _git(squasher, "push", "--force", "origin", "main")
     _git(
         config.repo_path,
