@@ -29,6 +29,43 @@ def _make_adapter(extra=None):
     return adapter
 
 
+@pytest.mark.asyncio
+async def test_operator_link_is_consumed_without_gateway_authorization_or_agent_turn(monkeypatch):
+    adapter = _make_adapter({'support_approval_callback_url':'http://127.0.0.1:8790/api/suporte/telegram/callback'})
+    msg = SimpleNamespace(text='/start balcao_'+'a'*43, chat=SimpleNamespace(type='private', id=1234),
+                          from_user=SimpleNamespace(id=1234, username='operator', is_bot=False), reply_text=AsyncMock())
+    monkeypatch.setattr(adapter, '_effective_update_message', lambda update: msg)
+    monkeypatch.setattr(adapter, '_should_process_message', lambda *a, **k: True)
+    authorization = MagicMock(return_value=False)
+    monkeypatch.setattr(adapter, '_is_user_authorized_from_message', authorization)
+    bridge = MagicMock(return_value={'decision':'linked'})
+    monkeypatch.setattr(adapter, '_submit_support_approval_callback', bridge)
+    adapter.handle_message = AsyncMock()
+    await adapter._handle_command(SimpleNamespace(update_id=1), None)
+    assert bridge.call_args[0][0] == {'action':'link','token':'a'*43,'chat_type':'private',
+                                    'chat_id':'1234','telegram_user_id':'1234','username':'operator'}
+    authorization.assert_not_called()
+    adapter.handle_message.assert_not_called()
+    assert 'conectado' in msg.reply_text.call_args[0][0]
+    # A normal DM does not acquire gateway access by connecting an operator account.
+    msg.text = '/start'
+    await adapter._handle_command(SimpleNamespace(update_id=2), None)
+    authorization.assert_called_once()
+    adapter.handle_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_operator_link_in_group_is_never_claimed_or_dispatched(monkeypatch):
+    adapter = _make_adapter({'support_approval_callback_url':'http://127.0.0.1:8790/api/suporte/telegram/callback'})
+    msg = SimpleNamespace(text='/start balcao_'+'a'*43, chat=SimpleNamespace(type='supergroup', id=-1234),
+                          from_user=SimpleNamespace(id=1234, username='operator', is_bot=False), reply_text=AsyncMock())
+    bridge = MagicMock()
+    monkeypatch.setattr(adapter, '_submit_support_approval_callback', bridge)
+    assert await adapter._handle_support_link(msg)
+    bridge.assert_not_called()
+    msg.reply_text.assert_not_called()
+
+
 class _AuthRunner:
     """Minimal runner shim for callback auth tests."""
 
