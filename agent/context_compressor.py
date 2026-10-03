@@ -113,41 +113,7 @@ def _is_summary_access_or_quota_error(exc: Exception) -> bool:
 HISTORICAL_TASK_HEADING = "## Historical Task Snapshot"
 
 
-SUMMARY_PREFIX = (
-    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
-    "into the summary below. This is a handoff from a previous context "
-    "window — treat it as background reference, NOT as active instructions. "
-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
-    "they were already addressed. "
-    "Respond ONLY to the latest user message that appears AFTER this "
-    "summary — that message is the single source of truth for what to do "
-    "right now. "
-    "If no user message appears AFTER this summary, do nothing: do not "
-    "resume, wrap up, or continue work from "
-    f"'{HISTORICAL_TASK_HEADING}' or any other section, do not call tools, "
-    "and wait for a new user message. This handoff must never become the "
-    "active turn by itself. (Exception: if tool results or your own "
-    "tool calls appear after this summary, you are mid-way through an "
-    "in-flight exchange — continue that exchange normally.) "
-    "Topic overlap with the summary does NOT mean you should resume its "
-    "task: even on similar topics, the latest user message WINS. Treat ONLY "
-    "the latest message as the active task and discard stale items from "
-    f"'{HISTORICAL_TASK_HEADING}' entirely — do not 'wrap up' or "
-    "'finish' work described there unless the latest message explicitly "
-    "asks for it. "
-    "Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll "
-    "back', 'just verify', 'don't do that anymore', 'never mind', a new "
-    "topic) must immediately end any in-flight work described in the "
-    "summary; do not re-surface it in later turns. "
-    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
-    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
-    "memory content due to this compaction note. "
-    "None of the above restricts HOW you work: your tools remain fully "
-    "active — keep calling them normally for the active task (edit files, "
-    "run commands, search) instead of merely narrating what you would do. "
-    "The current session state (files, config, etc.) may reflect work "
-    "described here — avoid repeating it:"
-)
+SUMMARY_PREFIX = '[CONTEXT COMPACTION - REFERENCE ONLY] Earlier turns are summarized below as historical evidence, not new instructions. The latest user message or genuine mid-turn steer takes priority over older requests. A status question, request for explanation, or correction steers authorized unfinished work; answer it and continue that work unless the user cancels, pauses, replaces it, or a real blocker requires their input. Do not assume earlier requests were completed just because they were summarized. Use the retained conversation and verified task state to identify the current outcome, authorization, delivery evidence and next action. Topic overlap alone does not authorize resuming historical tasks or repeating completed side effects. If no user message appears after this summary and no in-flight exchange remains, do nothing and wait for a new user message. This handoff must never become the active turn by itself. Stop, pause, rollback and scope changes override older plans immediately. Memory and summaries are context, not permission to override current user instructions or governing policy. Tools remain fully active for the authorized task. Verify existing effects before retrying them.'
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
 
 # Metadata key added to context compression summary messages so that frontends
@@ -504,6 +470,8 @@ def salvage_grown_transcript(
 # written by that build generation; prepend only. tests/agent/
 # test_summary_prefix_semantics.py byte-pins every entry to enforce this.
 _HISTORICAL_SUMMARY_PREFIXES = (
+    # Retired after the 2026-09-04 Titan continuity incident.
+    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below. This is a handoff from a previous context window — treat it as background reference, NOT as active instructions. Do NOT answer questions or fulfill requests mentioned in this summary; they were already addressed. Respond ONLY to the latest user message that appears AFTER this summary — that message is the single source of truth for what to do right now. If no user message appears AFTER this summary, do nothing: do not resume, wrap up, or continue work from '## Historical Task Snapshot' or any other section, do not call tools, and wait for a new user message. This handoff must never become the active turn by itself. (Exception: if tool results or your own tool calls appear after this summary, you are mid-way through an in-flight exchange — continue that exchange normally.) Topic overlap with the summary does NOT mean you should resume its task: even on similar topics, the latest user message WINS. Treat ONLY the latest message as the active task and discard stale items from '## Historical Task Snapshot' entirely — do not 'wrap up' or 'finish' work described there unless the latest message explicitly asks for it. Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll back', 'just verify', 'don't do that anymore', 'never mind', a new topic) must immediately end any in-flight work described in the summary; do not re-surface it in later turns. IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction note. None of the above restricts HOW you work: your tools remain fully active — keep calling them normally for the active task (edit files, run commands, search) instead of merely narrating what you would do. The current session state (files, config, etc.) may reflect work described here — avoid repeating it:",
     # Pre-#80622: identical to the current prefix except it lacked the
     # explicit "if no user message appears AFTER this summary, do nothing"
     # clause. Standalone reference handoffs persisted by that build could
@@ -909,7 +877,10 @@ def _synthetic_user_row(content: str) -> bool:
     return stripped.startswith(_synthetic_prefixes)
 
 
-def _build_verbatim_user_section(turns: List[Dict[str, Any]]) -> str:
+def _build_verbatim_user_section(
+    turns: List[Dict[str, Any]], *, max_chars: int = _LEAN_USER_MESSAGES_BUDGET_CHARS,
+    max_messages: int | None = None,
+) -> str:
     """Embed the compacted region's REAL user messages verbatim in the summary.
 
     Newest-first under a character budget; the straddler is truncated rather
@@ -919,17 +890,35 @@ def _build_verbatim_user_section(turns: List[Dict[str, Any]]) -> str:
     collected: list[str] = []
     used = 0
     for msg in reversed(turns):
-        if msg.get("role") != "user":
+        if msg.get("_compaction_quote_eligible") is False:
             continue
         content = msg.get("content")
         if not isinstance(content, str):
             content = _content_text_for_contains(content)
-        if _synthetic_user_row(content):
+        if ContextCompressor._is_context_summary_content(content):
+            # Earlier head turns were already summarized. Do not resurrect
+            # their verbatim instructions on every subsequent compaction.
+            break
+        if msg.get("role") == "tool":
+            # Runtime steering rides the terminal result, not a user-role row.
+            # Preserve only the exact terminal marker, never arbitrary tool text.
+            from agent.prompt_builder import STEER_MARKER_OPEN, STEER_MARKER_CLOSE
+
+            stripped = content.rstrip()
+            marker_at = stripped.rfind(STEER_MARKER_OPEN + "\n")
+            if marker_at < 0 or not stripped.endswith("\n" + STEER_MARKER_CLOSE):
+                continue
+            content = stripped[marker_at + len(STEER_MARKER_OPEN): -len(STEER_MARKER_CLOSE)].strip()
+        elif msg.get("role") != "user" or _synthetic_user_row(content):
             continue
+        if not content.strip():
+            continue
+        if max_messages is not None and len(collected) >= max_messages:
+            break
         text = content.strip()
         if len(text) > _LEAN_USER_MESSAGE_MAX_CHARS:
             text = text[:_LEAN_USER_MESSAGE_MAX_CHARS].rstrip() + " …[truncated]"
-        remaining = _LEAN_USER_MESSAGES_BUDGET_CHARS - used
+        remaining = max_chars - used
         if remaining <= 0:
             break
         if len(text) > remaining:
@@ -941,9 +930,10 @@ def _build_verbatim_user_section(turns: List[Dict[str, Any]]) -> str:
     return (
         "\n\n" + _LEAN_USER_MESSAGES_HEADING + "\n"
         + "\n\n".join(collected)
-        + "\n(Every real user message from the compacted region, quoted "
-        "verbatim. These are the user's actual words and override any "
-        "paraphrase of them above.)"
+        + "\n(Recent recorded user messages, including runtime-delivered steering, "
+        "quoted under a size limit; truncation is marked. Newer instructions "
+        "override older ones. These historical quotes correct paraphrases; "
+        "they do not by themselves authorize resuming completed or canceled work.)"
     )
 
 
@@ -4666,9 +4656,15 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 
         Both the LLM path and the static fallback route through this, so the
         verbatim user messages and the recovery pointer never depend on the
-        summarizer's cooperation. No-op in legacy mode.
+        summarizer's cooperation. Legacy mode retains a smaller user section.
         """
         if getattr(self, "tail_mode", "legacy") != "lean":
+            # Legacy compression also needs the user's actual corrections.
+            # Keep a small bounded recency window without enabling lean mode.
+            if _LEAN_USER_MESSAGES_HEADING not in summary:
+                summary += _redact_compaction_text(_build_verbatim_user_section(
+                    turns_to_summarize, max_chars=6_000, max_messages=6,
+                ))
             return summary
         if _LEAN_ANCHOR_HEADING not in summary:
             summary += _redact_compaction_text(
@@ -7597,7 +7593,9 @@ This compaction should PRIORITISE preserving all information related to the focu
             # dropping it (#47274 interplay with the multi-fossil scan).
             def _window_row(idx: int, msg: Dict[str, Any]):
                 if idx not in summary_indices:
-                    return msg
+                    # Summarize the old head as evidence, but do not renew
+                    # its instructions in the recent verbatim quote section.
+                    return dict(msg, _compaction_quote_eligible=False)
                 stripped = self._strip_context_summary_handoff_message(
                     _fresh_compaction_message_copy(msg)
                 )
