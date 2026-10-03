@@ -6584,9 +6584,34 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception:
                 detail = None
             raise PermissionError(detail or f"Support approval rejected ({exc.code})") from exc
-        if not isinstance(result, dict) or result.get("decision") not in ("approved", "rejected"):
+        decisions = ("linked",) if payload.get("action") == "link" else ("approved", "rejected")
+        if not isinstance(result, dict) or result.get("decision") not in decisions:
             raise RuntimeError("Invalid support approval response")
         return result
+
+    async def _handle_support_link(self, msg) -> bool:
+        """Consume a Balcão link without authorizing a gateway session or agent turn."""
+        match = re.fullmatch(r"/start(?:@([A-Za-z0-9_]+))?\s+balcao_([A-Za-z0-9_-]{43})", msg.text.strip())
+        if not match or not (self.config.extra or {}).get("support_approval_callback_url"):
+            return False
+        if match[1] and match[1].lower() != str(getattr(self._bot, "username", "") or "").lower():
+            return True
+        user = getattr(msg, "from_user", None)
+        if getattr(msg.chat, "type", None) != "private" or not user or getattr(user, "is_bot", False):
+            return True
+        payload = {"action":"link", "token":match[2], "chat_type":"private",
+                   "chat_id":str(msg.chat.id), "telegram_user_id":str(user.id),
+                   "username":str(getattr(user, "username", "") or "")}
+        try:
+            await asyncio.to_thread(self._submit_support_approval_callback, payload)
+            text = "Telegram conectado ao Balcão. Vou avisar aqui quando houver pergunta ou conclusão dos seus chamados. Responda pelo link do chamado no Balcão."
+        except PermissionError as exc:
+            text = str(exc)[:240]
+        except Exception:
+            # Do not log the one-time link or send it into a model conversation.
+            text = "Não foi possível conectar agora. Gere um novo link no Balcão e tente novamente."
+        await msg.reply_text(text)
+        return True
 
     async def send_slash_confirm(
         self, chat_id: str, title: str, message: str, session_key: str,
@@ -9995,6 +10020,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if not msg or not msg.text:
             return
         if not self._should_process_message(msg, is_command=True):
+            return
+        if await self._handle_support_link(msg):
             return
         if not self._is_user_authorized_from_message(msg):
             logger.warning(
