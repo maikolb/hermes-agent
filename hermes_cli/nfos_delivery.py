@@ -328,7 +328,7 @@ def _urgent_intake(conn, request_id, source, text, reply_to_message_id, *, autho
 
 
 def receive_request(conn, *, source, text, project, attachments=(), part='0', origin=None,
-                    defer_to_principal=False, reply_to_message_id=None, urgency=None):
+                    defer_to_principal=False, reply_to_message_id=None, urgency=None, support_approval=None):
     required=('platform','chat_id','thread_id','message_id')
     if any(not str(source.get(k) or '').strip() for k in required):
         raise WorkflowError('A request needs its original platform/chat/topic/message identity')
@@ -359,6 +359,9 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
         payload['urgency']=urgency
     if origin is not None:
         payload['origin']=origin
+    if support_approval is not None:
+        # Only a split of an approved portal ticket passes this: the part inherits the ticket's approval.
+        payload['support_approval']=support_approval
     if defer_to_principal:
         payload['coordination']={'reply_to_message_id':reply_to_message_id}
     payload=_json(payload)
@@ -3857,6 +3860,12 @@ def _additional_requests(conn, decision, proposal):
         raise WorkflowError('The original request in this task lineage is unavailable')
     original=json.loads(root['payload'])
     project={key:value for key,value in original['project'].items() if key!='existing_task_id'}
+    # PORTAL_SPLIT_APPROVAL_20261005: the parts copy the ticket's portal source, so the support gate
+    # holds them like the ticket itself. A split happens while the approved ticket runs; its parts
+    # inherit that approval, with its lineage, instead of waiting for one nobody is asked for.
+    inherited=None
+    if original.get('support_approval') and not support_approval_pending(original):
+        inherited=dict(original['support_approval'],inherited_from=root['id'],inherited_via=decision['id'])
     seen=set();planned=[]
     for item in items:
         if not isinstance(item,dict) or any(not isinstance(item.get(key),str) or not item[key].strip()
@@ -3888,7 +3897,7 @@ def _additional_requests(conn, decision, proposal):
             comparable['origin']=prior_origin
             if comparable!=payload:
                 raise WorkflowError(f'Additional key {key!r} already identifies different work; review the existing request {request_id}')
-        planned.append({'id':request_id,'part':part,'payload':payload})
+        planned.append({'id':request_id,'part':part,'payload':payload,'support_approval':inherited})
     return planned
 
 
@@ -3897,7 +3906,8 @@ def _dispatch_additional_tasks(conn, decision, proposal):
     for item in planned:
         payload=item['payload']
         receive_request(conn,source=payload['source'],text=payload['text'],project=payload['project'],
-                        attachments=payload['attachments'],part=item['part'],origin=payload['origin'])
+                        attachments=payload['attachments'],part=item['part'],origin=payload['origin'],
+                        support_approval=item['support_approval'])
     wf=get_workflow(conn,decision['task_id'])
     state=json.loads(wf['state_json'])
     previous=state.get('task_partition') or {}

@@ -356,3 +356,56 @@ def test_real_cli_split_decision_dispatch_and_show_preserve_request(board, tmp_p
     assert json.loads(shown['request']['payload'])['attachments'] == MEDIA
     with kb.connect_closing(path) as conn:
         assert len(requests(conn)) == 3
+
+
+PORTAL = {'platform': 'portal', 'chat_id': 'dov', 'thread_id': 'suporte', 'message_id': 'DV-0008',
+          'chat_type': 'portal', 'user_id': 'portal:dov:lucas'}
+
+
+@pytest.fixture
+def portal_board(tmp_path, monkeypatch):
+    """An approved portal ticket already running, as on the dovcrm board."""
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path/'kanban.db'))
+    with kb.connect_closing() as conn:
+        d.init_schema(conn)
+        rid = d.receive_request(conn, source=PORTAL, text='[Lucas (suporte)|portal:dov:lucas] Página de acompanhamento',
+            project={'board': 'pilot', 'profile': 'default', 'delivery_type': 'code'},
+            origin={'portal': {'chamado': 'DV-0008'}})
+        payload = json.loads(d.get_request(conn, rid)['payload'])
+        payload['support_approval'] = {'required': True, 'approved_at': 1790993604, 'approved_by': 'Maikol',
+                                       'decided_at': 1790993604, 'decided_by': 'Maikol', 'decision': 'approved'}
+        conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?', (json.dumps(payload), rid))
+        conn.commit()
+        request = d.reserve_request(conn, capacity=5)
+        task = d.bootstrap_card(conn, rid, request['claim_token'], pid=os.getpid())
+    return tmp_path/'kanban.db', task, rid
+
+
+def test_parts_of_an_approved_portal_ticket_inherit_the_approval_and_run(portal_board):
+    # DV-0008 on 03/10: the parts copied the portal source but not the approval, so the support gate held them
+    # pending forever and nobody was asked to approve them.
+    path, task, rid = portal_board
+    with kb.connect_closing(path) as conn:
+        decision = propose(conn, task)
+        decide(conn, decision)
+        children = [r for r in requests(conn) if r['id'] != rid]
+        assert len(children) == 2
+        for child in children:
+            payload = json.loads(child['payload'])
+            assert payload['source'] == PORTAL
+            assert payload['support_approval']['approved_by'] == 'Maikol'
+            assert payload['support_approval']['inherited_from'] == rid
+            assert payload['support_approval']['inherited_via'] == decision
+            assert not d.support_approval_pending(payload)
+        reserved = d.reserve_request(conn, capacity=5)
+        assert reserved is not None and reserved['id'] in {c['id'] for c in children}
+
+
+def test_telegram_split_parts_carry_no_support_approval(board):
+    path, task, rid = board
+    with kb.connect_closing(path) as conn:
+        decide(conn, propose(conn, task))
+        for child in requests(conn):
+            if child['id'] != rid:
+                assert 'support_approval' not in json.loads(child['payload'])
