@@ -238,15 +238,23 @@ def test_sweep_keeps_a_paused_card_blocked_until_its_repair(running, monkeypatch
     assert kb.claim_task(conn, task.id).id == task.id
 
 
-def test_dispatcher_names_the_hold_of_a_ready_card(running, monkeypatch, all_assignees_spawnable):
+def test_dispatcher_ticks_keep_a_paused_card_blocked_without_repeating_events(running, monkeypatch, all_assignees_spawnable):
+    """05-06/10/2026: the sweep restored the block and recompute_ready promoted the card back in the same tick,
+    one pair of events per tick. A paused card now stays blocked across ticks with a single restoration."""
     conn, task, artifact, process, args = running
     _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
-    assert kb.unblock_task(conn, task.id), 'a competing requeue can still make it ready'
+    assert kb.recompute_ready(conn) == 0 and kb.get_task(conn, task.id).status == 'blocked', 'a pause is not promoted'
+    assert kb.unblock_task(conn, task.id), 'the state DV-0008 and DV-0009 were left in: ready, with the pause pending'
     refusal = []
     assert kb.claim_task(conn, task.id, refusal=refusal) is None and refusal == ['maintenance_pause']
-    result = kb.dispatch_once(conn, spawn_fn=lambda *a, **k: pytest.fail('a held card must not spawn'))
-    assert (task.id, 'maintenance_pause') in result.claim_held, 'the tick says why the ready card did not start'
-    assert kb.get_task(conn, task.id).status == 'ready'
+    for _ in range(3):
+        kb.dispatch_once(conn, spawn_fn=lambda *a, **k: pytest.fail('a held card must not spawn'))
+        assert kb.get_task(conn, task.id).status == 'blocked'
+    kinds = [k for (k,) in conn.execute(
+        "SELECT kind FROM task_events WHERE task_id=? AND kind IN ('nfos_maintenance_hold_restored','promoted') "
+        "AND id > (SELECT MAX(id) FROM task_events WHERE task_id=? AND kind='unblocked') ORDER BY id", (task.id, task.id))]
+    assert kinds == ['nfos_maintenance_hold_restored'], 'one restoration, no promotion back, nothing per tick'
+
 
 
 def test_sweep_restores_the_block_of_a_card_already_ready_under_a_pause(running, monkeypatch):
