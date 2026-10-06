@@ -4726,7 +4726,11 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         if staging and task.delivery_type!='code':
             raise WorkflowError('Staging preparation applies only to code delivery')
         from hermes_cli import nfos_process  # PROJECT_PROCESS_20261006: efeito externo só na etapa do processo que o permite
-        nfos_process.guard(conn,task_id,effect=operation)
+        _process=nfos_process.guard(conn,task_id,effect=operation)
+        # PROJECT_PROCESS_EFFECT_20261006: o efeito leva o card à etapa como o estágio levaria; a decisão vai no evento
+        # do efeito, na mesma transação, e é projetada depois do commit.
+        _decided={'process':nfos_process.summary(_process)} if _process else {}
+        _process_event=None
         if task.delivery_type=='code' and operation!='repair':
             from hermes_cli.nfos_destination import destination, review_only
             scope=destination(conn,task_id)
@@ -4745,16 +4749,27 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
             if existing['status']=='absent':
                 conn.execute("UPDATE nfos_effects SET status='unknown',run_id=?,updated_at=? WHERE id=?",
                              (run_id,int(time.time()),key))
-                _event(conn,task_id,run_id,'nfos_effect_retry',{'effect_id':key,'readback':json.loads(existing['evidence'])})
-                return {**existing,'status':'unknown','execute':True,'reconcile':False}
-            return {**existing,'execute':False,'reconcile':existing['status']=='unknown'}
-        now=int(time.time())
-        conn.execute('INSERT INTO nfos_effects(id,task_id,run_id,operation,target,candidate,status,created_at,updated_at) VALUES(?,?,?,?,?,?,\'unknown\',?,?)',
-                     (key,task_id,run_id,operation,target,candidate,now,now))
-        if preparation:
-            conn.execute('UPDATE nfos_effects SET evidence=? WHERE id=?',(_json(preparation),key))
-        _event(conn,task_id,run_id,'nfos_effect_requested',{'effect_id':key,'operation':operation,'target':target,'candidate':candidate})
-        return {'id':key,'execute':True,'reconcile':False,'status':'unknown'}
+                _event(conn,task_id,run_id,'nfos_effect_retry',{'effect_id':key,'readback':json.loads(existing['evidence']),**_decided})
+                _process_event=nfos_process.last_event_id(conn) if _decided else None
+                result={**existing,'status':'unknown','execute':True,'reconcile':False}
+            else:
+                moved=_decided.get('process') or {}
+                if moved.get('move','stay')!='stay' or moved.get('entry'):  # efeito já pedido que ainda move o card
+                    _event(conn,task_id,run_id,'nfos_process_moved',{'effect_id':key,'operation':operation,**_decided})
+                    _process_event=nfos_process.last_event_id(conn)
+                result={**existing,'execute':False,'reconcile':existing['status']=='unknown'}
+        else:
+            now=int(time.time())
+            conn.execute('INSERT INTO nfos_effects(id,task_id,run_id,operation,target,candidate,status,created_at,updated_at) VALUES(?,?,?,?,?,?,\'unknown\',?,?)',
+                         (key,task_id,run_id,operation,target,candidate,now,now))
+            if preparation:
+                conn.execute('UPDATE nfos_effects SET evidence=? WHERE id=?',(_json(preparation),key))
+            _event(conn,task_id,run_id,'nfos_effect_requested',{'effect_id':key,'operation':operation,'target':target,'candidate':candidate,**_decided})
+            _process_event=nfos_process.last_event_id(conn) if _decided else None
+            result={'id':key,'execute':True,'reconcile':False,'status':'unknown'}
+    if _process_event is not None:
+        nfos_process.project(conn,task_id,run_id,_process,event_id=_process_event)  # PROJECT_PROCESS_EFFECT_20261006
+    return result
 
 
 def reconcile_effect(conn, effect_id, *, found, evidence, caller_task_id=None, caller_run_id=None):

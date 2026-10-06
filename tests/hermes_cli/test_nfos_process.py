@@ -270,3 +270,57 @@ def test_the_worker_cli_gets_the_refusal_as_its_json_error_not_a_traceback(card,
     error = json.loads(result.stdout.strip().splitlines()[-1])
     assert error['type'] == 'ProcessRefusal' and 'p1 (1 · Reproduzir)' in error['error']
     assert d.get_workflow(conn, task.id)['spec_revision'] == 0
+
+
+def seed_base(pw):
+    """Só a esteira padrão: o board do card não tem processo próprio."""
+    from project_workflow.store import Store
+    store = Store(pw)
+    store.init()
+    spec = json.loads((Path(MODULE_SRC) / 'project_workflow' / 'definitions' / 'base.entrega.json').read_text(encoding='utf-8'))
+    store.add_definition(spec, source_text='esteira padrão', created_by='teste', approve_as=('teste', 'fixture'))
+    return store
+
+
+def kinds(conn, task, kind):
+    return [json.loads(row['payload']) for row in conn.execute(
+        'SELECT payload FROM task_events WHERE task_id=? AND kind=? ORDER BY id', (task.id, kind)).fetchall()]
+
+
+@needs_module
+def test_a_board_without_its_own_process_follows_the_default_pipeline(card):
+    conn, task, pw = card
+    store = seed_base(pw)
+    policy(pw, 'enforce')
+    assert save_spec(conn, task) == 1
+    assert [h['step_key'] for h in store.history('concursa-ai', task.id)] == ['analise', 'spec']
+    shown = nfos_process.position(conn, task.id)
+    assert shown['title'] == 'Esteira NFOS' and shown['current'] == 'spec' and shown['governed']
+    accept_spec(conn, task)
+    with pytest.raises(nfos_process.ProcessRefusal, match='Falta registrar: implementar'):
+        d.begin_effect(conn, task.id, task.current_run_id, operation='merge', target='main', candidate='abc1234')
+
+
+@needs_module
+def test_the_effect_moves_the_card_with_its_decision_in_the_effect_event(card):
+    # O worker faz o efeito e registra o estágio depois: o efeito leva o card à etapa, com a decisão no evento
+    # do efeito e a projeção depois do commit; o efeito já pedido que ainda move o card deixa evento próprio.
+    conn, task, pw = card
+    store = seed_base(pw)
+    policy(pw, 'enforce')
+    save_spec(conn, task)
+    accept_spec(conn, task)
+    effect = {'operation': 'repair', 'target': 'producao', 'candidate': 'preimage-1'}
+    assert d.begin_effect(conn, task.id, task.current_run_id, **effect)['execute']
+    requested = kinds(conn, task, 'nfos_effect_requested')[-1]
+    assert requested['process']['step'] == 'implementar' and requested['process']['move'] == 'forward'
+    assert store.history('concursa-ai', task.id)[-1]['step_key'] == 'implementar'
+    assert not d.begin_effect(conn, task.id, task.current_run_id, **effect)['execute']
+    assert kinds(conn, task, 'nfos_process_moved') == [], 'o mesmo efeito na mesma etapa não move nada'
+    save_spec(conn, task, dict(SPEC, goal='Corrigir o cargo e o vínculo'))
+    accept_spec(conn, task)
+    assert store.history('concursa-ai', task.id)[-1]['step_key'] == 'spec', 'spec nova volta à etapa da spec'
+    assert not d.begin_effect(conn, task.id, task.current_run_id, **effect)['execute']
+    moved = kinds(conn, task, 'nfos_process_moved')
+    assert len(moved) == 1 and moved[0]['process']['step'] == 'implementar'
+    assert store.history('concursa-ai', task.id)[-1]['step_key'] == 'implementar'

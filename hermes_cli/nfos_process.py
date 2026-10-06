@@ -1,7 +1,8 @@
 """Processo do projeto (project_workflow) como autoridade do motor NFOS.
 
 O motor consulta o processo do board a cada troca que ele mesmo faz: salvar a spec, avançar o estágio,
-salvar o relatório, executar efeito externo e concluir o card. O modo vem da chave ``motor`` do
+salvar o relatório, executar efeito externo e concluir o card. O processo do board é o próprio ou, no board
+sem processo próprio, a esteira padrão do NFOS. O modo vem da chave ``motor`` do
 ``policy.json`` ao lado do banco do project_workflow, relido a cada chamada (sem reinício):
 
 - ``off`` (padrão): nada muda;
@@ -40,8 +41,8 @@ def _database() -> Path:
 def _rules() -> dict:
     """Política do project_workflow, com a mesma regra de ``project_workflow.policy.load``, lida sem o módulo.
 
-    Arquivo ausente desliga (nunca foi ligado). Arquivo defeituoso trava: o motor obedece em todo board com
-    processo próprio, porque erro de leitura não pode desligar a obediência.
+    Arquivo ausente desliga (nunca foi ligado). Arquivo defeituoso trava: o motor obedece em todo board, cada
+    um com o seu processo, porque erro de leitura não pode desligar a obediência.
     """
     path = _database().parent / "policy.json"
     try:
@@ -202,8 +203,9 @@ def position(conn, task_id) -> dict | None:
         enforce, Store = _module()
         store = Store(_database(), readonly=True)
         card = store.card(board, task_id)
-        definition = store.get(card["workflow_id"]) if card else store.active(board, "entrega", include_base=False)
-        if definition is None or definition["project"] == "*":
+        # O processo do board: o próprio ou, sem ele, a esteira padrão (PROJECT_PROCESS_EFFECT_20261006).
+        definition = store.get(card["workflow_id"]) if card else store.active(board, "entrega", include_base=True)
+        if definition is None:
             return None
         from project_workflow import spec as specmod
         spec = definition["spec"]
