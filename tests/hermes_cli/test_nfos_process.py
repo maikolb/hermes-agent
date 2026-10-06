@@ -6,6 +6,7 @@ por PROJECT_WORKFLOW_SRC; sem ele, só rodam os que não dependem do módulo (mo
 import importlib
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -246,3 +247,26 @@ def test_the_motor_refuses_when_its_own_decisions_cannot_be_read(card, monkeypat
         save_spec(conn, task)
     assert d.get_workflow(conn, task.id)['spec_revision'] == 0
     assert store.history('concursa-ai', task.id)[-1]['step_key'] == 'p3'
+
+
+@needs_module
+def test_the_worker_cli_gets_the_refusal_as_its_json_error_not_a_traceback(card, tmp_path):
+    # O worker roda hermes_cli/nfos_delivery.py como script: o arquivo é __main__ e a recusa vem do
+    # WorkflowError de hermes_cli.nfos_delivery, outra cópia da classe. Tem de sair no erro JSON da CLI.
+    conn, task, pw = card
+    seed(pw)
+    policy(pw, 'enforce')
+    spec = tmp_path / 'spec.json'
+    spec.write_text(json.dumps(SPEC), encoding='utf-8')
+    evidence = tmp_path / 'evidence.json'
+    evidence.write_text(json.dumps({'session': 'synthetic-worker'}), encoding='utf-8')
+    script = Path(d.__file__)
+    env = {**os.environ, 'HERMES_KANBAN_TASK': task.id, 'HERMES_KANBAN_RUN_ID': str(task.current_run_id),
+           'PYTHONPATH': str(script.parents[1]), 'PROJECT_WORKFLOW_SRC': MODULE_SRC, 'PYTHONIOENCODING': 'utf-8'}
+    result = subprocess.run([sys.executable, str(script), 'save-spec', '--input', str(spec), '--evidence', str(evidence),
+                             '--author', 'worker', '--db', os.environ['HERMES_KANBAN_DB']],
+                            env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
+    assert result.returncode == 1 and 'Traceback' not in result.stderr, result.stderr[-1500:]
+    error = json.loads(result.stdout.strip().splitlines()[-1])
+    assert error['type'] == 'ProcessRefusal' and 'p1 (1 · Reproduzir)' in error['error']
+    assert d.get_workflow(conn, task.id)['spec_revision'] == 0
