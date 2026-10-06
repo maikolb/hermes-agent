@@ -2300,10 +2300,24 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
 
 
 def sweep_awaiting_principal(conn):
-    """Card parado em awaiting_principal sem decisão pendente volta à fila sozinho."""
+    """Card parado em awaiting_principal sem decisão pendente volta à fila sozinho.
+
+    Pausa de manutenção pendente não é espera de decisão: o card espera o reparo e segue bloqueado, com o motivo
+    à vista, em vez de voltar a ready para o claim recusar a cada tick. Card que algo já devolveu a ready com a
+    pausa pendente (estado anterior a esta regra ou requeue manual) volta a blocked uma vez, com um evento; como
+    sai de ready, o evento não se repete a cada tick (MAINTENANCE_PAUSE_HONEST_20261005)."""
+    from hermes_cli.nfos_workspace_repair import maintenance_pause_pending
     freed = []
     try:
+        for (task_id,) in conn.execute("SELECT id FROM tasks WHERE status='ready' AND claim_lock IS NULL").fetchall():
+            if maintenance_pause_pending(conn, task_id):
+                with _kb().write_txn(conn, allow_nested=True):
+                    if conn.execute("UPDATE tasks SET status='blocked',block_kind='awaiting_principal' "
+                                    "WHERE id=? AND status='ready' AND claim_lock IS NULL", (task_id,)).rowcount == 1:
+                        _kb()._append_event(conn, task_id, 'nfos_maintenance_hold_restored', {'reason': 'maintenance_pause'})
         for r in conn.execute("SELECT id FROM tasks WHERE status='blocked' AND block_kind='awaiting_principal'").fetchall():
+            if maintenance_pause_pending(conn, r[0]):
+                continue
             if not conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human') LIMIT 1", (r[0],)).fetchone():
                 if _kb().unblock_task(conn, r[0]):
                     freed.append(r[0])
@@ -5018,7 +5032,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','probe','probe-env','lesson','rework','precheck','cancel','save-spec','save-report','progress','ask','decide',
-        'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','repair-execution','pause-for-repair','grant-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider'])
+        'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','repair-execution','pause-for-repair','resume-after-repair','grant-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -5101,6 +5115,9 @@ def main():
         elif args.action=='pause-for-repair':
             from hermes_cli.nfos_workspace_repair import pause_for_repair
             result=pause_for_repair(conn,args.task,**payload)
+        elif args.action=='resume-after-repair':  # MAINTENANCE_PAUSE_HONEST_20261005
+            from hermes_cli.nfos_workspace_repair import resume_after_repair
+            result=resume_after_repair(conn,args.task,**payload)
         elif args.action=='grant-budget':
             from hermes_cli.nfos_principal_review import grant_iteration_budget
             result=grant_iteration_budget(conn,args.task,**payload)

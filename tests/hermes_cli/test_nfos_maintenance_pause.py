@@ -11,7 +11,7 @@ import yaml
 
 from hermes_cli import kanban_db as kb, nfos_delivery as d, nfos_runtime as runtime
 from hermes_cli import nfos_workspace_repair as repair
-from tests.hermes_cli.test_nfos_principal_acceptance import task_context
+from tests.hermes_cli.test_nfos_principal_acceptance import assessment, task_context
 from tests.hermes_cli.test_nfos_workspace_repair import git
 
 
@@ -194,3 +194,136 @@ time.sleep(180)
         if parent.poll() is None: parent.terminate()
         parent.wait(timeout=5)
         if child: tool._signal_identity(child, kill=True)
+
+
+def _paused_and_exited(conn, task, artifact, process, args, monkeypatch):
+    """Paused card whose worker exited and with no open decision: only the pause can hold it."""
+    repair.pause_for_repair(conn, task.id, **args, apply=True)
+    real_now = time.time()
+    with monkeypatch.context() as clock:
+        clock.setattr(runtime.time, 'time', lambda: real_now + 30)
+        runtime.reconcile_terminal_workers(conn)
+    process.wait(timeout=5)
+    assert not runtime.previous_runs_termination_pending(conn, task.id)
+    for (decision_id,) in conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human')",
+                                       (task.id,)).fetchall():
+        d.resolve_decision(conn, decision_id, action='continue', answer='Reviewed', author='Principal',
+                           assessment=assessment(artifact))
+    assert not conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human')",
+                            (task.id,)).fetchone()
+
+
+def test_sweep_keeps_a_paused_card_blocked_until_its_repair(running, monkeypatch):
+    """05/10/2026: the decision sweep returned paused cards to ready, the claim refused them on every
+    tick and the dispatcher reported a stuck queue with no reason (DV-0008 held for two days)."""
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    assert d.sweep_awaiting_principal(conn) == [], 'a pause waits for its repair, not for a decision'
+    paused = kb.get_task(conn, task.id)
+    assert paused.status == 'blocked' and paused.block_kind == 'awaiting_principal'
+    repo = artifact.parent.parent / 'canonical'; repo.mkdir()
+    git(repo, 'init', '-b', 'main'); (repo/'code.txt').write_text('fixture\n')
+    git(repo, 'add', '.'); git(repo, 'commit', '-m', 'fixture')
+    config_path = artifact.parent.parent/'home/config.yaml'
+    config = yaml.safe_load(config_path.read_text())
+    config['kanban']['delivery']['projects'] = {'fixture': {'enabled': True, 'profile': 'default', 'repo_path': str(repo)}}
+    config_path.write_text(yaml.safe_dump(config))
+    monkeypatch.setattr('hermes_cli.profiles.profile_exists', lambda _: True)
+    wf = d.get_workflow(conn, task.id)
+    repair.repair_card(conn, task.id, board='fixture', delivery_type='code', expected_delivery_type=task.delivery_type,
+                       expected_spec_revision=wf['spec_revision'], expected_instruction_revision=task.instruction_revision,
+                       reason=args['reason'], actor='Principal', use_canonical_repo=True, apply=True)
+    assert not repair.maintenance_pause_pending(conn, task.id)
+    assert d.sweep_awaiting_principal(conn) == [task.id], 'once repaired, the same sweep returns the card to the queue'
+    assert kb.claim_task(conn, task.id).id == task.id
+
+
+def test_dispatcher_names_the_hold_of_a_ready_card(running, monkeypatch, all_assignees_spawnable):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    assert kb.unblock_task(conn, task.id), 'a competing requeue can still make it ready'
+    refusal = []
+    assert kb.claim_task(conn, task.id, refusal=refusal) is None and refusal == ['maintenance_pause']
+    result = kb.dispatch_once(conn, spawn_fn=lambda *a, **k: pytest.fail('a held card must not spawn'))
+    assert (task.id, 'maintenance_pause') in result.claim_held, 'the tick says why the ready card did not start'
+    assert kb.get_task(conn, task.id).status == 'ready'
+
+
+def test_sweep_restores_the_block_of_a_card_already_ready_under_a_pause(running, monkeypatch):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    assert kb.unblock_task(conn, task.id), 'the state DV-0008 and DV-0009 were in: ready, with the pause pending'
+    for _ in range(3):
+        d.sweep_awaiting_principal(conn)
+    restored = kb.get_task(conn, task.id)
+    assert restored.status == 'blocked' and restored.block_kind == 'awaiting_principal'
+    kinds = [k for (k,) in conn.execute("SELECT kind FROM task_events WHERE task_id=? AND kind='nfos_maintenance_hold_restored'",
+                                        (task.id,))]
+    assert kinds == ['nfos_maintenance_hold_restored'], 'one event per restoration, not one per tick'
+
+
+def _second_pending_pause(conn, task):
+    """Another pause of the same card, on an older closed run (as two maintenance passes leave)."""
+    now = time.time()
+    conn.execute("INSERT INTO task_runs(task_id, status, outcome, started_at, ended_at, metadata) "
+                 "VALUES (?, 'reclaimed', 'reclaimed', ?, ?, ?)",
+                 (task.id, int(now) - 600, int(now) - 590,
+                  json.dumps({'maintenance_pause': {'actor': 'Principal', 'reason': 'links to another ticket', 'at': now - 590}})))
+    conn.commit()
+    return conn.execute('SELECT MAX(id) FROM task_runs WHERE task_id=?', (task.id,)).fetchone()[0]
+
+
+def test_resume_after_repair_closes_only_the_selected_pause(running, monkeypatch):
+    """DV-0008 (05/10/2026): the pause waited for the support approval of split requests; the cause was repaired
+    outside the card, and repair-card/workspace/execution did not apply."""
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    run_id = task.current_run_id
+    request = dict(pause_run_id=run_id, actor='Principal', reason='Split requests approved and done',
+                   evidence=['req_9937bb85 done in t_c9f676b5', 'req_c176d83e done in t_ca2605b5'])
+    with pytest.raises(d.WorkflowError, match='evidence'):
+        repair.resume_after_repair(conn, task.id, **dict(request, evidence=[]))
+    preview = repair.resume_after_repair(conn, task.id, **request)
+    assert not preview['resumed'] and preview['pause_reason'] == args['reason'] and repair.maintenance_pause_pending(conn, task.id)
+    with pytest.raises(d.WorkflowError, match='sha256'):
+        repair.resume_after_repair(conn, task.id, **request, apply=True)
+    with pytest.raises(d.WorkflowError, match='changed'):
+        repair.resume_after_repair(conn, task.id, **request, expected_pause_sha256='0' * 64, apply=True)
+    with monkeypatch.context() as worker:
+        worker.setenv('HERMES_KANBAN_TASK', task.id)
+        with pytest.raises(d.WorkflowError, match='Principal maintainer'):
+            repair.resume_after_repair(conn, task.id, **request, expected_pause_sha256=preview['pause_sha256'], apply=True)
+    other = _second_pending_pause(conn, task)
+    done = repair.resume_after_repair(conn, task.id, **request, expected_pause_sha256=preview['pause_sha256'], apply=True)
+    assert done['resumed'] and not done['already_resumed']
+    assert repair.maintenance_pause_pending(conn, task.id), 'the other pause still holds the card'
+    assert d.sweep_awaiting_principal(conn) == [] and kb.get_task(conn, task.id).status == 'blocked'
+    again = repair.resume_after_repair(conn, task.id, **request, expected_pause_sha256=preview['pause_sha256'], apply=True)
+    assert again['already_resumed'], 'repeating the same resume is idempotent'
+    with pytest.raises(d.WorkflowError, match='another repair'):
+        repair.resume_after_repair(conn, task.id, **dict(request, reason='a different story'),
+                                   expected_pause_sha256=preview['pause_sha256'], apply=True)
+    resumed = [json.loads(p) for (p,) in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_maintenance_resumed'", (task.id,))]
+    assert len(resumed) == 1 and resumed[0]['evidence'] == request['evidence'] and resumed[0]['pause_run_id'] == run_id
+    meta = json.loads(conn.execute('SELECT metadata FROM task_runs WHERE id=?', (run_id,)).fetchone()[0])['maintenance_pause']
+    assert meta['repair_kind'] == 'external' and meta['repaired_by'] == 'Principal'
+    second = repair.resume_after_repair(conn, task.id, pause_run_id=other, actor='Principal', reason='Links repaired',
+                                        evidence=['DV-0016 link fixed'])
+    repair.resume_after_repair(conn, task.id, pause_run_id=other, actor='Principal', reason='Links repaired',
+                               evidence=['DV-0016 link fixed'], expected_pause_sha256=second['pause_sha256'], apply=True)
+    assert not repair.maintenance_pause_pending(conn, task.id)
+    assert d.sweep_awaiting_principal(conn) == [task.id] and kb.claim_task(conn, task.id).id == task.id
+
+
+def test_native_cli_previews_the_resume_without_mutating_it(running, monkeypatch, capsys):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    request = artifact.parent / 'resume.json'
+    request.write_text(json.dumps(dict(pause_run_id=task.current_run_id, actor='Principal', reason='Cause repaired',
+                                       evidence=['readback of the repaired cause'])))
+    monkeypatch.setattr(sys, 'argv', ['nfos', 'resume-after-repair', '--task', task.id, '--input', str(request)])
+    d.main()
+    result = json.loads(capsys.readouterr().out)
+    assert not result['resumed'] and len(result['pause_sha256']) == 64
+    assert repair.maintenance_pause_pending(conn, task.id)

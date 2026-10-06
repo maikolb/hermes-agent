@@ -5223,6 +5223,9 @@ class GatewayKanbanWatchersMixin:
                 rate_limited = getattr(res, "rate_limited", None) or []
                 if rate_limited:
                     bits.append(f"rate_limited={len(rate_limited)}")
+                held = getattr(res, "claim_held", None) or []
+                if held:
+                    bits.append("claim_held=" + ", ".join(f"{task_id}:{reason}" for task_id, reason in held[:5]))
                 if bits:
                     parts.append(f"{slug}: " + ", ".join(bits))
             return "; ".join(parts) or "no board reported a skip reason"
