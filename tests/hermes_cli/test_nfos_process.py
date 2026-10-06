@@ -226,3 +226,23 @@ def test_a_broken_policy_keeps_the_motor_locked(card):
     assert nfos_process.mode('concursa-ai') == 'enforce'
     (pw.parent / 'policy.json').unlink()
     assert nfos_process.mode('concursa-ai') == 'off', 'sem arquivo: nunca foi ligado'
+
+
+@needs_module
+def test_the_motor_refuses_when_its_own_decisions_cannot_be_read(card, monkeypatch):
+    conn, task, pw = card
+    store = seed(pw)
+    policy(pw, 'enforce')
+    store.bind('concursa-ai', task.id, by='teste')
+    steps(store, task, 'triagem', 'p1', 'p2', 'p3')
+    from project_workflow import enforce
+    import sqlite3
+
+    def unreadable(*args, **kwargs):
+        raise sqlite3.OperationalError('database disk image is malformed')
+
+    monkeypatch.setattr(enforce, 'motor_events_in', unreadable)
+    with pytest.raises(nfos_process.ProcessRefusal, match='não conseguiu consultar o processo'):
+        save_spec(conn, task)
+    assert d.get_workflow(conn, task.id)['spec_revision'] == 0
+    assert store.history('concursa-ai', task.id)[-1]['step_key'] == 'p3'

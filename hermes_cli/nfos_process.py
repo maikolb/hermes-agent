@@ -119,7 +119,7 @@ def evaluate(conn, task_id, *, stage=None, effect=None, delivery_type=None, spec
         decision = enforce.decide(Store(_database()), board, task_id,
                                   _engine(conn, task_id, delivery_type, spec_revision),
                                   stage=stage, effect=effect, actor=actor(), rules=rules,
-                                  events=enforce.motor_events_in(conn, task_id))
+                                  events=lambda: enforce.motor_events_in(conn, task_id))
     except Exception as exc:  # noqa: BLE001 - qualquer falha da consulta vale como processo indisponível
         if current != "enforce":
             return None, None
