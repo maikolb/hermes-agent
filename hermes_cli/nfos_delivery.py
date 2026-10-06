@@ -5218,8 +5218,12 @@ def main():
 
 
 if __name__=='__main__':
+    # Como script (o prefixo dos workers) ou ``-m``, este arquivo é o módulo __main__; quem o importa
+    # (nfos_process, nfos_principal_review, ...) levanta o WorkflowError de hermes_cli.nfos_delivery, outra cópia
+    # da mesma classe. As duas saem no mesmo erro JSON, nunca como traceback (PROJECT_PROCESS_20261006).
+    from hermes_cli import nfos_delivery as _imported
     try:
         main()
-    except WorkflowError as exc:
+    except (WorkflowError, _imported.WorkflowError) as exc:
         print(_json({'error':str(exc),'type':type(exc).__name__}))
         raise SystemExit(1)
