@@ -402,6 +402,28 @@ def test_parts_of_an_approved_portal_ticket_inherit_the_approval_and_run(portal_
         assert reserved is not None and reserved['id'] in {c['id'] for c in children}
 
 
+def test_split_parts_never_merge_into_another_open_card_by_reference(portal_board):
+    # DV-0013 on 05/10: both parts cited the HML address the open DV-0016 card also cites; the intake attached them
+    # to that card as a resend, no executor was born and the ticket's card waited for parts that did not exist.
+    # A full URL here, so only the planned-part identity (not the bare-host rule) keeps them apart.
+    path, task, rid = portal_board
+    url = 'https://hml.example.com/painel/kpis'
+    with kb.connect_closing(path) as conn:
+        with kb.write_txn(conn):
+            other = kb.create_task(conn, title='DV-0016 teste de login', body='Validar em ' + url, assignee='default')
+        payload = proposal()
+        for item in payload['tasks']:
+            item['text'] += ' Destino ' + url
+        decide(conn, propose(conn, task, payload))
+        children = [r for r in requests(conn) if r['id'] != rid]
+        assert len(children) == 2
+        assert all(c['status'] == 'pending' and c['task_id'] is None for c in children)
+        assert not conn.execute("SELECT 1 FROM task_events WHERE kind='request_attached'").fetchone()
+        assert not conn.execute('SELECT 1 FROM task_comments WHERE task_id=?', (other,)).fetchone()
+        reserved = d.reserve_request(conn, capacity=5)
+        assert reserved is not None and reserved['id'] in {c['id'] for c in children}
+
+
 def test_telegram_split_parts_carry_no_support_approval(board):
     path, task, rid = board
     with kb.connect_closing(path) as conn:

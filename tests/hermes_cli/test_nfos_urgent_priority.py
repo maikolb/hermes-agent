@@ -62,6 +62,20 @@ def test_same_reference_attaches_instead_of_new_card(board):
         assert body.startswith("[reenvio]")
 
 
+def test_bare_host_is_not_a_reference_but_a_path_still_is(board):
+    # INTAKE_REFERENCE_20261006: on 05/10 the Sineta reinstall cited https://hml.dovcrm.com.br first and was attached
+    # to the newest open card citing the same host (DV-0016), not to the work it repeated.
+    project, task = board
+    host = "https://hml.example.com"
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            newer = kb.create_task(conn, title="outro pedido", body="Validar login em " + host + "/", assignee="default")
+        lone = d.receive_request(conn, source=_source(2), text="[Maikol|9] conferir " + host, project=project)
+        assert _req(conn, lone)["status"] == "pending" and _req(conn, lone)["task_id"] is None
+        both = d.receive_request(conn, source=_source(3), text=f"[Maikol|9] {host} de novo: {URL}", project=project)
+        assert _req(conn, both)["task_id"] == task.id != newer
+
+
 def test_portal_tickets_sharing_url_keep_independent_identity(board):
     project, existing = board
     with kb.connect_closing() as conn:
