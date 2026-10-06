@@ -5559,6 +5559,10 @@ def recompute_ready(
     MUST be called OUTSIDE any open write transaction (plain ``write_txn``
     raises on nesting); call it after the enclosing txn commits.
 
+    A task held by a pending support approval or by a Principal maintenance
+    pause is never promoted: the claim would refuse it, and promoting a paused
+    card undid the pause's block on every tick (MAINTENANCE_PAUSE_HONEST_20261005).
+
     ``blocked`` tasks are also considered for promotion (so a task
     blocked purely by a parent dependency unblocks itself when the
     parent completes), *except* in two cases:
@@ -5586,6 +5590,8 @@ def recompute_ready(
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
     aggregates = []
+    from hermes_cli.nfos_delivery import task_support_approval_pending
+    from hermes_cli.nfos_workspace_repair import maintenance_pause_pending
     with write_txn(conn):
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries, task_role "
@@ -5594,8 +5600,7 @@ def recompute_ready(
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
-            from hermes_cli.nfos_delivery import task_support_approval_pending
-            if task_support_approval_pending(conn, task_id):
+            if task_support_approval_pending(conn, task_id) or maintenance_pause_pending(conn, task_id):
                 continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Worker / operator asked for explicit human intervention — do not
