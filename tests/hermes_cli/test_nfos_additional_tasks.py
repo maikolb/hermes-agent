@@ -418,10 +418,18 @@ def test_split_parts_never_merge_into_another_open_card_by_reference(portal_boar
         children = [r for r in requests(conn) if r['id'] != rid]
         assert len(children) == 2
         assert all(c['status'] == 'pending' and c['task_id'] is None for c in children)
-        assert not conn.execute("SELECT 1 FROM task_events WHERE kind='request_attached'").fetchone()
-        assert not conn.execute('SELECT 1 FROM task_comments WHERE task_id=?', (other,)).fetchone()
         reserved = d.reserve_request(conn, capacity=5)
         assert reserved is not None and reserved['id'] in {c['id'] for c in children}
+        own = d.bootstrap_card(conn, reserved['id'], reserved['claim_token'], pid=os.getpid())
+        # The same batch again (a repeated Principal answer) reuses both stable items: the materialized part stays on
+        # its own card and the other one stays pending, never on the card that shares the reference.
+        decide(conn, propose(conn, task, payload))
+        again = {r['id']: r for r in requests(conn) if r['id'] != rid}
+        assert set(again) == {c['id'] for c in children}
+        assert again[reserved['id']]['status'] == 'attached' and again[reserved['id']]['task_id'] == own.id != other
+        assert [(r['status'], r['task_id']) for i, r in again.items() if i != reserved['id']] == [('pending', None)]
+        assert not conn.execute("SELECT 1 FROM task_events WHERE kind='request_attached'").fetchone()
+        assert not conn.execute('SELECT 1 FROM task_comments WHERE task_id=?', (other,)).fetchone()
 
 
 def test_telegram_split_parts_carry_no_support_approval(board):

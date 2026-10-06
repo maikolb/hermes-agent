@@ -70,10 +70,19 @@ def test_bare_host_is_not_a_reference_but_a_path_still_is(board):
     with kb.connect_closing() as conn:
         with kb.write_txn(conn):
             newer = kb.create_task(conn, title="outro pedido", body="Validar login em " + host + "/", assignee="default")
-        lone = d.receive_request(conn, source=_source(2), text="[Maikol|9] conferir " + host, project=project)
-        assert _req(conn, lone)["status"] == "pending" and _req(conn, lone)["task_id"] is None
-        both = d.receive_request(conn, source=_source(3), text=f"[Maikol|9] {host} de novo: {URL}", project=project)
+        for number, bare in enumerate((host, host + "/"), start=2):
+            lone = d.receive_request(conn, source=_source(number), text="[Maikol|9] conferir " + bare, project=project)
+            assert _req(conn, lone)["status"] == "pending" and _req(conn, lone)["task_id"] is None
+        both = d.receive_request(conn, source=_source(4), text=f"[Maikol|9] {host} de novo: {URL}", project=project)
         assert _req(conn, both)["task_id"] == task.id != newer
+
+
+@pytest.mark.parametrize("reference", [URL, URL.rsplit("/", 1)[1]])
+def test_reference_with_path_or_uuid_still_attaches(board, reference):
+    project, task = board
+    with kb.connect_closing() as conn:
+        rid = d.receive_request(conn, source=_source(2), text="[Maikol|9] de novo " + reference, project=project)
+        assert _req(conn, rid)["status"] == "attached" and _req(conn, rid)["task_id"] == task.id
 
 
 def test_portal_tickets_sharing_url_keep_independent_identity(board):
