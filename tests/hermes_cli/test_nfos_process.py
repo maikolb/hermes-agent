@@ -319,7 +319,9 @@ def test_the_effect_moves_the_card_with_its_decision_in_the_effect_event(card):
     assert kinds(conn, task, 'nfos_process_moved') == [], 'o mesmo efeito na mesma etapa não move nada'
     save_spec(conn, task, dict(SPEC, goal='Corrigir o cargo e o vínculo'))
     accept_spec(conn, task)
-    assert store.history('concursa-ai', task.id)[-1]['step_key'] == 'spec', 'spec nova volta à etapa da spec'
+    assert store.history('concursa-ai', task.id)[-1]['step_key'] == 'implementar', \
+        'spec revista sem portão no meio continua a mudança: o card fica'
+    store.record_step('concursa-ai', task.id, 'spec', source='agent', note='o Principal devolveu o card à spec')
     assert not d.begin_effect(conn, task.id, task.current_run_id, **effect)['execute']
     moved = kinds(conn, task, 'nfos_process_moved')
     assert len(moved) == 1 and moved[0]['process']['step'] == 'implementar'
