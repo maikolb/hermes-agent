@@ -62,10 +62,12 @@ def seed(pw):
     from project_workflow.store import Store
     store = Store(pw)
     store.init()
-    definitions = Path(MODULE_SRC) / 'project_workflow' / 'definitions'
-    for name in ('base.entrega.json', 'concursa-ai.entrega.json'):
-        spec = json.loads((definitions / name).read_text(encoding='utf-8'))
-        store.add_definition(spec, source_text=name, created_by='teste', approve_as=('teste', 'fixture'))
+    # O Concursa entra na versão 2 fixada aqui (portões do Maikol no dado e no Aceite): os testes exercitam os ganchos
+    # do motor com um processo conhecido, independente da versão que o módulo entrega.
+    for path in (Path(MODULE_SRC) / 'project_workflow' / 'definitions' / 'base.entrega.json',
+                 Path(__file__).parent / 'fixtures' / 'concursa-ai.entrega.v2.json'):
+        spec = json.loads(path.read_text(encoding='utf-8'))
+        store.add_definition(spec, source_text=path.name, created_by='teste', approve_as=('teste', 'fixture'))
     return store
 
 
