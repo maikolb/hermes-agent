@@ -68,6 +68,7 @@ def test_open_decision_skip_releases_the_workspace_lease(board, all_assignees_sp
         res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
         assert task.id not in spawns
         assert task.id not in [s[0] for s in res.spawned]
+        assert (task.id, "open_decision") in res.claim_held, "o tick diz por que o card pronto não rodou"
         workspace = kb.resolve_workspace(kb.get_task(conn, task.id))
         lease, owner = kb._try_acquire_workspace_lease(workspace, task_id="probe")
         assert lease is not None, f"lease do workspace ficou preso pelo dispatcher: {owner}"

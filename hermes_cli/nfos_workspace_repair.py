@@ -88,6 +88,67 @@ def pause_for_repair(conn, task_id, *, expected_run_id, expected_claim, expected
     return dict(pause, paused=True, already_paused=False, run_id=expected_run_id, apply=True)
 
 
+def resume_after_repair(conn, task_id, *, pause_run_id, actor, reason, evidence, expected_pause_sha256=None,
+                        apply=False):
+    """Principal maintenance resume of ONE pause whose cause was repaired outside the card (intake,
+    support approval, links), with the same maintainer gate as the pause.
+
+    repair-card, repair-workspace and repair-execution keep closing the pauses they repair; a budget pause
+    (kind='runtime_budget_exhausted') stays with repair-execution. This route
+    closes only the selected pause (repair_kind='external', with reason and evidence): other pauses,
+    decisions and blocks stay, and the card returns to the queue through the runtime sweep once nothing
+    else holds it. The preview returns the pause sha256 that apply must present; repeating the same
+    resume is idempotent.
+    """
+    from agent.delegation_context import is_dispatcher_owned_worker_context
+    if (os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT')
+            or not is_dispatcher_owned_worker_context()):
+        raise delivery.WorkflowError('Only the Principal maintainer can resume a maintenance pause')
+    if (type(pause_run_id) is not int or any(not isinstance(v, str) or not v.strip() for v in (actor, reason))
+            or not isinstance(evidence, list) or not evidence
+            or any(not isinstance(item, str) or not item.strip() for item in evidence)):
+        raise delivery.WorkflowError('Specify the pause run, actor, reason and the evidence that its cause was repaired')
+    if apply and not isinstance(expected_pause_sha256, str):
+        raise delivery.WorkflowError('Apply requires the pause sha256 returned by the preview')
+
+    def observed():
+        row = conn.execute('SELECT metadata FROM task_runs WHERE task_id=? AND id=?', (task_id, pause_run_id)).fetchone()
+        metadata = json.loads((row['metadata'] if row else None) or '{}')
+        pause = metadata.get('maintenance_pause')
+        if not isinstance(pause, dict):
+            raise delivery.WorkflowError('The selected run holds no maintenance pause')
+        if pause.get('kind') == 'runtime_budget_exhausted':
+            raise delivery.WorkflowError('A budget pause resumes through repair-execution, which checks the balance '
+                                         'and the resume context')
+        if pause.get('repaired_at') is not None:
+            if (pause.get('repair_kind'), pause.get('repaired_by'), pause.get('repair_reason')) == ('external', actor, reason):
+                return metadata, None  # the same resume again: the card may already be running
+            raise delivery.WorkflowError('The selected pause was already closed by another repair')
+        _idle(conn, task_id)  # idle card, no live executor, previous worker termination confirmed
+        digest = hashlib.sha256(delivery._json(pause).encode()).hexdigest()
+        if apply and digest != expected_pause_sha256:
+            raise delivery.WorkflowError('The selected pause changed since it was read')
+        return metadata, digest
+
+    base = dict(task_id=task_id, pause_run_id=pause_run_id, actor=actor, reason=reason, evidence=evidence, apply=apply)
+    metadata, digest = observed()
+    if digest is None:
+        return dict(base, resumed=True, already_resumed=True)
+    if not apply:
+        return dict(base, pause_sha256=digest, pause_reason=metadata['maintenance_pause'].get('reason'), resumed=False)
+    with kb.write_txn(conn):
+        metadata, digest = observed()
+        if digest is None:
+            return dict(base, resumed=True, already_resumed=True)
+        metadata['maintenance_pause'].update(repaired_at=time.time(), repaired_by=actor, repair_kind='external',
+                                             repair_reason=reason, repair_evidence=evidence)
+        conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (delivery._json(metadata), pause_run_id))
+        kb._append_event(conn, task_id, 'nfos_maintenance_resumed',
+                         dict(pause_run_id=pause_run_id, pause_sha256=digest, actor=actor, reason=reason,
+                              evidence=evidence), run_id=pause_run_id)
+    return dict(base, pause_sha256=digest, resumed=True, already_resumed=False)
+
+
 def repair_card(conn, task_id, *, board, delivery_type, expected_delivery_type,
                 expected_spec_revision, expected_instruction_revision,
                 reason, actor, use_canonical_repo=False, apply=False):

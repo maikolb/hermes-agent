@@ -5694,12 +5694,22 @@ def claim_task(
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
     allow_activity: bool = False,
+    refusal: Optional[list] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
+
+    ``refusal``, when given, receives the reason when a hold (not a lost
+    race) refuses the claim, so the dispatcher can say why a ready card did
+    not start: a silent refusal used to read as a stuck dispatcher.
     """
+    def held(reason: str) -> None:
+        if refusal is not None:
+            refusal.append(reason)
+        return None
+
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -5710,11 +5720,13 @@ def claim_task(
         if task is None or (task.task_role != "work" and not allow_activity):
             return None
         from hermes_cli.nfos_delivery import active_suspension, task_support_approval_pending
-        if active_suspension(conn, task_id) or task_support_approval_pending(conn, task_id):
-            return None
+        if active_suspension(conn, task_id):
+            return held("principal_suspension")
+        if task_support_approval_pending(conn, task_id):
+            return held("support_approval_pending")
         from hermes_cli.nfos_workspace_repair import maintenance_pause_pending, execution_budget, request_execution_budget_review
         if maintenance_pause_pending(conn, task_id):
-            return None
+            return held("maintenance_pause")
         balance = execution_budget(conn, task)
         if balance and any(balance[k] is not None and balance[k] <= 0 for k in
                            ('remaining_iterations', 'remaining_runtime_seconds', 'remaining_goal_turns')):
@@ -5722,13 +5734,13 @@ def claim_task(
                 conn.execute("UPDATE tasks SET status='blocked',block_kind='awaiting_principal' WHERE id=?", (task_id,))
                 _append_event(conn, task_id, 'nfos_execution_budget_exhausted', balance)
             request_execution_budget_review(conn, task, balance)
-            return None
+            return held("execution_budget_exhausted")
         retained = conn.execute("SELECT json_extract(state_json,'$.retained_workspace') FROM nfos_workflows WHERE task_id=?", (task_id,)).fetchone()
         if retained and retained[0] and not json.loads(retained[0]).get('restored_at'):
-            return None
+            return held("retained_workspace")
         from hermes_cli.nfos_runtime import previous_runs_termination_pending
         if task.status == 'ready' and previous_runs_termination_pending(conn, task_id):
-            return None
+            return held("previous_run_termination")
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -5753,7 +5765,7 @@ def claim_task(
                 conn, task_id, "claim_rejected",
                 {"reason": "parents_not_done"},
             )
-            return None
+            return held("parents_not_done")
         # Defensive: if a prior run somehow leaked (invariant violation from
         # an unknown code path), close it as 'reclaimed' so we don't strand
         # it when the CAS resets the pointer below. No-op when the invariant
@@ -11289,6 +11301,11 @@ class DispatchResult:
     board. This is the steady-state signal that a single-writer guard is
     actively preventing two dispatchers from racing on ``kanban.db``."""
     memory_pressure: Optional[str] = None
+    claim_held: list[tuple[str, str]] = field(default_factory=list)
+    """Ready tasks whose claim a hold refused this tick, as ``(task_id, reason)``:
+    principal_suspension, support_approval_pending, maintenance_pause,
+    execution_budget_exhausted, retained_workspace, previous_run_termination,
+    parents_not_done. The card waits for that resolution, not for the dispatcher."""
     skipped_capacity: list[dict] = field(default_factory=list)
     """Patch 10/09/2026: por que este tick não gerou spawn quando o motivo foi capacidade.
     Cada item: {reason: max_spawn|max_in_progress|workers, running, limit, reserved?}. Não é falha:
@@ -14699,8 +14716,11 @@ def _dispatch_once_locked(
             else:
                 workspace = resolve_workspace(candidate, board=board)
         except Exception as exc:
-            claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
+            refusal: list[str] = []
+            claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds, refusal=refusal)
             if claimed is None:
+                if refusal:
+                    result.claim_held.append((row["id"], refusal[0]))
                 continue
             auto = _record_spawn_failure(
                 conn, claimed.id, f"workspace: {exc}",
@@ -14730,11 +14750,15 @@ def _dispatch_once_locked(
                 pass
             _release_workspace_lease(workspace_lease)  # LEASE_RELEASE_20260910: sem liberar, o lease ficava em nome do gateway e o card nunca mais era reclamado
             _log.debug("kanban dispatcher: %s aguarda decisão aberta (pending/human); não relançado", row["id"])  # LOGGER_NAME_20260910
+            result.claim_held.append((row["id"], "open_decision"))
             continue
         _apply_project_max_runtime_default(conn, delivery_project, row["id"])  # MAX_RUNTIME_DEFAULT_20260910
-        claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
+        refusal: list[str] = []
+        claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds, refusal=refusal)
         if claimed is None:
             _release_workspace_lease(workspace_lease)
+            if refusal:  # a hold, not a lost race: the diagnosis names it instead of reading as a stuck dispatcher
+                result.claim_held.append((row["id"], refusal[0]))
             continue
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
