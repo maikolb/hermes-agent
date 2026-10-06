@@ -9,9 +9,11 @@ salvar o relatório, executar efeito externo e concluir o card. O modo vem da ch
 - ``enforce``: o motor obedece. A troca fora do desenho é recusada dentro do próprio motor com o que
   falta, e falha ao consultar o processo também recusa, porque o processo não é opcional nesse board.
 
-A regra (posição do card, etapas, portões, raias, tipos de entrega governados) é do módulo
-project_workflow; aqui fica só a ligação com o motor: board, ator, estado do card e a gravação da etapa
-na mesma transação da troca, depois do evento que a registra no Kanban.
+A decisão do processo vai no evento do Kanban da troca (``process``), na mesma transação: é a fonte do
+andamento do card. O andamento no banco do project_workflow é a projeção dela, gravada logo depois do
+commit e refeita pelo observador a partir do evento se essa gravação falhar (idempotente pelo id do evento).
+A regra (posição do card, etapas, portões, raias, tipos de entrega governados) é do módulo project_workflow;
+aqui fica só a ligação com o motor: board, ator, estado do card, decisão no evento e projeção.
 """
 from __future__ import annotations
 
@@ -36,11 +38,22 @@ def _database() -> Path:
 
 
 def _rules() -> dict:
+    """Política do project_workflow, com a mesma regra de ``project_workflow.policy.load``, lida sem o módulo.
+
+    Arquivo ausente desliga (nunca foi ligado). Arquivo defeituoso trava: o motor obedece em todo board com
+    processo próprio, porque erro de leitura não pode desligar a obediência.
+    """
+    path = _database().parent / "policy.json"
     try:
-        data = json.loads((_database().parent / "policy.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) else {}
+    except (OSError, ValueError) as exc:
+        return {"enforce": True, "motor": {"*": "enforce"}, "broken": f"policy.json defeituosa: {type(exc).__name__}"}
+    motor = data.get("motor", {}) if isinstance(data, dict) else None
+    if not isinstance(motor, dict) or any(value not in MODES for value in motor.values()):
+        return {"enforce": True, "motor": {"*": "enforce"}, "broken": "policy.json defeituosa: chave motor inválida"}
+    return data
 
 
 def board_of(conn) -> str | None:
@@ -98,21 +111,25 @@ def evaluate(conn, task_id, *, stage=None, effect=None, delivery_type=None, spec
     current = mode(board, rules)
     if current == "off":
         return None, None
+    note = (f" Política do project_workflow defeituosa ({rules['broken']}): o motor segue travado até ela ser "
+            "corrigida.") if rules.get("broken") else ""
     try:
         enforce, Store = _module()
+        # O andamento é projeção das decisões gravadas nos eventos do card: a que ficou só no evento entra antes.
         decision = enforce.decide(Store(_database()), board, task_id,
                                   _engine(conn, task_id, delivery_type, spec_revision),
-                                  stage=stage, effect=effect, actor=actor(), rules=rules)
+                                  stage=stage, effect=effect, actor=actor(), rules=rules,
+                                  events=enforce.motor_events_in(conn, task_id))
     except Exception as exc:  # noqa: BLE001 - qualquer falha da consulta vale como processo indisponível
         if current != "enforce":
             return None, None
         return None, (f"PROCESSO do board {board}: o motor não conseguiu consultar o processo do projeto "
                       f"({type(exc).__name__}: {str(exc)[:300]}). Com o processo obrigatório neste board, a troca "
-                      "não acontece sem ele. Avise o Principal.")
+                      "não acontece sem ele. Avise o Principal." + note)
     if decision is None:
         return None, None
     if not decision["allowed"] and current == "enforce":
-        return decision, decision["message"]
+        return decision, decision["message"] + note
     return decision, None
 
 
@@ -129,29 +146,35 @@ def last_event_id(conn) -> int:
 
 
 def summary(decision) -> dict | None:
-    """Resumo da decisão para o evento do Kanban da troca."""
+    """A decisão como ela vai no evento do Kanban da troca (fonte do andamento do card governado)."""
     if decision is None:
         return None
-    return {"step": decision.get("target") if decision["move"] in ("forward", "back", "jump") else decision.get("current"),
-            "move": decision["move"], "entry": decision.get("entry"), "allowed": decision["allowed"],
-            "mode": decision["mode"], "workflow_id": decision["workflow_id"], "version": decision["version"]}
+    enforce, _ = _module()
+    return enforce.summary(decision)
 
 
-def record(decision, *, engine_stage=None, event_id=None) -> None:
-    """Grava a entrada e a troca de etapa no andamento do card, depois do evento do Kanban da mesma troca.
+def project(conn, task_id, run_id, decision, *, event_id=None) -> bool:
+    """Projeta no andamento do card a decisão já gravada no evento, depois do commit da troca.
 
-    Em ``enforce``, falha ao gravar recusa a troca (a transação do motor é desfeita): o motor não avança
-    sem registrar onde o card está no processo.
+    A troca já aconteceu com a permissão do processo; falha aqui não a desfaz. Fica um evento
+    ``nfos_process_projection_failed``, e a projeção é refeita a partir do evento pelo próximo julgamento do
+    card, pelo registro de etapa pela CLI ou pelo observador.
     """
     if decision is None:
-        return
+        return True
     try:
         enforce, Store = _module()
-        enforce.record(Store(_database()), decision, engine_stage=engine_stage, event_id=event_id)
+        # Projeta todas as decisões do card que estão nos eventos, em ordem (a desta troca e qualquer anterior
+        # que tenha ficado só no evento), sem repetir o que já está gravado.
+        Store(_database()).replay_motor_events(decision["board"], task_id, enforce.motor_events_in(conn, task_id))
+        return True
     except Exception as exc:  # noqa: BLE001
-        if decision.get("mode") == "enforce":
-            raise ProcessRefusal(f"PROCESSO {decision.get('title')}: o motor não conseguiu gravar a etapa do card "
-                                 f"({type(exc).__name__}: {str(exc)[:300]}); a troca foi desfeita.") from exc
+        from hermes_cli import kanban_db as kb
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, "nfos_process_projection_failed",
+                             {"engine_event": event_id, "reason": f"{type(exc).__name__}: {str(exc)[:500]}"},
+                             run_id=run_id)
+        return False
 
 
 def completion_blocked(conn, task_id, run_id, refusal, *, append_event) -> None:

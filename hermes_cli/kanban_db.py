@@ -7338,6 +7338,7 @@ def complete_task(
                         ),
                     )
                 return False
+    nfos_process_event_id = None
     with write_txn(conn):
         # Parent completion is a hard invariant even for direct human review
         # approval. A parent may have been reopened after this task entered
@@ -7651,12 +7652,12 @@ def complete_task(
             run_id=run_id,
         )
         if nfos_process_decision is not None:
-            # A conclusão já passou pelo processo; falha só na anotação da etapa não desfaz o fechamento.
-            try:
-                nfos_process.record(nfos_process_decision, engine_stage="done",
-                                    event_id=nfos_process.last_event_id(conn))
-            except nfos_process.ProcessRefusal as exc:
-                _append_event(conn, task_id, "nfos_process_record_failed", {"reason": str(exc)[:1000]}, run_id=run_id)
+            nfos_process_event_id = nfos_process.last_event_id(conn)
+            nfos_process_run_id = run_id
+    if nfos_process_event_id is not None:
+        # A decisão do processo está no evento completed, na transação da conclusão; o andamento é projeção dela.
+        nfos_process.project(conn, task_id, nfos_process_run_id, nfos_process_decision,
+                             event_id=nfos_process_event_id)
     if nfos_closeout:
         from hermes_cli.nfos_principal_review import persist_closeout_learning
         persist_closeout_learning(conn, task_id, nfos_closeout)

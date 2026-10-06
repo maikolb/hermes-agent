@@ -25,7 +25,7 @@ def _module_available():
     return hasattr(importlib.import_module('project_workflow.enforce'), 'judge')
 
 
-needs_module = pytest.mark.skipif(not _module_available(), reason='PROJECT_WORKFLOW_SRC aponta para o módulo project_workflow')
+needs_module = pytest.mark.skipif(not _module_available(), reason='precisa de PROJECT_WORKFLOW_SRC apontando para o módulo project_workflow')
 
 
 @pytest.fixture
@@ -184,3 +184,45 @@ def test_shadow_records_the_position_and_audits_what_it_would_refuse(card):
     assert [h['step_key'] for h in store.history('concursa-ai', task.id)] == ['triagem', 'p4']
     shown = nfos_process.position(conn, task.id)
     assert shown['mode'] == 'shadow' and shown['current'] == 'p4' and shown['next'][0]['step'] == 'aceite'
+
+
+@needs_module
+def test_the_decision_lives_in_the_event_and_a_lost_projection_is_replayed(card, monkeypatch):
+    conn, task, pw = card
+    store = seed(pw)
+    policy(pw, 'enforce')
+    store.bind('concursa-ai', task.id, by='teste')
+    steps(store, task, 'triagem', 'p1', 'p2', 'p3')
+    from project_workflow.store import Store
+    original = Store.replay_motor_events
+
+    def lost(self, *args, **kwargs):
+        raise OSError('banco do processo indisponível depois do commit')
+
+    monkeypatch.setattr(Store, 'replay_motor_events', lost)
+    assert save_spec(conn, task) == 1, 'a troca permitida já está no Kanban; a projeção perdida não a desfaz'
+    monkeypatch.setattr(Store, 'replay_motor_events', original)
+    event = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='nfos_spec_saved'", (task.id,)).fetchone()
+    assert json.loads(event['payload'])['process'] == {'step': 'p4', 'move': 'forward', 'entry': None, 'allowed': True,
+                                                      'mode': 'enforce', 'workflow_id': 2, 'version': 1}
+    failed = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_process_projection_failed'",
+                          (task.id,)).fetchone()
+    assert json.loads(failed['payload'])['engine_event'] == event['id']
+    assert store.history('concursa-ai', task.id)[-1]['step_key'] == 'p3'
+    # O próximo julgamento do card refaz, antes de decidir, a projeção que ficou só no evento.
+    decision, refusal = nfos_process.evaluate(conn, task.id, stage='implement')
+    assert decision['current'] == 'p4' and 'Portão sem registro válido: aceite' in refusal
+    nfos_process.evaluate(conn, task.id, stage='implement')
+    history = store.history('concursa-ai', task.id)
+    assert [h['step_key'] for h in history] == ['triagem', 'p1', 'p2', 'p3', 'p4'], 'refeita uma vez, na ordem'
+    assert history[-1]['evidence'] == {'move': 'forward', 'engine_event': event['id']}
+
+
+def test_a_broken_policy_keeps_the_motor_locked(card):
+    conn, task, pw = card
+    (pw.parent / 'policy.json').write_text('{"motor": {"concursa-ai": "enforce"', encoding='utf-8')
+    assert nfos_process.mode('concursa-ai') == 'enforce' and nfos_process.mode('dovcrm') == 'enforce'
+    (pw.parent / 'policy.json').write_text('{"motor": {"concursa-ai": "talvez"}}', encoding='utf-8')
+    assert nfos_process.mode('concursa-ai') == 'enforce'
+    (pw.parent / 'policy.json').unlink()
+    assert nfos_process.mode('concursa-ai') == 'off', 'sem arquivo: nunca foi ligado'

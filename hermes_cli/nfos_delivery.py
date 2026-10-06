@@ -3170,13 +3170,14 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                      (revision,int(time.time()),task_id))
         _event(conn,task_id,run_id,'nfos_spec_saved',{'revision':revision,'author':author,'evidence':saved_evidence,
                                                       **({'process':nfos_process.summary(_process)} if _process else {})})
-        nfos_process.record(_process,engine_stage='spec',event_id=nfos_process.last_event_id(conn))
+        _process_event=nfos_process.last_event_id(conn)
         from hermes_cli.nfos_principal_review import required
         if required(conn,task_id):
             ask_principal(conn,task_id,run_id,kind='spec_review',
                           question='Validate the saved spec against the original request before implementation',context={})
             conn.execute('UPDATE nfos_workflows SET next_action=? WHERE task_id=?',
                          ('Wait for Principal spec acceptance; revise the spec if changes are requested',task_id))
+    nfos_process.project(conn,task_id,run_id,_process,event_id=_process_event)  # PROJECT_PROCESS_20261006
     return revision
 
 
@@ -3219,7 +3220,8 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
                      (stage,next_action,_json(saved),int(time.time()),task_id))
         _event(conn,task_id,run_id,'nfos_progress',{'stage':stage,'next_action':next_action,'state':updates,
                                                     **({'process':nfos_process.summary(_process)} if _process else {})})
-        nfos_process.record(_process,engine_stage=stage,event_id=nfos_process.last_event_id(conn))
+        _process_event=nfos_process.last_event_id(conn)
+    nfos_process.project(conn,task_id,run_id,_process,event_id=_process_event)  # PROJECT_PROCESS_20261006
 
 
 def _report_results(spec, report):
@@ -3575,7 +3577,7 @@ def save_report(conn, task_id, run_id, report):
             (task_id,run_id,'report',revision,encoded,'worker',_json(evidence),int(time.time())))
         _event(conn,task_id,run_id,'nfos_report_saved',{'revision':revision,'spec_revision':spec['revision'],
                                                         **({'process':nfos_process.summary(_process)} if _process else {})})
-        nfos_process.record(_process,engine_stage='report',event_id=nfos_process.last_event_id(conn))
+        _process_event=nfos_process.last_event_id(conn)
         from hermes_cli.nfos_principal_review import required
         if required(conn,task_id,'final_review'):
             decision_id = ask_principal(conn,task_id,run_id,kind='final_review',
@@ -3593,6 +3595,7 @@ def save_report(conn, task_id, run_id, report):
             conn.execute("UPDATE nfos_workflows SET stage='report',next_action=?,updated_at=? WHERE task_id=?",
                          ('Accepted result preserved; continue completion' if editorial else
                           'Principal reviewing the saved result; address any requested changes on this card',int(time.time()),task_id))
+    nfos_process.project(conn,task_id,run_id,_process,event_id=_process_event)  # PROJECT_PROCESS_20261006
 
 
 def _result_review():
