@@ -3137,6 +3137,9 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                 raise WorkflowError('Production precheck missing: run `precheck --input precheck.json` (checked=[{target,method,result}]: for code read production/HML/PRs, for operation or report read only the production target; verdict=already_delivered|partial|not_delivered) before saving a spec')  # OPERATION_FAST2_20260910
             if str(spec.get('size') or '').strip().upper() not in SPEC_SIZE_BUDGET:  # BLOCK_LESS9_20260910
                 raise WorkflowError('Spec needs size P, M or G (P: small fix up to 45 min; M: up to 2 h; G: up to 4 h); it sets the run budget and the board class')
+        from hermes_cli import nfos_process  # PROJECT_PROCESS_20261006: o processo do projeto decide se a spec entra agora
+        _process=nfos_process.guard(conn,task_id,stage='spec',delivery_type=spec.get('delivery_type') or task.delivery_type,
+                                    spec_revision=wf['spec_revision']+1)
         _size=str(spec.get('size') or '').strip().upper()  # BLOCK_LESS9_20260910: quem escreve a spec define o orçamento
         if _size in SPEC_SIZE_BUDGET:
             conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?',(SPEC_SIZE_BUDGET[_size],task_id))
@@ -3165,7 +3168,9 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                      (task_id,run_id,'spec',revision,_json(spec),author,_json(saved_evidence),int(time.time())))
         conn.execute("UPDATE nfos_workflows SET stage='spec',spec_revision=?,next_action='Implement and verify the persisted spec',updated_at=? WHERE task_id=?",
                      (revision,int(time.time()),task_id))
-        _event(conn,task_id,run_id,'nfos_spec_saved',{'revision':revision,'author':author,'evidence':saved_evidence})
+        _event(conn,task_id,run_id,'nfos_spec_saved',{'revision':revision,'author':author,'evidence':saved_evidence,
+                                                      **({'process':nfos_process.summary(_process)} if _process else {})})
+        nfos_process.record(_process,engine_stage='spec',event_id=nfos_process.last_event_id(conn))
         from hermes_cli.nfos_principal_review import required
         if required(conn,task_id):
             ask_principal(conn,task_id,run_id,kind='spec_review',
@@ -3208,9 +3213,13 @@ def advance(conn, task_id, run_id, stage, *, next_action, state=None):
             if stage=='publish' and not _approved(conn,task_id,wf['spec_revision'],state=saved):
                 raise WorkflowError('Principal review of this candidate is pending')
             _project_owned(conn,task_id,run_id,_delivery_candidate(conn,task_id,saved))
+        from hermes_cli import nfos_process  # PROJECT_PROCESS_20261006
+        _process=nfos_process.guard(conn,task_id,stage=stage)
         conn.execute('UPDATE nfos_workflows SET stage=?,next_action=?,state_json=?,updated_at=? WHERE task_id=?',
                      (stage,next_action,_json(saved),int(time.time()),task_id))
-        _event(conn,task_id,run_id,'nfos_progress',{'stage':stage,'next_action':next_action,'state':updates})
+        _event(conn,task_id,run_id,'nfos_progress',{'stage':stage,'next_action':next_action,'state':updates,
+                                                    **({'process':nfos_process.summary(_process)} if _process else {})})
+        nfos_process.record(_process,engine_stage=stage,event_id=nfos_process.last_event_id(conn))
 
 
 def _report_results(spec, report):
@@ -3530,6 +3539,8 @@ def save_report(conn, task_id, run_id, report):
         if get_spec(conn,task_id)['id']!=spec['id'] or current.workspace_path!=task.workspace_path:
             raise WorkflowError('Spec or workspace changed while evidence was checked; save the current report')
         _require_current_instruction_spec(conn,task_id)
+        from hermes_cli import nfos_process  # PROJECT_PROCESS_20261006: o relatório só entra na etapa que o processo permite
+        _process=nfos_process.guard(conn,task_id,stage='report')
         previous=_artifact(conn,task_id,'report');revision=(previous['revision'] if previous else 0)+1
         from hermes_cli.nfos_principal_review import accepted
         prior_review = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND kind='final_review' ORDER BY rowid DESC LIMIT 1", (task_id,)).fetchone()
@@ -3562,7 +3573,9 @@ def save_report(conn, task_id, run_id, report):
                 'editorial_only':editorial}
         conn.execute('INSERT INTO nfos_artifacts(task_id,run_id,kind,revision,content,author,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)',
             (task_id,run_id,'report',revision,encoded,'worker',_json(evidence),int(time.time())))
-        _event(conn,task_id,run_id,'nfos_report_saved',{'revision':revision,'spec_revision':spec['revision']})
+        _event(conn,task_id,run_id,'nfos_report_saved',{'revision':revision,'spec_revision':spec['revision'],
+                                                        **({'process':nfos_process.summary(_process)} if _process else {})})
+        nfos_process.record(_process,engine_stage='report',event_id=nfos_process.last_event_id(conn))
         from hermes_cli.nfos_principal_review import required
         if required(conn,task_id,'final_review'):
             decision_id = ask_principal(conn,task_id,run_id,kind='final_review',
@@ -4698,6 +4711,8 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         preparation=None
         if staging and task.delivery_type!='code':
             raise WorkflowError('Staging preparation applies only to code delivery')
+        from hermes_cli import nfos_process  # PROJECT_PROCESS_20261006: efeito externo só na etapa do processo que o permite
+        nfos_process.guard(conn,task_id,effect=operation)
         if task.delivery_type=='code' and operation!='repair':
             from hermes_cli.nfos_destination import destination, review_only
             scope=destination(conn,task_id)
@@ -5080,6 +5095,8 @@ def main():
             _dest=json.loads(result['spec']['content']).get('delivery_destination') if result['spec'] else None  # INTENT_DESTINATION_20260923
             result['delivery_environment']=_delivery_environment_for_db(args.db,destination=_dest)  # DELIVERY_ENV_20260911
             result['continuation']=continuation_links(conn,args.task)  # RECORD_CONTINUATION_20260911
+            from hermes_cli import nfos_process  # PROJECT_PROCESS_20261006: etapa do card no processo do projeto
+            result['process']=nfos_process.position(conn,args.task)
             try:  # RESULT_PROBE_20260911: medições, tentativas e nota de debug
                 _st=(json.loads(result['workflow']['state_json'] or '{}') or {}) if result['workflow'] else {}
                 result['measurements']=_st.get('measurements'); result['attempts']=_st.get('attempts')

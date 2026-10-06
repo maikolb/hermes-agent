@@ -7226,6 +7226,19 @@ def complete_task(
     nfos_evidence_check = completion_evidence_check(conn, task_id) if delivery_enrolled else None
     if not completion_ready(conn, task_id, evidence_check=nfos_evidence_check):
         return False
+    # PROJECT_PROCESS_20261006: concluir é uma troca do processo do projeto; com o motor como autoridade do
+    # board, o card só fecha na etapa em que o desenho permite (rechecado na transação final abaixo).
+    from hermes_cli import nfos_process
+    nfos_process_decision = None
+    if delivery_enrolled:
+        nfos_process_decision, process_refusal = nfos_process.evaluate(conn, task_id, stage="done")
+        if process_refusal:
+            with write_txn(conn):
+                current = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                nfos_process.completion_blocked(
+                    conn, task_id, current["current_run_id"] if current is not None else None,
+                    process_refusal, append_event=_append_event)
+            return False
 
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a
@@ -7333,6 +7346,14 @@ def complete_task(
             return False
         if not completion_ready(conn, task_id, evidence_check=nfos_evidence_check):
             return False
+        if delivery_enrolled:
+            nfos_process_decision, process_refusal = nfos_process.evaluate(conn, task_id, stage="done")
+            if process_refusal:
+                current = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                nfos_process.completion_blocked(
+                    conn, task_id, current["current_run_id"] if current is not None else None,
+                    process_refusal, append_event=_append_event)
+                return False
         prior = conn.execute(
             "SELECT status, current_run_id, workspace_kind, workspace_path, "
             "branch_name, worker_pid FROM tasks WHERE id = ?",
@@ -7622,11 +7643,20 @@ def complete_task(
                 ]
                 if cleaned_artifacts:
                     completed_payload["artifacts"] = cleaned_artifacts
+        if nfos_process_decision is not None:
+            completed_payload["process"] = nfos_process.summary(nfos_process_decision)
         _append_event(
             conn, task_id, "completed",
             completed_payload,
             run_id=run_id,
         )
+        if nfos_process_decision is not None:
+            # A conclusão já passou pelo processo; falha só na anotação da etapa não desfaz o fechamento.
+            try:
+                nfos_process.record(nfos_process_decision, engine_stage="done",
+                                    event_id=nfos_process.last_event_id(conn))
+            except nfos_process.ProcessRefusal as exc:
+                _append_event(conn, task_id, "nfos_process_record_failed", {"reason": str(exc)[:1000]}, run_id=run_id)
     if nfos_closeout:
         from hermes_cli.nfos_principal_review import persist_closeout_learning
         persist_closeout_learning(conn, task_id, nfos_closeout)

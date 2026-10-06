@@ -1104,6 +1104,13 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
             if not ok:
+                try:  # PROJECT_PROCESS_20261006: o processo do projeto diz em que etapa o card pode fechar e o que falta
+                    from hermes_cli import nfos_process as _np
+                    _process_refusal = _np.evaluate(conn, tid, stage="done")[1]
+                except Exception:
+                    _process_refusal = None
+                if _process_refusal:
+                    return tool_error("kanban_complete refused: " + _process_refusal)
                 try:  # RESULT_PROBE_20260911: critério obrigatório sem PASS devolve a nota de debug; o card continua neste run
                     from hermes_cli import nfos_delivery as _dp
                     _note = _dp.completion_refusal_note(conn, tid)
