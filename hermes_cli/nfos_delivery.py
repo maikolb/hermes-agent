@@ -154,9 +154,17 @@ def _references(text):
     return [t.rstrip('.,;:)') for t in _REF_RE.findall(text or '')]
 
 
+def _site_only(ref):
+    """INTAKE_REFERENCE_20261006: URL só com o host (sem caminho, query ou fragmento) nomeia o ambiente que muitos cards
+    citam, não um item de trabalho. Em 05/10 ela anexou os dois blocos da divisão do DV-0013 e a reinstalação semanal da
+    Sineta ao card aberto do DV-0016, porque todos citam https://hml.dovcrm.com.br."""
+    parts = urlsplit(ref)
+    return bool(parts.scheme) and parts.path in ('', '/') and not parts.query and not parts.fragment
+
+
 def _open_task_for_references(conn, refs):
     for ref in refs:
-        if len(ref) < 12:
+        if len(ref) < 12 or _site_only(ref):
             continue
         row = conn.execute(
             "SELECT id FROM tasks WHERE status NOT IN ('done','archived') AND task_role = 'work' "
@@ -384,8 +392,11 @@ def receive_request(conn, *, source, text, project, attachments=(), part='0', or
             portal = origin.get('portal') if isinstance(origin, dict) else None
             independent_ticket = (source.get('platform') == 'portal' and isinstance(portal, dict)
                                   and bool(str(portal.get('chamado') or '').strip()))
+            # INTAKE_REFERENCE_20261006: a parte de uma divisão aprovada pelo Principal (additional_tasks) é trabalho novo
+            # por decisão, com identidade própria (raiz + chave do item); citar a referência de outro card não a funde nele.
+            planned_part = isinstance(origin, dict) and bool(origin.get('decision_id')) and bool(origin.get('item_key'))
             _urgent_intake(conn, request_id, source, text, reply_to_message_id, author=_author, urgency=urgency,
-                           attach_by_reference=not independent_ticket)
+                           attach_by_reference=not (independent_ticket or planned_part))
         except Exception:
             if urgency is not None:
                 raise
