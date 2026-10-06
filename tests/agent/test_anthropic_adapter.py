@@ -41,6 +41,11 @@ class TestIsOAuthToken:
     def test_api_key(self):
         assert _is_oauth_token("sk-ant-api03-abcdef1234567890") is False
 
+    def test_user_scoped_api_key(self):
+        # sk-ant-usr* is a pay-per-token API key accepted as x-api-key — not an OAuth/setup
+        # token (#133856): classifying it as OAuth rides the Claude Code identity on it.
+        assert _is_oauth_token("sk-ant-usr01-abcdef1234567890") is False
+
 
 
 

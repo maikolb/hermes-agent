@@ -5,7 +5,7 @@ Anthropic's Messages API. Follows the same pattern as the codex_responses
 adapter — all provider-specific logic is isolated here.
 
 Auth supports:
-  - Regular API keys (sk-ant-api*) → x-api-key header
+  - Regular API keys (sk-ant-api*, sk-ant-usr*) → x-api-key header
   - OAuth setup-tokens (sk-ant-oat*) → Bearer auth + beta header
   - Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json) → Bearer auth
 """
@@ -452,7 +452,7 @@ def _is_oauth_token(key: str) -> bool:
     """Check if the key is an Anthropic OAuth/setup token.
 
     Positively identifies Anthropic OAuth tokens by their key format:
-    - ``sk-ant-`` prefix (but NOT ``sk-ant-api``) → setup tokens, managed keys
+    - ``sk-ant-`` prefix (but NOT ``sk-ant-api`` / ``sk-ant-usr``) → setup tokens, managed keys
     - ``eyJ`` prefix → JWTs from the Anthropic OAuth flow
     - ``cc-`` prefix → Claude Code OAuth access tokens (from CLAUDE_CODE_OAUTH_TOKEN)
 
@@ -462,7 +462,9 @@ def _is_oauth_token(key: str) -> bool:
     if not key:
         return False
     # Regular Anthropic Console API keys — x-api-key auth, never OAuth
-    if key.startswith("sk-ant-api"):
+    # (sk-ant-usr* is a user-scoped pay-per-token key, NousResearch#133856:
+    # classifying it as OAuth rides the Claude Code identity on it).
+    if key.startswith(("sk-ant-api", "sk-ant-usr")):
         return False
     # Anthropic-issued tokens (setup-tokens sk-ant-oat-*, managed keys)
     if key.startswith("sk-ant-"):
