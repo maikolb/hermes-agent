@@ -93,7 +93,8 @@ def resume_after_repair(conn, task_id, *, pause_run_id, actor, reason, evidence,
     """Principal maintenance resume of ONE pause whose cause was repaired outside the card (intake,
     support approval, links), with the same maintainer gate as the pause.
 
-    repair-card, repair-workspace and repair-execution keep closing the pauses they repair. This route
+    repair-card, repair-workspace and repair-execution keep closing the pauses they repair; a budget pause
+    (kind='runtime_budget_exhausted') stays with repair-execution. This route
     closes only the selected pause (repair_kind='external', with reason and evidence): other pauses,
     decisions and blocks stay, and the card returns to the queue through the runtime sweep once nothing
     else holds it. The preview returns the pause sha256 that apply must present; repeating the same
@@ -116,6 +117,9 @@ def resume_after_repair(conn, task_id, *, pause_run_id, actor, reason, evidence,
         pause = metadata.get('maintenance_pause')
         if not isinstance(pause, dict):
             raise delivery.WorkflowError('The selected run holds no maintenance pause')
+        if pause.get('kind') == 'runtime_budget_exhausted':
+            raise delivery.WorkflowError('A budget pause resumes through repair-execution, which checks the balance '
+                                         'and the resume context')
         if pause.get('repaired_at') is not None:
             if (pause.get('repair_kind'), pause.get('repaired_by'), pause.get('repair_reason')) == ('external', actor, reason):
                 return metadata, None  # the same resume again: the card may already be running

@@ -262,13 +262,13 @@ def test_sweep_restores_the_block_of_a_card_already_ready_under_a_pause(running,
     assert kinds == ['nfos_maintenance_hold_restored'], 'one event per restoration, not one per tick'
 
 
-def _second_pending_pause(conn, task):
+def _second_pending_pause(conn, task, **pause):
     """Another pause of the same card, on an older closed run (as two maintenance passes leave)."""
     now = time.time()
+    pause = pause or {'actor': 'Principal', 'reason': 'links to another ticket', 'at': now - 590}
     conn.execute("INSERT INTO task_runs(task_id, status, outcome, started_at, ended_at, metadata) "
                  "VALUES (?, 'reclaimed', 'reclaimed', ?, ?, ?)",
-                 (task.id, int(now) - 600, int(now) - 590,
-                  json.dumps({'maintenance_pause': {'actor': 'Principal', 'reason': 'links to another ticket', 'at': now - 590}})))
+                 (task.id, int(now) - 600, int(now) - 590, json.dumps({'maintenance_pause': pause})))
     conn.commit()
     return conn.execute('SELECT MAX(id) FROM task_runs WHERE task_id=?', (task.id,)).fetchone()[0]
 
@@ -327,3 +327,17 @@ def test_native_cli_previews_the_resume_without_mutating_it(running, monkeypatch
     result = json.loads(capsys.readouterr().out)
     assert not result['resumed'] and len(result['pause_sha256']) == 64
     assert repair.maintenance_pause_pending(conn, task.id)
+
+
+def test_resume_after_repair_leaves_budget_pauses_to_repair_execution(running, monkeypatch):
+    """Master review of cba2fcf: a cumulative runtime pause must keep its own route, which checks the balance."""
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    budget = _second_pending_pause(conn, task, kind='runtime_budget_exhausted', actor='runtime', at=time.time(),
+                                   reason='Cumulative runtime exhausted; grant-budget then repair-execution before resuming')
+    request = dict(pause_run_id=budget, actor='Principal', reason='budget looks fine', evidence=['operator read'])
+    for apply in (False, True):
+        with pytest.raises(d.WorkflowError, match='repair-execution'):
+            repair.resume_after_repair(conn, task.id, **request, expected_pause_sha256='0' * 64, apply=apply)
+    meta = json.loads(conn.execute('SELECT metadata FROM task_runs WHERE id=?', (budget,)).fetchone()[0])['maintenance_pause']
+    assert meta.get('repaired_at') is None and repair.maintenance_pause_pending(conn, task.id)
