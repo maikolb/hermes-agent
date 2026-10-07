@@ -457,7 +457,8 @@ def _is_oauth_token(key: str) -> bool:
     - ``cc-`` prefix → Claude Code OAuth access tokens (from CLAUDE_CODE_OAUTH_TOKEN)
 
     Non-Anthropic keys (MiniMax, Alibaba, etc.) don't match any pattern
-    and correctly return False.
+    and correctly return False. Unknown ``sk-ant-*`` prefixes still classify
+    as OAuth so OAuth prefixes Anthropic ships later keep working.
     """
     if not key:
         return False
