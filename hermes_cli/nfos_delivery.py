@@ -2268,6 +2268,8 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
             ctx = {}
         if not isinstance(ctx, dict):
             ctx = {}
+        if isinstance(ctx.get('lab_wait'), dict) and ctx['lab_wait'].get('hold'):
+            continue  # LAB_WAIT_20261008: espera da fila do laboratório; sweep_lab_waits responde, sem lembrete nem awaiting_principal
         if human_wait and not (ctx.get('owner_guidance') or ctx.get('human_reply')):
             continue
         needs_principal = bool(internal_hold or ctx.get('owner_guidance') or ctx.get('maintenance_recovery')
@@ -3069,6 +3071,171 @@ def sweep_destination_waits(conn):
         except Exception:
             continue
     return changed
+
+
+# LAB_WAIT_20261008: pedido do laboratório do Concursa na fila do broker (vagas ocupadas) espera sem o Principal. O worker registra a
+# espera numa decisão que cede o turno (como qualquer decisão aberta); o runtime confere o recibo e responde sozinho quando o pedido sai
+# da fila. Antes, cada volta da fila virava impedimento ao Principal, continue, novo worker, fila cheia de novo e outro impedimento.
+LAB_WAIT_RECHECK_SECONDS = 300
+LAB_WAIT_ESCALATE_SECONDS = 12 * 3600
+LAB_WAIT_MAX_CHECKS_PER_SWEEP = 3
+LAB_WAIT_MAX_READ_ERRORS = 6
+LAB_WAIT_READ_TIMEOUT_SECONDS = 20  # a varredura roda no tick do despacho: leitura curta e teto por passada
+LAB_WAIT_SWEEP_SECONDS = 45
+LAB_WAIT_QUEUED = ('submitted', 'pending', 'queued')
+_LAB_RECEIPT_RX = re.compile(r'[a-z0-9][a-z0-9-]{5,60}\Z')  # o mesmo REQID do concursa-lab
+
+
+def _lab_receipt(receipt, timeout=90):
+    """Recibo do pedido no broker do laboratório (`concursa-lab runtime result`), lido fora de transação. None quando não deu para ler."""
+    import subprocess
+    exe = os.environ.get('NFOS_CONCURSA_LAB') or '/usr/local/bin/concursa-lab'
+    try:
+        done = subprocess.run([exe, 'runtime', 'result', str(receipt)], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in reversed((done.stdout or '').strip().splitlines()):
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get('status'):
+            return data
+    return None
+
+
+def lab_wait(conn, task_id, run_id, receipt, *, reason=''):
+    """O worker achou o pedido do laboratório na fila (`concursa-lab` saiu com 75). A espera vira uma decisão pendente que cede o turno, não
+    acorda o Principal e é respondida pelo runtime quando o recibo sair da fila. Recibo fora da fila não espera: o worker lê e segue."""
+    receipt = str(receipt or '').strip()
+    if not _LAB_RECEIPT_RX.fullmatch(receipt):
+        raise WorkflowError('lab-wait precisa do id do pedido do laboratório, o mesmo do `concursa-lab runtime request`')
+    if conn.in_transaction:
+        raise WorkflowError('lab-wait consulta o broker fora de transação')
+    current = _lab_receipt(receipt)
+    if current is None:
+        raise WorkflowError(f'Recibo {receipt} ilegível agora; confira com `concursa-lab runtime result {receipt}` antes de esperar')
+    status = str(current.get('status') or '')
+    if status not in LAB_WAIT_QUEUED:
+        return {'waiting': False, 'receipt': receipt, 'status': status, 'result': current,
+                'next': 'O pedido já saiu da fila: siga a partir deste recibo, sem reenviar.'}
+    now = int(time.time())
+    question = (f"Laboratório: o pedido {receipt} está na fila do broker ({current.get('reason') or status}). Espera nativa: o runtime confere "
+                "o recibo a cada 5 min e responde esta decisão sozinho quando o pedido sair da fila; o Principal só entra depois de 12 h "
+                "ou se o recibo ficar ilegível.")
+    if str(reason or '').strip():
+        question += ' Contexto do worker: ' + str(reason).strip()[:400]
+    wait = {'receipt': receipt, 'hold': True, 'since': now, 'checked_at': now, 'next_check_at': now + LAB_WAIT_RECHECK_SECONDS,
+            'status': status, 'reason': str(current.get('reason') or '')[:80]}
+    with _kb().write_txn(conn, allow_nested=True):
+        _owned(conn, task_id, run_id)
+        for row in conn.execute("SELECT id, context FROM nfos_decisions WHERE task_id=? AND run_id=? AND status='pending'",
+                                (task_id, run_id)).fetchall():
+            try:
+                saved = (json.loads(row['context'] or '{}') or {}).get('lab_wait')
+            except ValueError:
+                saved = None
+            if isinstance(saved, dict) and saved.get('receipt') == receipt:
+                return {'waiting': True, 'receipt': receipt, 'decision_id': row['id'], 'status': status,
+                        'next': 'Encerre o turno: esta espera já está registrada.'}
+        context = {'lab_wait': wait}
+        from hermes_cli.nfos_principal_review import impediment_identity
+        context['impediment_identity'] = impediment_identity(conn, task_id, context)
+        decision_id = 'dec_' + uuid.uuid4().hex[:20]
+        conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
+                     (decision_id, task_id, run_id, 'impediment', question, _json(context), get_workflow(conn, task_id)['spec_revision'], now))
+        conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (question[:400], now, task_id))
+        _event(conn, task_id, run_id, 'nfos_lab_wait', {'decision_id': decision_id, 'receipt': receipt, 'status': status, 'reason': wait['reason']})
+    return {'waiting': True, 'receipt': receipt, 'decision_id': decision_id, 'status': status,
+            'next': 'Encerre o turno agora: o card volta sozinho quando o pedido sair da fila, com a resposta desta decisão.'}
+
+
+def _store_lab_wait(conn, decision_id, context):
+    with _kb().write_txn(conn, allow_nested=True):
+        conn.execute("UPDATE nfos_decisions SET context=? WHERE id=? AND status='pending'", (_json(context), decision_id))
+
+
+def _lab_wait_to_principal(conn, row, context, why, now):
+    """A espera sai do runtime e vai ao Principal uma vez: fila há mais de 12 h ou recibo ilegível. A decisão continua a mesma."""
+    wait = dict(context.get('lab_wait') or {}, hold=False, escalated_at=now, escalated_because=why)
+    context = dict(context, lab_wait=wait)
+    with _kb().write_txn(conn, allow_nested=True):
+        if conn.execute("UPDATE nfos_decisions SET context=? WHERE id=? AND status='pending'", (_json(context), row['id'])).rowcount != 1:
+            return None
+        _event(conn, row['task_id'], row['run_id'], 'nfos_lab_wait_escalated', {'decision_id': row['id'], 'receipt': wait.get('receipt'),
+                                                                                 'why': why})
+        _event(conn, row['task_id'], row['run_id'], 'nfos_principal_requested', {'decision_id': row['id'], 'kind': row['kind'],
+                                                                                  'question': row['question'], 'lab_wait_escalated': why})
+    return 'escalated'
+
+
+def sweep_lab_waits(conn):
+    """Responde a espera da fila do laboratório quando o recibo sai da fila. No máximo LAB_WAIT_MAX_CHECKS_PER_SWEEP consultas ao broker por
+    varredura, de até LAB_WAIT_READ_TIMEOUT_SECONDS cada e LAB_WAIT_SWEEP_SECONDS no total (roda no tick do despacho), cada espera no
+    máximo a cada LAB_WAIT_RECHECK_SECONDS, a mais atrasada primeiro. Fila há LAB_WAIT_ESCALATE_SECONDS ou
+    LAB_WAIT_MAX_READ_ERRORS leituras seguidas sem recibo: a decisão vai ao Principal uma vez. Só mexe na espera que segura a decisão."""
+    out = []
+    now = int(time.time())
+    budget = LAB_WAIT_MAX_CHECKS_PER_SWEEP
+    deadline = time.monotonic() + LAB_WAIT_SWEEP_SECONDS
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM nfos_decisions WHERE status='pending' AND json_valid(context) AND json_extract(context,'$.lab_wait.hold')=1 "
+            "ORDER BY CAST(COALESCE(json_extract(context,'$.lab_wait.next_check_at'),0) AS INTEGER), created_at, id")]
+    except sqlite3.Error:
+        return out
+    for row in rows:
+        try:
+            context = json.loads(row['context'] or '{}') or {}
+            wait = dict(context.get('lab_wait') or {})
+            task = _kb().get_task(conn, row['task_id'])
+            if not task or task.status in ('done', 'archived'):
+                continue
+            if now - int(wait.get('since') or now) >= LAB_WAIT_ESCALATE_SECONDS:
+                if _lab_wait_to_principal(conn, row, context, 'fila há mais de 12 h', now):
+                    out.append((row['id'], 'escalated'))
+                continue
+            if now < int(wait.get('next_check_at') or 0) or budget <= 0 or time.monotonic() >= deadline:
+                continue
+            budget -= 1
+            current = _lab_receipt(wait.get('receipt'), timeout=LAB_WAIT_READ_TIMEOUT_SECONDS)
+            wait['checked_at'] = now
+            if current is None:
+                wait.update(errors=int(wait.get('errors') or 0) + 1, next_check_at=now + LAB_WAIT_RECHECK_SECONDS)
+                context['lab_wait'] = wait
+                if wait['errors'] >= LAB_WAIT_MAX_READ_ERRORS:
+                    if _lab_wait_to_principal(conn, row, context, 'recibo ilegível', now):
+                        out.append((row['id'], 'escalated'))
+                    continue
+                _store_lab_wait(conn, row['id'], context)
+                out.append((row['id'], 'unreadable'))
+                continue
+            status = str(current.get('status') or '')
+            if status in LAB_WAIT_QUEUED:
+                wait.update(status=status, errors=0, reason=str(current.get('reason') or '')[:80],
+                            next_check_at=now + LAB_WAIT_RECHECK_SECONDS)
+                context['lab_wait'] = wait
+                _store_lab_wait(conn, row['id'], context)
+                out.append((row['id'], 'wait'))
+                continue
+            receipt = wait.get('receipt')
+            answer = (f"CONTINUE (runtime do NFOS, espera do laboratório): o pedido {receipt} saiu da fila em "
+                      f"{time.strftime('%d/%m %H:%MZ', time.gmtime(now))} com status {status}. Leia o recibo com "
+                      f"`concursa-lab runtime result {receipt}` e siga a partir dele; não reenvie o pedido.")
+            context['lab_wait'] = dict(wait, hold=False, status=status, released_at=now)
+            with _kb().write_txn(conn, allow_nested=True):
+                if conn.execute("UPDATE nfos_decisions SET context=? WHERE id=? AND status='pending'",
+                                (_json(context), row['id'])).rowcount != 1:
+                    continue
+                resolve_decision(conn, row['id'], action='continue', answer=answer, author='Principal')
+                _event(conn, row['task_id'], row['run_id'], 'nfos_lab_wait_released', {'decision_id': row['id'], 'receipt': receipt,
+                                                                                       'status': status})
+            out.append((row['id'], 'released'))
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning('LAB_WAIT_20261008 sweep failed for %s', row.get('id'), exc_info=True)
+            continue
+    return out
 
 
 def request_rework(conn, task_id, *, criterion, reason, evidence, author, title=None):
@@ -3976,9 +4143,11 @@ def _dispatch_additional_tasks(conn, decision, proposal):
 
 
 def pending_decisions(conn):
+    """Decisões que esperam o Principal. A espera da fila do laboratório não entra enquanto o runtime a segura (LAB_WAIT_20261008)."""
     return [dict(r) for r in conn.execute(
         "SELECT d.* FROM nfos_decisions d LEFT JOIN tasks t ON t.id=d.task_id "
-        "WHERE d.status='pending' ORDER BY COALESCE(t.priority,0) DESC,d.created_at,d.id")]
+        "WHERE d.status='pending' AND NOT (json_valid(d.context) AND COALESCE(json_extract(d.context,'$.lab_wait.hold'),0)=1) "
+        "ORDER BY COALESCE(t.priority,0) DESC,d.created_at,d.id")]
 
 
 def wait_decision(conn,decision_id,*,timeout=300):
@@ -4216,6 +4385,11 @@ def reconcile_human_answers(conn):
     except Exception:
         import logging
         logging.getLogger(__name__).warning('HUMAN_LAST_RESORT_20260914 sweep failed', exc_info=True)
+    try:  # LAB_WAIT_20261008: pedido do laboratório que saiu da fila devolve o card sem o Principal
+        sweep_lab_waits(conn)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning('LAB_WAIT_20261008 sweep failed', exc_info=True)
     rows=conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()
     for row in rows:
         task=_kb().get_task(conn,row['task_id'])
@@ -5114,7 +5288,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','probe','probe-env','lesson','rework','precheck','cancel','save-spec','save-report','progress','ask','decide',
-        'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','repair-execution','pause-for-repair','resume-after-repair','grant-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider'])
+        'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','repair-execution','pause-for-repair','resume-after-repair','grant-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider','lab-wait'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -5139,6 +5313,7 @@ def main():
     parser.add_argument('--wait',type=int,default=0,help='Seconds to keep trying the project slot (max 900); BLOCK_LESS_20260910')
     parser.add_argument('--effect-id')
     parser.add_argument('--project',default=os.environ.get('HERMES_KANBAN_BOARD'))
+    parser.add_argument('--receipt',help='lab-wait: id do pedido do concursa-lab que está na fila')  # LAB_WAIT_20261008
     args=parser.parse_args()
     payload=json.loads(Path(args.input).read_text(encoding='utf-8-sig')) if args.input else {}
     evidence=json.loads(Path(args.evidence).read_text(encoding='utf-8-sig')) if args.evidence else {}
@@ -5228,6 +5403,8 @@ def main():
             context.update(payload.get('context') or {})
             result={'decision_id':ask_principal(conn,args.task,args.run,kind=args.kind,
                 question=payload['question'],context=context)}
+        elif args.action=='lab-wait':  # LAB_WAIT_20261008
+            result=lab_wait(conn,args.task,args.run,args.receipt,reason=str(payload.get('reason') or ''))
         elif args.action=='pending':
             result=pending_decisions(conn)
         elif args.action=='wait':
