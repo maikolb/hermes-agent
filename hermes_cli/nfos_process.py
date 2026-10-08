@@ -90,13 +90,21 @@ def actor() -> str:
 
 
 def _engine(conn, task_id, delivery_type=None, spec_revision=None) -> dict:
-    row = conn.execute("SELECT t.delivery_type, t.status, t.instruction_revision, w.stage, w.spec_revision, w.state_json FROM tasks t "
-                       "LEFT JOIN nfos_workflows w ON w.task_id=t.id WHERE t.id=?", (task_id,)).fetchone()
+    row = conn.execute("SELECT t.delivery_type, t.status, t.instruction_revision, t.workspace_path, w.stage, w.spec_revision, "
+                       "w.state_json FROM tasks t LEFT JOIN nfos_workflows w ON w.task_id=t.id WHERE t.id=?", (task_id,)).fetchone()
     engine = {k: row[k] for k in ("delivery_type", "status", "stage", "spec_revision")} if row else {}
     if row:
         engine["instruction_revision"] = row["instruction_revision"]
         state = json.loads(row["state_json"] or "{}")
         engine.update({k: state.get(k) for k in ("candidate_sha", "integrated_sha")})
+        # Worktree e base do card: na rota curta, o processo lê o diff da candidata antes de publicar (ROTAS_20261009).
+        engine["workspace_path"] = row["workspace_path"]
+        event = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='worktree_creation_requested' "
+                             "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+        try:
+            engine["base_sha"] = (json.loads(event[0] or "{}") or {}).get("base_sha") if event else None
+        except ValueError:
+            engine["base_sha"] = None
     if delivery_type:
         engine["delivery_type"] = delivery_type
     if spec_revision is not None:
