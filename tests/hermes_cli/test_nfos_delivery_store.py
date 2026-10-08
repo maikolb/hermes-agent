@@ -351,6 +351,44 @@ def test_portal_reopening_retains_attempt_and_requires_new_approval(board):
         assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
 
 
+@pytest.mark.parametrize('closure_source,allowed', [('balcao:dov:DV-0011:resolve', True),
+                                                  ('balcao:dov:DV-0011:cancel', False),
+                                                  ('balcao:dov:DV-9999:resolve', False)])
+def test_operator_resolution_reopens_only_the_current_ticket_receipt(board, monkeypatch, closure_source, allowed):
+    from hermes_cli import nfos_runtime
+    monkeypatch.setattr(nfos_runtime, 'previous_runs_termination_pending', lambda *args: False)
+    with kb.connect_closing(board) as conn:
+        task = started(conn)
+        request = delivery.get_request(conn, delivery.get_workflow(conn, task.id)['request_id'])
+        payload = json.loads(request['payload'])
+        payload['origin'] = {'portal': {'chamado': 'DV-0011'}}
+        payload['support_approval'] = {'required': True, 'approved_at': 1, 'approved_by': 'Maikol'}
+        with kb.write_txn(conn):
+            conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?', (json.dumps(payload), request['id']))
+        metadata = {'disposition': 'cancelled_by_owner', 'functional_delivery': False,
+                    'reason': 'Resolvido no atendimento', 'author': 'Lucas', 'source': closure_source,
+                    'authorization_message': 'Encerrar atendimento automático',
+                    'expected_instruction_revision': task.instruction_revision}
+        assert kb.complete_task(conn, task.id, metadata=metadata)
+        source = {'platform': 'portal', 'actor': 'Lucas', 'message_id': 'portal-note-resolution', 'ticket': 'DV-0011'}
+        if not allowed:
+            with pytest.raises(delivery.WorkflowError, match='cancelled ticket'):
+                delivery.reopen_support_task(conn, task.id, text='Ainda ocorre', source=source)
+            assert kb.get_task(conn, task.id).status == 'done'
+            return
+        assert not delivery.reopen_support_task(conn, task.id, text='Ainda ocorre', source=source)['duplicate']
+        reopened = kb.get_task(conn, task.id)
+        assert reopened.status == 'todo' and reopened.title == task.title
+        assert delivery.task_support_approval_pending(conn, task.id)
+        assert not kb.claim_task(conn, task.id)
+        assert conn.execute("SELECT count(*) FROM task_events WHERE kind='administrative_cancelled'").fetchone()[0] == 1
+        assert 'administrative_closure' not in json.loads(delivery.get_workflow(conn, task.id)['state_json'])
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done',completed_at=456 WHERE id=?", (task.id,))
+        with pytest.raises(ValueError, match='already closed'):
+            kb.complete_task(conn, task.id, metadata=metadata)
+
+
 def test_worker_recovers_explicit_existing_card_without_recreating_history(board):
     with kb.connect_closing(board) as conn:
         tid=kb.create_task(conn,title='Existing authorized report',body='Original request',assignee='default',
