@@ -37,12 +37,17 @@ def reconcile_maintenance_recovery(conn):
             did = 'dec_' + hashlib.sha256(delivery._json(['maintenance-recovery', identity]).encode()).hexdigest()[:24]
             decision = delivery.get_decision(conn, did)
             if pause.get('repaired_at') is not None:
-                if decision and decision['status'] == 'pending':
+                # Reconsideration supersedes a decision but carries the same pause obligation.
+                # Close only pending obligations for this repaired pause, not their history or other holds.
+                obligations = conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND status='pending' "
+                                           "AND json_extract(context,'$.maintenance_recovery.pause_run_id')=?",
+                                           (row['task_id'], row['id'])).fetchall()
+                for obligation in obligations:
                     answer = 'Native maintenance repair confirmed: ' + str(pause.get('repair_kind'))
                     conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',answer=?,"
-                                 "author='NFOS automation',resolved_at=? WHERE id=?", (answer, int(time.time()), did))
+                                 "author='NFOS automation',resolved_at=? WHERE id=?", (answer, int(time.time()), obligation['id']))
                     kb._append_event(conn, row['task_id'], 'nfos_maintenance_recovery_completed',
-                                     dict(decision_id=did, pause_run_id=row['id'], repaired_at=pause['repaired_at']), run_id=row['id'])
+                                     dict(decision_id=obligation['id'], pause_run_id=row['id'], repaired_at=pause['repaired_at']), run_id=row['id'])
                 continue
             if decision:
                 continue

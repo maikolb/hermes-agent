@@ -377,6 +377,8 @@ def test_sweep_owns_recovery_until_native_repair_then_resumes(running, monkeypat
     # Explaining a pause does not execute its repair or discharge the obligation.
     d.resolve_decision(conn, did, action='changes', answer='The environment needs preparation; no receipt yet', author='Principal')
     assert d.get_decision(conn, did)['status'] == 'pending'
+    last_event = conn.execute('SELECT kind FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1', (task.id,)).fetchone()[0]
+    assert last_event == 'nfos_maintenance_recovery_deferred'
     event_count = conn.execute('SELECT count(*) FROM task_events').fetchone()[0]
     d.sweep_awaiting_principal(conn)
     d.nudge_open_decisions(conn, task.id)
@@ -427,3 +429,25 @@ def test_sweep_preserves_a_genuine_human_input_hold(running, monkeypatch):
     assert [tuple(r) for r in conn.execute('SELECT * FROM nfos_decisions')] == decisions
     assert kb.get_task(conn, task.id).status == 'blocked'
     assert d.get_workflow(conn, task.id)['next_action'] == 'Waiting for the named destination operator'
+
+
+def test_reconsidered_recovery_closes_the_effective_obligation(running, monkeypatch):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    d.sweep_awaiting_principal(conn)
+    original = conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND "
+                           "json_extract(context,'$.maintenance_recovery.pause_run_id')=?",
+                           (task.id, task.current_run_id)).fetchone()[0]
+    d.resolve_decision(conn, original, action='human', answer='PERGUNTA para Operador: qual o endereço do destino?', author='Principal')
+    replacement = d.reconsider_decision(conn, original, action='continue', reason='Existing destination access was restored',
+                                      answer='The prerequisite is available; execute the remaining maintenance')
+    d.sweep_awaiting_principal(conn)
+    assert d.get_decision(conn, original)['status'] == 'superseded'
+    assert d.get_decision(conn, replacement)['status'] == 'pending'
+    request = dict(pause_run_id=task.current_run_id, actor='Principal', reason='Cause repaired', evidence=['verified repair receipt'])
+    preview = repair.resume_after_repair(conn, task.id, **request)
+    repair.resume_after_repair(conn, task.id, **request, expected_pause_sha256=preview['pause_sha256'], apply=True)
+    assert d.sweep_awaiting_principal(conn) == [task.id]
+    assert d.get_decision(conn, original)['status'] == 'superseded'
+    assert d.get_decision(conn, replacement)['status'] == 'resolved'
+    assert kb.claim_task(conn, task.id).id == task.id
