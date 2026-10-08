@@ -349,3 +349,81 @@ def test_resume_after_repair_leaves_budget_pauses_to_repair_execution(running, m
             repair.resume_after_repair(conn, task.id, **request, expected_pause_sha256='0' * 64, apply=apply)
     meta = json.loads(conn.execute('SELECT metadata FROM task_runs WHERE id=?', (budget,)).fetchone()[0])['maintenance_pause']
     assert meta.get('repaired_at') is None and repair.maintenance_pause_pending(conn, task.id)
+
+
+def test_pause_exposes_its_reason_in_native_card_presentation(running):
+    conn, task, _, _, args = running
+    repair.pause_for_repair(conn, task.id, **args, apply=True)
+    assert kb.task_presentation(conn, kb.get_task(conn, task.id))['block_reason'] == args['reason']
+
+
+def test_sweep_owns_recovery_until_native_repair_then_resumes(running, monkeypatch):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    before_runs = [tuple(r) for r in conn.execute('SELECT * FROM task_runs')]
+    original_spec = dict(d.get_spec(conn, task.id))
+    assert d.sweep_awaiting_principal(conn) == []
+    row = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND "
+                       "json_extract(context,'$.maintenance_recovery.pause_run_id')=?",
+                       (task.id, task.current_run_id)).fetchone()
+    assert row is not None, 'A retained pause needs an executable Principal recovery obligation'
+    did = row['id']
+    assert row['status'] == 'pending'
+    context = json.loads(row['context'])['maintenance_recovery']
+    assert context['reason'] == args['reason']
+    assert context['resume_route'] == 'resume-after-repair'
+    assert context['budget_mode'] == 'per_run'
+    assert args['reason'] in d.get_workflow(conn, task.id)['next_action']
+    # Explaining a pause does not execute its repair or discharge the obligation.
+    d.resolve_decision(conn, did, action='changes', answer='The environment needs preparation; no receipt yet', author='Principal')
+    assert d.get_decision(conn, did)['status'] == 'pending'
+    event_count = conn.execute('SELECT count(*) FROM task_events').fetchone()[0]
+    d.sweep_awaiting_principal(conn)
+    d.nudge_open_decisions(conn, task.id)
+    assert conn.execute('SELECT count(*) FROM task_events').fetchone()[0] == event_count
+    assert [tuple(r) for r in conn.execute('SELECT * FROM task_runs')] == before_runs
+    assert dict(d.get_spec(conn, task.id)) == original_spec
+    # A blocked card is absent from dispatch's ready/review loops: the runtime tick must own reminders.
+    now = time.time()
+    with monkeypatch.context() as clock:
+        clock.setattr(d.time, 'time', lambda: now + d.DECISION_REMINDER_GAP + 1)
+        runtime.reconcile_runtime(conn)
+        runtime.reconcile_runtime(conn)
+    wakes = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'",
+                         (task.id,)).fetchall()
+    reminders = [json.loads(r[0]) for r in wakes if json.loads(r[0]).get('decision_id') == did
+                 and json.loads(r[0]).get('reminder')]
+    assert len(reminders) == 1, 'One due wake across repeated runtime ticks, not an orphan or a busy loop'
+    request = dict(pause_run_id=task.current_run_id, actor='Principal', reason='Environment prepared',
+                   evidence=['verified preparation receipt'])
+    preview = repair.resume_after_repair(conn, task.id, **request)
+    repair.resume_after_repair(conn, task.id, **request, expected_pause_sha256=preview['pause_sha256'], apply=True)
+    assert d.sweep_awaiting_principal(conn) == [task.id]
+    assert d.get_decision(conn, did)['status'] == 'resolved'
+    assert not repair.maintenance_pause_pending(conn, task.id)
+    assert kb.claim_task(conn, task.id).id == task.id
+
+
+def test_legacy_pause_recovers_reason_without_releasing_the_pause(running, monkeypatch):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    # The deployed pause path recorded only its private event, invisible to consumers.
+    with kb.write_txn(conn):
+        conn.execute("DELETE FROM task_events WHERE task_id=? AND kind='blocked'", (task.id,))
+    d.sweep_awaiting_principal(conn)
+    assert kb.task_presentation(conn, kb.get_task(conn, task.id))['block_reason'] == args['reason']
+    assert kb.get_task(conn, task.id).status == 'blocked'
+    assert repair.maintenance_pause_pending(conn, task.id)
+
+
+def test_sweep_preserves_a_genuine_human_input_hold(running, monkeypatch):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET block_kind='needs_input' WHERE id=?", (task.id,))
+        conn.execute("UPDATE nfos_workflows SET next_action='Waiting for the named destination operator' WHERE task_id=?", (task.id,))
+    decisions = [tuple(r) for r in conn.execute('SELECT * FROM nfos_decisions')]
+    assert d.sweep_awaiting_principal(conn) == []
+    assert [tuple(r) for r in conn.execute('SELECT * FROM nfos_decisions')] == decisions
+    assert kb.get_task(conn, task.id).status == 'blocked'
+    assert d.get_workflow(conn, task.id)['next_action'] == 'Waiting for the named destination operator'
