@@ -18,6 +18,63 @@ def maintenance_pause_pending(conn, task_id):
                         (task_id,)).fetchone() is not None
 
 
+def reconcile_maintenance_recovery(conn):
+    """Keep each native pause owned by the Principal until its repair receipt exists.
+
+    Uses existing decisions/wakes, never a second task or a speculative worker retry.
+    Reconciles legacy pauses too; explanatory answers cannot orphan the retained work.
+    """
+    from hermes_cli.nfos_principal_review import worker_escalation
+    with kb.write_txn(conn, allow_nested=True):
+        rows = conn.execute("SELECT r.id,r.task_id,r.metadata,w.spec_revision FROM task_runs r "
+                            "JOIN tasks t ON t.id=r.task_id JOIN nfos_workflows w ON w.task_id=t.id "
+                            "WHERE t.status NOT IN ('done','archived') "
+                            "AND (t.status<>'blocked' OR t.block_kind='awaiting_principal') AND "
+                            "json_type(r.metadata,'$.maintenance_pause')='object'").fetchall()
+        for row in rows:
+            pause = json.loads(row['metadata'])['maintenance_pause']
+            identity = [row['task_id'], row['id'], pause.get('identity'), pause.get('at')]
+            did = 'dec_' + hashlib.sha256(delivery._json(['maintenance-recovery', identity]).encode()).hexdigest()[:24]
+            decision = delivery.get_decision(conn, did)
+            if pause.get('repaired_at') is not None:
+                # Reconsideration supersedes a decision but carries the same pause obligation.
+                # Close only pending obligations for this repaired pause, not their history or other holds.
+                obligations = conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND status='pending' "
+                                           "AND json_extract(context,'$.maintenance_recovery.pause_run_id')=?",
+                                           (row['task_id'], row['id'])).fetchall()
+                for obligation in obligations:
+                    answer = 'Native maintenance repair confirmed: ' + str(pause.get('repair_kind'))
+                    conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',answer=?,"
+                                 "author='NFOS automation',resolved_at=? WHERE id=?", (answer, int(time.time()), obligation['id']))
+                    kb._append_event(conn, row['task_id'], 'nfos_maintenance_recovery_completed',
+                                     dict(decision_id=obligation['id'], pause_run_id=row['id'], repaired_at=pause['repaired_at']), run_id=row['id'])
+                continue
+            if decision:
+                continue
+            reason = pause.get('reason') or 'Pausa de manutenção sem motivo registrado; recuperar a causa no histórico antes de retomar.'
+            accumulated = bool(worker_escalation(conn, row['task_id']).get('first_run_id'))
+            route = 'repair-execution' if pause.get('kind') == 'runtime_budget_exhausted' else 'resume-after-repair'
+            context = dict(maintenance_recovery=dict(pause_run_id=row['id'], reason=reason,
+                resume_route=route, budget_mode='accumulated_escalation' if accumulated else 'per_run'))
+            question = ('Execute o reparo desta pausa no contexto administrativo autorizado do Principal, '
+                        'fora do worker retido. Diagnostique e corrija a causa; explicar o impedimento não conclui a manutenção. '
+                        'Confirme a saída do executor anterior e registre o recibo real. Use repair-card/workspace quando '
+                        'a causa for o vínculo; nos demais casos use ' + route + ' dry-run/apply para a pausa ' + str(row['id']) + '. '
+                        'Não invente escalonamento nem reinicie saldo: este card usa ' + context['maintenance_recovery']['budget_mode'] + '. '
+                        'Não relance o worker para esperar o mesmo reparo. Se faltar acesso indispensável, registre a dependência '
+                        'concreta e o responsável pela rota existente. Preserve sessão, consumo, evidências e aceites. Causa: ' + reason)
+            conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) "
+                         "VALUES(?,?,?,'impediment',?,?,?,?)",
+                         (did,row['task_id'],row['id'],question,delivery._json(context),row['spec_revision'],int(time.time())))
+            conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',
+                         ('Principal: reparar a pausa e confirmar a retomada. Causa: '+reason, int(time.time()), row['task_id']))
+            # The public Project Ops event contract is consumed by both native show and Vigilia.
+            kb._append_event(conn,row['task_id'],'blocked',dict(reason=reason,kind='awaiting_principal',
+                source='maintenance_pause',pause_run_id=row['id'],decision_id=did),run_id=row['id'])
+            kb._append_event(conn,row['task_id'],'nfos_principal_requested',
+                dict(decision_id=did,kind='impediment',question=question,maintenance_recovery=True),run_id=row['id'])
+
+
 def _finish_maintenance_pause(conn, task_id, *, actor, repair_kind):
     """Release the native claim hold only in the successful repair transaction."""
     rows = conn.execute("SELECT id,metadata FROM task_runs WHERE task_id=? "
@@ -83,6 +140,8 @@ def pause_for_repair(conn, task_id, *, expected_run_id, expected_claim, expected
         conn.execute("UPDATE tasks SET status='blocked',block_kind='awaiting_principal',"
                      "claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,worker_started_at=NULL WHERE id=?", (task_id,))
         kb._append_event(conn, task_id, 'nfos_maintenance_paused', pause, run_id=expected_run_id)
+        kb._append_event(conn, task_id, 'blocked', dict(reason=reason, kind='awaiting_principal',
+                         source='maintenance_pause', pause_run_id=expected_run_id), run_id=expected_run_id)
     # The existing dispatcher cleans this closed run. Claims and repair_card keep
     # rejecting the old process/descendants until its exit receipt is confirmed.
     return dict(pause, paused=True, already_paused=False, run_id=expected_run_id, apply=True)

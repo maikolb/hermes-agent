@@ -2265,7 +2265,8 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
             ctx = {}
         if not isinstance(ctx, dict):
             ctx = {}
-        needs_principal = bool(ctx.get('owner_guidance') or (ctx.get('human_reply', {}).get('source') or {}).get('platform') == 'portal')
+        needs_principal = bool(ctx.get('owner_guidance') or ctx.get('maintenance_recovery')
+                               or (ctx.get('human_reply', {}).get('source') or {}).get('platform') == 'portal')
         if owner_guidance_only and not needs_principal:
             continue
         age = now - int(row.get('created_at') or now)
@@ -2317,7 +2318,8 @@ def sweep_awaiting_principal(conn):
     à vista, em vez de voltar a ready para o claim recusar a cada tick. Card que algo já devolveu a ready com a
     pausa pendente (estado anterior a esta regra ou requeue manual) volta a blocked uma vez, com um evento; como
     sai de ready, o evento não se repete a cada tick (MAINTENANCE_PAUSE_HONEST_20261005)."""
-    from hermes_cli.nfos_workspace_repair import maintenance_pause_pending
+    from hermes_cli.nfos_workspace_repair import maintenance_pause_pending, reconcile_maintenance_recovery
+    reconcile_maintenance_recovery(conn)
     freed = []
     try:
         for (task_id,) in conn.execute("SELECT id FROM tasks WHERE status='ready' AND claim_lock IS NULL").fetchall():
@@ -4383,12 +4385,27 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
         conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(context), decision_id))
         conn.execute('UPDATE nfos_decisions SET status=?,answer=?,author=?,action=?,resolved_at=? WHERE id=?',
                      ('human' if action=='human' else 'resolved',answer,author,action,int(time.time()),decision_id))
+        recovery = context.get('maintenance_recovery')
+        maintenance_deferred = False
+        if recovery and action in {'continue','changes'}:
+            pause_row = conn.execute('SELECT metadata FROM task_runs WHERE task_id=? AND id=?',
+                                    (row['task_id'], recovery['pause_run_id'])).fetchone()
+            pause = json.loads(pause_row['metadata'] or '{}').get('maintenance_pause', {}) if pause_row else {}
+            if pause and pause.get('repaired_at') is None:
+                maintenance_deferred = True
+                # Keep the actual action owned and retryable; retain the answer in the event ledger.
+                # Starting a new reminder window avoids an immediate paid wake loop after a response.
+                context['reminders'] = [int(time.time())]
+                context['maintenance_response_at'] = int(time.time())
+                conn.execute("UPDATE nfos_decisions SET status='pending',resolved_at=NULL,context=? WHERE id=?",
+                             (_json(context), decision_id))
         if action == 'human':
             root, _ = _open_human_escalation_root(conn, row)
             if root:
                 _consolidate_human_escalation_review(conn, get_decision(conn, decision_id), root)
                 return  # Keep the original blocker; do not notify or block again.
-        _event(conn,row['task_id'],row['run_id'],'nfos_principal_resolved',
+        _event(conn,row['task_id'],row['run_id'],
+               'nfos_maintenance_recovery_deferred' if maintenance_deferred else 'nfos_principal_resolved',
                {'decision_id':decision_id,'action':action,'answer':answer,
                 'asked_spec_revision':row['spec_revision'],'resolved_spec_revision':current_spec_revision})
         context=json.loads(get_decision(conn, decision_id)['context'])
