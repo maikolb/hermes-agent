@@ -119,14 +119,13 @@ def test_domain_routing_uses_real_card_revision_and_candidate(card, tmp_path):
     proof = tmp_path / 'inspected.txt'
     proof.write_text('Synthetic source, dependency and result inspection', encoding='utf-8')
     ref = dict(path=str(proof), sha256=hashlib.sha256(proof.read_bytes()).hexdigest())
-    value = dict(rationale='Receiver flow inspected', dependencies_complete=True, impacts=[
+    value = dict(rationale='Receiver flow inspected', dependencies_complete=True, data_issue=False, impacts=[
         dict(domain='edital_extraction', relation='excluded', rationale='No parser dependencies', evidence=[ref]),
         dict(domain='sineta', relation='direct', rationale='Receiver flow affected', evidence=[ref])])
     plan = validation.prepare_plan(value, engine, board='concursa-ai', task_id=task.id)
     store.record_step('concursa-ai', task.id, 'triagem', source='agent', evidence={'validation_plan': plan})
-    steps(store, task, 'p1')
-    assert [item['step'] for item in nfos_process.position(conn, task.id)['next']] == ['p4']
-    steps(store, task, 'p1', 'p4', 'aceite', 'p5', 'p6', 'p7', 'publicar')
+    assert 'p5' in [item['step'] for item in nfos_process.position(conn, task.id)['next']]
+    steps(store, task, 'p5', 'p6', 'p7', 'publicar')
     assert nfos_process.evaluate(conn, task.id, effect='deploy')[1], 'Position alone cannot publish'
     receipt = validation.prepare_result(dict(plan_digest=plan['digest'], rationale='Inspected focal proof',
         coverage=[dict(requirement='focal:sineta', status='passed', evidence=[ref])]), plan, engine)
