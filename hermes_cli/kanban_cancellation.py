@@ -31,9 +31,9 @@ def cancel_task(conn, task_id, *, metadata, expected_run_id=None):
         task = kb.get_task(conn, task_id)
         if task is None:
             raise ValueError(f'Unknown task: {task_id}')
-        prior = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='administrative_cancelled' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+        prior = conn.execute("SELECT kind,payload FROM task_events WHERE task_id=? AND kind IN ('administrative_cancelled','support_reopened') ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
         if task.status == 'done':
-            if prior and json.loads(prior['payload']).get('source') == receipt['source']:
+            if prior and prior['kind'] == 'administrative_cancelled' and json.loads(prior['payload']).get('source') == receipt['source']:
                 return True
             raise ValueError('Task is already closed; cancellation cannot rewrite a prior delivery')
         if task.instruction_revision != revision:

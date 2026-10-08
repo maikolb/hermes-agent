@@ -4172,8 +4172,19 @@ def reopen_support_task(conn, task_id, *, text, source):
         if not (payload.get('origin') or {}).get('portal', {}).get('chamado'):
             raise WorkflowError('This card did not originate in a support ticket')
         report = _artifact(conn, task_id, 'report')
-        if (workflow['stage'] == 'cancelled' or (report and json.loads(report['content']).get('disposition') in {'cancelled_by_owner','canceled_by_owner'})):
+        latest = conn.execute("SELECT kind,payload FROM task_events WHERE task_id=? AND kind IN ('administrative_cancelled','support_reopened') ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+        closure = json.loads(latest['payload']) if latest and latest['kind'] == 'administrative_cancelled' else {}
+        ticket = (payload.get('origin') or {}).get('portal', {}).get('chamado')
+        operator_resolved = (closure.get('functional_delivery') is False
+                             and bool(re.fullmatch(r'balcao:[^:]+:' + re.escape(ticket) + r':resolve', str(closure.get('source') or ''))))
+        historical = latest and latest['kind'] == 'support_reopened'
+        if not operator_resolved and (workflow['stage'] == 'cancelled' or
+                (not historical and report and json.loads(report['content']).get('disposition') in {'cancelled_by_owner','canceled_by_owner'})):
             raise WorkflowError('A cancelled ticket requires a new request')
+        if operator_resolved:
+            from hermes_cli.nfos_runtime import previous_runs_termination_pending
+            if previous_runs_termination_pending(conn, task_id):
+                raise WorkflowError('Wait for the previous execution to stop before reopening')
         previous_approval = dict(payload.get('support_approval') or {})
         if not _kb().reopen_completed_task(conn, task_id, expected_completed_at=task.completed_at, actor=source['actor'], reason=text):
             raise WorkflowError('Card changed while reopening')
@@ -4182,9 +4193,14 @@ def reopen_support_task(conn, task_id, *, text, source):
         conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?', (_json(payload), request['id']))
         _kb().update_task_instruction(conn, task_id, body=(task.body or '')+'\n\nReabertura pelo suporte:\n'+text,
                                       author=source['actor'], expected_revision=task.instruction_revision)
+        if operator_resolved:
+            conn.execute('UPDATE tasks SET title=? WHERE id=?', (task.title.removeprefix('[CANCELADO] '), task_id))
+            state = json.loads(workflow['state_json'])
+            state.pop('administrative_closure', None)
+            conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (_json(state), task_id))
         conn.execute("UPDATE nfos_workflows SET stage='analysis',updated_at=? WHERE task_id=?", (int(time.time()), task_id))
         _event(conn, task_id, None, 'support_reopened', {'text':text,'source':source,'previous_completed_at':task.completed_at,
-               'previous_approval':previous_approval,'approval_required':True})
+               'previous_approval':previous_approval,'approval_required':True,'previous_administrative_closure':closure})
         _kb().add_comment(conn, task_id, source['actor'], text)
     return {'duplicate':False}
 
