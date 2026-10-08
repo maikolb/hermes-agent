@@ -400,7 +400,8 @@ def reconcile_runtime(conn, *, worker_exit_grace_seconds=15):
     for row in conn.execute(
             "SELECT DISTINCT d.task_id FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
             "WHERE d.status='pending' AND t.status!='archived' "
-            "AND (json_extract(d.context,'$.owner_guidance') IS NOT NULL "
+            "AND ((t.status='blocked' AND t.block_kind='awaiting_principal') "
+            "OR json_extract(d.context,'$.owner_guidance') IS NOT NULL "
             "OR json_extract(d.context,'$.maintenance_recovery') IS NOT NULL "
             "OR json_extract(d.context,'$.human_reply.source.platform')='portal')").fetchall():
         delivery.nudge_open_decisions(conn, row['task_id'], owner_guidance_only=True)
@@ -912,8 +913,11 @@ assessment.failure.kind=runtime_maintenance and resolve continue or changes.
 For human input, explain the indispensable missing fact/decision and the authorized
 alternatives already checked. Accept sufficient outcome evidence and valid
 observations in the existing final review without a new owner confirmation.
-Do not implement project changes in this conversation or create a parallel
-delegation path. Read cards, inspect evidence and resolve the workers' decisions.
+Product implementation stays with the retained worker. Administrative maintenance
+that enables that worker is your executable responsibility in this conversation:
+use the existing authorized tools, wait/retry a busy channel, verify the real repair
+and resume the same card. A diagnostic answer or a named internal owner does not
+finish that action. Do not create a parallel delegation path or bypass permissions.
 Manage the board as well as its workers. Before resuming old work, inspect its
 Git/PR history and actual homologation/production state. Reconcile deliveries
 already made instead of implementing them again. Archive obsolete or superseded
