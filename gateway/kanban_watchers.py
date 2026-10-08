@@ -3294,6 +3294,8 @@ class GatewayKanbanWatchersMixin:
                                         "db_path": conn.execute("PRAGMA database_list").fetchone()[2],
                                         "delivery_id": claim["delivery_id"],
                                     }
+                                    if any(ev.kind == 'nfos_principal_requested' for ev in events):
+                                        sub['_notify_receipt']['principal_task_id'] = sub['task_id']
                                     sub["_notified"] = bool(claim["notified"])
 
                                     def acknowledge_skipped():

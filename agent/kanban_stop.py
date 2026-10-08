@@ -14,12 +14,60 @@ loop continues instead of exiting.
 from __future__ import annotations
 
 import os
+import json
+import sqlite3
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 
 _TERMINAL_KANBAN_TOOLS = frozenset({"kanban_complete", "kanban_block"})
 
 _DEFAULT_MAX_ATTEMPTS = 2
+
+
+def _principal_continuation(receipt):
+    """A trusted internal wake owns its pending decisions, not just its delivery ACK."""
+    from gateway.wake import current_notify_receipt
+    receipt = current_notify_receipt.get() or receipt or {}
+    task_id = receipt.get('principal_task_id')
+    if not task_id or not receipt.get('db_path'):
+        return None
+    try:
+        with sqlite3.connect(Path(receipt['db_path']).resolve().as_uri()+'?mode=ro', uri=True, timeout=5) as conn:
+            conn.row_factory = sqlite3.Row
+            task = conn.execute('SELECT status,block_kind FROM tasks WHERE id=?', (task_id,)).fetchone()
+            if not task or task['status'] in ('done','archived'):
+                return None
+            human_wait = conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='human'", (task_id,)).fetchone()
+            rows = [dict(row) for row in conn.execute(
+                "SELECT id,question,answer,context FROM nfos_decisions WHERE task_id=? AND status='pending' ORDER BY created_at", (task_id,))]
+    except (OSError,sqlite3.Error) as exc:
+        return f'[NFOS: recovery state could not be read ({type(exc).__name__}). Retry the existing board read before reporting completion.]'
+    if not rows:
+        return None
+    pending = []
+    for row in rows:
+        try:
+            context = json.loads(row['context'] or '{}')
+        except (ValueError,TypeError):
+            context = {}
+        context = context if isinstance(context,dict) else {}
+        if human_wait and not (context.get('owner_guidance') or context.get('human_reply')):
+            continue
+        pending.append({'id':row['id'],'question':row['question'],'last_response':row['answer'],
+                        'recovery':context.get('maintenance_recovery')})
+    if not pending:
+        return None
+    return ('[NFOS: this Principal turn still owns unfinished decisions. Continue in this SAME turn/session '
+            'and its remaining budget; an explanatory answer is not execution.\n'
+            f'Board database: {receipt["db_path"]}; card: {task_id}. Pending: '+json.dumps(pending,ensure_ascii=False)+'\n'
+            'Execute the next authorized administrative action now through the existing tools. For a busy lock/exit75, '
+            'wait with bounded backoff and retry the unexecuted operation. Inspect existing calls/receipts first; '
+            'never duplicate an in-flight or uncertain external effect. Repair the cause, read back the actual result, '
+            'then use the native repair/resume route and resolve the decision. Do not restart a held worker to perform '
+            'its own administrative repair. If a permission, finite budget grant or access is genuinely indispensable '
+            'and unavailable after checking authorized routes, record that concrete human dependency via decide; '
+            'never invent a grant, credential, repaired receipt or broaden scope. Do not end with a future-action promise.]')
 
 
 def kanban_stop_nudge_enabled() -> bool:
@@ -72,6 +120,7 @@ def build_kanban_stop_nudge(
     attempts: int = 0,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     task_id: Optional[str] = None,
+    principal_receipt: Optional[dict] = None,
 ) -> Optional[str]:
     """Return a synthetic follow-up when a kanban worker exits without a terminal tool.
 
@@ -79,7 +128,7 @@ def build_kanban_stop_nudge(
     already completed/blocked, or nudge budget exhausted).
     """
     if not kanban_stop_nudge_enabled():
-        return None
+        return _principal_continuation(principal_receipt)
     if attempts >= max_attempts:
         return None
     if session_called_kanban_terminal(messages):

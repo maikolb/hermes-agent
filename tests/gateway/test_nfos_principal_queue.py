@@ -35,6 +35,8 @@ def test_principal_request_survives_progress_in_same_poll(tmp_path, monkeypatch,
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
     assert len(adapter.handled) == (card_count if request_review else 0)
     assert all(' pending' in event.text for event in adapter.handled)
+    if request_review:
+        assert {event.metadata['kanban_wake_delivery'].get('principal_task_id') for event in adapter.handled} == {task.id for task in tasks}
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
     assert len(adapter.handled) == (card_count if request_review else 0)
     with kb.connect_closing() as conn:
@@ -169,6 +171,7 @@ def test_unanswered_owner_guidance_wakes_again_after_transport_ack(tmp_path, mon
         assert kb.get_task(conn, task.id).status == 'blocked'
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
     assert len(adapter.handled) == 2
+
     assert task.id in adapter.handled[-1].text
     with kb.connect_closing() as conn:
         delivery.resolve_decision(conn, receipt['decision_id'], action='continue',
@@ -181,3 +184,32 @@ def test_unanswered_owner_guidance_wakes_again_after_transport_ack(tmp_path, mon
         runtime.reconcile_runtime(conn)
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
     assert len(adapter.handled) == 2
+
+
+def test_blocked_impediment_is_not_abandoned_after_three_reminders(tmp_path, monkeypatch):
+    import json
+    from hermes_cli import nfos_runtime as runtime
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'kanban.db'))
+    now = 1800000000
+    monkeypatch.setattr(delivery.time, 'time', lambda: now)
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title='Transport preserved evidence', assignee='default',
+                             delivery_type='report', requires_repo=False)
+        kb.block_task(conn, tid, reason='Internal channel needs repair', kind='transient')
+        runtime.adopt_existing_tasks(conn, board='default', project={'profile':'default','delivery_type':'report'})
+        did = delivery.pending_decisions(conn)[0]['id']
+        context = json.loads(delivery.get_decision(conn, did)['context'])
+        context.update(reminders=[now-3600,now-2700,now-1800],stalled_at=now-900)
+        with kb.write_txn(conn):
+            conn.execute('UPDATE nfos_decisions SET created_at=?,context=? WHERE id=?',
+                         (now-5000,json.dumps(context),did))
+            conn.execute("UPDATE tasks SET status='blocked',block_kind='awaiting_principal' WHERE id=?",(tid,))
+        before = conn.execute("SELECT count(*) FROM task_events WHERE kind='nfos_principal_requested'").fetchone()[0]
+        runtime.reconcile_runtime(conn)
+        runtime.reconcile_runtime(conn)
+        assert conn.execute("SELECT count(*) FROM task_events WHERE kind='nfos_principal_requested'").fetchone()[0] == before+1
+        delivery.resolve_decision(conn,did,action='human',answer='Which authorized access may be used?',author='Principal')
+        count = conn.execute('SELECT count(*) FROM task_events').fetchone()[0]
+        runtime.reconcile_runtime(conn)
+        assert conn.execute('SELECT count(*) FROM task_events').fetchone()[0] == count

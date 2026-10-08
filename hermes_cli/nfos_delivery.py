@@ -2258,6 +2258,9 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
     rows = [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status='pending' ORDER BY created_at", (task_id,))]
     out = []
     now = int(time.time())
+    human_wait = conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='human'", (task_id,)).fetchone()
+    internal_hold = conn.execute("SELECT 1 FROM tasks WHERE id=? AND status='blocked' AND block_kind='awaiting_principal'",
+                                 (task_id,)).fetchone() is not None
     for row in rows:
         try:
             ctx = json.loads(row.get('context') or '{}') or {}
@@ -2265,7 +2268,9 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
             ctx = {}
         if not isinstance(ctx, dict):
             ctx = {}
-        needs_principal = bool(ctx.get('owner_guidance') or ctx.get('maintenance_recovery')
+        if human_wait and not (ctx.get('owner_guidance') or ctx.get('human_reply')):
+            continue
+        needs_principal = bool(internal_hold or ctx.get('owner_guidance') or ctx.get('maintenance_recovery')
                                or (ctx.get('human_reply', {}).get('source') or {}).get('platform') == 'portal')
         if owner_guidance_only and not needs_principal:
             continue

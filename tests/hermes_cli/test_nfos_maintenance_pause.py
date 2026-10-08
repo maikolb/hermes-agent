@@ -357,6 +357,51 @@ def test_pause_exposes_its_reason_in_native_card_presentation(running):
     assert kb.task_presentation(conn, kb.get_task(conn, task.id))['block_reason'] == args['reason']
 
 
+def test_principal_cannot_end_with_explanation_before_actual_repair(running, monkeypatch):
+    from agent.kanban_stop import build_kanban_stop_nudge
+    from gateway.wake import current_notify_receipt
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    d.sweep_awaiting_principal(conn)
+    row = conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND status='pending'", (task.id,)).fetchone()
+    d.resolve_decision(conn, row['id'], action='changes', author='Principal',
+                       answer='The broker returned 75 busy. Inspect its tools after the lock is released.')
+    token = current_notify_receipt.set({'db_path': conn.execute('PRAGMA database_list').fetchone()[2],
+        'principal_task_id': task.id, 'delivery_id': 'internal-notifier-fixture'})
+    try:
+        # Even after two narrated stops, stay in this same bounded agent turn.
+        assert build_kanban_stop_nudge(messages=[], attempts=3) is not None
+        assert d.get_decision(conn, row['id'])['status'] == 'pending'
+        request = dict(pause_run_id=task.current_run_id, actor='Principal', reason='Environment prepared',
+                       evidence=['real fixture preparation receipt'])
+        preview = repair.resume_after_repair(conn, task.id, **request)
+        repair.resume_after_repair(conn, task.id, **request, expected_pause_sha256=preview['pause_sha256'], apply=True)
+        d.sweep_awaiting_principal(conn)
+        assert build_kanban_stop_nudge(messages=[], attempts=4) is None
+        assert kb.get_task(conn, task.id).status == 'ready'
+    finally:
+        current_notify_receipt.reset(token)
+
+
+def test_principal_waits_for_real_human_dependency_but_handles_new_owner_guidance(running,monkeypatch):
+    from agent.kanban_stop import build_kanban_stop_nudge
+    from gateway.wake import current_notify_receipt
+    conn,task,artifact,process,args=running
+    _paused_and_exited(conn,task,artifact,process,args,monkeypatch)
+    d.sweep_awaiting_principal(conn)
+    did=conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND status='pending'",(task.id,)).fetchone()[0]
+    d.resolve_decision(conn,did,action='human',answer='Which access is authorized for this isolated fixture?',author='Principal')
+    token=current_notify_receipt.set({'db_path':conn.execute('PRAGMA database_list').fetchone()[2],
+        'principal_task_id':task.id,'delivery_id':'fixture'})
+    try:
+        assert build_kanban_stop_nudge(messages=[]) is None
+        d.receive_owner_guidance(conn,task.id,text='Use the existing authorized fixture route.',
+            source={'platform':'vigilia','actor':'Maikol','message_id':'fixture-access'})
+        assert build_kanban_stop_nudge(messages=[]) is not None
+    finally:
+        current_notify_receipt.reset(token)
+
+
 def test_sweep_owns_recovery_until_native_repair_then_resumes(running, monkeypatch):
     conn, task, artifact, process, args = running
     _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
