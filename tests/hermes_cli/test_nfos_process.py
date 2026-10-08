@@ -98,6 +98,49 @@ def test_motor_off_changes_nothing(card):
     assert not pw.exists(), 'sem política o motor nem abre o banco do processo'
 
 
+@needs_module
+def test_domain_routing_uses_real_card_revision_and_candidate(card, tmp_path):
+    import hashlib
+    from project_workflow import validation
+    conn, task, pw = card
+    store = seed(pw)
+    current = Path(MODULE_SRC) / 'project_workflow' / 'definitions' / 'concursa-ai.entrega.json'
+    store.add_definition(json.loads(current.read_text(encoding='utf-8')), source_text='Synthetic routing authority',
+                         created_by='fixture', approve_as=('fixture', 'synthetic'))
+    policy(pw, 'enforce')
+    store.bind('concursa-ai', task.id, by='fixture')
+    candidate = 'a' * 40
+    conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?',
+                 (json.dumps({'candidate_sha': candidate}), task.id))
+    conn.commit()
+    engine = nfos_process._engine(conn, task.id)
+    assert engine['candidate_sha'] == candidate
+    assert engine['instruction_revision'] == conn.execute('SELECT instruction_revision FROM tasks WHERE id=?', (task.id,)).fetchone()[0]
+    proof = tmp_path / 'inspected.txt'
+    proof.write_text('Synthetic source, dependency and result inspection', encoding='utf-8')
+    ref = dict(path=str(proof), sha256=hashlib.sha256(proof.read_bytes()).hexdigest())
+    value = dict(rationale='Receiver flow inspected', dependencies_complete=True, impacts=[
+        dict(domain='edital_extraction', relation='excluded', rationale='No parser dependencies', evidence=[ref]),
+        dict(domain='sineta', relation='direct', rationale='Receiver flow affected', evidence=[ref])])
+    plan = validation.prepare_plan(value, engine, board='concursa-ai', task_id=task.id)
+    store.record_step('concursa-ai', task.id, 'triagem', source='agent', evidence={'validation_plan': plan})
+    steps(store, task, 'p1')
+    assert [item['step'] for item in nfos_process.position(conn, task.id)['next']] == ['p4']
+    steps(store, task, 'p1', 'p4', 'aceite', 'p5', 'p6', 'p7', 'publicar')
+    assert nfos_process.evaluate(conn, task.id, effect='deploy')[1], 'Position alone cannot publish'
+    receipt = validation.prepare_result(dict(plan_digest=plan['digest'], rationale='Inspected focal proof',
+        coverage=[dict(requirement='focal:sineta', status='passed', evidence=[ref])]), plan, engine)
+    store.record_step('concursa-ai', task.id, 'publicar', source='agent', evidence={'validation_result': receipt})
+    for _ in range(2):
+        decision, refusal = nfos_process.evaluate(conn, task.id, effect='deploy')
+        assert not refusal, refusal
+        assert decision['validation_route'] == 'focal'
+    conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?',
+                 (json.dumps({'candidate_sha': 'b' * 40}), task.id))
+    conn.commit()
+    assert nfos_process.evaluate(conn, task.id, effect='deploy')[1], 'Another candidate needs its own result'
+
+
 def test_enforce_without_the_process_refuses_instead_of_skipping_it(card, monkeypatch, tmp_path):
     conn, task, pw = card
     policy(pw, 'enforce')
@@ -138,7 +181,7 @@ def test_the_motor_obeys_the_concursa_process(card):
     assert store.history('concursa-ai', task.id)[-1]['step_key'] == 'p5'
     assert d.get_workflow(conn, task.id)['stage'] == 'implement'
     with pytest.raises(nfos_process.ProcessRefusal, match='Falta registrar: p6'):
-        d.begin_effect(conn, task.id, task.current_run_id, operation='merge', target='main', candidate='abc123')
+        d.begin_effect(conn, task.id, task.current_run_id, operation='merge', target='main', candidate='a' * 40)
 
 
 @needs_module
@@ -300,7 +343,7 @@ def test_a_board_without_its_own_process_follows_the_default_pipeline(card):
     assert shown['title'] == 'Esteira NFOS' and shown['current'] == 'spec' and shown['governed']
     accept_spec(conn, task)
     with pytest.raises(nfos_process.ProcessRefusal, match='Falta registrar: implementar'):
-        d.begin_effect(conn, task.id, task.current_run_id, operation='merge', target='main', candidate='abc1234')
+        d.begin_effect(conn, task.id, task.current_run_id, operation='merge', target='main', candidate='a' * 40)
 
 
 @needs_module

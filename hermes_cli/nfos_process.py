@@ -90,9 +90,13 @@ def actor() -> str:
 
 
 def _engine(conn, task_id, delivery_type=None, spec_revision=None) -> dict:
-    row = conn.execute("SELECT t.delivery_type, t.status, w.stage, w.spec_revision FROM tasks t "
+    row = conn.execute("SELECT t.delivery_type, t.status, t.instruction_revision, w.stage, w.spec_revision, w.state_json FROM tasks t "
                        "LEFT JOIN nfos_workflows w ON w.task_id=t.id WHERE t.id=?", (task_id,)).fetchone()
     engine = {k: row[k] for k in ("delivery_type", "status", "stage", "spec_revision")} if row else {}
+    if row:
+        engine["instruction_revision"] = row["instruction_revision"]
+        state = json.loads(row["state_json"] or "{}")
+        engine.update({k: state.get(k) for k in ("candidate_sha", "integrated_sha")})
     if delivery_type:
         engine["delivery_type"] = delivery_type
     if spec_revision is not None:
@@ -208,9 +212,19 @@ def position(conn, task_id) -> dict | None:
         if definition is None:
             return None
         from project_workflow import spec as specmod
-        spec = definition["spec"]
         engine = _engine(conn, task_id)
         history = store.history(board, task_id) if card else []
+        # Older installed modules retain their original projection until the
+        # coordinated routing module is installed; never grant from this view.
+        if hasattr(enforce, "live_definition"):
+            definition = enforce.live_definition(store, definition, board, engine)
+        spec = definition["spec"]
+        if spec.get("validation_policy"):
+            from project_workflow import validation
+            try:
+                spec, _ = validation.effective(spec, history, dict(engine, board=board, task_id=task_id))
+            except (ValueError, TypeError, KeyError, OSError):
+                pass  # judge reports the refusal; this remains a read-only view.
         judged = enforce.judge(definition, history, engine, stage=engine.get("stage") or "analysis", actor=actor())
         steps = specmod.steps_by_key(spec)
         here = judged["current"]
