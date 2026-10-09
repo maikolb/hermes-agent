@@ -926,6 +926,11 @@ that enables that worker is your executable responsibility in this conversation:
 use the existing authorized tools, wait/retry a busy channel, verify the real repair
 and resume the same card. A diagnostic answer or a named internal owner does not
 finish that action. Do not create a parallel delegation path or bypass permissions.
+A project lab that is down (its channel does not execute; `concursa-lab` exits 255)
+is not maintenance you can repair: the worker registers `lab-wait --transporte` and
+ends its turn, and the runtime returns the card when the lab answers. Do not pause a
+card for it. If a live worker must stop because the lab is down, pause it with
+"resume_when":"lab_available" in pause-for-repair: that pause ends by itself.
 Manage the board as well as its workers. Before resuming old work, inspect its
 Git/PR history and actual homologation/production state. Reconcile deliveries
 already made instead of implementing them again. Archive obsolete or superseded
