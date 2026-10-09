@@ -4259,6 +4259,26 @@ def pending_decisions(conn):
         "ORDER BY COALESCE(t.priority,0) DESC,d.created_at,d.id")]
 
 
+def _current_decision(conn, row, limit=20):
+    """WAIT_FOLLOWS_SUCCESSOR_20261009: decisão substituída responde pela sucessora vigente.
+
+    No t_8ed13ed7 (09/10/2026) o worker esperava dec_785f17b753874f9699d0, que o Principal tinha reconsiderado
+    (superseded_by nd_1facb9ca63b34325a1ed9978, CONTINUE). O wait devolvia a linha antiga, com action human e a
+    pergunta ao Maikol, e o worker reabria a pergunta a cada run (04:23, 05:52 e 05:55)."""
+    chain = []
+    while row and row['status'] == 'superseded' and len(chain) < limit:
+        try:
+            successor = (json.loads(row.get('context') or '{}') or {}).get('superseded_by')
+        except Exception:
+            successor = None
+        following = get_decision(conn, successor) if successor and successor not in chain and successor != row['id'] else None
+        if not following:
+            break
+        chain.append(row['id'])
+        row = following
+    return row, chain
+
+
 def wait_decision(conn,decision_id,*,timeout=300):
     """Wait outside a transaction, without repeatedly invoking the model."""
     if conn.in_transaction:
@@ -4268,10 +4288,13 @@ def wait_decision(conn,decision_id,*,timeout=300):
         row=get_decision(conn,decision_id)
         if row is None:
             raise WorkflowError('Unknown decision')
+        row, chain = _current_decision(conn, row)
         suspension = active_suspension(conn, row['task_id'])
         if suspension:
             return dict(suspension)
         if row['status']!='pending' or time.monotonic()>=deadline:
+            if chain:
+                row = dict(row, requested_decision=decision_id, superseded_chain=chain)
             return row
         time.sleep(min(1,max(0,deadline-time.monotonic())))
 
