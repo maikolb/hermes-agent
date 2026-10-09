@@ -2437,6 +2437,37 @@ def _human_is_maintenance(answer):
     return isinstance(failure, dict) and failure.get('kind') == 'runtime_maintenance'
 
 
+# NO_OWNER_QUESTIONS_20261009 (Maikol, 09/10/2026: "Não quero que essas merdas de card fiquem perguntando coisas pra mim ou
+# travando" e "Eu preciso acordar com o nfos funcionando sem sua intervenção e os cards entregues"). Projeto com
+# owner_questions: false não pergunta ao dono: o único humano que o card pode consultar é o solicitante, pelo Balcão.
+_OWNER_RX = re.compile(r'maikol|owner|dono', re.I)
+OWNER_QUESTION_REFUSAL = (
+    'Neste projeto não há pergunta ao Maikol (NO_OWNER_QUESTIONS_20261009). Maikol, 09/10/2026: "Não quero que essas merdas de '
+    'card fiquem perguntando coisas pra mim ou travando". Decida com continue ou changes. Dentro da faixa do contrato, autorize. Fora '
+    'dela, escolha o caminho conservador que entrega algo ao aluno agora: dado conferido no PDF, sem mexer em atividade do aluno, dentro '
+    'do teto de US$ 2, com aviso honesto do que ficou de fora. Capacidade que falta fica registrada no card e o card segue no que dá. '
+    'Pergunta só ao solicitante, pelo Balcão: action human com public_message {kind: "question", text: "..."}.')
+
+
+def _requester_question(public_message):
+    """Pergunta pública ao solicitante pelo Balcão; endereçada ao dono não conta."""
+    return (isinstance(public_message, dict) and public_message.get('kind') == 'question'
+            and not _OWNER_RX.search(str(public_message.get('to') or '')))
+
+
+def _owner_questions_refused(conn, task_id):
+    try:
+        from hermes_cli.nfos_principal_review import settings
+        workflow = get_workflow(conn, task_id)
+        request = get_request(conn, workflow['request_id']) if workflow else None
+        project = json.loads(request['payload']).get('project', {}) if request else {}
+        board = project.get('board') or project.get('project_id')
+        scope = (settings().get('projects') or {}).get(board) or {} if board else {}
+        return scope.get('owner_questions') is False
+    except Exception:
+        return False
+
+
 def review_maintenance_human_decisions(conn):
     """Pergunta a humano sobre sonda, medição ou manutenção do runtime parada no card volta ao Principal como decisão pendente (a antiga
     fica superseded, com rastro) e o card sai do bloqueio: o dispatcher não relança card com decisão aberta, lembra o Principal e, sem
@@ -2475,6 +2506,51 @@ def review_maintenance_human_decisions(conn):
                           _json({'supersedes': row['id'], 'human_last_resort': True}), wf['spec_revision'], now))
             _event(conn, task.id, row['run_id'], 'nfos_human_question_refused',
                    {'decision_id': row['id'], 'new_decision_id': new_id, 'question': refused[:400]})
+            _event(conn, task.id, row['run_id'], 'nfos_principal_requested', {'decision_id': new_id, 'kind': 'impediment', 'question': question})
+        if task.status == 'blocked':
+            _kb().unblock_task(conn, task.id)
+        out.append((row['id'], new_id))
+    return out
+
+
+def review_owner_questions(conn):
+    """NO_OWNER_QUESTIONS_20261009: pergunta ao dono já aberta em projeto com owner_questions: false volta ao Principal.
+
+    Mesmo caminho da revisão de manutenção acima: a pergunta fica superseded com rastro, o Principal recebe uma decisão pendente
+    com a recusa e o card sai do bloqueio. Pergunta ao solicitante pelo Balcão (public_message question) e resposta já recebida
+    ficam como estão."""
+    from hermes_cli.nfos_runtime import run_termination_pending
+    out = []
+    for row in [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()]:
+        try:
+            ctx = json.loads(row.get('context') or '{}') or {}
+        except Exception:
+            ctx = {}
+        if not isinstance(ctx, dict) or ctx.get('human_reply') or _requester_question(ctx.get('public_message')):
+            continue
+        if not _owner_questions_refused(conn, row['task_id']):
+            continue
+        task = _kb().get_task(conn, row['task_id'])
+        wf = get_workflow(conn, row['task_id'])
+        if not task or not wf or task.status not in ('blocked', 'ready'):
+            continue
+        if _run_process_alive(conn, task.id, row['run_id']) or run_termination_pending(conn, task.id, row['run_id']):
+            continue
+        refused = _human_question_part(row.get('answer'))
+        question = 'Revisão de autonomia: ' + OWNER_QUESTION_REFUSAL + ' Pergunta recusada: ' + refused[:700]
+        new_id = 'dec_' + uuid.uuid4().hex[:20]
+        now = int(time.time())
+        with _kb().write_txn(conn, allow_nested=True):
+            current = get_decision(conn, row['id'])
+            if not current or current['status'] != 'human':
+                continue
+            ctx.update(superseded_by=new_id, superseded_reason='no_owner_questions')
+            conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?", (_json(ctx), row['id']))
+            conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
+                         (new_id, task.id, row['run_id'], 'impediment', question,
+                          _json({'supersedes': row['id'], 'no_owner_questions': True}), wf['spec_revision'], now))
+            _event(conn, task.id, row['run_id'], 'nfos_human_question_refused',
+                   {'decision_id': row['id'], 'new_decision_id': new_id, 'question': refused[:400], 'reason': 'no_owner_questions'})
             _event(conn, task.id, row['run_id'], 'nfos_principal_requested', {'decision_id': new_id, 'kind': 'impediment', 'question': question})
         if task.status == 'blocked':
             _kb().unblock_task(conn, task.id)
@@ -4414,6 +4490,7 @@ def reconcile_human_answers(conn):
     sweep_awaiting_principal(conn)  # CLOSURE_RECOVERY_20260911
     try:  # HUMAN_LAST_RESORT_20260914: pergunta de manutenção parada volta ao Principal; destino fora do ar espera e volta sozinho
         review_maintenance_human_decisions(conn)
+        review_owner_questions(conn)  # NO_OWNER_QUESTIONS_20261009
         sweep_destination_waits(conn)
     except Exception:
         import logging
@@ -4491,6 +4568,8 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
     if action=='human' and _human_is_maintenance(assessment):
         raise WorkflowError(HUMAN_MAINTENANCE_REFUSAL)
     initial=get_decision(conn,decision_id)
+    if action=='human' and initial and not _requester_question(public_message) and _owner_questions_refused(conn, initial['task_id']):
+        raise WorkflowError(OWNER_QUESTION_REFUSAL)
     assessed=None
     quality_refusal=None
     if initial and initial['status']=='pending' and initial['kind'] in {'spec_review','final_review'} and action=='continue':
