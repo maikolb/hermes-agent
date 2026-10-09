@@ -94,3 +94,35 @@ def test_principal_turn_ends_while_only_the_lab_queue_holds_its_card(agent_env,t
     assert result['api_calls']==1, 'a espera do laboratório não segura o turno do Principal'
     with kb.connect_closing(db) as conn:
         assert delivery.get_decision(conn,wait['decision_id'])['status']=='pending'
+
+
+def test_principal_turn_ends_after_idle_replies_to_the_continuation(agent_env,tmp_path,monkeypatch):
+    """PRINCIPAL_TURN_BOUND_20261009: em 09/10, no turno do t_39e0a22e, 490 de 538 cutucões foram respondidos com "[SILENT]",
+    sem nenhuma ferramenta; cada um custou uma chamada com o contexto inteiro e o quadro ficou parado."""
+    agent, provider = agent_env
+    from hermes_cli import kanban_db as kb,nfos_delivery as delivery,nfos_runtime as runtime
+    from gateway.wake import current_notify_receipt
+    from hermes_state import SessionDB
+    from agent import kanban_stop
+    agent.session_id='principal-idle'
+    agent._session_db=SessionDB(tmp_path/'state.db')
+    agent._session_db.create_session(session_id=agent.session_id,source='cli',model='test-model')
+    db=tmp_path/'board.db'
+    monkeypatch.setenv('HERMES_KANBAN_DB',str(db))
+    monkeypatch.delenv('HERMES_KANBAN_TASK',raising=False)
+    with kb.connect_closing(db) as conn:
+        tid=kb.create_task(conn,title='Idle principal fixture',assignee='default',delivery_type='report',requires_repo=False)
+        kb.block_task(conn,tid,reason='Fixture needs a Principal decision',kind='transient')
+        runtime.adopt_existing_tasks(conn,board='default',project={'profile':'default','delivery_type':'report'})
+        did=delivery.pending_decisions(conn)[0]['id']
+    agent.max_iterations=10
+    provider.response_queue.clear();provider.captured_requests.clear()
+    provider.response_queue.extend([_text_resp('[SILENT]')]*10)
+    token=current_notify_receipt.set({'db_path':str(db),'principal_task_id':tid,'delivery_id':'idle-wake'})
+    try:
+        result=agent.run_conversation('Revise o card',conversation_history=[],task_id='idle-turn')
+    finally:
+        current_notify_receipt.reset(token)
+    assert result['api_calls']==1+kanban_stop._PRINCIPAL_MAX_IDLE_NUDGES, 'resposta vazia seguida não segura o turno até o limite'
+    with kb.connect_closing(db) as conn:
+        assert delivery.get_decision(conn,did)['status']=='pending', 'a decisão volta para a fila justa'
