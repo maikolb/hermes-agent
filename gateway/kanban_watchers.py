@@ -162,17 +162,6 @@ def _resolve_auto_decompose_settings(
 _PROGRESS_STAGES = ("ler", "reproduzir", "mudar", "testar", "PR", "merge/deploy", "readback")
 _PROGRESS_RE = re.compile(r"^\s*\[\s*etapa\s*(\d)\s*/\s*7\s*([^\]]*)\]\s*(.*)$", re.S | re.I)
 _PROGRESS_CRIT_RE = re.compile(r"(?im)^\s*(?:crit[ée]rio(?:\s+de\s+aceite)?|pronto\s+quando)\s*[:\-]\s*(.+?)\s*$")
-_WORKFLOW_PROGRESS = {
-    "analysis": (1, "ler"),
-    "spec": (2, "especificar"),
-    "implement": (3, "implementar"),
-    "verify": (4, "testar"),
-    "review": (5, "revisar"),
-    "homolog": (6, "homologar"),
-    "publish": (6, "publicar"),
-    "report": (7, "readback"),
-    "done": (7, "concluído"),
-}
 
 
 def _sub_chat_type(sub, platform_str):
@@ -222,24 +211,20 @@ def _progress_parse(body):
     return n, name[:24], nxt
 
 
-def _progress_render(task_id, n, name, minutes, tools, budget, cls, nxt="", done=False, blocked=False, title="", outcome="entregue"):  # CLIENT_CHAT_20260913
+def _progress_render(task_id, n, name, minutes, tools, budget, cls, nxt="", done=False, title="", outcome="entregue"):  # CLIENT_CHAT_20260913
     from hermes_cli.nfos_delivery import public_request_title
     if done:
         head = f"▰▰▰▰▰▰▰ 7/7 {outcome}"
-    elif blocked:
-        head = "⏸ " + "▰" * n + "▱" * (7 - n) + f" {n}/7 bloqueado"
     else:
         head = "▰" * n + "▱" * (7 - n) + f" {n}/7 {name}"
     parts = [head]
-    if blocked and name:
-        parts.append(name)
     short = public_request_title(title, limit=70) if title else ""
     if short:
         parts.append(short)
     parts.append(f"{int(minutes)} min")
     line = " · ".join(parts)
     if nxt and not done:
-        line += f"\n{'aguardando' if blocked else 'próximo'}: {nxt}"
+        line += f"\npróximo: {nxt}"
     return line
 
 
@@ -253,7 +238,7 @@ def _progress_recebido(task_id, title, cls, body):  # CLIENT_CHAT_20260913: tít
 
 
 def _progress_state(board, task_id):
-    """Lê progresso, execução e bloqueio atuais do kanban.db do board."""
+    """Lê do kanban.db do board: (etapa mais recente|None, minutos do run, tools do run, orçamento, classe, título, corpo, nº de runs)."""
     from hermes_cli import kanban_db as _kb
     with _kb.connect_closing(board=board) as conn:
         task = _kb.get_task(conn, task_id)
@@ -280,43 +265,9 @@ def _progress_state(board, task_id):
             if parsed:
                 latest = parsed
                 break
-        if conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_workflows'"
-        ).fetchone():
-            workflow = conn.execute(
-                "SELECT stage,next_action FROM nfos_workflows WHERE task_id=?",
-                (task_id,),
-            ).fetchone()
-            if workflow:
-                # NFOS workflow state is the current typed authority. A worker
-                # comment can describe an earlier step and must not freeze the
-                # progress bar after the workflow has advanced.
-                number, label = _WORKFLOW_PROGRESS.get(
-                    str(workflow["stage"] or "").strip().lower(),
-                    (1, "ler"),
-                )
-                latest = (
-                    number,
-                    label,
-                    str(workflow["next_action"] or "").strip()[:80],
-                )
-        status = str(getattr(task, "status", "") or "")
-        blocked_reason = ""
-        if status == "blocked":
-            row = conn.execute(
-                "SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' "
-                "ORDER BY id DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-            if row:
-                try:
-                    blocked_reason = str((json.loads(row["payload"] or "{}") or {}).get("reason") or "").strip()[:160]
-                except Exception:
-                    blocked_reason = ""
         budget, cls = _progress_budget(getattr(task, "max_runtime_seconds", None))
         return (latest, minutes, tools, budget, cls,
-                getattr(task, "title", "") or "", getattr(task, "body", "") or "", int(n_runs or 0),
-                status, blocked_reason)
+                getattr(task, "title", "") or "", getattr(task, "body", "") or "", int(n_runs or 0))
 
 
 def _progress_meta_get(board, sub):
@@ -350,7 +301,7 @@ def _progress_meta_set(board, sub, **fields):
 async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
     """Trata claimed/commented/nfos_progress/completed para a barrinha. Devolve True quando o evento
     foi consumido (não gera mensagem passiva). Qualquer falha devolve False e o fluxo original segue."""
-    if kind not in ("claimed", "commented", "nfos_progress", "blocked", "completed"):
+    if kind not in ("claimed", "commented", "nfos_progress", "completed"):
         return False
     if (sub.get("platform") or "").lower() != "telegram":
         return False
@@ -362,7 +313,7 @@ async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
         metadata.pop("thread_id", None)
     board = board or ""
     task_id = sub["task_id"]
-    latest, minutes, tools, budget, cls, title, body, n_runs, status, blocked_reason = await asyncio.to_thread(_progress_state, board, task_id)
+    latest, minutes, tools, budget, cls, title, body, n_runs = await asyncio.to_thread(_progress_state, board, task_id)
     meta = await asyncio.to_thread(_progress_meta_get, board, sub)
     msg_id = meta.get("progress_message_id")
     if kind == "claimed":
@@ -370,35 +321,20 @@ async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
             return True  # reclaim/redispatch: silêncio
         text = _progress_recebido(task_id, title, cls, body)
         res = await adapter.send(sub["chat_id"], text, metadata=metadata)
-        if res is not None and getattr(res, "success", True) is False:
-            raise RuntimeError("progress send reported failure")
         mid = getattr(res, "message_id", None)
         if getattr(res, "success", False) and mid:
             await asyncio.to_thread(_progress_meta_set, board, sub, progress_message_id=str(mid))
         return True
-    if kind in ("commented", "nfos_progress", "blocked"):
-        if kind == "blocked" and status != "blocked":
-            return True  # stale blocked event; current task state already advanced
+    if kind in ("commented", "nfos_progress"):
         if not latest:
-            if kind != "blocked":
-                return True  # comentário sem linha de etapa: nada a mostrar no grupo
-            latest = (1, "aguardando", "")
+            return True  # comentário sem linha de etapa: nada a mostrar no grupo
         n, name, nxt = latest
-        is_blocked = kind == "blocked" or status == "blocked"
-        next_text = (blocked_reason or nxt) if is_blocked else nxt
-        text = _progress_render(
-            task_id, n, name, minutes, tools, budget, cls,
-            next_text,
-            blocked=is_blocked,
-            title=title,
-        )  # CLIENT_CHAT_20260913
+        text = _progress_render(task_id, n, name, minutes, tools, budget, cls, nxt, title=title)  # CLIENT_CHAT_20260913
         if msg_id and hasattr(adapter, "edit_message"):
             res = await adapter.edit_message(sub["chat_id"], str(msg_id), text, metadata=metadata)
             if getattr(res, "success", False):
                 return True
         res = await adapter.send(sub["chat_id"], text, metadata=metadata)
-        if res is not None and getattr(res, "success", True) is False:
-            raise RuntimeError("progress send reported failure")
         mid = getattr(res, "message_id", None)
         if getattr(res, "success", False) and mid:
             await asyncio.to_thread(_progress_meta_set, board, sub, progress_message_id=str(mid))
@@ -3507,22 +3443,11 @@ class GatewayKanbanWatchersMixin:
                             # or progress bubble belongs to this internal wake.
                             continue
                         try:
-                            # Retrying a wake must not re-publish progress. Keep
-                            # building its handoff below from the original event.
-                            reassessment = kind == "blocked" and (ev.payload or {}).get("reassessment_requested")
-                            _pb_handled = (
-                                send_passive and not sub.get("_notified") and not reassessment
-                                and await _kanban_progress_bar(kind, sub, board_slug, adapter, _pb_metadata)
-                            )
+                            _pb_handled = await _kanban_progress_bar(kind, sub, board_slug, adapter, _pb_metadata)
                         except Exception as _pb_err:
                             logger.debug("kanban progress bar: %s", _pb_err)
                             _pb_handled = False
                         if _pb_handled:
-                            from gateway.wake import record_notify_progress
-                            await asyncio.to_thread(
-                                record_notify_progress, sub["_notify_receipt"], notified=True,
-                            )
-                            sub["_notified"] = True
                             continue
                         if not _notify_kind_allowed(kind, _load_config):
                             continue  # patch local 10/09/2026: modo quieto (kanban.notify_kinds)
