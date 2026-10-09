@@ -301,6 +301,29 @@ def test_legacy_portal_reply_requires_actual_principal_review(board, monkeypatch
         assert kb.get_task(conn, task.id).status == 'ready'
 
 
+def test_delivery_public_message_releases_requester_without_ending_the_card(board):
+    """STUDENT_DELIVERY_20261009: entrega ao solicitante é mensagem pública própria; o card segue para a causa."""
+    with kb.connect_closing(board) as conn:
+        task = started(conn); spec(conn, task)
+        decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind='impediment',
+                                          question='Dado do aluno corrigido e conferido; entregar?', context={})
+        with pytest.raises(delivery.WorkflowError):
+            delivery.resolve_decision(conn, decision, action='human', answer='Ask', author='Principal',
+                                      public_message={'kind': 'delivery', 'text': 'Seu plano foi corrigido.'})
+        with pytest.raises(delivery.WorkflowError):
+            delivery.resolve_decision(conn, decision, action='continue', answer='Deliver', author='Principal',
+                                      public_message={'kind': 'release', 'text': 'Seu plano foi corrigido.'})
+        delivery.resolve_decision(conn, decision, action='continue', answer='Entregar e seguir para a causa', author='Principal',
+                                  public_message={'kind': 'delivery', 'text': 'Seu plano foi corrigido.', 'to': 'solicitante',
+                                                  'internal': 'não passa'})
+        saved = delivery.get_decision(conn, decision)
+        public = json.loads(saved['context'])['public_message']
+        assert saved['status'] == 'resolved' and saved['action'] == 'continue'
+        assert {k: public[k] for k in ('kind', 'text')} == {'kind': 'delivery', 'text': 'Seu plano foi corrigido.'}
+        assert 'internal' not in public and public['created_at'] > 0
+        assert kb.get_task(conn, task.id).status != 'done'
+
+
 def test_portal_followup_question_needs_a_new_reply(board, monkeypatch):
     from hermes_cli import nfos_runtime
     monkeypatch.setattr(delivery, '_run_process_alive', lambda *args:False)
