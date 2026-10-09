@@ -9,20 +9,48 @@ tool calls. Hermes treats that as a clean exit → ``rc=0`` → dispatcher
 This module is policy-only: when a kanban worker tries to finish without a
 terminal board tool, return a bounded synthetic nudge so the conversation
 loop continues instead of exiting.
+
+The Principal (an internal wake for a card) gets the same guard while that
+card still has decisions it owns, within a bounded window per wake.
 """
 
 from __future__ import annotations
 
 import os
 import json
+import logging
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 _TERMINAL_KANBAN_TOOLS = frozenset({"kanban_complete", "kanban_block"})
 
 _DEFAULT_MAX_ATTEMPTS = 2
+
+# PRINCIPAL_TURN_BOUND_20261009: the Principal is one shared session. A wake may
+# keep it on its card's pending decisions for this long; after that the
+# decisions stay pending and go back to the fair notify queue, instead of
+# stalling every other card and paying a full-context call per nudge.
+_PRINCIPAL_CONTINUATION_SECONDS = 20 * 60
+_principal_wakes: dict[tuple[str, str], float] = {}
+_now = time.monotonic
+
+
+def _principal_window_open(delivery_id, task_id) -> bool:
+    now = _now()
+    for key, started in list(_principal_wakes.items()):
+        if now - started > 2 * _PRINCIPAL_CONTINUATION_SECONDS:
+            _principal_wakes.pop(key, None)
+    started = _principal_wakes.setdefault((str(delivery_id or ''), task_id), now)
+    if now - started < _PRINCIPAL_CONTINUATION_SECONDS:
+        return True
+    logger.warning('principal continuation released after %ds: task=%s delivery=%s',
+                   int(now - started), task_id, delivery_id)
+    return False
 
 
 def _principal_continuation(receipt):
@@ -42,6 +70,8 @@ def _principal_continuation(receipt):
             rows = [dict(row) for row in conn.execute(
                 "SELECT id,question,answer,context FROM nfos_decisions WHERE task_id=? AND status='pending' ORDER BY created_at", (task_id,))]
     except (OSError,sqlite3.Error) as exc:
+        if not _principal_window_open(receipt.get('delivery_id'), task_id):
+            return None
         return f'[NFOS: recovery state could not be read ({type(exc).__name__}). Retry the existing board read before reporting completion.]'
     if not rows:
         return None
@@ -52,11 +82,14 @@ def _principal_continuation(receipt):
         except (ValueError,TypeError):
             context = {}
         context = context if isinstance(context,dict) else {}
+        lab_wait = context.get('lab_wait')
+        if isinstance(lab_wait, dict) and lab_wait.get('hold'):
+            continue  # LAB_WAIT_20261008: sweep_lab_waits answers it; it is not this turn's work
         if human_wait and not (context.get('owner_guidance') or context.get('human_reply')):
             continue
         pending.append({'id':row['id'],'question':row['question'],'last_response':row['answer'],
                         'recovery':context.get('maintenance_recovery')})
-    if not pending:
+    if not pending or not _principal_window_open(receipt.get('delivery_id'), task_id):
         return None
     return ('[NFOS: this Principal turn still owns unfinished decisions. Continue in this SAME turn/session '
             'and its remaining budget; an explanatory answer is not execution.\n'

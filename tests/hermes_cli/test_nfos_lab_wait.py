@@ -198,3 +198,50 @@ def test_twelve_hours_in_queue_or_unreadable_receipt_go_to_the_principal_once(bo
                                                  (task.id,))]
             assert len(requested) == 1
         assert delivery.sweep_lab_waits(conn) == [], "a escalada acontece uma vez"
+
+
+def _wake(board, task_id, delivery_id):
+    return {"db_path": str(board / "kanban.db"), "principal_task_id": task_id, "delivery_id": delivery_id}
+
+
+def _escalated_wait(conn, n, receipt):
+    task = _card(conn, n)
+    decision_id = delivery.lab_wait(conn, task.id, task.current_run_id, receipt)["decision_id"]
+    _shift(conn, decision_id, since=int(time.time()) - delivery.LAB_WAIT_ESCALATE_SECONDS - 60)
+    assert (decision_id, "escalated") in delivery.sweep_lab_waits(conn)
+    return task, decision_id
+
+
+def test_held_lab_wait_does_not_hold_the_principal_turn_until_it_escalates(board, broker):
+    """PRINCIPAL_TURN_BOUND_20261009: em 09/10, das 18:26 às 19:09 UTC, o turno do Principal acordado pelo t_8ed13ed7 ficou esperando
+    a espera do laboratório (dec_1d51bb77) com 43 cutucões e o quadro inteiro parou. A espera é do runtime, não do turno."""
+    from agent import kanban_stop
+    with kb.connect_closing() as conn:
+        task = _card(conn, 40)
+        out = delivery.lab_wait(conn, task.id, task.current_run_id, RECEIPT)
+    assert kanban_stop._principal_continuation(_wake(board, task.id, "wake-lab-1")) is None
+    with kb.connect_closing() as conn:
+        _shift(conn, out["decision_id"], since=int(time.time()) - delivery.LAB_WAIT_ESCALATE_SECONDS - 60)
+        assert (out["decision_id"], "escalated") in delivery.sweep_lab_waits(conn)
+    nudge = kanban_stop._principal_continuation(_wake(board, task.id, "wake-lab-2"))
+    assert nudge and out["decision_id"] in nudge, "escalada, a decisão volta a ser do Principal e o turno continua nela"
+
+
+def test_principal_continuation_is_bounded_per_wake(board, broker, monkeypatch):
+    """PRINCIPAL_TURN_BOUND_20261009: o Principal é uma sessão só. Um despertar segura o turno por tempo limitado; depois a decisão
+    continua pendente e volta para a fila justa, em vez de parar os outros cards e pagar uma chamada de contexto cheio por cutucão."""
+    from agent import kanban_stop
+    clock = [1000.0]
+    monkeypatch.setattr(kanban_stop, "_now", lambda: clock[0])
+    with kb.connect_closing() as conn:
+        task, decision_id = _escalated_wait(conn, 41, "t-limite1-p6")
+    wake = _wake(board, task.id, "wake-limite-1")
+    assert decision_id in kanban_stop._principal_continuation(wake)
+    clock[0] += kanban_stop._PRINCIPAL_CONTINUATION_SECONDS - 1
+    assert kanban_stop._principal_continuation(wake), "dentro da janela o turno continua"
+    clock[0] += 2
+    assert kanban_stop._principal_continuation(wake) is None, "passada a janela, o turno pode encerrar"
+    with kb.connect_closing() as conn:
+        assert delivery.get_decision(conn, decision_id)["status"] == "pending"
+        assert decision_id in [d["id"] for d in delivery.pending_decisions(conn)], "a decisão segue na fila do Principal"
+    assert kanban_stop._principal_continuation(_wake(board, task.id, "wake-limite-2")), "o próximo despertar tem a própria janela"
