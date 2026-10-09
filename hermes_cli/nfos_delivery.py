@@ -3222,15 +3222,23 @@ LAB_TRANSPORT_DOWN_EXIT = 255
 
 
 def _lab_transport_up(timeout=LAB_WAIT_READ_TIMEOUT_SECONDS):
-    """O canal do laboratório executa? `concursa-lab status` sai com 255 quando o SSH não executa (o "indisponivel" que o worker
-    vê) e com 0 ou 1 quando executa (1 só diz que a página de login ainda não respondeu). None quando não deu para saber."""
+    """O laboratório executa? Só quando o programa de `concursa-lab status` rodou lá e devolveu o JSON dele (saída 0 ou 1; 1 só
+    diz que a página de login ainda não respondeu). Saída 255 (o "indisponivel": SSH sem execução, "exec request failed on
+    channel 0") ou status sem o JSON (o shell remoto não criou o processo, como no contêiner sem PID de 09/10) é fora do ar.
+    None quando não deu para saber."""
     import subprocess
     exe = os.environ.get('NFOS_CONCURSA_LAB') or '/usr/local/bin/concursa-lab'
     try:
         done = subprocess.run([exe, 'status'], capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
-    return done.returncode != LAB_TRANSPORT_DOWN_EXIT
+    if done.returncode == LAB_TRANSPORT_DOWN_EXIT:
+        return False
+    try:
+        report = json.loads((done.stdout or '').strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return False
+    return isinstance(report, dict) and isinstance(report.get('services'), dict)
 
 
 def lab_transport_wait_question(reason=''):

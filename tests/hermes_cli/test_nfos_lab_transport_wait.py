@@ -255,6 +255,39 @@ def test_existing_repair_obligation_becomes_the_wait_when_the_pause_waits_for_th
     assert len(_pause_wait(conn, task)) == 1, "a conversão acontece uma vez"
 
 
+@pytest.mark.parametrize("returncode,stdout,expected", [
+    (0, '{"scope": "Concursa-Isolado", "services": {"web": {"http": 200}, "admin": {"http": 200}}}\n', True),
+    (1, '{"scope": "Concursa-Isolado", "services": {"web": {"error_type": "URLError"}, "admin": {"http": 200}}}\n', True),
+    (255, "", False),
+    (1, "", False),
+    (126, "bash: fork: retry: Resource temporarily unavailable\n", False),
+])
+def test_lab_counts_as_up_only_when_its_status_program_ran(monkeypatch, returncode, stdout, expected):
+    """09/10/2026: o sshd aceitava a conexão e o contêiner de controle, sem PID livre, não criava o processo. No ar é o
+    programa de status ter rodado lá e devolvido o JSON dele; 255 ou saída sem o JSON é fora do ar."""
+    import subprocess
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs.get("timeout")))
+        return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setenv("NFOS_CONCURSA_LAB", "/opt/fake/concursa-lab")
+    assert delivery._lab_transport_up(timeout=7) is expected
+    assert calls == [(["/opt/fake/concursa-lab", "status"], 7)]
+
+
+def test_lab_without_an_answer_is_unknown(monkeypatch):
+    import subprocess
+
+    def run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert delivery._lab_transport_up(timeout=1) is None
+
+
 def test_pause_refuses_an_unknown_resume_condition(running):
     conn, task, _, _, args = running
     with pytest.raises(delivery.WorkflowError, match="resume_when"):
