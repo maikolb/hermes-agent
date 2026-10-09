@@ -18,11 +18,53 @@ def maintenance_pause_pending(conn, task_id):
                         (task_id,)).fetchone() is not None
 
 
+# LAB_TRANSPORT_WAIT_20261009: a pausa cuja causa é o laboratório fora do ar volta quando ele responder, sem o Principal.
+# Antes ela virava "Execute o reparo desta pausa", que o Principal não alcança (PC, WSL ou túnel do laboratório): cada
+# resposta voltava a pendente e o lembrete o acordava a cada 15 min por card (09/10/2026, seis cards do Concursa).
+RESUME_WHEN = ('lab_available',)
+
+
+def _lab_wait_decision(conn, row, pause, identity, accumulated):
+    """Decisão de espera do laboratório para a pausa: segura o card sem lembrete nem turno do Principal até o laboratório
+    responder (sweep_lab_waits encerra a pausa e responde) e só vai ao Principal depois de 12 h. Leva a mesma obrigação
+    maintenance_recovery da pausa, para resposta explicativa não deixar o trabalho retido órfão. Obrigação de reparo
+    pendente da mesma pausa sai como superseded, com o vínculo para esta espera."""
+    wid = 'dec_' + hashlib.sha256(delivery._json(['maintenance-lab-wait', identity]).encode()).hexdigest()[:24]
+    if delivery.get_decision(conn, wid):
+        return
+    now = int(time.time())
+    reason = pause.get('reason') or 'Laboratório fora do ar.'
+    superseded = []
+    for old in conn.execute("SELECT id,context FROM nfos_decisions WHERE task_id=? AND status='pending' "
+                            "AND json_extract(context,'$.maintenance_recovery.pause_run_id')=?",
+                            (row['task_id'], row['id'])).fetchall():
+        old_context = json.loads(old['context'] or '{}')
+        old_context.update(superseded_by=wid, superseded_reason='lab_transport_wait')
+        conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=? AND status='pending'",
+                     (delivery._json(old_context), old['id']))
+        superseded.append(old['id'])
+    context = dict(
+        lab_wait=dict(kind='transport', hold=True, since=now, checked_at=None, next_check_at=now,
+                      status='indisponivel', pause_run_id=row['id']),
+        maintenance_recovery=dict(pause_run_id=row['id'], reason=reason, resume_route='lab_available',
+                                  budget_mode='accumulated_escalation' if accumulated else 'per_run'))
+    question = (delivery.lab_transport_wait_question() + ' Quando o laboratório responder, o runtime encerra a pausa '
+                + str(row['id']) + ' e devolve o card à fila no mesmo checkpoint. Causa registrada na pausa: ' + reason)
+    conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) "
+                 "VALUES(?,?,?,'impediment',?,?,?,?)",
+                 (wid, row['task_id'], row['id'], question, delivery._json(context), row['spec_revision'], now))
+    conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',
+                 ('Laboratório fora do ar: o card volta sozinho quando ele responder. Causa: ' + reason, now, row['task_id']))
+    kb._append_event(conn, row['task_id'], 'nfos_lab_wait', dict(decision_id=wid, transport=True, status='indisponivel',
+                     source='maintenance_pause', pause_run_id=row['id'], superseded=superseded), run_id=row['id'])
+
+
 def reconcile_maintenance_recovery(conn):
     """Keep each native pause owned by the Principal until its repair receipt exists.
 
     Uses existing decisions/wakes, never a second task or a speculative worker retry.
     Reconciles legacy pauses too; explanatory answers cannot orphan the retained work.
+    A pause that resumes when the lab answers (resume_when) waits natively instead (LAB_TRANSPORT_WAIT_20261009).
     """
     from hermes_cli.nfos_principal_review import worker_escalation
     with kb.write_txn(conn, allow_nested=True):
@@ -48,6 +90,9 @@ def reconcile_maintenance_recovery(conn):
                                  "author='NFOS automation',resolved_at=? WHERE id=?", (answer, int(time.time()), obligation['id']))
                     kb._append_event(conn, row['task_id'], 'nfos_maintenance_recovery_completed',
                                      dict(decision_id=obligation['id'], pause_run_id=row['id'], repaired_at=pause['repaired_at']), run_id=row['id'])
+                continue
+            if pause.get('resume_when') == 'lab_available':
+                _lab_wait_decision(conn, row, pause, identity, bool(worker_escalation(conn, row['task_id']).get('first_run_id')))
                 continue
             if decision:
                 continue
@@ -87,14 +132,19 @@ def _finish_maintenance_pause(conn, task_id, *, actor, repair_kind):
 
 
 def pause_for_repair(conn, task_id, *, expected_run_id, expected_claim, expected_pid,
-                     expected_started_at, actor, reason, apply=False):
-    """Principal maintenance pause, using Project Ops and its native exit cleanup."""
+                     expected_started_at, actor, reason, apply=False, resume_when=None):
+    """Principal maintenance pause, using Project Ops and its native exit cleanup.
+
+    resume_when='lab_available': the cause is the lab being down; the pause waits for it natively and ends by
+    itself when `concursa-lab status` answers, with no repair for the Principal (LAB_TRANSPORT_WAIT_20261009)."""
     from agent.delegation_context import is_dispatcher_owned_worker_context
     if (os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT')
             or not is_dispatcher_owned_worker_context()):
         raise delivery.WorkflowError('Only the Principal maintainer can pause for repair')
     if not actor or not reason or not expected_claim or not expected_pid or expected_started_at is None:
         raise delivery.WorkflowError('Specify actor, reason and the observed run/claim/process identity')
+    if resume_when is not None and resume_when not in RESUME_WHEN:
+        raise delivery.WorkflowError('resume_when accepts only: ' + ', '.join(RESUME_WHEN))
     identity = dict(run_id=expected_run_id, claim=expected_claim, pid=expected_pid, started_at=expected_started_at)
 
     def observed():
@@ -122,13 +172,15 @@ def pause_for_repair(conn, task_id, *, expected_run_id, expected_claim, expected
     if saved:
         return dict(saved, paused=True, already_paused=True, run_id=expected_run_id, apply=apply)
     if not apply:
-        return dict(identity=identity, actor=actor, reason=reason, paused=False, apply=False)
+        return dict(identity=identity, actor=actor, reason=reason, paused=False, apply=False, resume_when=resume_when)
     with kb.write_txn(conn):
         saved = observed()
         if saved:
             return dict(saved, paused=True, already_paused=True, run_id=expected_run_id, apply=True)
         now = time.time()
         pause = dict(identity=identity, actor=actor, reason=reason, at=now)
+        if resume_when:
+            pause['resume_when'] = resume_when
         cleanup = dict(worker_pid=expected_pid, worker_started_at=expected_started_at,
                        status='waiting', grace_seconds=15, not_before=now+15,
                        descendants_json='[]', requested_at=now)
@@ -206,6 +258,37 @@ def resume_after_repair(conn, task_id, *, pause_run_id, actor, reason, evidence,
                          dict(pause_run_id=pause_run_id, pause_sha256=digest, actor=actor, reason=reason,
                               evidence=evidence), run_id=pause_run_id)
     return dict(base, pause_sha256=digest, resumed=True, already_resumed=False)
+
+
+def lab_pause_ready(conn, task_id, pause_run_id):
+    """A pausa que espera o laboratório pode terminar agora? Só a própria pausa aberta, com o card ocioso e a saída do
+    executor anterior confirmada (o mesmo _idle do resume-after-repair). Fora disso a espera continua."""
+    row = conn.execute('SELECT metadata FROM task_runs WHERE task_id=? AND id=?', (task_id, pause_run_id)).fetchone()
+    pause = json.loads((row['metadata'] if row else None) or '{}').get('maintenance_pause')
+    if not isinstance(pause, dict) or pause.get('resume_when') != 'lab_available' or pause.get('repaired_at') is not None:
+        return None
+    try:
+        _idle(conn, task_id)
+    except delivery.WorkflowError:
+        return None
+    return pause
+
+
+def finish_lab_pause(conn, task_id, pause_run_id, *, evidence):
+    """Encerra, na transação do chamador, a pausa que esperava o laboratório (LAB_TRANSPORT_WAIT_20261009). Devolve False
+    quando ela não pode terminar agora; o card volta à fila pela varredura quando nada mais o segura."""
+    if not lab_pause_ready(conn, task_id, pause_run_id):
+        return False
+    row = conn.execute('SELECT metadata FROM task_runs WHERE task_id=? AND id=?', (task_id, pause_run_id)).fetchone()
+    metadata = json.loads(row['metadata'])
+    reason = 'O laboratório voltou a responder (concursa-lab status).'
+    metadata['maintenance_pause'].update(repaired_at=time.time(), repaired_by='NFOS automation', repair_kind='lab_available',
+                                         repair_reason=reason, repair_evidence=evidence)
+    conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (delivery._json(metadata), pause_run_id))
+    kb._append_event(conn, task_id, 'nfos_maintenance_resumed',
+                     dict(pause_run_id=pause_run_id, actor='NFOS automation', reason=reason, evidence=evidence,
+                          repair_kind='lab_available'), run_id=pause_run_id)
+    return True
 
 
 def repair_card(conn, task_id, *, board, delivery_type, expected_delivery_type,
