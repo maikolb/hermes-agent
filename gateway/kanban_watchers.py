@@ -454,6 +454,30 @@ def _coalesce_notify_events(events):
     return retained + events[-1:], [notice for notice in notices if notice]
 
 
+# PRINCIPAL_FAIR_ADMISSION_20261009: o aviso ao Principal ocupado não entra em fila (3c6418ae9e) e cada ciclo
+# oferece primeiro o card de maior prioridade (eb572f12fc). Com cards de prioridade 100 gerando decisão nova a
+# cada turno, o de prioridade menor nunca achava o Principal livre: em 08/10 o t_39e0a22e teve 12 lembretes
+# emitidos em 3 h e nenhum entregue. Aviso que espera além do limite passa na frente, do mais antigo para o mais
+# novo; abaixo do limite continua valendo a prioridade (urgente primeiro).
+PRINCIPAL_FAIR_AFTER_SECONDS = 1200
+
+
+def _admission_order(deliveries, now=None):
+    """Ordem de oferta ao Principal: espera vencida primeiro (a mais antiga antes), depois a prioridade."""
+    now = time.time() if now is None else now
+
+    def key(item):
+        stamps = [float(getattr(ev, "created_at", 0) or 0) for ev in item.get("events") or []]
+        stamps = [stamp for stamp in stamps if stamp > 0]
+        waited = now - min(stamps) if stamps else 0.0
+        priority = int(getattr(item.get("task"), "priority", 0) or 0)
+        if waited >= PRINCIPAL_FAIR_AFTER_SECONDS:
+            return (0, -waited, -priority)
+        return (1, -priority, -waited)
+
+    return sorted(deliveries, key=key)
+
+
 WAKE_GROUP_RULE = (  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913: instrução e filtro alinhados
     "Regra do grupo: este turno foi acordado por notificação de kanban. "
     "Resolva pelas ferramentas (decide, kanban_comment, kanban_block). "
@@ -3408,8 +3432,9 @@ class GatewayKanbanWatchersMixin:
                     self._kanban_worker_focus_rehydrated = True
                 self._kanban_focus_apply_rows(focus_rows)
                 # Admission to a busy Principal is serial: offer urgent work first,
-                # including when its board/subscription was collected last.
-                deliveries.sort(key=lambda item: -int(getattr(item["task"], "priority", 0) or 0))
+                # including when its board/subscription was collected last. A wake
+                # waiting past PRINCIPAL_FAIR_AFTER_SECONDS goes ahead, oldest first.
+                deliveries = _admission_order(deliveries)
                 for d in deliveries:
                     sub = d["sub"]
                     task = d["task"]
