@@ -36,8 +36,30 @@ _DEFAULT_MAX_ATTEMPTS = 2
 # decisions stay pending and go back to the fair notify queue, instead of
 # stalling every other card and paying a full-context call per nudge.
 _PRINCIPAL_CONTINUATION_SECONDS = 20 * 60
+# Nudges answered in a row with a plain final (no tool call): the model is not
+# going to act in this turn (09/10: 490 of 538 nudges answered "[SILENT]").
+_PRINCIPAL_MAX_IDLE_NUDGES = 3
+_PRINCIPAL_NUDGE_PREFIX = '[NFOS: this Principal turn still owns unfinished decisions.'
 _principal_wakes: dict[tuple[str, str], float] = {}
 _now = time.monotonic
+
+
+def _idle_nudges(messages) -> int:
+    """Trailing continuation nudges answered without any tool call, the current reply included."""
+    msgs = list(messages or [])
+    count, i = 0, len(msgs) - 1
+    while i >= 0:
+        nudge = msgs[i]
+        if not (isinstance(nudge, dict) and nudge.get('role') == 'user'
+                and (nudge.get('_kanban_stop_synthetic')
+                     or str(nudge.get('content') or '').startswith(_PRINCIPAL_NUDGE_PREFIX))):
+            break
+        count += 1
+        final = msgs[i - 1] if i >= 1 else None
+        if not (isinstance(final, dict) and final.get('role') == 'assistant' and not final.get('tool_calls')):
+            break
+        i -= 2
+    return count
 
 
 def _principal_window_open(delivery_id, task_id) -> bool:
@@ -91,7 +113,7 @@ def _principal_continuation(receipt):
                         'recovery':context.get('maintenance_recovery')})
     if not pending or not _principal_window_open(receipt.get('delivery_id'), task_id):
         return None
-    return ('[NFOS: this Principal turn still owns unfinished decisions. Continue in this SAME turn/session '
+    return (_PRINCIPAL_NUDGE_PREFIX + ' Continue in this SAME turn/session '
             'and its remaining budget; an explanatory answer is not execution.\n'
             f'Board database: {receipt["db_path"]}; card: {task_id}. Pending: '+json.dumps(pending,ensure_ascii=False)+'\n'
             'Execute the next authorized administrative action now through the existing tools. For a busy lock/exit75, '
@@ -161,7 +183,12 @@ def build_kanban_stop_nudge(
     already completed/blocked, or nudge budget exhausted).
     """
     if not kanban_stop_nudge_enabled():
-        return _principal_continuation(principal_receipt)
+        nudge = _principal_continuation(principal_receipt)
+        if nudge and _idle_nudges(messages) >= _PRINCIPAL_MAX_IDLE_NUDGES:
+            logger.warning('principal continuation released after %d nudges answered without a tool call',
+                           _PRINCIPAL_MAX_IDLE_NUDGES)
+            return None
+        return nudge
     if attempts >= max_attempts:
         return None
     if session_called_kanban_terminal(messages):
