@@ -4693,6 +4693,14 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             escalate_rework(conn, row, assessment)
         context = json.loads(get_decision(conn, decision_id)['context'])
         previous_public = context.get('public_message')
+        # PUBLIC_MESSAGES_20261009 (Maikol: "tá dando feedback demais ao operador. Isso está errado e gastando cota"): o
+        # retorno de andamento escrito pelo Principal não vai ao Balcão; fica num evento interno. A resposta do solicitante
+        # recebe só a confirmação curta automática abaixo; pergunta ao solicitante e entrega seguem publicadas.
+        if isinstance(public_message, dict) and public_message.get('kind') == 'update':
+            _event(conn, row['task_id'], row['run_id'], 'nfos_public_update_suppressed',
+                   {'decision_id': decision_id, 'text': str(public_message.get('text') or '')[:1000]})
+            public_message = None
+        published = False
         if public_message is not None and previous_public:
             context.setdefault('public_message_history', []).append(previous_public)
         if action == 'human' and context.get('human_reply'):
@@ -4708,11 +4716,14 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             if (public_message['kind'] == 'question') != (action == 'human'):
                 raise WorkflowError('A public question requires a human decision')
             context['public_message'] = {key:public_message[key] for key in ('kind','text','to') if key in public_message}
+            published = True
         elif (context.get('human_reply', {}).get('source') or {}).get('platform') == 'portal' and action in {'continue','changes'}:
             if previous_public:
                 context.setdefault('public_message_history', []).append(previous_public)
             context['public_message'] = {'kind':'update','text':'Sua resposta foi analisada pela equipe. O atendimento foi encaminhado para continuação.'}
-        if context.get('public_message'):
+            published = True
+        if published:
+            # Só mensagem nova ganha hora: a herdada mantém a dela e não volta ao Balcão como se fosse nova.
             context['public_message']['created_at'] = int(time.time())
         conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(context), decision_id))
         conn.execute('UPDATE nfos_decisions SET status=?,answer=?,author=?,action=?,resolved_at=? WHERE id=?',
@@ -4809,7 +4820,10 @@ def reconsider_decision(conn, decision_id, *, action, reason, answer, author='Pr
                 or previous_runs_termination_pending(conn,task.id)):
             raise OwnershipConflict('Confirm the previous run and its children finished termination before reconsidering')
         now=int(time.time())
-        context={k:v for k,v in old_context.items() if k not in {'human_reply','superseded_by'}}
+        # PUBLIC_MESSAGES_20261009: a mensagem pública fica na decisão substituída, que o Balcão continua mostrando;
+        # copiada para a sucessora, a mesma pergunta aparecia duas vezes ao operador.
+        context={k:v for k,v in old_context.items()
+                 if k not in {'human_reply','superseded_by','public_message','public_message_history'}}
         context.update(supersedes=decision_id,reconsideration_reason=reason,
             reconsideration_identity=identity,
             workflow_at_reconsideration={'stage':wf['stage'],'next_action':wf['next_action'],

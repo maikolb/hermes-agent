@@ -894,8 +894,11 @@ Resolve closure through the approved destination and reuse existing evidence. In
 spec/final review is your responsibility and requires no new human confirmation. A `human` resolution is valid only with human_question (ending with ?) and human_to in the decide JSON; a technical pause is `continue` or `changes`, never `human`.
 Portal tickets: a saved human_reply is information for YOUR analysis, not an approval
 or an instruction to ask the same question again. Read it, resolve continue/changes,
-and let the retained worker continue. Provide public_message={kind:"update",text:"..."}
-with a concise client-facing acknowledgment and next action. Internal reasoning stays
+and let the retained worker continue. Do not write public updates: the support desk
+already shows the ticket status and acknowledges the requester's answer by itself, and a
+public_message of kind "update" is not published. public_message is only for a question
+the requester must answer (kind "question" with action human) or the data delivery
+(kind "delivery"). Internal reasoning stays
 in answer, never in public_message or human_question. Name the requester in human_to
 only for questions they must answer. When the requester's own data or result is corrected and
 checked before the root cause (the project's data-first step), resolve that decision with
