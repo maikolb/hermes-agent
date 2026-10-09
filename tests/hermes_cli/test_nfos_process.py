@@ -109,7 +109,29 @@ def test_domain_routing_uses_real_card_revision_and_candidate(card, tmp_path):
                          created_by='fixture', approve_as=('fixture', 'synthetic'))
     policy(pw, 'enforce')
     store.bind('concursa-ai', task.id, by='fixture')
-    candidate = 'a' * 40
+    # Worktree real do card: na rota curta o motor lê o diff da candidata contra a base antes de publicar.
+    import subprocess
+    repo = tmp_path / 'worktree'
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True, check=True).stdout.strip()
+
+    git('init', '-q')
+    git('config', 'user.email', 'fixture@example.com')
+    git('config', 'user.name', 'fixture')
+    (repo / 'README.md').write_text('base', encoding='utf-8')
+    git('add', '.')
+    git('commit', '-qm', 'base')
+    base = git('rev-parse', 'HEAD')
+    (repo / 'apps').mkdir()
+    (repo / 'apps' / 'receiver.tsx').write_text('receiver', encoding='utf-8')
+    git('add', '.')
+    git('commit', '-qm', 'receiver')
+    candidate = git('rev-parse', 'HEAD')
+    conn.execute('UPDATE tasks SET workspace_path=? WHERE id=?', (str(repo), task.id))
+    conn.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,'worktree_creation_requested',?,1)",
+                 (task.id, json.dumps({'base_sha': base})))
     conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?',
                  (json.dumps({'candidate_sha': candidate}), task.id))
     conn.commit()
