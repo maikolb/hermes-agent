@@ -2343,7 +2343,40 @@ def sweep_awaiting_principal(conn):
                     freed.append(r[0])
     except Exception:
         pass
+    # TRANSIENT_CONTINUE_20261009: retenção transient que o Principal liberou com continue/changes depois do bloqueio.
+    for (task_id,) in conn.execute("SELECT id FROM tasks WHERE status='blocked' AND block_kind='transient'").fetchall():
+        try:
+            if _transient_released_by_principal(conn, task_id) and _kb().unblock_task(conn, task_id):
+                freed.append(task_id)
+        except Exception:
+            continue
     return freed
+
+
+def _transient_released_by_principal(conn, task_id):
+    """Card retido em transient cuja decisão o Principal resolveu com continue ou changes depois do último bloqueio.
+
+    resolve_decision só devolve à fila a adoção legada, e a varredura acima só olha awaiting_principal: o t_d8699d5f
+    (09/10/2026) ficou blocked das 00:49 às 04:14 com o CONTINUE das 00:57 ("a retenção técnica já foi efetivada e agora
+    sua precondição foi removida"). A resposta dada depois do bloqueio é a liberação. Ficam de fora a espera do destino,
+    em que continue mantém a espera por desenho, a pausa de manutenção e qualquer decisão ainda aberta (a espera do
+    laboratório é uma delas)."""
+    from hermes_cli.nfos_workspace_repair import maintenance_pause_pending
+    if maintenance_pause_pending(conn, task_id):
+        return False
+    if conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human') LIMIT 1", (task_id,)).fetchone():
+        return False
+    wf = get_workflow(conn, task_id)
+    task = _kb().get_task(conn, task_id)
+    if not wf or not task:
+        return False
+    if (json.loads(wf['state_json'] or '{}') or {}).get('destination_wait') or _orphan_destination_wait(conn, task):
+        return False
+    blocked_at = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected')",
+                              (task_id,)).fetchone()[0]
+    return bool(blocked_at and conn.execute(
+        "SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='resolved' AND action IN ('continue','changes') AND resolved_at>=? LIMIT 1",
+        (task_id, blocked_at)).fetchone())
 
 
 # ---------------------------------------------------------------------------------------------------------------------
