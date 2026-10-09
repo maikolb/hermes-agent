@@ -897,7 +897,11 @@ or an instruction to ask the same question again. Read it, resolve continue/chan
 and let the retained worker continue. Provide public_message={kind:"update",text:"..."}
 with a concise client-facing acknowledgment and next action. Internal reasoning stays
 in answer, never in public_message or human_question. Name the requester in human_to
-only for questions they must answer. The final report uses public_delivery={summary,links}
+only for questions they must answer. When the requester's own data or result is corrected and
+checked before the root cause (the project's data-first step), resolve that decision with
+public_message={kind:"delivery",text:"..."}: it tells the requester what was corrected and
+releases the support ticket to them, while this card continues the cause internally. Use it
+once per delivery, never for internal progress. The final report uses public_delivery={summary,links}
 for the usable result; never include internal logs, models, credits, PRs or paths there.
 Sineta triage approval only creates a TODO ticket. Execution approval is separate.
 Reopened support tickets return to TODO for a new approval. Neither an ordinary reply

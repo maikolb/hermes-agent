@@ -4564,7 +4564,9 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
             context.setdefault('human_reply_history', []).append(context.pop('human_reply'))
             context.pop('support_resume_applied_at', None)
         if public_message is not None:
-            if (not isinstance(public_message, dict) or public_message.get('kind') not in {'question','update'}
+            # STUDENT_DELIVERY_20261009 (Maikol, 09/10/2026: "primeiro a correção e entrega do dado para o aluno ficar
+            # feliz e liberar o cs"): delivery é a entrega ao solicitante; o Balcão libera o chamado e a causa segue no card.
+            if (not isinstance(public_message, dict) or public_message.get('kind') not in {'question','update','delivery'}
                     or not isinstance(public_message.get('text'), str) or not public_message['text'].strip()
                     or len(public_message['text']) > 4000):
                 raise WorkflowError('Public message needs kind and client-facing text of at most 4000 characters')
