@@ -235,7 +235,7 @@ def test_a_step_applies_once_even_when_two_ticks_read_the_same_wait(board, broke
         from hermes_cli import nfos_waits as registry
         check, raced, inner = registry._decision_resolved, [], []
 
-        def racing_check(conn_, wait):
+        def racing_check(conn_, wait, budget=None):
             if not raced:  # outro tick aplica o mesmo passo enquanto este ainda confere
                 raced.append(True)
                 inner.append(registry.step(conn_, wait["id"], now=now))

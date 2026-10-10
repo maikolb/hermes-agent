@@ -148,14 +148,34 @@ def known_decision(conn, decision_id):
     return _table(conn) and conn.execute('SELECT 1 FROM nfos_waits WHERE decision_id=? LIMIT 1', (decision_id,)).fetchone() is not None
 
 
+def public(predicate):
+    """O predicado como ele sai da tabela: em evento, contexto de decisão, recibo de reparo e `show`. A sonda sai só com o
+    tipo e o alvo; cabeçalho, consulta, caminho e resultado esperado ficam na linha da espera, que é quem a executa."""
+    if predicate.get('kind') != 'probe':
+        return predicate
+    probe = predicate.get('probe') or {}
+    target = 'sql' if probe.get('kind') == 'sql' else _delivery()._host_of(probe.get('url'))
+    return {'kind': 'probe', 'probe': {'kind': probe.get('kind'), 'target': target}}
+
+
+# O que a conferência observou e pode sair da tabela. Texto de erro de sonda fica só na linha da espera.
+PUBLIC_EVIDENCE = ('card_status', 'completed_at', 'effect_id', 'candidate', 'probe_state', 'http_status', 'lab', 'answered',
+                   'status', 'queue_reason', 'decision_status', 'action', 'expired_because', 'unreadable', 'checked_at')
+
+
+def public_evidence(evidence):
+    return {key: evidence[key] for key in PUBLIC_EVIDENCE if key in evidence}
+
+
 def card_waits(conn, task_id, closed=5):
-    """Esperas do card para o `show`: todas as abertas e as últimas encerradas."""
+    """Esperas do card para o `show`: todas as abertas e as últimas encerradas, com o predicado e a evidência públicos."""
     if not _table(conn):
         return []
     rows = conn.execute("SELECT * FROM nfos_waits WHERE task_id=? AND status='open' ORDER BY created_at,id", (task_id,)).fetchall()
     rows += conn.execute("SELECT * FROM nfos_waits WHERE task_id=? AND status<>'open' ORDER BY closed_at DESC,id LIMIT ?",
                          (task_id, closed)).fetchall()
-    return [_decode(row) for row in rows]
+    waits = [_decode(row) for row in rows]
+    return [dict(wait, predicate=public(wait['predicate']), evidence=public_evidence(wait['evidence'])) for wait in waits]
 
 
 def episode(conn, task_id):
@@ -285,7 +305,9 @@ def declare(conn, task_id, run_id, *, reason, executor, predicate, decision_id=N
         if _same(conn, task_id, reason, predicate, EXPIRED, round_):
             raise d.WorkflowError(refusal(conn, task_id, reason=reason, predicate=predicate))
         if predicate['kind'] == 'card':
-            if not d._kb().get_task(conn, predicate['task_id']):
+            target = d._kb().get_task(conn, predicate['task_id'])
+            # O tenant separa negócios dentro do mesmo quadro: um card não lê o andamento do card de outro.
+            if not target or target.tenant != d._kb().get_task(conn, task_id).tenant:
                 raise d.WorkflowError(f"card {predicate['task_id']} does not exist on this board")
             if card_cycle(conn, task_id, predicate['task_id']):
                 raise d.WorkflowError(
@@ -308,7 +330,7 @@ def declare(conn, task_id, run_id, *, reason, executor, predicate, decision_id=N
                       d._json(evidence or {}), min(first, deadline), deadline, int(attempts), int(spec['max_attempts']),
                       decision_id, d._json(saved), started, started))
         d._event(conn, task_id, run_id, 'nfos_wait_declared',
-                 {'wait_id': wait_id, 'reason': reason, 'executor': executor, 'predicate': predicate,
+                 {'wait_id': wait_id, 'reason': reason, 'executor': executor, 'predicate': public(predicate),
                   'decision_id': decision_id, 'deadline_at': deadline, 'max_attempts': int(spec['max_attempts'])})
         return get(conn, wait_id)
 

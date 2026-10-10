@@ -116,8 +116,15 @@ def reconcile_maintenance_recovery(conn):
                         'a causa for o vínculo; nos demais casos use ' + route + ' dry-run/apply para a pausa ' + str(row['id']) + '. '
                         'Não invente escalonamento nem reinicie saldo: este card usa ' + context['maintenance_recovery']['budget_mode'] + '. '
                         'Não relance o worker para esperar o mesmo reparo. Se o reparo depende de algo fora das suas ferramentas '
-                        'autorizadas, não repita a explicação: responda esta decisão uma vez com "dependency":{"owner":"quem '
-                        'entrega","need":"o que falta"} no JSON do decide; a pausa espera sem lembrete e volta para você '
+                        'autorizadas, não repita a explicação: responda esta decisão uma vez com "dependency":{"executor":'
+                        '{"kind":"lab|card|external|operator","name":"quem entrega"},"need":"o que falta","check":{...}} no '
+                        'JSON do decide. check é o fato que o runtime confere sozinho a cada 5 min: {"kind":"card","task_id":'
+                        '"t_..."} para outro card deste quadro, {"kind":"probe","probe":{sonda sql/http/header como a de um '
+                        'critério}}, {"kind":"lab_status","services":["web"]} para os apps do laboratório que o card usa, ou '
+                        '{"kind":"lab_receipt","receipt":"id do pedido"}. Quando o fato fica verdadeiro o runtime encerra a pausa '
+                        'e devolve o card à fila sem acordar você; em 24 h sem ele a decisão volta para você uma vez. Sem fato '
+                        'conferível por código, "dependency":{"owner":"quem entrega","need":"o que falta"} espera sem lembrete '
+                        'e volta para você '
                         'reconferir em 1 h (depois 2, 4 e 6 h na mesma pausa); "recheck_hours" de 1 a 24 só quando você sabe '
                         'a hora em que o fato muda. Quem entrega não é você nem a engenharia deste projeto: o que só vocês '
                         'fariam, ou uma autorização que este projeto não pergunta ao dono, não é reparo nem dependência, e o card '
@@ -306,11 +313,21 @@ def finish_lab_pause(conn, task_id, pause_run_id, *, evidence):
     return True
 
 
-def finish_dependency_pause(conn, task_id, pause_run_id, *, evidence):
+def finish_dependency_pause(conn, task_id, pause_run_id, *, wait_id, evidence):
     """Encerra, na transação do chamador, a pausa cuja dependência declarada foi entregue (DEPENDENCY_BY_FACT_20261010): o
     fato que o Principal declarou foi conferido pelo runtime, e essa conferência é o recibo do reparo. Devolve False quando
     ela não pode terminar agora (card ocupado ou saída do executor anterior não confirmada, o mesmo _idle do
-    resume-after-repair); pausa de saldo nunca termina por aqui. Pausa já encerrada por outra rota conta como encerrada."""
+    resume-after-repair); pausa de saldo nunca termina por aqui. Pausa já encerrada por outra rota conta como encerrada.
+
+    Só o runtime chama, e só para a pausa de uma espera de dependência que o registro acabou de dar como satisfeita: um
+    worker não encerra pausa por aqui, e pausa sem dependência conferida segue com o reparo do Principal."""
+    if os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT'):
+        raise delivery.WorkflowError('Only the runtime ends a pause on a delivered dependency')
+    from hermes_cli import nfos_waits
+    wait = nfos_waits.get(conn, wait_id)
+    if (not wait or wait['task_id'] != task_id or wait['reason'] != 'external_dependency' or wait['status'] != nfos_waits.SATISFIED
+            or wait['origin'].get('pause_run_id') != pause_run_id):
+        raise delivery.WorkflowError('A pause ends this way only on its own dependency, verified by the wait registry')
     row = conn.execute('SELECT metadata FROM task_runs WHERE task_id=? AND id=?', (task_id, pause_run_id)).fetchone()
     metadata = json.loads((row['metadata'] if row else None) or '{}')
     pause = metadata.get('maintenance_pause')

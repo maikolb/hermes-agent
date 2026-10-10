@@ -3560,16 +3560,17 @@ def _declare_dependency_wait(conn, row, decision_id, context, declared, recovery
                               predicate=declared['check'], decision_id=decision_id, subject=declared['need'], now=now,
                               origin={'pause_run_id': recovery['pause_run_id']})
     # A decisão guarda o que foi declarado e segue fora da fila e do turno do Principal (hold); o relógio é do registro.
+    check = nfos_waits.public(wait['predicate'])  # a sonda inteira fica só na linha da espera
     context['lab_wait'] = {'kind': 'dependency', 'hold': True, 'since': now, 'until': wait['deadline_at'], 'wait_id': wait['id'],
                            'owner': wait['executor']['name'], 'need': declared['need'], 'executor': wait['executor'],
-                           'check': wait['predicate'], 'pause_run_id': recovery['pause_run_id']}
+                           'check': check, 'pause_run_id': recovery['pause_run_id']}
     until = time.strftime('%d/%m %H:%MZ', time.gmtime(wait['deadline_at']))
     waiting = (f"Pausa esperando dependência: {declared['need']} (quem entrega: {wait['executor']['name']}). O runtime confere o "
                f"fato declarado a cada 5 min e devolve o card à fila sozinho quando ele for verdadeiro; prazo final {until}.")
     conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (waiting[:400], now, row['task_id']))
     _event(conn, row['task_id'], row['run_id'], 'nfos_maintenance_dependency_declared',
            {'decision_id': decision_id, 'pause_run_id': recovery['pause_run_id'], 'owner': wait['executor']['name'],
-            'need': declared['need'], 'until': wait['deadline_at'], 'executor': wait['executor'], 'check': wait['predicate'],
+            'need': declared['need'], 'until': wait['deadline_at'], 'executor': wait['executor'], 'check': check,
             'wait_id': wait['id']})
 
 
@@ -3613,10 +3614,10 @@ def _dependency_delivered(conn, wait, evidence, now):
     row = get_decision(conn, wait['decision_id'])
     context = json.loads(row['context'] or '{}') or {}
     stamp = time.strftime('%d/%m %H:%MZ', time.gmtime(now))
-    seen = {key: value for key, value in evidence.items() if key not in ('checked_at', 'unreadable', 'not_ready')}
-    proof = [f"dependência conferida pelo runtime em {stamp}: {_json(wait['predicate'])[:300]} -> {_json(seen)[:300]}",
+    seen = {key: value for key, value in nfos_waits.public_evidence(evidence).items() if key not in ('checked_at', 'unreadable')}
+    proof = [f"dependência conferida pelo runtime em {stamp}: {_json(nfos_waits.public(wait['predicate']))[:300]} -> {_json(seen)[:300]}",
              f"espera {wait['id']}, decisão {row['id']}"]
-    if not finish_dependency_pause(conn, wait['task_id'], wait['origin'].get('pause_run_id'), evidence=proof):
+    if not finish_dependency_pause(conn, wait['task_id'], wait['origin'].get('pause_run_id'), wait_id=wait['id'], evidence=proof):
         raise nfos_waits.NotYet
     context['lab_wait'] = dict(context.get('lab_wait') or {}, hold=False, status='entregue', released_at=now)
     conn.execute("UPDATE nfos_decisions SET context=? WHERE id=? AND status='pending'", (_json(context), row['id']))
