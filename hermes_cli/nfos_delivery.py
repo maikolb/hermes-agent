@@ -4574,19 +4574,22 @@ def card_calls(conn, task_id, limit=0):
     """SHOW_CALLS_LIMIT_20261010: com limite, o show devolve as chamadas nativas que ainda importam, não todas.
 
     Em 10/10/2026, com o limite das decisões já no ar, o show do t_8ed13ed7 ainda tinha 273 KB: 143 KB eram native_calls,
-    com 151 chamadas. Com limite ficam as ``limit`` mais recentes e toda chamada ainda em execução (o recibo que o worker
+    com 151 chamadas. Com limite ficam as ``limit`` mais recentes e toda chamada sem desfecho (o recibo que o worker
     precisa ler antes de tentar de novo); o resto se lê por id (ação call). Sem limite (0, o padrão) devolve tudo, como
-    antes. Devolve as linhas e, quando cortou algo, o resumo do corte."""
-    from hermes_cli.nfos_tool import read_calls
+    antes. Devolve as linhas e, quando cortou algo, o resumo do corte.
+
+    SHOW_CALLS_ACTIVE_20261010: sem desfecho é o ``ACTIVE`` do nfos_tool (intent, running, stopping), não só running. A
+    chamada parada em intent ou stopping é a de efeito incerto, a que o worker mais precisa ver antes de repetir."""
+    from hermes_cli.nfos_tool import ACTIVE, read_calls
     rows = read_calls(conn, task_id)
     if not limit or limit < 0:
         return rows, None
-    keep = {row['id'] for row in rows[-limit:]} | {row['id'] for row in rows if row['status'] == 'running'}
+    keep = {row['id'] for row in rows[-limit:]} | {row['id'] for row in rows if row['status'] in ACTIVE}
     if len(keep) == len(rows):
         return rows, None
     return [row for row in rows if row['id'] in keep], {
         'total': len(rows), 'omitted': len(rows) - len(keep),
-        'hint': 'Only the most recent native calls and the ones still running are listed; older calls are not. '
+        'hint': 'Only the most recent native calls and the ones without an outcome yet are listed; older calls are not. '
                 'Read one call by id: call --call <id>. Every call of the card: show --full.'}
 
 
