@@ -3932,7 +3932,7 @@ class GatewayKanbanWatchersMixin:
                                     "por `decide`. Um worker ativo continua após sua resposta; um card migrado sem worker "
                                     "volta ao distribuidor pelo mesmo decide. Não crie outro worker "
                                     "nem encerre o card para fazer a revisão. Se resolver, use continue ou approve; "
-                                    "se depender de humano, registre human com a pergunta concreta. "
+                                    "se faltar informação de quem pediu, registre human com a pergunta a essa pessoa; o dono não é perguntado em nenhum projeto. "
                                     "Se o impedimento for orçamento esgotado, existe `grant-budget --task ID --input JSON` "
                                     "com grant_id, iterations, runtime_seconds opcional, actor, reason, expected_run_id e "
                                     "expected_instruction_revision; exige autorização existente para a concessão limitada. "

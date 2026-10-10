@@ -125,7 +125,8 @@ def requester(context, answer):
     if isinstance(public, dict):
         return str(public.get('to') or 'solicitante') if d._requester_question(public) else ''
     addressee = d._human_addressee(answer)  # pergunta antiga, sem mensagem pública: o destinatário está no texto
-    return '' if not addressee or d._OWNER_RX.search(addressee) else addressee
+    # ONE_ADDRESSEE_RULE_20261010: dono ou solicitante se decide num lugar só, pelo destinatário inteiro.
+    return addressee if addressee and d._asked_to_requester(context if isinstance(context, dict) else {}, answer) else ''
 
 
 def arm(conn, task_id, context, *, now=None):

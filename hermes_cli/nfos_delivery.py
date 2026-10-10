@@ -2588,8 +2588,18 @@ def _asked_to_requester(ctx, answer):
         return True
     if ctx.get('public_message'):
         return False
+    addressee = _prefix_addressee(answer)
+    return bool(addressee) and not _OWNER_RX.search(addressee)
+
+
+def _prefix_addressee(answer):
+    """ONE_ADDRESSEE_RULE_20261010: destinatário de uma pergunta gravada sem public_message. No formato que o decide grava
+    ("PERGUNTA para <human_to>: ...") é o destinatário inteiro, até os dois-pontos; em texto livre antigo, a primeira palavra
+    depois de "pergunta para/ao/pra" (_human_addressee). A varredura da pergunta ao dono e o prazo da pergunta ao
+    solicitante leem por aqui: com duas regras, "PERGUNTA para o dono do projeto" voltava ao Principal por uma e ganhava
+    prazo de solicitante pela outra (a que lia só a primeira palavra via "o")."""
     found = _ASKED_TO.match(str(answer or ''))
-    return bool(found) and not _OWNER_RX.search(found.group('to'))
+    return found.group('to').strip() if found else _human_addressee(answer)
 
 
 def _require_public_form(field, text, *, question=False):

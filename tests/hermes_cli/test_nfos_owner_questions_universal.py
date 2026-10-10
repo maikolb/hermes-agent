@@ -174,3 +174,19 @@ def test_open_pause_whose_obligation_nobody_owes_gets_it_again(running, monkeypa
     d.sweep_awaiting_principal(conn)
     assert _pause_obligations(conn, task, ('pending', 'human')) == [], 'pausa reparada não ganha obrigação'
     assert kb.claim_task(conn, task.id).id == task.id
+
+
+@pytest.mark.parametrize('answer, addressee', [
+    ('PERGUNTA para Jhonatan (7550030839): Qual servidor PostgreSQL separado devemos usar?', 'Jhonatan'),
+    ('Pergunta ao Jhonatan, qual servidor PostgreSQL separado devemos usar?', 'Jhonatan'),
+    ('PERGUNTA para o dono do projeto: qual conta de IA usar?', ''),
+    ('PERGUNTA para Maikol: autoriza publicar?', ''),
+    ('Diagnóstico confirmado pelo card: este card deve permanecer bloqueado.', ''),
+])
+def test_owner_sweep_and_requester_deadline_decide_owner_or_requester_by_one_rule(answer, addressee):
+    """ONE_ADDRESSEE_RULE_20261010: com duas regras, "PERGUNTA para o dono do projeto" voltava ao Principal pela varredura
+    da pergunta ao dono e ganhava prazo de solicitante pela outra, que lia só a primeira palavra do destinatário."""
+    from hermes_cli import nfos_requester_deadline as deadline
+    assert deadline.requester({}, answer) == addressee
+    assert d._asked_to_requester({}, answer) is bool(addressee)
+
