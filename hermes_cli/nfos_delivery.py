@@ -3315,8 +3315,8 @@ LAB_BUSY_EXIT = 75
 
 
 def _lab_transport_up(timeout=LAB_WAIT_READ_TIMEOUT_SECONDS):
-    """O laboratório executa? Quando o programa de `concursa-lab status` rodou lá e devolveu o JSON dele (saída 0 ou 1; 1 só
-    diz que a página de login ainda não respondeu), ou quando o laboratório respondeu "execução ocupada" (saída 75): o
+    """O laboratório atende? Quando o programa de `concursa-lab status` rodou lá e o JSON dele mostra ao menos um app
+    respondendo por HTTP (saída 0 ou 1; `_lab_apps_answer`), ou quando o laboratório respondeu "execução ocupada" (saída 75): o
     status sem tarefa disputa a trava de execução, e com outra execução em curso o canal atende e os comandos por tarefa
     rodam (09/10/2026: um card ficou 45 min na espera com o laboratório atendendo). Saída 255 (o "indisponivel": SSH sem
     execução, "exec request failed on channel 0") ou outra saída sem o JSON (o shell remoto não criou o processo, como no
@@ -3335,11 +3335,24 @@ def _lab_transport_up(timeout=LAB_WAIT_READ_TIMEOUT_SECONDS):
         report = json.loads((done.stdout or '').strip().splitlines()[-1])
     except (ValueError, IndexError):
         return False
-    return isinstance(report, dict) and isinstance(report.get('services'), dict)
+    return isinstance(report, dict) and _lab_apps_answer(report)
+
+
+def _lab_apps_answer(report):
+    """LAB_APPS_DOWN_20261010: ao menos um app do laboratório respondeu por HTTP? O programa de status grava `http` só
+    quando web ou admin responderam; sem resposta ele grava `error_type` (TimeoutError, URLError, HTTPError). Em 10/10/2026 o
+    laboratório ficou 36 min sem tráfego entre contêineres com o canal respondendo: o status trazia os dois apps em timeout,
+    a sonda contava como no ar e os workers levaram ao Principal seis impedimentos de "app não responde" em 20 min. Com os
+    dois apps sem resposta o laboratório não serve a ninguém e a espera é a mesma do canal fora do ar; um app respondendo
+    basta para contar como no ar."""
+    services = report.get('services')
+    return isinstance(services, dict) and any(isinstance(item, dict) and isinstance(item.get('http'), int)
+                                              for item in services.values())
 
 
 def lab_transport_wait_question(reason=''):
-    question = ('Laboratório fora do ar (o canal do concursa-lab não executa: PC, WSL ou túnel). Espera nativa: o runtime confere '
+    question = ('Laboratório fora do ar (o canal do concursa-lab não executa ou os apps dele não respondem: PC, WSL, túnel ou rede '
+                'interna). Espera nativa: o runtime confere '
                 '`concursa-lab status` a cada 5 min e responde esta decisão sozinho quando o laboratório voltar. Não é decisão '
                 'do Principal nem reparo a fazer daqui: quem opera o laboratório é a dependência.')
     if str(reason or '').strip():
@@ -3421,8 +3434,9 @@ def _store_lab_wait(conn, decision_id, context):
         conn.execute("UPDATE nfos_decisions SET context=? WHERE id=? AND status='pending'", (_json(context), decision_id))
 
 
-def _lab_wait_to_principal(conn, row, context, why, now):
-    """A espera sai do runtime e vai ao Principal uma vez: fila há mais de 12 h ou recibo ilegível. A decisão continua a mesma."""
+def _lab_wait_to_principal(conn, row, context, why, now, lead=''):
+    """A espera sai do runtime e vai ao Principal uma vez: fila há mais de 12 h ou recibo ilegível. A decisão continua a mesma.
+    `lead` abre o pedido que o acorda (a pergunta gravada não muda): o aviso mostra só o começo da pergunta."""
     wait = dict(context.get('lab_wait') or {}, hold=False, escalated_at=now, escalated_because=why)
     context = dict(context, lab_wait=wait)
     with _kb().write_txn(conn, allow_nested=True):
@@ -3431,8 +3445,18 @@ def _lab_wait_to_principal(conn, row, context, why, now):
         _event(conn, row['task_id'], row['run_id'], 'nfos_lab_wait_escalated', {'decision_id': row['id'], 'receipt': wait.get('receipt'),
                                                                                  'why': why})
         _event(conn, row['task_id'], row['run_id'], 'nfos_principal_requested', {'decision_id': row['id'], 'kind': row['kind'],
-                                                                                  'question': row['question'], 'lab_wait_escalated': why})
+                                                                                  'question': lead + row['question'], 'lab_wait_escalated': why})
     return 'escalated'
+
+
+def _dependency_recheck_lead(wait):
+    """DEPENDENCY_HAS_OWNER_20261010: o pedido de reconferência abre com a dependência, e não com o "Execute o reparo" de
+    sempre. Em 10/10/2026 nove pausas do Concursa esperavam dependência com prazo de 6 h; o que faltava a seis delas tinha
+    sido entregue de 1 a 6 h antes do prazo (rede do laboratório, base e PDFs) e nada no pedido dizia o que reconferir."""
+    since = time.strftime('%d/%m %H:%MZ', time.gmtime(int(wait.get('since') or 0)))
+    return (f"Reconferência de dependência declarada em {since}: {wait.get('need')} (quem entrega: {wait.get('owner')}). "
+            'Confira por fato se isso já foi entregue (sonde a capacidade, releia as instruções do projeto) antes de declarar '
+            'de novo; se foi, retome. ')
 
 
 class _LabPauseNotReady(Exception):
@@ -3507,7 +3531,8 @@ def sweep_lab_waits(conn):
                 # para reconferir. Pausa reparada antes disso: reconcile_maintenance_recovery responde a obrigação.
                 if now >= int(wait.get('until') or 0):
                     context['reminders'] = [now]  # o pedido desta volta já é o aviso; o lembrete seguinte respeita o recuo
-                    if _lab_wait_to_principal(conn, row, context, 'hora de reconferir a dependência', now):
+                    if _lab_wait_to_principal(conn, row, context, 'hora de reconferir a dependência', now,
+                                              lead=_dependency_recheck_lead(wait)):
                         out.append((row['id'], 'recheck'))
                 continue
             if wait.get('kind') == 'transport':
@@ -4269,7 +4294,8 @@ def reconcile_incomplete_reviews(conn, task_id=None):
 # eram mecânicos (36 h de card em espera) e cada classe só foi achada depois, por regex no texto da pergunta. A chave não é
 # 'cause': a deduplicação de impedimentos pendentes usa context.get('cause') e mudaria de alcance.
 IMPEDIMENT_CAUSES = {
-    'lab_transport': 'the laboratory is out of reach (concursa-lab exited 255); the native wait is lab-wait --transporte',
+    'lab_transport': ('the laboratory is out of reach (concursa-lab exited 255, or the apps of your copy time out without an HTTP '
+                      'answer); the native wait is lab-wait --transporte'),
     'lab_queue': 'the request waits in the broker queue; the native wait is lab-wait --receipt <id>',
     'lab_busy': 'the laboratory is up and busy (concursa-lab exited 75); wait and repeat the call',
     'lab_capability': 'the laboratory has no command for what the task needs',
@@ -5886,7 +5912,8 @@ def main():
     parser.add_argument('--project',default=os.environ.get('HERMES_KANBAN_BOARD'))
     parser.add_argument('--receipt',help='lab-wait: id do pedido do concursa-lab que está na fila')  # LAB_WAIT_20261008
     parser.add_argument('--transporte','--transport',dest='transport',action='store_true',
-                        help='lab-wait: laboratório fora do ar (concursa-lab saiu com 255), sem recibo')  # LAB_TRANSPORT_WAIT_20261009
+                        help='lab-wait: laboratório fora do ar (concursa-lab saiu com 255, ou apps sem resposta HTTP), '
+                             'sem recibo')  # LAB_TRANSPORT_WAIT_20261009
     parser.add_argument('--cause',choices=sorted(IMPEDIMENT_CAUSES),
                         help='ask --kind impediment: declared cause of the impediment')  # IMPEDIMENT_CAUSE_20261010
     args=parser.parse_args()

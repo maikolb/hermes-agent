@@ -44,7 +44,9 @@ def test_reminders_of_an_unrepaired_pause_back_off_with_each_answer(running, mon
     conn, task, artifact, process, args = running
     _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
     did = _obligation(conn, task)
-    assert '"dependency"' in d.get_decision(conn, did)['question'], 'a obrigação diz como declarar a dependência'
+    question = d.get_decision(conn, did)['question']
+    assert '"dependency"' in question, 'a obrigação diz como declarar a dependência'
+    assert 'Quem entrega não é você nem a engenharia deste projeto' in question and 'fecha como entrega parcial, com o resto obrigatório no card de continuação' in question
     gap = d.DECISION_REMINDER_GAP
     clock = [time.time()]
     monkeypatch.setattr(d.time, 'time', lambda: clock[0])
@@ -100,6 +102,11 @@ def test_declared_dependency_holds_the_pause_without_reminders_until_its_recheck
     runtime.reconcile_runtime(conn)
     runtime.reconcile_runtime(conn)
     assert len(_requests(conn, task, did)) == before + 1, 'no prazo, volta ao Principal uma vez'
+    recheck = _requests(conn, task, did)[-1]['question']
+    assert recheck.startswith('Reconferência de dependência declarada em '), 'o pedido abre com a dependência, não com o reparo'
+    assert DEPENDENCY['need'] in recheck[:300] and DEPENDENCY['owner'] in recheck[:300] and 'Confira por fato' in recheck[:400]
+    assert recheck.endswith(d.get_decision(conn, did)['question']), 'a pergunta gravada segue inteira depois da abertura'
+    assert not d.get_decision(conn, did)['question'].startswith('Reconferência'), 'a pergunta gravada não muda'
     assert _context(conn, did)['lab_wait']['hold'] is False
     assert did in [x['id'] for x in d.pending_decisions(conn)]
     clock[0] += 60
@@ -163,3 +170,17 @@ def test_native_cli_declares_the_dependency(running, monkeypatch, capsys):
     result = json.loads(capsys.readouterr().out)
     assert result['saved'] and result['decision']['status'] == 'pending'
     assert _context(conn, did)['lab_wait']['kind'] == 'dependency'
+
+
+def test_principal_instructions_say_who_can_own_a_dependency_and_how_to_recheck_it():
+    """DEPENDENCY_HAS_OWNER_20261010: em 10/10/2026 as nove pausas abertas do Concursa esperavam dependência. Os donos
+    declarados eram "Administração autorizada do Concursa-Isolado, sob coordenação do Principal", "Manutenção NFOS /
+    project_workflow" e "Principal / engenharia Concursa": ninguém que fosse avisado, e num caso o próprio Principal. Dois
+    chamados esperavam uma autorização que o projeto não pergunta ao dono."""
+    text = ' '.join(runtime.principal_instructions().split())
+    assert "Never name yourself, the Principal or this project's own engineering as its owner" in text
+    assert 'an authorization this project does not ask of its owner is nobody\'s to give' in text
+    assert ('closes as a real partial delivery (partial_delivery=true with blockers and follow_ups), the remainder a '
+            'mandatory criterion of the follow-up card') in text
+    assert 'test the need by fact before declaring it again' in text
+
