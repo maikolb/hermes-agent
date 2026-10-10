@@ -42,3 +42,32 @@ def test_optional_knowledge_failure_preserves_case_and_lessons(monkeypatch):
 def test_disabled_integration_does_not_change_existing_worker_context(monkeypatch):
     monkeypatch.setattr(review,'settings',lambda:{})
     assert d.project_knowledge_context(None,'task')==''
+
+
+def test_project_with_a_shared_graph_gets_the_ready_graph_and_the_impact_command(tmp_path, monkeypatch):
+    # SHARED_GRAPH_20261010: com grafo da main e comando de impacto na política do projeto, o worker não gera grafo no checkout.
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path/'kanban.db'))
+    shared = '/srv/projects/Concursa_ai/historico-commits/grafo-codigo/graph.json'
+    impact = 'python3 /srv/projects/Concursa_ai/historico-commits/historico.py impacto --repo {repo} --candidata HEAD'
+    monkeypatch.setattr(review, 'settings', lambda: {'project_knowledge': {
+        'enabled': True, 'graphify_command': '/srv/hermes/bin/graphify',
+        'projects': {'concursa-ai': {'memory_project': 'Concursa_ai', 'graph_path': shared, 'impact_command': impact},
+                     'dovcrm': {'memory_project': 'next-crm'}}}})
+    prompts = {}
+    with kb.connect_closing() as conn:
+        for n, project in enumerate(['concursa-ai', 'dovcrm']):
+            rid = d.receive_request(conn, source={'platform': 'telegram', 'chat_id': '1', 'thread_id': str(n), 'message_id': '1'},
+                                    text='Corrigir extração', project={'project_id': project, 'profile': 'default', 'delivery_type': 'report'})
+            claim = d.reserve_request(conn, capacity=3)
+            task = d.bootstrap_card(conn, rid, claim['claim_token'], pid=os.getpid())
+            checkout = str(tmp_path/project/'worktree with space')
+            conn.execute('UPDATE tasks SET workspace_path=? WHERE id=?', (checkout, task.id))
+            conn.commit()
+            prompts[project] = (d.worker_context(conn, task.id), checkout)
+    prompt, checkout = prompts['concursa-ai']
+    assert shared in prompt and "--graph " + shared in prompt and 'Do not build a graph in this checkout' in prompt
+    assert "historico.py impacto --repo '" + checkout + "' --candidata HEAD" in prompt
+    assert ' extract ' not in prompt and 'not a delivery gate' in prompt
+    other, other_checkout = prompts['dovcrm']
+    assert shared not in other and 'impacto' not in other and "--out '" + other_checkout + "' (local code parsing" in other
