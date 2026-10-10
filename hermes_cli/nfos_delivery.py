@@ -2518,6 +2518,14 @@ def _requester_question(public_message):
             and not _OWNER_RX.search(str(public_message.get('to') or '')))
 
 
+def _require_public_form(field, text, *, question=False):
+    """PUBLIC_TEXT_FORM_20261009: o texto que uma pessoa lê volta a quem o escreveu, com o que corrigir, antes de ser salvo."""
+    from hermes_cli.nfos_public_text import refusal
+    problem = refusal(field, text, question=question) if isinstance(text, str) else None
+    if problem:
+        raise WorkflowError(problem)
+
+
 def _owner_questions_refused(conn, task_id):
     try:
         from hermes_cli.nfos_principal_review import settings
@@ -4011,6 +4019,9 @@ def save_report(conn, task_id, run_id, report):
         raise WorkflowError('No persisted spec')
     _require_current_instruction_spec(conn,task_id)
     report=json.loads(_json(report))
+    public=report.get('public_delivery')  # PUBLIC_TEXT_FORM_20261009
+    if isinstance(public,dict):
+        _require_public_form('o resumo público do relatório (public_delivery.summary)',public.get('summary'))
     # Report versions retain the previous result. The Principal assesses the
     # new evidence; a second reclassification form is not a separate gate.
     if not _result_review():
@@ -4830,6 +4841,13 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
     initial=get_decision(conn,decision_id)
     if action=='human' and initial and not _requester_question(public_message) and _owner_questions_refused(conn, initial['task_id']):
         raise WorkflowError(OWNER_QUESTION_REFUSAL)
+    # PUBLIC_TEXT_FORM_20261009: só a decisão pendente publica texto novo; repetir uma já resolvida segue sem efeito.
+    if (initial and initial['status']=='pending' and isinstance(public_message, dict)
+            and public_message.get('kind') in {'question','delivery'}):
+        if public_message['kind']=='question':
+            _require_public_form('a pergunta (human_question ou public_message.text)', public_message.get('text'), question=True)
+        else:
+            _require_public_form('a entrega de dado (public_message.text)', public_message.get('text'))
     assessed=None
     quality_refusal=None
     if initial and initial['status']=='pending' and initial['kind'] in {'spec_review','final_review'} and action=='continue':
