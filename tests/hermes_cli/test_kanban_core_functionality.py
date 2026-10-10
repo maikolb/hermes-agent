@@ -1271,10 +1271,12 @@ def test_reclaim_task_resets_running_to_ready(kanban_home, monkeypatch):
                 state["alive"] = False
 
         monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: state["alive"])
+        # A live worker has an identity: the PID and the creation time recorded at spawn.
+        monkeypatch.setattr(_kb, "_process_start_time", lambda _pid: 1700000000.0)
         conn.execute(
             "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, "
-            "worker_pid=? WHERE id=?",
-            (lock, future, 12345, t),
+            "worker_pid=?, worker_started_at=? WHERE id=?",
+            (lock, future, 12345, 1700000000.0, t),
         )
         conn.execute(
             "INSERT INTO task_runs (task_id, status, claim_lock, claim_expires, "

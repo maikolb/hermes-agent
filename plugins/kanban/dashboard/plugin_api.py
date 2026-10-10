@@ -1146,7 +1146,8 @@ def _set_status_direct(
     with kanban_db.write_txn(conn):
         # Snapshot current state so we know whether to close a run.
         prev = conn.execute(
-            "SELECT status, current_run_id, worker_pid, claim_lock, workspace_kind "
+            "SELECT status, current_run_id, worker_pid, worker_started_at, claim_lock, "
+            "       workspace_kind "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -1216,7 +1217,9 @@ def _set_status_direct(
                 outcome="reclaimed", status="reclaimed",
                 summary=f"status changed to {effective_status} (dashboard/direct)",
             )
-            terminations.append((prev["worker_pid"], prev["claim_lock"]))
+            terminations.append(kanban_db._WorkerRef(
+                prev["worker_pid"], prev["claim_lock"], prev["worker_started_at"],
+            ))
         conn.execute(
             "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
             "VALUES (?, ?, 'status', ?, ?)",
@@ -1238,8 +1241,10 @@ def _set_status_direct(
                 task_id,
                 terminations,
             )
-    for pid, claim_lock in terminations:
-        kanban_db._terminate_reclaimed_worker(pid, claim_lock)
+    for ref in terminations:
+        kanban_db._terminate_reclaimed_worker(
+            ref[0], ref[1], started_at=getattr(ref, "started_at", None),
+        )
     # If we re-opened something, children may have gone stale.
     if effective_status in {"done", "ready", "review"}:
         kanban_db.recompute_ready(conn)
