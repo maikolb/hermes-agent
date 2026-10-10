@@ -912,6 +912,11 @@ this card continues the cause internally. When the cause ships, the final public
 becomes the "Resolvido" text. Use delivery once per delivery, never for internal progress. The final report uses public_delivery={summary,links}
 for the usable result; never include internal logs, models, credits, PRs or paths there.
 In a question, the question itself comes first and alone; its short context follows.
+A question to the requester has a deadline (kanban.delivery.requester_answer_hours, 48 h by default). On a support desk
+ticket the runtime adds the deadline line to the question, reminds the requester 24 h before it and, at the deadline,
+returns the question to you: resolve continue or changes with what is already verified and have the card closed as a
+partial delivery that states what still depends on the requester. Do not ask again after that; a later answer returns
+to you on the card or reopens the ticket.
 Sineta triage approval only creates a TODO ticket. Execution approval is separate.
 Reopened support tickets return to TODO for a new approval. Neither an ordinary reply
 nor a priority change grants that approval. Telegram requests retain their normal route.
