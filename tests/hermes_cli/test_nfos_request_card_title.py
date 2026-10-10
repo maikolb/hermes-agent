@@ -40,6 +40,27 @@ def test_request_card_title_cuts_long_requests_at_a_word_boundary():
     assert words[len(stem)] == ' '
 
 
+CACHE = '/srv/hermes/profiles/hermes-project-factory/cache/images/img_0ba84bac6dff.jpg'
+REPLIED = f"[Replied-to image 'file_279.jpg' saved at: {CACHE}]"
+UNREADABLE = '[Observed Telegram attachment could not be read, not cached.]'
+
+
+@pytest.mark.parametrize('text, media, expected', [
+    (ATTRIBUTED + '\n\n' + REPLIED, [CACHE], ATTRIBUTED),
+    ('[Maikol|996979567]\n@hermes_nexafactory_bot\n\n' + REPLIED, [CACHE], '[Maikol|996979567]\n@hermes_nexafactory_bot'),
+    (REPLIED, [CACHE], ''),
+    (f"[image 'foto.jpg' saved at: {CACHE}]\n\n" + REQUEST, [CACHE], REQUEST),
+    (REQUEST + '\n\nsegundo parágrafo\n\n' + REPLIED, [CACHE], REQUEST + '\n\nsegundo parágrafo'),
+    # Without the attachment the note is the only pointer to the file: it stays.
+    (REQUEST + '\n\n' + REPLIED, [], REQUEST + '\n\n' + REPLIED),
+    (REQUEST + '\n\n' + REPLIED, ['/srv/hermes/cache/other.jpg'], REQUEST + '\n\n' + REPLIED),
+    # A failure note has no file to attach; it is the only record of what happened.
+    (REQUEST + '\n\n' + UNREADABLE, [CACHE], REQUEST + '\n\n' + UNREADABLE),
+])
+def test_request_text_drops_the_cache_note_of_an_attached_file(text, media, expected):
+    assert d.request_text(text, media) == expected
+
+
 def test_bootstrap_card_titles_the_card_with_the_request(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'kanban.db'))

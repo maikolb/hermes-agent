@@ -632,6 +632,24 @@ def explicit_request_title(project):
     return title
 
 
+def request_text(text, media_paths=()):
+    """What the person asked, without the adapter's cache notes for attached files.
+
+    A platform adapter points a chat agent at a cached file by appending the
+    block ``[<kind> '<name>' saved at: <path>]`` (or ``[Replied-to ...]``) to the
+    message text. A request preserves that file as an attachment and the cache
+    path expires, so the note is transport: left in the text it becomes the card
+    title and is quoted back as the request. A note for a file that is not
+    attached stays, because it is then the only pointer to that file.
+    """
+    endings=tuple(' saved at: '+str(path)+']' for path in media_paths if path)
+    if not endings:
+        return text
+    blocks=[block for block in str(text or '').split('\n\n')
+            if not (block.strip().startswith('[') and block.strip().endswith(endings))]
+    return '\n\n'.join(blocks).strip()
+
+
 def request_card_title(text, attachments=()):
     """Title a request card with the request itself.
 
@@ -4865,13 +4883,16 @@ def resume_after_answer(conn,task_id,*,answer,source):
                     selected.append(row)
             rows = selected
         if not rows:
+            from hermes_cli import nfos_requester_deadline  # REQUESTER_DEADLINE_20261010: resposta depois do prazo
+            if nfos_requester_deadline.late_answer(conn, task_id, answer=answer, source=source):
+                return False
             raise WorkflowError('No pending human question on this card')
         for row in rows:
             context=json.loads(row['context'])
             context['human_reply']={'answer':answer,'source':source,'author':source.get('actor') or 'Human','received_at':int(time.time())}
             conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?',(_json(context),row['id']))
         _event(conn,task_id,None,'nfos_human_answer_received',{'answer':answer,'source':source,'decisions':[r['id'] for r in rows]})
-    return task_id in reconcile_human_answers(conn)
+    return task_id in reconcile_human_answers(conn, lab_sweep=False)
 
 
 def _resume_reviewed_support_input(conn):
@@ -4966,9 +4987,12 @@ def reopen_support_task(conn, task_id, *, text, source):
     return {'duplicate':False}
 
 
-def reconcile_human_answers(conn):
+def reconcile_human_answers(conn, *, lab_sweep=True):
     from hermes_cli.nfos_runtime import run_termination_pending
-    """The same runtime tick retains human blocks and applies saved replies."""
+    """The same runtime tick retains human blocks and applies saved replies.
+
+    LAB_SWEEP_PER_TICK_20261010: a varredura do laboratório consulta o broker com um teto que vale para o tick. Quem chama esta
+    função de novo no mesmo tick, ou fora dele (o comando resume), passa lab_sweep=False."""
     resumed=_resume_reviewed_support_input(conn)
     sweep_awaiting_principal(conn)  # CLOSURE_RECOVERY_20260911
     try:  # HUMAN_LAST_RESORT_20260914: pergunta de manutenção parada volta ao Principal; destino fora do ar espera e volta sozinho
@@ -4979,10 +5003,17 @@ def reconcile_human_answers(conn):
         import logging
         logging.getLogger(__name__).warning('HUMAN_LAST_RESORT_20260914 sweep failed', exc_info=True)
     try:  # LAB_WAIT_20261008: pedido do laboratório que saiu da fila devolve o card sem o Principal
-        sweep_lab_waits(conn)
+        if lab_sweep:
+            sweep_lab_waits(conn)
     except Exception:
         import logging
         logging.getLogger(__name__).warning('LAB_WAIT_20261008 sweep failed', exc_info=True)
+    try:  # REQUESTER_DEADLINE_20261010: pergunta ao solicitante sem resposta avisa, vence e volta ao Principal
+        from hermes_cli import nfos_requester_deadline
+        nfos_requester_deadline.sweep(conn)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning('REQUESTER_DEADLINE_20261010 sweep failed', exc_info=True)
     rows=conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()
     for row in rows:
         task=_kb().get_task(conn,row['task_id'])
@@ -5055,6 +5086,11 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
     initial=get_decision(conn,decision_id)
     if action=='human' and initial and not _requester_question(public_message) and _owner_questions_refused(conn, initial['task_id']):
         raise WorkflowError(OWNER_QUESTION_REFUSAL)
+    if action=='human' and initial and initial['status']=='pending' and _requester_question(public_message):
+        from hermes_cli import nfos_requester_deadline  # REQUESTER_DEADLINE_20261010: silêncio vencido não vira nova pergunta
+        silence_refusal = nfos_requester_deadline.refusal_after_silence(conn, initial['task_id'])
+        if silence_refusal:
+            raise WorkflowError(silence_refusal)
     # PUBLIC_TEXT_FORM_20261009: só a decisão pendente publica texto novo; repetir uma já resolvida segue sem efeito.
     if (initial and initial['status']=='pending' and isinstance(public_message, dict)
             and public_message.get('kind') in {'question','delivery'}):
@@ -5186,6 +5222,9 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                 raise WorkflowError('A public question requires a human decision')
             context['public_message'] = {key:public_message[key] for key in ('kind','text','to') if key in public_message}
             published = True
+            if action == 'human':
+                from hermes_cli import nfos_requester_deadline  # REQUESTER_DEADLINE_20261010: a pergunta sai com o prazo
+                nfos_requester_deadline.arm(conn, row['task_id'], context)
         elif (context.get('human_reply', {}).get('source') or {}).get('platform') == 'portal' and action in {'continue','changes'}:
             if previous_public:
                 context.setdefault('public_message_history', []).append(previous_public)

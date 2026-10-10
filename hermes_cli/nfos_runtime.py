@@ -386,13 +386,16 @@ def reconcile_terminal_workers(conn, *, worker_exit_grace_seconds=15):
     return changed
 
 
-def reconcile_runtime(conn, *, worker_exit_grace_seconds=15):
-    """Run NFOS recovery inside the existing canonical dispatcher tick."""
-    delivery.reconcile_human_answers(conn)
+def reconcile_runtime(conn, *, worker_exit_grace_seconds=15, lab_sweep=True):
+    """Run NFOS recovery inside the existing canonical dispatcher tick.
+
+    The laboratory sweep reads the broker under a budget that belongs to the tick: it runs in the first
+    pass only, and a tick that reconciles a second time passes lab_sweep=False."""
+    delivery.reconcile_human_answers(conn, lab_sweep=lab_sweep)
     reconcile_terminal_workers(conn,worker_exit_grace_seconds=worker_exit_grace_seconds)
     delivery.reconcile_owner_guidance(conn)
     delivery.reconcile_incomplete_reviews(conn)
-    delivery.reconcile_human_answers(conn)
+    delivery.reconcile_human_answers(conn, lab_sweep=False)
     from hermes_cli.nfos_tool import reconcile_calls
     # Blocked/completed cards never enter the ready/review dispatch loops.
     # Their owner instructions and maintenance obligations still need recovery
@@ -911,6 +914,11 @@ this card continues the cause internally. When the cause ships, the final public
 becomes the "Resolvido" text. Use delivery once per delivery, never for internal progress. The final report uses public_delivery={summary,links}
 for the usable result; never include internal logs, models, credits, PRs or paths there.
 In a question, the question itself comes first and alone; its short context follows.
+A question to the requester has a deadline (kanban.delivery.requester_answer_hours, 48 h by default). On a support desk
+ticket the runtime adds the deadline line to the question, reminds the requester 24 h before it and, at the deadline,
+returns the question to you: resolve continue or changes with what is already verified and have the card closed as a
+partial delivery that states what still depends on the requester. Do not ask again after that; a later answer returns
+to you on the card or reopens the ticket.
 Sineta triage approval only creates a TODO ticket. Execution approval is separate.
 Reopened support tickets return to TODO for a new approval. Neither an ordinary reply
 nor a priority change grants that approval. Telegram requests retain their normal route.
