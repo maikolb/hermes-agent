@@ -959,15 +959,18 @@ minutes: {"kind":"card","task_id":"t_..."} for another card of this board (add
 "until":"effect","operation":"deploy" to wait for its confirmed effect instead of its
 completion), {"kind":"probe","probe":{...}} with the same sql/http/header probe of a spec
 criterion, {"kind":"lab_status","services":["web"]} for the laboratory apps this card
-needs, {"kind":"lab_receipt","receipt":"<request id>"} for a laboratory request. When the
-fact becomes true the runtime ends the pause and returns the card to the queue without
-waking you; after 24 hours without it the decision comes back to you once, and the same
-dependency is not accepted again on that card.
-When no fact can be checked by code, "dependency":{"owner":"who delivers","need":"what is
-missing"} holds the pause without reminders and returns to you
-in 1 hour, then 2, 4 and 6 for the same pause; add "recheck_hours" (1 to 24) only when
-you know the hour that fact can change. An unrepaired pause answered without a
-dependency comes back at growing intervals.
+needs, {"kind":"lab_receipt","receipt":"<request id>"} for a laboratory request,
+{"kind":"lab_command","command":["job","status","<job id>"],"exit":0} (or "exit_not":64)
+for a read-only laboratory command (status, job status, runtime capabilities, runtime
+result), {"kind":"event","name":"<event kind>"} for an event recorded on a card after
+you declare. When the fact becomes true the runtime ends the pause and returns the card
+to the queue without waking you; after 24 hours without it the decision comes back to
+you once, and the same dependency is not accepted again on that card.
+When someone real will deliver but no fact can be checked by code, send the same
+dependency without "check": the pause waits without reminders and returns to you
+in 1 hour, then 2, 4 and 6 for the same pause, four times at most. The runtime sets
+those hours; "recheck_hours" is ignored and "owner" as free text is refused. An
+unrepaired pause answered without a dependency comes back at growing intervals.
 A dependency names someone other than you who can deliver the need: the team, person
 or system the project instructions point to. Never name yourself, the Principal or
 this project's own engineering as its owner. What only they would build is work for a

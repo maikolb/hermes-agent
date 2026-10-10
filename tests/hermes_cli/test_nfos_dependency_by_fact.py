@@ -132,8 +132,14 @@ def test_dependency_on_a_confirmed_effect_of_another_card(paused):
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'probe', 'probe': {'kind': 'http', 'url': 'https://app.example', 'expect': {'status': 200}}}},
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_status', 'services': ['web; rm -rf /']}},
     {'executor': CARD, 'need': ' ', 'check': {'kind': 'card', 'task_id': 'CAUSE'}},
-    {'executor': CARD, 'need': NEED, 'check': {'kind': 'card', 'task_id': 'CAUSE'}, 'recheck_hours': 2},
-    {'executor': CARD, 'need': NEED},
+    {'executor': CARD, 'need': NEED, 'check': 'o card da causa concluir'},
+    {'owner': 'Executor do card de engenharia CAUSE', 'need': NEED, 'check': {'kind': 'card', 'task_id': 'CAUSE'}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['exec', 'rm', '-rf', '/'], 'exit': 0}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['job', 'status', '../x'], 'exit': 0}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['job', 'status', 'job-abc123'], 'exit': 0, 'exit_not': 64}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['status']}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'event', 'name': 'evento com espaço'}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'event', 'name': 'nfos_effect_reconciled', 'task_id': 't_inexistente'}},
 ])
 def test_dependency_the_runtime_could_not_check_or_nobody_can_deliver_is_refused(paused, dependency):
     conn, task, did, _ = paused
@@ -274,6 +280,73 @@ def test_fact_already_true_waits_for_the_previous_executor_to_leave(paused, monk
     busy[0] = False
     advance()
     assert d.get_decision(conn, did)['status'] == 'resolved' and not repair.maintenance_pause_pending(conn, task.id)
+
+
+def test_read_only_laboratory_command_with_the_declared_exit_code(paused, monkeypatch):
+    """Tipos 2 e 3 da lista de 10/10/2026: o canal recusava a tarefa com saída 64, o job não tinha recibo terminal."""
+    conn, task, did, advance = paused
+    import subprocess
+    runs, code = [], [64]
+
+    def run(argv, **kwargs):
+        runs.append((argv[1:], kwargs.get('shell', False)))
+        if code[0] is None:
+            raise subprocess.TimeoutExpired(argv, kwargs.get('timeout'))
+        return subprocess.CompletedProcess(argv, code[0], stdout='{}', stderr='')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    _declare(conn, did, {'kind': 'lab_command', 'command': ['job', 'status', 'job-abc123'], 'exit': 0}, executor=LAB)
+    advance()
+    assert waits.open_for_decision(conn, did)['evidence']['exit'] == 64
+    code[0] = None
+    advance()
+    assert waits.open_for_decision(conn, did)['evidence']['unreadable'] == 1, 'comando que não rodou não entrega nem vence'
+    code[0] = 0
+    advance()
+    assert runs == [(['job', 'status', 'job-abc123'], False)] * 3, 'o subcomando declarado, em lista e sem shell'
+    assert d.get_decision(conn, did)['status'] == 'resolved' and not repair.maintenance_pause_pending(conn, task.id)
+
+
+def test_laboratory_command_that_stops_exiting_with_the_refusal_code(paused, monkeypatch):
+    conn, task, did, advance = paused
+    import subprocess
+    code = [64]
+    monkeypatch.setattr(subprocess, 'run', lambda argv, **kwargs: subprocess.CompletedProcess(argv, code[0], stdout='', stderr=''))
+    _declare(conn, did, {'kind': 'lab_command', 'command': ['runtime', 'capabilities'], 'exit_not': 64}, executor=LAB)
+    advance()
+    assert repair.maintenance_pause_pending(conn, task.id)
+    code[0] = 1
+    advance()
+    assert not repair.maintenance_pause_pending(conn, task.id)
+
+
+def test_event_recorded_after_the_declaration_releases_the_pause(paused):
+    conn, task, did, advance = paused
+    kb._append_event(conn, task.id, 'nfos_effect_reconciled', {'effect_id': 'antigo'})
+    conn.commit()
+    _declare(conn, did, {'kind': 'event', 'name': 'nfos_effect_reconciled'}, executor=LAB)
+    advance()
+    assert waits.open_for_decision(conn, did)['attempts'] == 1, 'o evento anterior à declaração não conta'
+    kb._append_event(conn, task.id, 'nfos_effect_reconciled', {'effect_id': 'novo'})
+    conn.commit()
+    advance()
+    assert d.get_decision(conn, did)['status'] == 'resolved' and not repair.maintenance_pause_pending(conn, task.id)
+
+
+def test_dependency_without_a_fact_needs_someone_real_and_is_bounded(paused):
+    """Os três tipos sem fato de 10/10/2026 (rota de processo que não existe, autorização com o próprio Principal como
+    dono, credencial e gasto do dono) são recusados pelo tipo de quem entrega, sem ler texto."""
+    conn, task, did, _ = paused
+    for nobody in ({'kind': 'principal', 'name': 'Principal / engenharia Concursa'},
+                   {'kind': 'runtime', 'name': 'Manutenção NFOS / project_workflow'}, {'kind': 'owner', 'name': 'Maikol'}):
+        with pytest.raises(d.WorkflowError, match='Nobody waits for the Principal'):
+            d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal',
+                               dependency={'executor': nobody, 'need': NEED})
+    assert 'lab_wait' not in _context(conn, did)
+    d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency={'executor': LAB, 'need': NEED})
+    held = _context(conn, did)['lab_wait']
+    assert held['hold'] is True and held['executor'] == LAB and held['until'] == held['since'] + 3600
+    assert waits.open_for_decision(conn, did) is None, 'sem predicado não é espera do registro: é a volta contada ao Principal'
 
 
 def test_probe_internals_stay_in_the_wait_row_and_nowhere_else(paused, monkeypatch):

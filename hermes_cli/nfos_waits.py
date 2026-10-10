@@ -70,7 +70,8 @@ def policy(reason):
     if reason == 'external_dependency':
         # Quem entrega nunca é o Principal nem o motor: o que só eles fariam não é dependência, é trabalho de um card.
         deadline = int(d.MAINTENANCE_DEPENDENCY_HOURS[1] * 3600)
-        return dict(executors=('lab', 'card', 'external', 'operator'), predicates=('card', 'probe', 'lab_receipt', 'lab_status'),
+        return dict(executors=('lab', 'card', 'external', 'operator'),
+                    predicates=('card', 'probe', 'lab_receipt', 'lab_status', 'lab_command', 'event'),
                     holds_decision=True, on_expire='obligation', first_check=0, recheck=d.LAB_WAIT_RECHECK_SECONDS,
                     deadline=deadline, max_attempts=max(1, deadline // d.LAB_WAIT_RECHECK_SECONDS),
                     satisfied=d._dependency_delivered, expired=d._dependency_expired)
@@ -84,7 +85,8 @@ def _checker(kind):
     d = _delivery()
     return {'lab_receipt': (d._lab_queue_check, True), 'decision_resolved': (_decision_resolved, False),
             'card': (_card_delivered, False), 'probe': (d._dependency_probe_check, True),
-            'lab_status': (d._lab_status_check, True)}[kind]
+            'lab_status': (d._lab_status_check, True), 'lab_command': (d._lab_command_check, True),
+            'event': (_event_recorded, False)}[kind]
 
 
 class NotYet(Exception):
@@ -160,7 +162,8 @@ def public(predicate):
 
 # O que a conferência observou e pode sair da tabela. Texto de erro de sonda fica só na linha da espera.
 PUBLIC_EVIDENCE = ('card_status', 'completed_at', 'effect_id', 'candidate', 'probe_state', 'http_status', 'lab', 'answered',
-                   'status', 'queue_reason', 'decision_status', 'action', 'expired_because', 'unreadable', 'checked_at')
+                   'status', 'queue_reason', 'decision_status', 'action', 'expired_because', 'unreadable', 'checked_at',
+                   'exit', 'event_id', 'event_at')
 
 
 def public_evidence(evidence):
@@ -187,6 +190,9 @@ def episode(conn, task_id):
 CARD_UNTIL = ('done', 'effect')
 CARD_EFFECTS = ('pr', 'merge', 'deploy', 'homolog')
 _SERVICE_NAME = set('abcdefghijklmnopqrstuvwxyz0123456789_-')
+# Subcomandos de leitura do concursa-lab que um predicado pode rodar, e quantos identificadores cada um leva. Nenhum deles
+# executa, envia ou cancela nada no laboratório.
+LAB_COMMANDS = {('status',): 0, ('job', 'status'): 1, ('runtime', 'capabilities'): 0, ('runtime', 'result'): 1}
 
 
 def _predicate(reason, spec, value):
@@ -217,6 +223,24 @@ def _predicate(reason, spec, value):
     if kind == 'probe':
         d._validate_probe('dependency', value.get('probe'))
         return {'kind': kind, 'probe': value['probe']}
+    if kind == 'lab_command':
+        command = value.get('command')
+        verb = next((verb for verb in LAB_COMMANDS if isinstance(command, list) and tuple(command[:len(verb)]) == verb), None)
+        ids = command[len(verb):] if verb else None
+        codes = [key for key in ('exit', 'exit_not') if key in value]
+        if (verb is None or len(ids) != LAB_COMMANDS[verb] or any(not isinstance(i, str) or not d._LAB_RECEIPT_RX.fullmatch(i) for i in ids)
+                or len(codes) != 1 or type(value[codes[0]]) is not int or not 0 <= value[codes[0]] <= 255):
+            raise d.WorkflowError('lab_command needs command, one of ' + ', '.join(' '.join(verb) + ' <id>' * count
+                                  for verb, count in LAB_COMMANDS.items()) + ', and exactly one of exit or exit_not (0 to 255)')
+        return {'kind': kind, 'command': list(command), codes[0]: value[codes[0]]}
+    if kind == 'event':
+        name = value.get('name')
+        if not isinstance(name, str) or not 3 <= len(name) <= 64 or set(name) - (_SERVICE_NAME - {'-'}):
+            raise d.WorkflowError('event needs name, the kind of the card event to wait for, such as nfos_effect_reconciled')
+        target = value.get('task_id')
+        if target is not None and (not isinstance(target, str) or not target):
+            raise d.WorkflowError('event task_id is the card whose event is awaited; omit it for this card')
+        return {'kind': kind, 'name': name, **({'task_id': target} if target else {})}
     services = value.get('services', [])
     if (not isinstance(services, list) or len(services) > 8 or any(
             not isinstance(name, str) or not 0 < len(name) <= 32 or set(name) - _SERVICE_NAME for name in services)):
@@ -250,8 +274,14 @@ def card_cycle(conn, task_id, target):
 def _executor(reason, spec, value):
     if (not isinstance(value, dict) or value.get('kind') not in spec['executors']
             or not isinstance(value.get('name'), str) or not value['name'].strip()):
-        raise _delivery().WorkflowError(f"A {reason} wait needs its executor: kind in {list(spec['executors'])} and a name")
+        raise _delivery().WorkflowError(f"A {reason} wait needs its executor: kind in {list(spec['executors'])} and a name. "
+                                        'Nobody waits for the Principal, for this runtime or for the project owner')
     return {'kind': value['kind'], 'name': value['name'].strip()[:160]}
+
+
+def executor(reason, value):
+    """Quem entrega, conferido contra o que o motivo admite. Serve também a quem ainda não grava espera no registro."""
+    return _executor(reason, policy(reason), value)
 
 
 def _same(conn, task_id, reason, predicate, status, round_=None):
@@ -304,11 +334,14 @@ def declare(conn, task_id, run_id, *, reason, executor, predicate, decision_id=N
         round_ = episode(conn, task_id)
         if _same(conn, task_id, reason, predicate, EXPIRED, round_):
             raise d.WorkflowError(refusal(conn, task_id, reason=reason, predicate=predicate))
-        if predicate['kind'] == 'card':
+        if predicate['kind'] in ('card', 'event') and predicate.get('task_id'):
             target = d._kb().get_task(conn, predicate['task_id'])
             # O tenant separa negócios dentro do mesmo quadro: um card não lê o andamento do card de outro.
             if not target or target.tenant != d._kb().get_task(conn, task_id).tenant:
                 raise d.WorkflowError(f"card {predicate['task_id']} does not exist on this board")
+        if predicate['kind'] == 'event':  # "depois de um instante": só conta o evento gravado depois desta declaração
+            origin = dict(origin or {}, after_event_id=conn.execute('SELECT COALESCE(MAX(id),0) FROM task_events').fetchone()[0])
+        if predicate['kind'] == 'card':
             if card_cycle(conn, task_id, predicate['task_id']):
                 raise d.WorkflowError(
                     f"card {predicate['task_id']} cannot move before this card does (it is ordered after it, or already waits "
@@ -478,6 +511,15 @@ def _card_delivered(conn, wait, budget=None):
     if task.completed_at is None or closure.get('functional_delivery') is False:
         return False, {'card_status': task.status, 'final': 'dependency_not_delivered'}
     return True, {'card_status': task.status, 'completed_at': task.completed_at}
+
+
+def _event_recorded(conn, wait, budget=None):
+    """O evento esperado foi gravado no card depois de a espera ser declarada?"""
+    predicate = wait['predicate']
+    row = conn.execute('SELECT id,created_at FROM task_events WHERE task_id=? AND kind=? AND id>? ORDER BY id LIMIT 1',
+                       (predicate.get('task_id') or wait['task_id'], predicate['name'],
+                        int(wait['origin'].get('after_event_id') or 0))).fetchone()
+    return (True, {'event_id': row['id'], 'event_at': row['created_at']}) if row else (False, {})
 
 
 def _decision_resolved(conn, wait, budget=None):
