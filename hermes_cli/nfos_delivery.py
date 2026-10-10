@@ -3255,6 +3255,12 @@ LAB_WAIT_MAX_READ_ERRORS = 6
 LAB_WAIT_READ_TIMEOUT_SECONDS = 20  # a varredura roda no tick do despacho: leitura curta e teto por passada
 LAB_WAIT_SWEEP_SECONDS = 45
 LAB_WAIT_QUEUED = ('submitted', 'pending', 'queued')
+# LAB_RECEIPT_UNKNOWN_20261010: o laboratório não conhece o pedido (sem recibo e sem o pedido na caixa do broker), ou seja, ele
+# não chegou. Em 09/10 o cliente respondia "pending" para qualquer ID sem recibo e o CS-0019 esperou 3 h 44 por um pedido que
+# nunca foi aceito. Pedido desconhecido não espera e não é "saiu da fila": o worker reenvia com o mesmo ID e o mesmo conteúdo.
+LAB_RECEIPT_UNKNOWN = 'unknown'
+LAB_RECEIPT_UNKNOWN_NEXT = ('O pedido não chegou ao laboratório: ele não conhece esse ID. Reenvie com o mesmo ID e o mesmo conteúdo '
+                            '(`concursa-lab runtime request`) e só registre a espera depois de o recibo mostrar submitted, pending ou queued.')
 _LAB_RECEIPT_RX = re.compile(r'[a-z0-9][a-z0-9-]{5,60}\Z')  # o mesmo REQID do concursa-lab
 
 
@@ -3368,6 +3374,8 @@ def lab_wait(conn, task_id, run_id, receipt, *, reason='', transport=False):
     if current is None:
         raise WorkflowError(f'Recibo {receipt} ilegível agora; confira com `concursa-lab runtime result {receipt}` antes de esperar')
     status = str(current.get('status') or '')
+    if status == LAB_RECEIPT_UNKNOWN:
+        return {'waiting': False, 'receipt': receipt, 'status': status, 'result': current, 'next': LAB_RECEIPT_UNKNOWN_NEXT}
     if status not in LAB_WAIT_QUEUED:
         return {'waiting': False, 'receipt': receipt, 'status': status, 'result': current,
                 'next': 'O pedido já saiu da fila: siga a partir deste recibo, sem reenviar.'}
@@ -3519,9 +3527,12 @@ def sweep_lab_waits(conn):
                 out.append((row['id'], 'wait'))
                 continue
             receipt = wait.get('receipt')
-            answer = (f"CONTINUE (runtime do NFOS, espera do laboratório): o pedido {receipt} saiu da fila em "
-                      f"{time.strftime('%d/%m %H:%MZ', time.gmtime(now))} com status {status}. Leia o recibo com "
-                      f"`concursa-lab runtime result {receipt}` e siga a partir dele; não reenvie o pedido.")
+            if status == LAB_RECEIPT_UNKNOWN:
+                answer = f"CONTINUE (runtime do NFOS, espera do laboratório): pedido {receipt}. {LAB_RECEIPT_UNKNOWN_NEXT}"
+            else:
+                answer = (f"CONTINUE (runtime do NFOS, espera do laboratório): o pedido {receipt} saiu da fila em "
+                          f"{time.strftime('%d/%m %H:%MZ', time.gmtime(now))} com status {status}. Leia o recibo com "
+                          f"`concursa-lab runtime result {receipt}` e siga a partir dele; não reenvie o pedido.")
             context['lab_wait'] = dict(wait, hold=False, status=status, released_at=now)
             with _kb().write_txn(conn, allow_nested=True):
                 if conn.execute("UPDATE nfos_decisions SET context=? WHERE id=? AND status='pending'",
