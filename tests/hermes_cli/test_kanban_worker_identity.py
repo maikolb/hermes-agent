@@ -23,6 +23,7 @@ def conn(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    monkeypatch.setattr(kb, "_resolve_executable_assignee", lambda name: name)  # no real profile on the test machine
     kb.init_db()
     connection = kb.connect()
     try:
