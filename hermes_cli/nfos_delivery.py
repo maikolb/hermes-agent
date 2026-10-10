@@ -3406,8 +3406,9 @@ def _store_lab_wait(conn, decision_id, context):
         conn.execute("UPDATE nfos_decisions SET context=? WHERE id=? AND status='pending'", (_json(context), decision_id))
 
 
-def _lab_wait_to_principal(conn, row, context, why, now):
-    """A espera sai do runtime e vai ao Principal uma vez: fila há mais de 12 h ou recibo ilegível. A decisão continua a mesma."""
+def _lab_wait_to_principal(conn, row, context, why, now, lead=''):
+    """A espera sai do runtime e vai ao Principal uma vez: fila há mais de 12 h ou recibo ilegível. A decisão continua a mesma.
+    `lead` abre o pedido que o acorda (a pergunta gravada não muda): o aviso mostra só o começo da pergunta."""
     wait = dict(context.get('lab_wait') or {}, hold=False, escalated_at=now, escalated_because=why)
     context = dict(context, lab_wait=wait)
     with _kb().write_txn(conn, allow_nested=True):
@@ -3416,8 +3417,18 @@ def _lab_wait_to_principal(conn, row, context, why, now):
         _event(conn, row['task_id'], row['run_id'], 'nfos_lab_wait_escalated', {'decision_id': row['id'], 'receipt': wait.get('receipt'),
                                                                                  'why': why})
         _event(conn, row['task_id'], row['run_id'], 'nfos_principal_requested', {'decision_id': row['id'], 'kind': row['kind'],
-                                                                                  'question': row['question'], 'lab_wait_escalated': why})
+                                                                                  'question': lead + row['question'], 'lab_wait_escalated': why})
     return 'escalated'
+
+
+def _dependency_recheck_lead(wait):
+    """DEPENDENCY_HAS_OWNER_20261010: o pedido de reconferência abre com a dependência, e não com o "Execute o reparo" de
+    sempre. Em 10/10/2026 nove pausas do Concursa esperavam dependência com prazo de 6 h; o que faltava a seis delas tinha
+    sido entregue de 1 a 6 h antes do prazo (rede do laboratório, base e PDFs) e nada no pedido dizia o que reconferir."""
+    since = time.strftime('%d/%m %H:%MZ', time.gmtime(int(wait.get('since') or 0)))
+    return (f"Reconferência de dependência declarada em {since}: {wait.get('need')} (quem entrega: {wait.get('owner')}). "
+            'Confira por fato se isso já foi entregue (sonde a capacidade, releia as instruções do projeto) antes de declarar '
+            'de novo; se foi, retome. ')
 
 
 class _LabPauseNotReady(Exception):
@@ -3492,7 +3503,8 @@ def sweep_lab_waits(conn):
                 # para reconferir. Pausa reparada antes disso: reconcile_maintenance_recovery responde a obrigação.
                 if now >= int(wait.get('until') or 0):
                     context['reminders'] = [now]  # o pedido desta volta já é o aviso; o lembrete seguinte respeita o recuo
-                    if _lab_wait_to_principal(conn, row, context, 'hora de reconferir a dependência', now):
+                    if _lab_wait_to_principal(conn, row, context, 'hora de reconferir a dependência', now,
+                                              lead=_dependency_recheck_lead(wait)):
                         out.append((row['id'], 'recheck'))
                 continue
             if wait.get('kind') == 'transport':
