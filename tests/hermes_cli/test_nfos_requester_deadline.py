@@ -378,6 +378,25 @@ def test_the_deadline_comes_from_one_global_key_and_zero_turns_it_off(board, wor
     assert _context(board, second)["public_message"]["text"] == QUESTION and "requester_deadline" not in _context(board, second)
 
 
+@pytest.mark.parametrize("unreadable", [False, True, "0", "48", None, "", -1, 721, [48]])
+def test_key_that_is_present_and_unreadable_keeps_the_clock_off(board, worker, monkeypatch, unreadable):
+    # A chave segura aviso e vencimento para cliente: valor errado não pode ligar o prazo sozinho.
+    monkeypatch.setattr(review, "settings", lambda: {"principal_validation": False, "requester_answer_hours": unreadable})
+    assert deadline.hours() == 0
+    task, decision = _card(board, worker)
+    _ask(board, decision)
+    context = _context(board, decision)
+    assert context["public_message"]["text"] == QUESTION and "requester_deadline" not in context
+    assert deadline.sweep(board, now=int(time.time()) + 30 * DAY) == []
+
+
+def test_absent_key_means_the_default_deadline(monkeypatch):
+    monkeypatch.setattr(review, "settings", lambda: {"principal_validation": False})
+    assert deadline.hours() == deadline.DEFAULT_HOURS
+    monkeypatch.setattr(review, "settings", lambda: {"requester_answer_hours": 36.5})
+    assert deadline.hours() == 36.5
+
+
 def test_the_runtime_tick_applies_the_deadline(board, worker):
     task, decision, clock = _asked(board, worker)
     past = int(time.time()) - HOUR

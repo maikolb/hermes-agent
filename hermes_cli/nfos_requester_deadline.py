@@ -52,11 +52,18 @@ def _settings():
 
 
 def hours():
-    """Prazo em horas, da chave global kanban.delivery.requester_answer_hours. Zero desliga o relógio."""
-    value = _settings().get('requester_answer_hours', DEFAULT_HOURS)
-    if type(value) not in (int, float) or value < 0 or value > 720:
+    """Prazo em horas, da chave global kanban.delivery.requester_answer_hours. Zero desliga o relógio.
+
+    DEADLINE_KEY_FAILS_OFF_20261010: a chave é o que segura aviso e vencimento para cliente. Presente e ilegível (false,
+    "0" entre aspas, vazia, fora de 0 a 720) desliga o relógio; antes caía no padrão e ligava o prazo sozinha. Só a chave
+    ausente vale o padrão."""
+    settings = _settings()
+    if 'requester_answer_hours' not in settings:
         return DEFAULT_HOURS
-    return value
+    value = settings['requester_answer_hours']
+    if type(value) in (int, float) and 0 <= value <= 720:
+        return value
+    return 0
 
 
 def _lead(limit_hours):
