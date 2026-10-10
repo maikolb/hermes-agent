@@ -4238,6 +4238,33 @@ def reconcile_incomplete_reviews(conn, task_id=None):
     return changed
 
 
+# IMPEDIMENT_CAUSE_20261010: o worker declara a causa do impedimento numa lista fechada. Nesta fase ela só fica registrada em
+# context['declared_cause']; a pergunta segue para o Principal como antes. Em 09/10/2026, 109 de 358 impedimentos do Concursa
+# eram mecânicos (36 h de card em espera) e cada classe só foi achada depois, por regex no texto da pergunta. A chave não é
+# 'cause': a deduplicação de impedimentos pendentes usa context.get('cause') e mudaria de alcance.
+IMPEDIMENT_CAUSES = {
+    'lab_transport': 'the laboratory is out of reach (concursa-lab exited 255); the native wait is lab-wait --transporte',
+    'lab_queue': 'the request waits in the broker queue; the native wait is lab-wait --receipt <id>',
+    'lab_busy': 'the laboratory is up and busy (concursa-lab exited 75); wait and repeat the call',
+    'lab_capability': 'the laboratory has no command for what the task needs',
+    'replaced_reference': 'the question cites a decision that was replaced',
+    'tool_refused': 'a guard or the process engine refused a command',
+    'budget': 'the call or cost budget of the card ran out',
+    'step_authorization': 'authorization or the path for one step',
+    'product_decision': 'a product or scope choice',
+    'other': 'none of the above',
+}
+IMPEDIMENT_CAUSE_HINT = ('Declare the cause on the next impediment: ask --kind impediment --cause <cause> --input question.json. Causes: '
+                         + '; '.join(f'{name} ({text})' for name, text in IMPEDIMENT_CAUSES.items()) + '.')
+
+
+def _declared_cause(context):
+    cause = context.get('declared_cause')
+    if cause is not None and not (isinstance(cause, str) and cause in IMPEDIMENT_CAUSES):
+        raise WorkflowError('Unknown impediment cause; use one of: ' + ', '.join(IMPEDIMENT_CAUSES))
+    return cause
+
+
 def ask_principal(conn, task_id, run_id, *, kind, question, context):
     if kind not in {'review','spec_review','final_review','impediment','additional_tasks','homologation','preparation'} or not question.strip():
         raise WorkflowError('A decision needs its kind and concrete question')
@@ -4276,6 +4303,7 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
                 return decision_id
         context=dict(context)
         if kind == 'impediment':
+            _declared_cause(context)  # IMPEDIMENT_CAUSE_20261010
             answered = _answer_replaced_reference(conn, task_id, run_id, question, context)
             if answered:
                 return answered
@@ -5792,6 +5820,8 @@ def main():
     parser.add_argument('--receipt',help='lab-wait: id do pedido do concursa-lab que está na fila')  # LAB_WAIT_20261008
     parser.add_argument('--transporte','--transport',dest='transport',action='store_true',
                         help='lab-wait: laboratório fora do ar (concursa-lab saiu com 255), sem recibo')  # LAB_TRANSPORT_WAIT_20261009
+    parser.add_argument('--cause',choices=sorted(IMPEDIMENT_CAUSES),
+                        help='ask --kind impediment: declared cause of the impediment')  # IMPEDIMENT_CAUSE_20261010
     args=parser.parse_args()
     payload=json.loads(Path(args.input).read_text(encoding='utf-8-sig')) if args.input else {}
     evidence=json.loads(Path(args.evidence).read_text(encoding='utf-8-sig')) if args.evidence else {}
@@ -5881,8 +5911,12 @@ def main():
         elif args.action=='ask':
             context={k:v for k,v in payload.items() if k not in {'question','context'}}
             context.update(payload.get('context') or {})
+            if args.cause and args.kind=='impediment':  # IMPEDIMENT_CAUSE_20261010
+                context['declared_cause']=args.cause
             result={'decision_id':ask_principal(conn,args.task,args.run,kind=args.kind,
                 question=payload['question'],context=context)}
+            if args.kind=='impediment' and not context.get('declared_cause'):
+                result['cause_hint']=IMPEDIMENT_CAUSE_HINT
         elif args.action=='lab-wait':  # LAB_WAIT_20261008, LAB_TRANSPORT_WAIT_20261009
             result=lab_wait(conn,args.task,args.run,args.receipt,reason=str(payload.get('reason') or ''),transport=args.transport)
         elif args.action=='pending':
