@@ -321,3 +321,53 @@ def test_applying_a_human_answer_does_not_sweep_the_laboratory(board, broker):
         reads.clear()
         delivery.resume_after_answer(conn, task.id, answer="Use A", source={"platform": "telegram", "message_id": "955"})
         assert reads == []
+
+
+RETENTION = "Retenção pedida pelo executor efetivada: run encerrado aguardando decisão. Principal deve obter readback antes de retomar."
+
+
+def _retain(conn, task):
+    """O worker saiu e o card foi retido em blocked/transient por outro motivo, como no t_d8699d5f; o bloqueio tem 8 min."""
+    conn.execute("UPDATE task_runs SET status='crashed', outcome='crashed', ended_at=? WHERE id=?", (int(time.time()), task.current_run_id))
+    conn.execute("UPDATE tasks SET status='ready', worker_pid=NULL, claim_lock=NULL, current_run_id=NULL WHERE id=?", (task.id,))
+    conn.commit()
+    assert kb.block_task(conn, task.id, reason=RETENTION, kind="transient")
+    conn.execute("UPDATE task_events SET created_at=created_at-480 WHERE task_id=? AND kind='blocked'", (task.id,))
+    conn.commit()
+
+
+def test_lab_answer_does_not_release_a_retention_placed_for_another_reason(board, broker):
+    """LAB_ANSWER_KEEPS_RETENTION_20261010: a espera do laboratório segura o card pela decisão aberta, não por bloqueio. Um
+    blocked/transient no mesmo card é outra retenção, e a resposta automática da varredura fala só da fila do laboratório."""
+    receipts, reads = broker
+    with kb.connect_closing() as conn:
+        task = _card(conn, 110)
+        out = delivery.lab_wait(conn, task.id, task.current_run_id, RECEIPT)
+        _retain(conn, task)
+        assert delivery.sweep_awaiting_principal(conn) == [], "com a espera aberta a retenção fica"
+        _shift(conn, out["decision_id"], next_check_at=0)
+        receipts[RECEIPT] = {"status": "ok", "result": {"task": "grupo-cs0013"}}
+        assert delivery.sweep_lab_waits(conn) == [(out["decision_id"], "released")]
+        row, context = _decision(conn, out["decision_id"])
+        assert row["status"] == "resolved" and row["author"] == "Principal" and context["lab_wait"]["released_at"]
+        assert delivery.sweep_awaiting_principal(conn) == [], "a resposta automática do runtime não é a liberação do Principal"
+        assert kb.get_task(conn, task.id).status == "blocked"
+        # A resposta do Principal de verdade, depois do bloqueio, continua sendo a liberação.
+        guidance = delivery.receive_owner_guidance(conn, task.id, text="Confira o readback antes de retomar.",
+                                                   source={"platform": "fixture", "actor": "Operador", "message_id": "guidance-110"})
+        assert delivery.sweep_awaiting_principal(conn) == [], "decisão aberta mantém a retenção"
+        delivery.resolve_decision(conn, guidance["decision_id"], action="continue", answer="CONTINUE: readback conferido.", author="Principal")
+        assert delivery.sweep_awaiting_principal(conn) == [task.id]
+        assert kb.get_task(conn, task.id).status == "ready"
+
+
+def test_escalated_lab_wait_answered_by_the_principal_releases_the_retention(board, broker):
+    """Espera que foi ao Principal (12 h na fila) e ele respondeu: é decisão dele, posterior ao bloqueio, e libera."""
+    with kb.connect_closing() as conn:
+        task, decision_id = _escalated_wait(conn, 111, "t-escalada1-p6")
+        _retain(conn, task)
+        assert delivery.sweep_awaiting_principal(conn) == []
+        delivery.resolve_decision(conn, decision_id, action="continue", answer="CONTINUE: siga sem o laboratório.", author="Principal")
+        row, context = _decision(conn, decision_id)
+        assert row["status"] == "resolved" and not context["lab_wait"].get("released_at") and context["lab_wait"]["escalated_at"]
+        assert delivery.sweep_awaiting_principal(conn) == [task.id]

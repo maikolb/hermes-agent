@@ -60,7 +60,7 @@ def _call(conn, task, order, status="succeeded"):
     conn.execute("INSERT INTO nfos_tool_calls(id,task_id,run_id,argv_json,cwd,status,created_at,timeout_seconds,returncode) "
                  "VALUES(?,?,?,?,?,?,?,?,?)",
                  (call_id, task.id, task.current_run_id, json.dumps(["concursa-lab", "run", f"passo-{order}"]), "/srv/x", status,
-                  1000.0 + order, 600.0, None if status == "running" else 0))
+                  1000.0 + order, 600.0, None if status in tool.ACTIVE else 0))
     return call_id
 
 
@@ -88,6 +88,17 @@ def test_limit_keeps_the_most_recent_calls_and_the_running_ones(board, task):
     assert [row["id"] for row in rows] == [ids[2], *ids[-10:]]
     assert cut["total"] == 30 and cut["omitted"] == 19 and "call --call <id>" in cut["hint"]
     assert all(row["argv_json"] and row["cwd"] for row in rows)
+
+
+@pytest.mark.parametrize("status", tool.ACTIVE)
+def test_limit_keeps_every_call_without_an_outcome(board, task, status):
+    # Chamada sem desfecho é o efeito incerto que o worker lê antes de repetir: intent e stopping valem como running.
+    ids = [_call(board, task, order, status if order == 1 else "succeeded") for order in range(1, 13)]
+    board.commit()
+    rows, cut = delivery.card_calls(board, task.id, 10)
+    assert [row["id"] for row in rows] == [ids[0], *ids[-10:]]
+    assert rows[0]["status"] == status and rows[0]["argv_json"] and rows[0]["cwd"]
+    assert cut["total"] == 12 and cut["omitted"] == 1
 
 
 def test_card_with_few_calls_is_not_cut(board, task):
