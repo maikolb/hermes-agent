@@ -235,7 +235,7 @@ def test_a_step_applies_once_even_when_two_ticks_read_the_same_wait(board, broke
         from hermes_cli import nfos_waits as registry
         check, raced, inner = registry._decision_resolved, [], []
 
-        def racing_check(conn_, wait):
+        def racing_check(conn_, wait, budget=None):
             if not raced:  # outro tick aplica o mesmo passo enquanto este ainda confere
                 raced.append(True)
                 inner.append(registry.step(conn_, wait["id"], now=now))
@@ -291,6 +291,22 @@ def test_old_wait_for_a_request_that_already_expired_in_the_registry_is_answered
         assert row["status"] == "resolved" and "já venceu neste card" in row["answer"]
         assert context["lab_wait"]["hold"] is False and context["wait_rule"]["outcome"] == "refused"
         assert not kb._nfos_decision_open(conn, task.id) and len(_rows(conn, task.id)) == 2
+
+
+def test_old_wait_the_registry_cannot_adopt_for_another_reason_is_left_alone(board, broker, clock):
+    """Só a recusa de espera vencida responde a decisão. Recibo antigo fora do formato não vira resposta nem libera o card."""
+    with kb.connect_closing() as conn:
+        task = _card(conn, 214)
+        since = int(time.time())
+        legacy = {"receipt": "../recibo fora do formato", "hold": True, "since": since, "next_check_at": since, "status": "queued"}
+        old = delivery._register_lab_wait(conn, task.id, task.current_run_id, "Laboratório: o pedido está na fila do broker.", legacy,
+                                          same=lambda saved: False, event={"receipt": "x"}, next_text="Encerre o turno.")
+        _yield_turn(conn, task)
+        clock(TICK)
+        _tick(conn, task.id)
+        row, context = _decision(conn, old["decision_id"])
+        assert row["status"] == "pending" and context["lab_wait"]["hold"] is True and "wait_rule" not in context
+        assert _rows(conn, task.id) == []
 
 
 def test_decision_already_handed_to_the_principal_before_the_registry_gets_its_counted_reminders(board, broker, clock):

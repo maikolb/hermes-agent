@@ -98,5 +98,13 @@
   {"pr": 316, "file": "gateway/kanban_watchers.py", "text": "def _client_delivery_published("},
   {"pr": 316, "file": "gateway/kanban_watchers.py", "text": "_kanban_client_texts_published"},
   {"pr": 316, "file": "hermes_cli/nfos_requester_deadline.py", "text": "MAX_REMINDER_REQUESTS = 3"},
-  {"pr": 316, "file": "hermes_cli/nfos_requester_deadline.py", "text": "reason='reminder_undelivered'"}
+  {"pr": 316, "file": "hermes_cli/nfos_requester_deadline.py", "text": "reason='reminder_undelivered'"},
+  {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "DEPENDENCY_BY_FACT_20261010"},
+  {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "def _declare_dependency_wait("},
+  {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "LAB_CAPABILITY_PER_CARD_20261010"},
+  {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "def _lab_command_check("},
+  {"pr": 319, "file": "hermes_cli/nfos_workspace_repair.py", "text": "def finish_dependency_pause("},
+  {"pr": 319, "file": "hermes_cli/nfos_waits.py", "text": "def card_cycle("},
+  {"pr": 319, "file": "hermes_cli/nfos_waits.py", "text": "LAB_COMMANDS = {"},
+  {"pr": 319, "file": "hermes_cli/nfos_runtime.py", "text": "the fact the runtime verifies by itself"}
 ]
