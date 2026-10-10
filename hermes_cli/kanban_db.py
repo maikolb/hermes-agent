@@ -1969,6 +1969,23 @@ CREATE TABLE IF NOT EXISTS task_runs (
     error               TEXT
 );
 
+-- WORKER_TREE_20261010: the processes a worker had running when its run
+-- closed, each by identity (PID + creation time), with the worker they
+-- belong to. Written while the worker lives, because afterwards init adopts
+-- them. Once the worker is gone the dispatcher ends what is still listed,
+-- together with every process whose environment carries the run, and
+-- removes the rows.
+CREATE TABLE IF NOT EXISTS task_run_processes (
+    run_id              INTEGER NOT NULL,
+    task_id             TEXT NOT NULL,
+    pid                 INTEGER NOT NULL,
+    started_at          REAL NOT NULL,
+    worker_pid          INTEGER NOT NULL,
+    worker_started_at   REAL NOT NULL,
+    recorded_at         INTEGER NOT NULL,
+    PRIMARY KEY (run_id, pid, started_at)
+);
+
 -- Files attached to a task (PDFs, images, source documents). The blob
 -- lives on disk under ``attachments_root(board)/<task_id>/<stored_name>``;
 -- this row carries metadata + the absolute ``stored_path`` so the
@@ -5278,6 +5295,9 @@ def _end_run(
     if not row or not row["current_run_id"]:
         return None
     run_id = int(row["current_run_id"])
+    # A worker that closes its own run and then exits is signalled by nobody:
+    # this is the last moment its processes can still be told apart.
+    _register_run_processes(conn, task_id, run_id)
     prior = conn.execute("SELECT metadata FROM task_runs WHERE id = ?", (run_id,)).fetchone()
     try:
         prior_metadata = json.loads(prior["metadata"]) if prior and prior["metadata"] else {}
@@ -10379,21 +10399,15 @@ def _terminate_archived_worker(
                 "pid_reused": True,
             }
         else:
-            base_signal = signal_fn if signal_fn is not None else os.kill
-
-            def _identity_guarded_signal(pid: int, sig: int) -> None:
-                observed = _process_start_time(pid)
-                if observed is None:
-                    raise OSError("worker process identity unavailable")
-                if abs(observed - worker_started_at) >= 0.01:
-                    raise ProcessLookupError("archived worker PID was reused")
-                base_signal(pid, sig)
-
+            # The primitive checks PID and creation time before every signal,
+            # of the worker and of each process it started. A guard here that
+            # compared every target with the worker's own creation time would
+            # refuse all of the worker's processes.
             termination = _terminate_reclaimed_worker(
                 worker_pid,
                 claim_lock,
                 started_at=worker_started_at,
-                signal_fn=_identity_guarded_signal,
+                signal_fn=signal_fn,
             )
     except Exception as exc:
         termination = {
@@ -11871,6 +11885,334 @@ def _worker_process_state(pid: int, started_at: Any) -> str:
         return "unverified"
 
 
+def _is_process(pid: Any, started_at: Any) -> bool:
+    """True while ``pid`` is alive and is the process created at ``started_at``."""
+    try:
+        return bool(_pid_alive(int(pid))) and _worker_process_state(int(pid), started_at) == "same"
+    except (TypeError, ValueError):
+        return False
+
+
+def _process_gone(pid: Any, started_at: Any) -> bool:
+    """True when the process created at ``started_at`` no longer holds ``pid``.
+
+    False while it lives and also while that cannot be told: a process whose
+    identity cannot be read is not treated as gone.
+    """
+    try:
+        return not _pid_alive(int(pid)) or _worker_process_state(int(pid), started_at) in ("gone", "reused")
+    except (TypeError, ValueError):
+        return False
+
+
+def _worker_processes(pid: Any, started_at: Any) -> list[dict[str, Any]]:
+    """Every live process the worker ``(pid, started_at)`` started.
+
+    WORKER_TREE_20261010: each is ``{"pid", "started_at"}``; the creation time
+    is what makes the PID an identity. The worker's descendants are walked,
+    which reaches the ones that moved to a session of their own while the
+    worker is still their ancestor. A worker that is gone, or whose identity
+    does not match, has nothing to list: afterwards init is their parent. The
+    process running this code is never listed.
+    """
+    if started_at is None:
+        return []
+    try:
+        from hermes_cli.nfos_tool import _descendants
+
+        found = _descendants(
+            {"worker_pid": int(pid), "worker_started_at": float(started_at), "descendants_json": "[]"},
+            include_group=True,
+        )
+    except Exception:
+        # Without the list the worker's processes outlive it again: say so.
+        _log.warning("could not list the processes of worker pid %s", pid, exc_info=True)
+        return []
+    return [p for p in found if int(p["pid"]) not in (os.getpid(), int(pid))]
+
+
+def _end_processes(processes: Iterable[Mapping[str, Any]], kill, *, grace: float = 2.0) -> list[dict[str, Any]]:
+    """End ``processes``, each only while it is still the process listed.
+
+    SIGTERM, then SIGKILL for what is still there after ``grace`` seconds.
+    The identity is checked again before every signal: a PID that now belongs
+    to a process created at another time is left alone, and so is the process
+    running this code. Returns the ones still alive.
+    """
+    import signal
+
+    targets = [dict(p) for p in processes if int(p["pid"]) != os.getpid()]
+
+    def alive() -> list[dict[str, Any]]:
+        return [p for p in targets if _is_process(p["pid"], p["started_at"])]
+
+    def send(sig: int) -> None:
+        # Listed parent first: ending the deepest first lets a shell that only
+        # waits for its command leave by itself.
+        for process in reversed(alive()):
+            try:
+                kill(int(process["pid"]), sig)
+            except OSError:
+                pass
+
+    def wait(seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and alive():
+            time.sleep(0.05)
+
+    send(signal.SIGTERM)
+    wait(grace)
+    if alive():
+        # signal.SIGKILL doesn't exist on Windows; SIGTERM already terminates there.
+        send(getattr(signal, "SIGKILL", signal.SIGTERM))
+        wait(1.0)
+    return alive()
+
+
+def _run_worker(conn: sqlite3.Connection, task_id: str, run_id: int) -> Optional[tuple[int, float]]:
+    """``(pid, started_at)`` of the worker of ``run_id``, or None when it has none on record.
+
+    Closing a run clears its worker; the event written when the worker
+    started keeps the PID and the creation time for good.
+    """
+    run = conn.execute(
+        "SELECT worker_pid FROM task_runs WHERE id = ? AND task_id = ?", (run_id, task_id),
+    ).fetchone()
+    if run is None:
+        return None
+    pid = int(run["worker_pid"]) if run["worker_pid"] else None
+    if pid is not None:
+        task = conn.execute(
+            "SELECT worker_pid, worker_started_at FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if task and task["worker_pid"] == pid and task["worker_started_at"] is not None:
+            return pid, float(task["worker_started_at"])
+    for event in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND run_id = ? "
+        "AND kind IN ('spawned', 'nfos_worker_created_card', 'nfos_worker_recovered_card') "
+        "ORDER BY id DESC",
+        (task_id, run_id),
+    ):
+        try:
+            payload = json.loads(event["payload"] or "{}")
+            recorded = payload.get("pid")
+            if recorded and payload.get("worker_started_at") is not None and pid in (None, recorded):
+                return int(recorded), float(payload["worker_started_at"])
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _register_run_processes(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: int,
+    worker: Optional[tuple[int, float]] = None,
+    processes: Optional[list[dict[str, Any]]] = None,
+) -> None:
+    """List on ``run_id`` what its worker has running right now.
+
+    Called inside the caller's transaction. Listing never blocks the caller:
+    a board whose schema predates the table closes its runs as before.
+    """
+    try:
+        worker = worker or _run_worker(conn, task_id, run_id)
+        if worker is None:
+            return
+        if worker[0] == os.getpid() and os.environ.get("HERMES_KANBAN_TASK") != task_id:
+            # A worker closing its own run carries the card in its environment.
+            # Any other process recorded as the worker (a dispatcher) has
+            # children that are other cards' workers: they are not listed.
+            return
+        if processes is None:
+            processes = _worker_processes(*worker)
+        now = int(time.time())
+        for process in processes:
+            conn.execute(
+                "INSERT OR IGNORE INTO task_run_processes "
+                "(run_id, task_id, pid, started_at, worker_pid, worker_started_at, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (run_id, task_id, int(process["pid"]), float(process["started_at"]),
+                 worker[0], worker[1], now),
+            )
+    except sqlite3.OperationalError:
+        _log.warning("could not list the processes of run %s of task %s", run_id, task_id, exc_info=True)
+
+
+def _board_db_file(conn: sqlite3.Connection) -> Optional[str]:
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        if row[1] == "main" and row[2]:
+            return os.path.normcase(os.path.realpath(row[2]))
+    return None
+
+
+def _run_marked_processes(conn: sqlite3.Connection) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    """Live processes whose environment says which run of this board started them.
+
+    WORKER_TREE_20261010: a worker is started with its board, card and run in
+    the environment (``HERMES_KANBAN_DB``, ``HERMES_KANBAN_TASK``,
+    ``HERMES_KANBAN_RUN_ID``) and everything it starts inherits them, whatever
+    session it moves to and whoever its parent is by now. That is the one
+    trace left of a worker that went away by itself. Keyed by
+    ``(task_id, run_id)``; each process is ``{"pid", "started_at"}``. Nothing
+    else of an environment is kept.
+    """
+    board = _board_db_file(conn)
+    if not board:
+        return {}
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        _log.warning("could not read the processes of this host", exc_info=True)
+        return {}
+    found: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for process in psutil.process_iter():
+        try:
+            environ = process.environ()
+            db = environ.get("HERMES_KANBAN_DB")
+            task_id = environ.get("HERMES_KANBAN_TASK")
+            run_id = environ.get("HERMES_KANBAN_RUN_ID")
+            if not (db and task_id and run_id):
+                continue
+            if os.path.normcase(os.path.realpath(db)) != board:
+                continue
+            if process.status() == psutil.STATUS_ZOMBIE:
+                continue
+            found.setdefault((task_id, int(run_id)), []).append(
+                {"pid": process.pid, "started_at": process.create_time()}
+            )
+        except (psutil.Error, OSError, ValueError):
+            continue
+    return found
+
+
+def end_closed_run_processes(conn: sqlite3.Connection, *, signal_fn=None) -> list[int]:
+    """End what the workers of closed runs left running; return those run ids.
+
+    WORKER_TREE_20261010: once a run is closed and the process that was its
+    worker no longer exists, every process the run listed when it closed and
+    every process whose environment carries that run is an orphan and is ended.
+    A worker that is still leaving, or that went on to a newer run, keeps them.
+    Never a target, whatever a run listed or an environment says: the process
+    running this code and its ancestors, and a process that is right now a
+    worker of a running card or one of its processes.
+    """
+    runs: dict[tuple[str, int], dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT run_id, task_id, pid, started_at, worker_pid, worker_started_at "
+        "FROM task_run_processes ORDER BY run_id, recorded_at, pid"
+    ).fetchall():
+        run = runs.setdefault((row["task_id"], int(row["run_id"])), {"listed": True, "marked": set(), "processes": {}})
+        run["worker"] = (int(row["worker_pid"]), float(row["worker_started_at"]))
+        run["processes"][int(row["pid"])] = {"pid": int(row["pid"]), "started_at": float(row["started_at"])}
+    # A run named by the environment of the process running this code names
+    # every process it starts as well (a dispatcher launched from inside a
+    # worker's shell): under that run the environment tells nothing apart.
+    own_run = (os.environ.get("HERMES_KANBAN_TASK"), os.environ.get("HERMES_KANBAN_RUN_ID"))
+    for key, processes in _run_marked_processes(conn).items():
+        if (key[0], str(key[1])) == own_run:
+            continue
+        run = runs.setdefault(key, {"listed": False, "marked": set(), "processes": {}})
+        for process in processes:
+            run["marked"].add(int(process["pid"]))
+            run["processes"].setdefault(int(process["pid"]), process)
+    if not runs:
+        return []
+    kill = signal_fn if signal_fn is not None else (os.kill if hasattr(os, "kill") else None)
+    if kill is None:
+        return []
+
+    spared: Optional[list[tuple[int, float]]] = None
+
+    def is_spared(pid: int, started_at: float) -> bool:
+        nonlocal spared
+        if spared is None:
+            spared = []
+            for row in conn.execute(
+                "SELECT worker_pid, worker_started_at FROM tasks "
+                "WHERE status = 'running' AND worker_pid IS NOT NULL AND worker_started_at IS NOT NULL"
+            ).fetchall():
+                worker = (int(row["worker_pid"]), float(row["worker_started_at"]))
+                spared.append(worker)
+                spared.extend((int(p["pid"]), float(p["started_at"])) for p in _worker_processes(*worker))
+            try:
+                import psutil  # type: ignore
+
+                spared.extend((parent.pid, parent.create_time()) for parent in psutil.Process().parents())
+            except Exception:
+                pass
+        return any(pid == used and abs(started_at - created) < 0.01 for used, created in spared)
+
+    has_tool_calls = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nfos_tool_calls'"
+    ).fetchone() is not None
+    ended_runs: list[int] = []
+    for (task_id, run_id), found in runs.items():
+        stored = conn.execute("SELECT task_id, ended_at FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        if stored is not None and (stored["task_id"] != task_id or stored["ended_at"] is None):
+            continue
+        # A run deleted with its card is as closed as one that ended, but only
+        # the list it left still says who its worker was.
+        worker = found.get("worker") or _run_worker(conn, task_id, run_id)
+        if worker is None:
+            continue
+        # The creation time read by another process can differ by a second
+        # when the clock is adjusted. A process that carries the run and has
+        # the worker's PID is the worker: it is alive.
+        if not _process_gone(*worker) or worker[0] in found["marked"]:
+            continue
+        # A native command of this run that is still open has its own receipt
+        # and its own exit grace: the runtime reconciliation ends it first.
+        if has_tool_calls and conn.execute(
+            "SELECT 1 FROM nfos_tool_calls WHERE run_id = ? "
+            "AND status IN ('intent', 'running', 'stopping') LIMIT 1",
+            (run_id,),
+        ).fetchone():
+            continue
+        # One attempt per process: a SIGKILL that did not take effect stays
+        # pending on it, and repeating it every tick changes nothing. What
+        # could not be ended is named in the event and not tried again.
+        tried: set[tuple[int, float]] = set()
+        for event in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND run_id = ? "
+            "AND kind = 'worker_processes_ended'",
+            (task_id, run_id),
+        ).fetchall():
+            try:
+                for process in json.loads(event["payload"] or "{}").get("still_alive") or []:
+                    tried.add((int(process["pid"]), float(process["started_at"])))
+            except (TypeError, ValueError, KeyError):
+                continue
+        targets = sorted(
+            (
+                process for process in found["processes"].values()
+                if (int(process["pid"]), float(process["started_at"])) not in tried
+                and not is_spared(int(process["pid"]), float(process["started_at"]))
+                and _is_process(process["pid"], process["started_at"])
+            ),
+            key=lambda process: process["started_at"],
+        )
+        alive = _end_processes(targets, kill) if targets else []
+        if not targets and not found["listed"]:
+            continue
+        with write_txn(conn):
+            conn.execute("DELETE FROM task_run_processes WHERE run_id = ?", (run_id,))
+            if targets and conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+                _append_event(
+                    conn, task_id, "worker_processes_ended",
+                    {
+                        "worker_pid": worker[0],
+                        "worker_started_at": worker[1],
+                        "processes": [p for p in targets if p not in alive],
+                        "still_alive": alive,
+                    },
+                    run_id=run_id,
+                )
+        if targets:
+            ended_runs.append(run_id)
+    return ended_runs
+
+
 def _terminate_reclaimed_worker(
     pid: Optional[int],
     claim_lock: Optional[str],
@@ -11888,6 +12230,11 @@ def _terminate_reclaimed_worker(
     claim is held as for a worker that survived (``identity_unavailable``).
     The identity is checked again before each signal. Without a ``signal_fn``
     the process running this code is never the target.
+
+    WORKER_TREE_20261010: the worker's processes are ended with it, under the
+    same rule. They are listed (PID and creation time each) before the first
+    signal and ended after the worker; ``processes`` names them and
+    ``processes_alive`` the ones that outlived a SIGKILL.
     """
     import signal
 
@@ -11931,6 +12278,18 @@ def _terminate_reclaimed_worker(
     def same_worker() -> bool:
         return bool(_pid_alive(pid)) and _worker_process_state(int(pid), started_at) == "same"
 
+    # WORKER_TREE_20261010: listed before the first signal. A process the
+    # worker left in a session of its own is reached by no signal sent to the
+    # worker, and once the worker is gone init is its parent. The process
+    # running this code is no worker: its own children are never listed.
+    processes = [] if int(pid) == os.getpid() else _worker_processes(int(pid), started_at)
+
+    def with_processes_ended() -> dict[str, Any]:
+        if processes:
+            info["processes"] = processes
+            info["processes_alive"] = _end_processes(processes, kill)
+        return info
+
     info["termination_attempted"] = True
     try:
         kill(int(pid), signal.SIGTERM)
@@ -11939,14 +12298,14 @@ def _terminate_reclaimed_worker(
         # survival. Leaving terminated=False here would make the reclaim guard
         # misread a dead worker as still-alive and defer forever.
         info["terminated"] = True
-        return info
+        return with_processes_ended()
     except OSError:
         return info
 
     for _ in range(10):
         if not same_worker():
             info["terminated"] = True
-            return info
+            return with_processes_ended()
         time.sleep(0.5)
 
     if same_worker():
@@ -11957,10 +12316,10 @@ def _terminate_reclaimed_worker(
             kill(int(pid), _sigkill)
             info["sigkill"] = True
         except (ProcessLookupError, OSError):
-            return info
+            return with_processes_ended()
 
     info["terminated"] = not same_worker()
-    return info
+    return with_processes_ended()
 
 
 def _worker_survived_termination(termination: dict) -> bool:
@@ -14488,6 +14847,10 @@ def _dispatch_once_locked(
         # claim_task also refuses the claim if termination remains pending.
         # The laboratory sweep already ran in this tick's first reconciliation.
         reconcile_runtime(conn, lab_sweep=False)
+    if not dry_run:
+        # A run closed above, or by its own worker since the last tick, whose
+        # worker is gone: end what it left running before a replacement starts.
+        end_closed_run_processes(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
     from hermes_cli.nfos_runtime import project_config, dispatch_requests, adopt_existing_tasks
     delivery_project = project_config(_normalize_board_slug(board) or get_current_board())
