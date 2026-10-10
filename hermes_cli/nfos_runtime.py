@@ -470,6 +470,7 @@ work. Administrative closure is not functional delivery.
 """
 
 from hermes_cli.nfos_principal_review import QUALITY_POLICY
+from hermes_cli.nfos_public_text import PUBLIC_TEXT_FORM  # PUBLIC_TEXT_FORM_20261009
 
 OUTCOME_CLOSURE_POLICY = QUALITY_POLICY + "\n" + """Owner priority, 16/09/2026: Does the solution work, match the request and let the user use it?
 Those outcomes decide delivery. PASS, probes and paperwork support judgment; they are not the goal.
@@ -485,7 +486,7 @@ existing notes rather than accumulating checklists. Fix unmet functional outcome
 For a portal ticket, also save report.public_delivery={summary,links}: the concrete
 client-facing result and public product links. Keep PRs, models, credits, logs and
 internal investigation instructions in the internal report, never in that public field.
-Evidence must demonstrate exactly the result the user requested. Proving a different behavior,
+""" + PUBLIC_TEXT_FORM + """Evidence must demonstrate exactly the result the user requested. Proving a different behavior,
 even if related and genuinely working, does not prove the request. This applies to every kind of task.
 If the request is for an agent, system or workflow to do something, evidence must come from that
 agent, system or workflow actually doing it. The operator doing the work in its place is not proof.
@@ -907,6 +908,7 @@ corrected; the support desk shows "Dado resolvido" with that text for support to
 this card continues the cause internally. When the cause ships, the final public_delivery
 becomes the "Resolvido" text. Use delivery once per delivery, never for internal progress. The final report uses public_delivery={summary,links}
 for the usable result; never include internal logs, models, credits, PRs or paths there.
+In a question, the question itself comes first and alone; its short context follows.
 Sineta triage approval only creates a TODO ticket. Execution approval is separate.
 Reopened support tickets return to TODO for a new approval. Neither an ordinary reply
 nor a priority change grants that approval. Telegram requests retain their normal route.
