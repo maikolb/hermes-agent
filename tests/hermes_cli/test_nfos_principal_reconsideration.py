@@ -12,6 +12,9 @@ import pytest
 from hermes_cli import kanban_db as kb, nfos_delivery as d
 from tests.hermes_cli.test_nfos_candidate_delivery import delivery, homolog, A, B
 from tests.hermes_cli.test_nfos_recovery_ownership import set_prior_worker
+from tests.hermes_cli.nfos_owner_question_switch import owner_questions_allowed  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures('owner_questions_allowed')  # NO_OWNER_QUESTIONS_UNIVERSAL_20261010
 
 
 def human_block(conn, task, *, kind='review', confirmed_pr=True, pid=987654321):

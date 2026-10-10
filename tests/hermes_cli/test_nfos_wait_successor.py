@@ -26,7 +26,8 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(review, "settings", lambda: {"principal_validation": False, "projects": {"pilot": {}}})
+    # O estado de antes da regra universal: o projeto ainda perguntava ao dono (NO_OWNER_QUESTIONS_UNIVERSAL_20261010).
+    monkeypatch.setattr(review, "settings", lambda: {"principal_validation": False, "projects": {"pilot": {"owner_questions": True}}})
     with kb.connect_closing() as conn:
         delivery.init_schema(conn)
         yield conn

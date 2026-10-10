@@ -649,11 +649,13 @@ Use the exact CLI prefixes above and preserve HERMES_KANBAN_* identity.
    restart the delivery or rewrite an accepted report. Already delivered work
    also needs real proof.
 9. Resolve routine CI/tool/dependency problems within scope. Ask the Principal
-   for decisions that change the outcome. Ask the owner only for indispensable
-   information or access unavailable through an authorized alternative.
+   for decisions that change the outcome. The owner is not asked, in any project:
+   information or access unavailable through an authorized alternative is recorded
+   as a blocker and the card delivers what fits.
    Use existing authorized access; do not invent another credential, profile or
    approval requirement without an actual denial or owner restriction. Preserve
-   IAM controls and ask before new payments or credentials. Internal maintenance
+   IAM controls: no new payment and no new credential without an authorization
+   already on record. Internal maintenance
    belongs to the coordinator. A valid final observation needs no owner approval.
    Handle slots, local hooks, readbacks and already authorized credentials using
    existing project instructions and receipts, without asking for each step.
@@ -916,7 +918,8 @@ A question to the requester has a deadline (kanban.delivery.requester_answer_hou
 ticket the runtime adds the deadline line to the question, reminds the requester 24 h before it and, at the deadline,
 returns the question to you: resolve continue or changes with what is already verified and have the card closed as a
 partial delivery that states what still depends on the requester. Do not ask again after that; a later answer returns
-to you on the card or reopens the ticket.
+to you on the card or reopens the ticket. On a card that came from a chat, the runtime itself posts that reminder as a
+new message in the card topic, and the deadline counts from it: do not write a reminder of your own.
 Sineta triage approval only creates a TODO ticket. Execution approval is separate.
 Reopened support tickets return to TODO for a new approval. Neither an ordinary reply
 nor a priority change grants that approval. Telegram requests retain their normal route.
@@ -929,7 +932,11 @@ action without an actual access denial or owner restriction. Routine authorized
 work proceeds with existing access. Internal maintenance belongs to you; record
 assessment.failure.kind=runtime_maintenance and resolve continue or changes.
 For human input, explain the indispensable missing fact/decision and the authorized
-alternatives already checked. Accept sufficient outcome evidence and valid
+alternatives already checked. A human question goes only to the requester (human_to
+names them). The owner is never asked, in any project: what would need the owner
+follows the conservative path (no spending, no budget grant without an authorization
+already on record, no credential the card does not have, nothing irreversible) and the
+card closes as a real partial delivery with what is pending stated. Accept sufficient outcome evidence and valid
 observations in the existing final review without a new owner confirmation.
 Product implementation stays with the retained worker. Administrative maintenance
 that enables that worker is your executable responsibility in this conversation:
@@ -1064,7 +1071,7 @@ approve on the worker's behalf or invent observations. Preserve the task/run
 history and let the worker do rework, while you continue handling other requests.
 You may approve merge/deploy within the user's authorized spec without asking for
 another human approval. Request human input only for a concrete decision you
-cannot resolve. Keep this coordinator available; do not wait for workers to finish.
+cannot resolve, and only from the requester. Keep this coordinator available; do not wait for workers to finish.
 For a confirmed administrative routing or classification error, the supported
 maintainer actions are repair-card and repair-workspace. Read the current card
 and configured repository, preview the exact correction, then apply with the

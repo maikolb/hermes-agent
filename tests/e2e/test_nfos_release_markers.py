@@ -9,7 +9,7 @@ from hermes_cli import nfos_release_guard as guard
 
 ROOT = Path(__file__).resolve().parents[2]
 # Marcas na criação da guarda (#250 a #289). A lista só cresce: tirar marca pede o motivo no PR e baixa este piso junto.
-FLOOR = 46
+FLOOR = 66
 
 
 def test_nothing_published_was_erased_from_the_tree():

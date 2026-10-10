@@ -95,7 +95,16 @@ def reconcile_maintenance_recovery(conn):
                 _lab_wait_decision(conn, row, pause, identity, bool(worker_escalation(conn, row['task_id']).get('first_run_id')))
                 continue
             if decision:
-                continue
+                # PAUSE_OBLIGATION_REISSUED_20261010: a obrigação existe mas ninguém a deve mais (saiu por pergunta humana,
+                # por resposta humana ou por sucessora sem a herança). Pausa aberta sem decisão pendente nem pergunta humana
+                # que a carregue ganha a obrigação de novo, em vez de ficar em awaiting_principal sem lembrete.
+                held = conn.execute("SELECT COUNT(*), SUM(status IN ('pending','human')) FROM nfos_decisions WHERE task_id=? "
+                                    "AND json_extract(context,'$.maintenance_recovery.pause_run_id')=?", (row['task_id'], row['id'])).fetchone()
+                if held[1]:
+                    continue
+                did = 'dec_' + hashlib.sha256(delivery._json(['maintenance-recovery', identity, 'reissued', held[0]]).encode()).hexdigest()[:24]
+                if delivery.get_decision(conn, did):
+                    continue
             reason = pause.get('reason') or 'Pausa de manutenção sem motivo registrado; recuperar a causa no histórico antes de retomar.'
             accumulated = bool(worker_escalation(conn, row['task_id']).get('first_run_id'))
             route = 'repair-execution' if pause.get('kind') == 'runtime_budget_exhausted' else 'resume-after-repair'
