@@ -162,6 +162,34 @@ def test_receipt_already_out_of_queue_does_not_wait(board, broker):
         assert conn.execute("SELECT count(*) FROM nfos_decisions WHERE task_id=?", (task.id,)).fetchone()[0] == 0
 
 
+def test_request_the_laboratory_does_not_know_is_resent_instead_of_awaited(board, broker):
+    """LAB_RECEIPT_UNKNOWN_20261010: sem recibo e sem pedido na caixa do broker, o pedido não chegou (CS-0019, 09/10/2026)."""
+    receipts, _ = broker
+    receipts[RECEIPT] = {"id": RECEIPT, "status": "unknown"}
+    with kb.connect_closing() as conn:
+        task = _card(conn, 31)
+        out = delivery.lab_wait(conn, task.id, task.current_run_id, RECEIPT)
+        assert out["waiting"] is False and out["status"] == "unknown"
+        assert "Reenvie com o mesmo ID" in out["next"] and "sem reenviar" not in out["next"]
+        assert conn.execute("SELECT count(*) FROM nfos_decisions WHERE task_id=?", (task.id,)).fetchone()[0] == 0
+
+
+def test_wait_on_a_request_that_turns_out_unknown_is_released_to_resend(board, broker):
+    receipts, _ = broker
+    with kb.connect_closing() as conn:
+        task = _card(conn, 32)
+        out = delivery.lab_wait(conn, task.id, task.current_run_id, RECEIPT)
+        assert out["waiting"] is True
+        _shift(conn, out["decision_id"], next_check_at=0)
+        receipts[RECEIPT] = {"id": RECEIPT, "status": "unknown"}
+        assert delivery.sweep_lab_waits(conn) == [(out["decision_id"], "released")]
+        row, context = _decision(conn, out["decision_id"])
+        assert row["status"] == "resolved" and row["action"] == "continue"
+        assert RECEIPT in row["answer"] and "Reenvie com o mesmo ID" in row["answer"] and "não reenvie" not in row["answer"]
+        assert context["lab_wait"]["hold"] is False and context["lab_wait"]["status"] == "unknown"
+        assert "nfos_principal_requested" not in _kinds(conn, task.id), "o worker reenvia; o Principal não é acordado"
+
+
 def test_bad_or_unreadable_receipt_and_foreign_run_refuse_to_wait(board, broker):
     receipts, _ = broker
     with kb.connect_closing() as conn:
