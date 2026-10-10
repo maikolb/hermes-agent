@@ -2078,6 +2078,40 @@ def _capture_hypothesis(conn, task_id, run_id, spec, crit, previous, record, rev
     _event(conn, task_id, run_id, 'nfos_lesson_recorded', {'lesson_id': cur.lastrowid, 'kind': 'hypothesis', 'criterion': crit['id']})
 
 
+def _current_decisions_context(conn, task_id, limit=3):
+    """CURRENT_DECISIONS_20261010: a retomada recebe as últimas respostas do Principal a impedimentos e o que foi substituído.
+
+    Em 09/10/2026 o Principal respondeu 52 impedimentos do Concursa como já decididos; 24 eram a primeira pergunta de uma
+    execução nova. O contexto da retomada só levava a última revisão de spec e a final, e o show devolve todas as decisões
+    do card sem limite, então a resposta que valia não chegava ao worker relançado. Reparo de pausa é obrigação do
+    Principal, e a escalada de destino tem o canal próprio dela (_destination_escalation_answer, que esconde a resposta de
+    uma espera antiga): as duas ficam de fora."""
+    parts = []
+    answered = [dict(r) for r in conn.execute(
+        "SELECT id,action,answer,resolved_at FROM nfos_decisions WHERE task_id=? AND kind='impediment' AND status='resolved' "
+        "AND author='Principal' AND action IN ('continue','changes') "
+        "AND NOT (json_valid(context) AND (json_extract(context,'$.maintenance_recovery') IS NOT NULL "
+        "OR json_extract(context,'$.destination_wait') IS NOT NULL)) "
+        "ORDER BY resolved_at DESC,rowid DESC LIMIT ?", (task_id, limit))]
+    if answered:
+        lines = []
+        for decision in answered:
+            answer = ' '.join(str(decision['answer'] or '').split())
+            when = time.strftime('%d/%m %H:%MZ', time.gmtime(int(decision['resolved_at'] or 0)))
+            lines.append(f"- {decision['id']} ({decision['action']}, {when}): {answer[:600]}" + (' [...]' if len(answer) > 600 else ''))
+        parts.append('Impediments the Principal already answered on this card, newest first. They are decided: apply them and '
+                     'do not ask the same thing again; ask only what they do not cover.\n' + '\n'.join(lines))
+    replaced = []
+    for row in conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status='superseded' ORDER BY rowid DESC LIMIT 8", (task_id,)):
+        current, chain = _current_decision(conn, dict(row))
+        if chain:
+            replaced.append(f"- {row['id']} -> {current['id']} ({current['status']}/{current.get('action') or 'pending'})")
+    if replaced:
+        parts.append('Replaced decisions (left) and the one in force (right). Never wait for, cite or forward a replaced '
+                     'decision or its question:\n' + '\n'.join(replaced))
+    return parts
+
+
 def case_context(conn, task_id):
     """Mesmo pedido: medições, tentativas, próxima ação e nota de debug, para toda retomada."""
     wf = get_workflow(conn, task_id)
@@ -2108,6 +2142,7 @@ def case_context(conn, task_id):
     escalation_answer = _destination_escalation_answer(conn, task_id)  # HUMAN_LAST_RESORT revisões 7 e 8: primeiro, antes do corte do worker_context
     if escalation_answer:
         parts.append(escalation_answer)
+    parts.extend(_current_decisions_context(conn, task_id))  # depois do pedido e da escalada de destino, que seguem primeiro
     measurements = st.get('measurements') or {}
     if measurements:
         parts.append('Measurements so far: ' + '; '.join(
@@ -4230,6 +4265,9 @@ def ask_principal(conn, task_id, run_id, *, kind, question, context):
                 return decision_id
         context=dict(context)
         if kind == 'impediment':
+            answered = _answer_replaced_reference(conn, task_id, run_id, question, context)
+            if answered:
+                return answered
             from hermes_cli.nfos_principal_review import impediment_identity
             context['impediment_identity'] = impediment_identity(conn, task_id, context)
             for pending in conn.execute("SELECT id,question,context FROM nfos_decisions WHERE task_id=? AND run_id=? AND kind='impediment' AND status='pending'",
@@ -4433,6 +4471,47 @@ def _current_decision(conn, row, limit=20):
         chain.append(row['id'])
         row = following
     return row, chain
+
+
+_DECISION_REFERENCE = re.compile(r'\b(?:dec|nd)_[0-9a-f]{8,32}\b')
+
+
+def _answer_replaced_reference(conn, task_id, run_id, question, context):
+    """SUPERSEDED_REFERENCE_20261010: pergunta que cita decisão substituída recebe a vigente, sem acordar o Principal.
+
+    Em 09/10/2026, 11 impedimentos do Concursa citavam uma decisão já substituída (como a dec_785f17b753874f9699d0 no
+    t_8ed13ed7) e nas 11 respostas o Principal só apontou a sucessora. Devolve o id da decisão que responde, ou None quando a
+    pergunta segue para ele. Uma citação responde sozinha uma única vez por execução: se o worker insistir, é porque
+    falta algo que a vigente não cobre, e isso é julgamento do Principal."""
+    for reference in dict.fromkeys(_DECISION_REFERENCE.findall(question)):
+        rows = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND id LIKE ?||'%' LIMIT 2", (task_id, reference)).fetchall()
+        if len(rows) != 1 or rows[0]['status'] != 'superseded':
+            continue
+        cited = rows[0]['id']
+        current, chain = _current_decision(conn, dict(rows[0]))
+        if not chain:
+            continue
+        if current['status'] == 'pending':
+            return current['id']
+        if current['status'] != 'resolved' or conn.execute(
+                "SELECT 1 FROM nfos_decisions WHERE task_id=? AND run_id=? AND author='NFOS automation' AND json_valid(context) "
+                "AND json_extract(context,'$.replaced_reference.cited')=?", (task_id, run_id, cited)).fetchone():
+            continue
+        decision_id = 'dec_'+uuid.uuid4().hex[:20]; now = int(time.time())
+        when = time.strftime('%d/%m %H:%MZ', time.gmtime(int(current.get('resolved_at') or 0)))
+        answer = (f"CONTINUE (automático): a decisão {cited} citada nesta pergunta foi substituída. Vale a decisão {current['id']} "
+                  f"({current.get('action')}, {when}):\n{str(current.get('answer') or '')[:3000]}\n"
+                  "Não espere, não cite e não encaminhe a decisão substituída nem a pergunta dela. Aplique a decisão vigente. "
+                  "Se ela não cobrir o que falta, pergunte de novo dizendo só o que falta.")
+        conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                     (decision_id, task_id, run_id, 'impediment', question,
+                      _json(dict(context, replaced_reference={'cited': cited, 'current': current['id']})),
+                      get_workflow(conn, task_id)['spec_revision'], now, 'resolved', 'continue', answer, 'NFOS automation', now))
+        _event(conn, task_id, run_id, 'nfos_principal_auto_continue',
+               {'decision_id': decision_id, 'kind': 'impediment', 'question': question, 'answer': answer,
+                'replaced_reference': {'cited': cited, 'current': current['id']}})
+        return decision_id
+    return None
 
 
 def wait_decision(conn,decision_id,*,timeout=300):
