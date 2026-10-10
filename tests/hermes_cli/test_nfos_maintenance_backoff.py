@@ -104,7 +104,10 @@ def test_declared_dependency_holds_the_pause_without_reminders_until_its_recheck
     assert len(_requests(conn, task, did)) == before + 1, 'no prazo, volta ao Principal uma vez'
     recheck = _requests(conn, task, did)[-1]['question']
     assert recheck.startswith('Reconferência de dependência declarada em '), 'o pedido abre com a dependência, não com o reparo'
-    assert DEPENDENCY['need'] in recheck[:300] and DEPENDENCY['owner'] in recheck[:300] and 'Confira por fato' in recheck[:400]
+    # RECHECK_WITHOUT_SIX_20261010: a orientação vem antes da necessidade e cabe no corte de 500 caracteres do aviso.
+    assert 'Confira por fato' in recheck[:120] and 'não informe recheck_hours: sem ele a pausa volta em 1 h' in recheck[:330]
+    assert DEPENDENCY['need'] in recheck[:500] and DEPENDENCY['owner'] in recheck[:500]
+    assert recheck.index('não informe recheck_hours') < recheck.index(DEPENDENCY['need'])
     assert recheck.endswith(d.get_decision(conn, did)['question']), 'a pergunta gravada segue inteira depois da abertura'
     assert not d.get_decision(conn, did)['question'].startswith('Reconferência'), 'a pergunta gravada não muda'
     assert _context(conn, did)['lab_wait']['hold'] is False
