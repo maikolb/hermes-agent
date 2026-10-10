@@ -13238,6 +13238,30 @@ def _budget_continuation(
     return True
 
 
+# A spawn that fails while the workspace is resolved reports its error with
+# this prefix. The NFOS reads it to route the breaker's stop to the workspace
+# repair (BREAKER_OWNER_20261010).
+WORKSPACE_FAILURE_PREFIX = "workspace: "
+
+
+def _own_breaker_stop(conn: sqlite3.Connection, task_id: str) -> None:
+    """BREAKER_OWNER_20261010: an NFOS card the breaker parks gets an owner.
+
+    Runs inside the breaker's transaction, under a savepoint. A failure here
+    rolls back only the owner, never the breaker's stop: the card is then
+    still ``blocked`` with ``gave_up`` as its last block event, which is what
+    the runtime sweep looks for to apply the same code on the next tick.
+    """
+    try:
+        from hermes_cli.nfos_workspace_repair import own_breaker_stop
+        own_breaker_stop(conn, task_id)
+    except Exception:
+        _log.warning(
+            "BREAKER_OWNER_20261010: %s got no owner in the breaker "
+            "transaction; the runtime sweep applies it", task_id, exc_info=True,
+        )
+
+
 def _record_task_failure(
     conn: sqlite3.Connection,
     task_id: str,
@@ -13383,6 +13407,7 @@ def _record_task_failure(
                 conn, task_id, "gave_up", payload, run_id=run_id,
             )
             blocked = True
+            _own_breaker_stop(conn, task_id)
         else:
             # Below threshold.
             if release_claim:
@@ -14823,7 +14848,7 @@ def _dispatch_once_locked(
                     result.claim_held.append((row["id"], refusal[0]))
                 continue
             auto = _record_spawn_failure(
-                conn, claimed.id, f"workspace: {exc}",
+                conn, claimed.id, f"{WORKSPACE_FAILURE_PREFIX}{exc}",
                 failure_limit=failure_limit,
             )
             if auto:
@@ -15012,7 +15037,7 @@ def _dispatch_once_locked(
             if claimed is None:
                 continue
             auto = _record_spawn_failure(
-                conn, claimed.id, f"workspace: {exc}",
+                conn, claimed.id, f"{WORKSPACE_FAILURE_PREFIX}{exc}",
                 failure_limit=failure_limit,
             )
             if auto:
