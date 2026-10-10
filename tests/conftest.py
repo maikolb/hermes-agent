@@ -1506,6 +1506,10 @@ def _live_system_guard(request, monkeypatch):
         return False
 
     real_kill = _os.kill
+    import signal as _signal
+    # TERM and KILL to the test process, or to its whole group, end the run for
+    # every other test: the suite dies with 137 and no failure names the cause.
+    _fatal = {int(_signal.SIGTERM), int(getattr(_signal, "SIGKILL", _signal.SIGTERM))}
 
     def _guarded_kill(pid, sig, *args, **kwargs):
         # Signal 0 is a pure liveness probe — it cannot terminate anything.
@@ -1515,6 +1519,13 @@ def _live_system_guard(request, monkeypatch):
         # test_entire_tree_is_sigkilled_not_just_parent.
         if int(sig) == 0:
             return real_kill(pid, sig, *args, **kwargs)
+        if int(sig) in _fatal and int(pid) in (test_pid, 0):
+            raise RuntimeError(
+                f"tests/conftest.py live-system guard: blocked os.kill("
+                f"{pid}, {sig}) — the target is the test process itself or "
+                "its own process group. The code under test took this "
+                "process for a worker to terminate."
+            )
         if _is_own_subtree(int(pid)):
             return real_kill(pid, sig, *args, **kwargs)
         raise RuntimeError(
@@ -1543,6 +1554,12 @@ def _live_system_guard(request, monkeypatch):
             # Signal 0 is a pure liveness probe — never destructive.
             if int(sig) == 0:
                 return real_killpg(pgid, sig, *args, **kwargs)
+            if int(sig) in _fatal and int(pgid) in (own_pgid, 0):
+                raise RuntimeError(
+                    f"tests/conftest.py live-system guard: blocked "
+                    f"os.killpg({pgid}, {sig}) — the target is the test "
+                    "process's own group. See _live_system_guard for the why."
+                )
             if int(pgid) == own_pgid or _is_own_subtree(int(pgid)):
                 return real_killpg(pgid, sig, *args, **kwargs)
             raise RuntimeError(

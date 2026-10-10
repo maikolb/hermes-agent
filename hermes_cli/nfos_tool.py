@@ -235,8 +235,13 @@ def _descendants(row, *, include_group=False):
 
 
 def _signal_identity(identity, *, kill=False):
-    """PID reuse must never turn an old call receipt into authority to kill."""
-    if not _matches(identity['pid'], identity['started_at']):
+    """PID reuse must never turn an old call receipt into authority to kill.
+
+    WORKER_IDENTITY_20261010: nor is the process running this reconciliation
+    ever its own target. A worker is a child of the runtime, never the runtime;
+    a receipt that names this process is wrong and stopping it would take the
+    whole dispatcher down."""
+    if identity['pid'] == os.getpid() or not _matches(identity['pid'], identity['started_at']):
         return
     try:
         proc = psutil.Process(identity['pid'])
