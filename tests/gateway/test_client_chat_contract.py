@@ -100,12 +100,13 @@ def test_progress_state_uses_typed_workflow_and_current_block(tmp_path, monkeypa
         conn.close()
 
     state = kw._progress_state(None, tid)
-    assert state[0] == (7, "readback", "Revisar o resultado salvo")
-    assert state[8:] == ("blocked", "Manutenção ativa; execução pausada")
+    assert state[0] == (7, "readback", "")
+    assert state[8:] == ("blocked",)
+    assert not any("Revisar o resultado salvo" in str(item) or "Manutenção ativa" in str(item) for item in state)
 
     missing = kw._progress_state(None, "t_missing")
-    assert len(missing) == 10
-    assert missing[0] is None and missing[8:] == ("", "")
+    assert len(missing) == 9
+    assert missing[0] is None and missing[8:] == ("",)
 
 
 @pytest.mark.asyncio
@@ -123,7 +124,6 @@ async def test_blocked_event_updates_existing_progress_message(monkeypatch):
             "",
             3,
             "blocked",
-            "Manutenção ativa; execução pausada",
         ),
     )
     monkeypatch.setattr(kw, "_progress_meta_get", lambda board, sub: {"progress_message_id": "74"})
@@ -143,8 +143,43 @@ async def test_blocked_event_updates_existing_progress_message(monkeypatch):
     assert handled is True
     adapter.send.assert_not_awaited()
     text = adapter.edit_message.await_args.args[2]
-    assert text.startswith("⏸ ▰▰▰▰▰▰▰ 7/7 bloqueado · readback")
-    assert "aguardando: Manutenção ativa; execução pausada" in text
+    assert text == "⏸ ▰▰▰▰▰▰▰ 7/7 bloqueado · readback · Publicar staging · 12 min"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,status,expected", [
+    ("blocked", "blocked", "⏸ ▰▰▰▱▱▱▱ 3/7 bloqueado · implementar · Erro ao extrair o cargo · 0 min"),
+    ("nfos_progress", "running", "▰▰▰▱▱▱▱ 3/7 implementar · Erro ao extrair o cargo · 0 min"),
+])
+async def test_bar_shows_the_state_and_never_the_internal_text(tmp_path, monkeypatch, kind, status, expected):
+    """BAR_STATE_ONLY_20261010: o reason do bloqueio e o next_action do fluxo são escritos para o Principal. Em 10/10/2026,
+    com a barra lendo os dois, o tópico do Telegram do Concursa recebeu na barra o texto "aguardando: Canal de jobs recusa JSON antes de execução"."""
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "bar.db"))
+    monkeypatch.setattr(kb, "_resolve_executable_assignee", lambda name: name)
+    kb.init_db()
+    from hermes_cli import nfos_delivery as delivery
+
+    reason = "Canal de jobs recusa JSON antes de execução; preservar cópia cs0017-curated e consultar jobs incertos"
+    next_action = "Pausa esperando dependência: Restaurar resposta JSON legível do recibo t45-update1521"
+    conn = kb.connect()
+    try:
+        delivery.init_schema(conn)
+        tid = kb.create_task(conn, title="Erro ao extrair o cargo", assignee="worker")
+        conn.execute("INSERT INTO nfos_requests(id,source_key,payload,status,task_id,created_at) VALUES('req_1','portal:x','{}','attached',?,1)", (tid,))
+        conn.execute("INSERT INTO nfos_workflows(task_id,request_id,state_json,stage,next_action,updated_at) VALUES(?, 'req_1', '{}', 'implement', ?, 1)",
+                     (tid, next_action))
+        kb.add_comment(conn, tid, "worker", "[etapa 2/7 reproduzir] feito | próximo: consultar o canal de jobs com exit64")
+        conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, tid))
+        kb._append_event(conn, tid, "blocked", {"reason": reason, "kind": "awaiting_principal"})
+        conn.commit()
+    finally:
+        conn.close()
+    adapter = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(success=True, message_id="9")))
+
+    assert await kw._kanban_progress_bar(kind, {"task_id": tid, "platform": "telegram", "chat_id": "-1004309874643", "thread_id": "41"},
+                                         None, adapter, {}) is True
+
+    assert adapter.send.await_args.args[1] == expected
 
 
 @pytest.mark.asyncio
@@ -154,7 +189,7 @@ async def test_stale_blocked_event_does_not_overwrite_newer_task_state(monkeypat
         "_progress_state",
         lambda board, task_id: (
             (3, "implementar", "Continuar"), 2, 1, 250, "M",
-            "Tarefa", "", 2, "running", "",
+            "Tarefa", "", 2, "running",
         ),
     )
     adapter = SimpleNamespace(edit_message=AsyncMock(), send=AsyncMock())
