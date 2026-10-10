@@ -4464,6 +4464,62 @@ def pending_decisions(conn):
         "ORDER BY COALESCE(t.priority,0) DESC,d.created_at,d.id")]
 
 
+SHOW_DECISION_QUESTION_CHARS = 500
+SHOW_DECISION_ANSWER_CHARS = 1500
+
+
+def _show_decisions_limit():
+    from hermes_cli.nfos_principal_review import settings
+    try:
+        return max(0, int(settings().get('show_decisions_limit') or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def card_decisions(conn, task_id, limit=0):
+    """SHOW_DECISIONS_LIMIT_20261010: com limite, o show devolve as decisões que valem agora, não o histórico inteiro.
+
+    Em 10/10/2026 o show do t_8ed13ed7 devolvia 437 KB só em decisions (147 decisões) e o do t_39e0a22e, 231 KB, a cada
+    execução de worker. Com limite ficam inteiras as pendentes e a última resolvida de cada tipo (a revisão que o contexto
+    do caso manda ler no show); das outras, as ``limit`` mais recentes vêm com pergunta e resposta cortadas e sem o
+    contexto. O resto se lê por id (ação decision). Sem limite (0, o padrão) devolve tudo, como antes.
+    Devolve as linhas e, quando cortou algo, o resumo do corte."""
+    rows = [dict(r) for r in conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? ORDER BY created_at', (task_id,))]
+    if not limit or limit < 0:
+        return rows, None
+    whole = {row['id'] for row in rows if row['status'] == 'pending'}
+    whole.update({row['kind']: row['id'] for row in rows if row['status'] == 'resolved'}.values())
+    recent = {row['id'] for row in [r for r in rows if r['id'] not in whole][-limit:]}
+    listed = []
+    for row in rows:
+        if row['id'] in recent:
+            question, answer = str(row['question'] or ''), str(row['answer'] or '')
+            row = dict(row, context=None, excerpt=True,
+                       question=question[:SHOW_DECISION_QUESTION_CHARS] + (' [...]' if len(question) > SHOW_DECISION_QUESTION_CHARS else ''),
+                       answer=(answer[:SHOW_DECISION_ANSWER_CHARS] + (' [...]' if len(answer) > SHOW_DECISION_ANSWER_CHARS else '')) if row['answer'] is not None else None)
+        elif row['id'] not in whole:
+            continue
+        listed.append(row)
+    if len(listed) == len(rows) and not recent:
+        return listed, None
+    return listed, {'total': len(rows), 'omitted': len(rows) - len(listed),
+                    'hint': 'Pending decisions and the latest resolved decision of each kind are whole. Rows marked excerpt carry a cut '
+                            'question and answer and no context; older decisions are not listed. Read one whole decision by id: '
+                            'decision --decision <id>. Every decision of the card: show --full.'}
+
+
+def read_decision(conn, decision_id):
+    """SHOW_DECISIONS_LIMIT_20261010: uma decisão inteira por id; a substituída vem com a que vale."""
+    row = get_decision(conn, decision_id) if decision_id else None
+    if row is None:
+        raise WorkflowError('Unknown decision')
+    current, chain = _current_decision(conn, dict(row))
+    result = {'decision': dict(row)}
+    if chain:
+        result['in_force'] = {key: current.get(key) for key in ('id', 'kind', 'status', 'action', 'answer', 'author', 'resolved_at')}
+    return result
+
+
 def _current_decision(conn, row, limit=20):
     """WAIT_FOLLOWS_SUCCESSOR_20261009: decisão substituída responde pela sucessora vigente.
 
@@ -5707,7 +5763,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','probe','probe-env','lesson','rework','precheck','cancel','save-spec','save-report','progress','ask','decide',
-        'pending','effect','reconcile','reconcile-spec','repair-workspace','repair-card','repair-execution','pause-for-repair','resume-after-repair','grant-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider','lab-wait'])
+        'pending','decision','effect','reconcile','reconcile-spec','repair-workspace','repair-card','repair-execution','pause-for-repair','resume-after-repair','grant-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider','lab-wait'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -5718,6 +5774,7 @@ def main():
     parser.add_argument('--next',dest='next_action',default='')
     parser.add_argument('--kind',choices=['review','spec_review','final_review','impediment','additional_tasks','homologation','preparation'])
     parser.add_argument('--decision')
+    parser.add_argument('--full',action='store_true',help='show: every decision of the card, whole')  # SHOW_DECISIONS_LIMIT_20261010
     parser.add_argument('--timeout',type=float,default=300,help='Maximum wait duration; pending is not failure')
     parser.add_argument('--resolution',choices=['continue','approve','changes','human'])
     parser.add_argument('--operation',choices=['homolog','pr','merge','deploy','staging_pr','staging_merge','repair'])  # RESULT_PROBE_20260911
@@ -5745,8 +5802,10 @@ def main():
                 'runtime':{'code_root':str(Path(__file__).resolve().parents[1]),'python':sys.executable},
                 'quality_policy':QUALITY_POLICY,
                 'report':_artifact(conn,args.task,'report'),
-                'decisions':[dict(r) for r in conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? ORDER BY created_at',(args.task,))],
                 'effects':[dict(r) for r in conn.execute('SELECT * FROM nfos_effects WHERE task_id=?',(args.task,))]}
+            result['decisions'],_cut=card_decisions(conn,args.task,0 if args.full else _show_decisions_limit())  # SHOW_DECISIONS_LIMIT_20261010
+            if _cut:
+                result['decisions_total']=_cut['total']; result['decisions_omitted']=_cut['omitted']; result['decisions_hint']=_cut['hint']
             try:  # BLOCK_LESS3_20260910: premissas do owner na primeira chamada de todo worker
                 from hermes_cli.nfos_principal_review import required as _req
                 if not _req(conn,args.task):
@@ -5828,6 +5887,8 @@ def main():
             result=lab_wait(conn,args.task,args.run,args.receipt,reason=str(payload.get('reason') or ''),transport=args.transport)
         elif args.action=='pending':
             result=pending_decisions(conn)
+        elif args.action=='decision':  # SHOW_DECISIONS_LIMIT_20261010
+            result=read_decision(conn,args.decision)
         elif args.action=='wait':
             result=wait_decision(conn,args.decision,timeout=args.timeout)
         elif args.action=='resume':
