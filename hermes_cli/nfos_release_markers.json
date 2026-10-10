@@ -47,6 +47,9 @@
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "card_calls(conn,args.task"},
   {"pr": 296, "file": "hermes_cli/nfos_delivery.py", "text": "def request_text("},
   {"pr": 296, "file": "gateway/kanban_watchers.py", "text": "text=delivery.request_text(text,media)"},
+  {"pr": 303, "file": "hermes_cli/nfos_delivery.py", "text": "return task_id in reconcile_human_answers(conn, lab_sweep=False)"},
+  {"pr": 303, "file": "hermes_cli/nfos_runtime.py", "text": "delivery.reconcile_human_answers(conn, lab_sweep=False)"},
+  {"pr": 303, "file": "hermes_cli/kanban_db.py", "text": "reconcile_runtime(conn, lab_sweep=False)"},
   {"pr": 298, "file": "hermes_cli/nfos_delivery.py", "text": "SHARED_GRAPH_20261010"},
   {"pr": 301, "file": "hermes_cli/nfos_delivery.py", "text": "SHOW_CALLS_ACTIVE_20261010"}
 ]
