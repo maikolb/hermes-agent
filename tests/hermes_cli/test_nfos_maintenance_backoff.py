@@ -1,0 +1,165 @@
+"""MAINTENANCE_BACKOFF_20261009: reparo de pausa que o Principal não alcança não o acorda a cada 15 min.
+
+Em 09/10/2026 cinco pausas do Concursa (preparo do laboratório que o broker não fazia, portão do processo) pediam "Execute o
+reparo desta pausa". Cada resposta sem reparo voltava a pendente e o lembrete seguia a cada 15 min por card: de 40 a 70% dos
+pedidos ao Principal em três horas, com 31 respostas devolvidas. Agora o lembrete dobra a cada resposta devolvida e o
+Principal pode declarar de quem o reparo depende: a pausa espera sem lembrete e volta para ele reconferir no prazo."""
+import json
+import sys
+import time
+
+import pytest
+
+from hermes_cli import kanban_db as kb, nfos_delivery as d, nfos_runtime as runtime
+from hermes_cli import nfos_workspace_repair as repair
+from tests.hermes_cli.test_nfos_maintenance_pause import _paused_and_exited, running  # noqa: F401
+from tests.hermes_cli.test_nfos_principal_acceptance import assessment, task_context  # noqa: F401
+
+DEPENDENCY = {'owner': 'laboratório (Codex)', 'need': 'importar o PDF do caso de produção para o corpus', 'recheck_hours': 6}
+ANSWER = 'O caso de produção não está no laboratório; o preparo depende de capacidade nova do broker.'
+
+
+def _obligation(conn, task):
+    d.sweep_awaiting_principal(conn)
+    return conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND status='pending' "
+                        "AND json_extract(context,'$.maintenance_recovery.pause_run_id')=?", (task.id, task.current_run_id)).fetchone()[0]
+
+
+def _requests(conn, task, did):
+    rows = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'", (task.id,)).fetchall()
+    return [p for p in (json.loads(r[0]) for r in rows) if p.get('decision_id') == did]
+
+
+def _context(conn, did):
+    return json.loads(d.get_decision(conn, did)['context'])
+
+
+def _resume(conn, task):
+    request = dict(pause_run_id=task.current_run_id, actor='Principal', reason='Capacidade entregue', evidence=['recibo real do preparo'])
+    preview = repair.resume_after_repair(conn, task.id, **request)
+    repair.resume_after_repair(conn, task.id, **request, expected_pause_sha256=preview['pause_sha256'], apply=True)
+
+
+def test_reminders_of_an_unrepaired_pause_back_off_with_each_answer(running, monkeypatch):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    did = _obligation(conn, task)
+    assert '"dependency"' in d.get_decision(conn, did)['question'], 'a obrigação diz como declarar a dependência'
+    gap = d.DECISION_REMINDER_GAP
+    clock = [time.time()]
+    monkeypatch.setattr(d.time, 'time', lambda: clock[0])
+    for answers, wait in ((1, 2 * gap), (2, 4 * gap), (3, 8 * gap), (4, 8 * gap)):
+        d.resolve_decision(conn, did, action='continue', answer=f'Explicação {answers}: o preparo segue indisponível', author='Principal')
+        assert d.get_decision(conn, did)['status'] == 'pending', 'a obrigação não fica órfã'
+        assert _context(conn, did)['maintenance_deferrals'] == answers
+        before = len(_requests(conn, task, did))
+        clock[0] += wait - 5
+        runtime.reconcile_runtime(conn)
+        assert len(_requests(conn, task, did)) == before, f'sem lembrete antes de {wait // 60} min depois de {answers} respostas'
+        clock[0] += 10
+        runtime.reconcile_runtime(conn)
+        runtime.reconcile_runtime(conn)
+        assert len(_requests(conn, task, did)) == before + 1, f'um lembrete aos {wait // 60} min'
+    assert d.MAINTENANCE_REMINDER_MAX_GAP == 8 * gap
+
+
+def test_declared_dependency_holds_the_pause_without_reminders_until_its_recheck(running, monkeypatch):
+    from agent import kanban_stop
+    from gateway.wake import current_notify_receipt
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    did = _obligation(conn, task)
+    start = int(time.time())
+    clock = [start]
+    monkeypatch.setattr(d.time, 'time', lambda: clock[0])
+    d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=DEPENDENCY)
+    row, context = d.get_decision(conn, did), _context(conn, did)
+    assert row['status'] == 'pending' and context['maintenance_recovery']['pause_run_id'] == task.current_run_id
+    wait = context['lab_wait']
+    assert wait['kind'] == 'dependency' and wait['hold'] is True and wait['until'] == start + 6 * 3600
+    assert wait['owner'] == DEPENDENCY['owner'] and wait['need'] == DEPENDENCY['need']
+    assert did not in [x['id'] for x in d.pending_decisions(conn)], 'fora da fila do Principal enquanto espera'
+    action = d.get_workflow(conn, task.id)['next_action']
+    assert DEPENDENCY['need'] in action and DEPENDENCY['owner'] in action
+    declared = [json.loads(r[0]) for r in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_maintenance_dependency_declared'", (task.id,))]
+    assert len(declared) == 1 and declared[0]['until'] == start + 6 * 3600
+    before = len(_requests(conn, task, did))
+    clock[0] = start + 5 * 3600
+    runtime.reconcile_runtime(conn)
+    runtime.reconcile_runtime(conn)
+    assert len(_requests(conn, task, did)) == before, 'cinco horas sem um pedido ao Principal'
+    assert repair.maintenance_pause_pending(conn, task.id) and kb.get_task(conn, task.id).status == 'blocked'
+    token = current_notify_receipt.set({'db_path': conn.execute('PRAGMA database_list').fetchone()[2],
+                                        'principal_task_id': task.id, 'delivery_id': 'wake-dependencia'})
+    try:
+        assert kanban_stop._principal_continuation(None) is None, 'a espera não segura o turno do Principal'
+    finally:
+        current_notify_receipt.reset(token)
+    clock[0] = start + 6 * 3600 + 1
+    runtime.reconcile_runtime(conn)
+    runtime.reconcile_runtime(conn)
+    assert len(_requests(conn, task, did)) == before + 1, 'no prazo, volta ao Principal uma vez'
+    assert _context(conn, did)['lab_wait']['hold'] is False
+    assert did in [x['id'] for x in d.pending_decisions(conn)]
+    clock[0] += 60
+    runtime.reconcile_runtime(conn)
+    assert len(_requests(conn, task, did)) == before + 1, 'o lembrete seguinte respeita o recuo'
+    # Ainda sem a capacidade: declara de novo e a pausa volta a esperar.
+    d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=dict(DEPENDENCY, recheck_hours=1))
+    assert _context(conn, did)['lab_wait']['hold'] is True and _context(conn, did)['lab_wait']['until'] == clock[0] + 3600
+    # O reparo real fecha a obrigação e o card volta à fila.
+    _resume(conn, task)
+    assert d.sweep_awaiting_principal(conn) == [task.id]
+    assert d.get_decision(conn, did)['status'] == 'resolved' and not repair.maintenance_pause_pending(conn, task.id)
+    assert kb.claim_task(conn, task.id).id == task.id
+
+
+@pytest.mark.parametrize('dependency', [
+    {'owner': 'laboratório'}, {'owner': ' ', 'need': 'capacidade'}, {'owner': 'laboratório', 'need': 'capacidade', 'recheck_hours': 0},
+    {'owner': 'laboratório', 'need': 'capacidade', 'recheck_hours': 48}, {'owner': 'laboratório', 'need': 'capacidade', 'recheck_hours': '6'},
+    'laboratório'])
+def test_invalid_dependency_is_refused_and_the_obligation_stays_as_it_was(running, monkeypatch, dependency):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    did = _obligation(conn, task)
+    saved = dict(d.get_decision(conn, did))
+    with pytest.raises(d.WorkflowError, match='dependency'):
+        d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=dependency)
+    assert dict(d.get_decision(conn, did)) == saved
+
+
+def test_dependency_is_only_for_the_repair_of_an_open_pause(running, monkeypatch):
+    conn, task, artifact, process, args = running
+    asked = d.ask_principal(conn, task.id, task.current_run_id, kind='impediment', question='Qual caminho seguir?', context={})
+    with pytest.raises(d.WorkflowError, match='maintenance pause'):
+        d.resolve_decision(conn, asked, action='continue', answer='Siga pelo caminho curto.', author='Principal', dependency=DEPENDENCY)
+    assert d.get_decision(conn, asked)['status'] == 'pending', 'nada foi gravado'
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    did = _obligation(conn, task)
+    _resume(conn, task)
+    with pytest.raises(d.WorkflowError):
+        d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=DEPENDENCY)
+
+
+def test_lab_pause_that_already_waits_takes_no_dependency(running, monkeypatch):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, dict(args, resume_when='lab_available'), monkeypatch)
+    did = _obligation(conn, task)
+    assert _context(conn, did)['lab_wait']['kind'] == 'transport'
+    with pytest.raises(d.WorkflowError, match='already waits'):
+        d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=DEPENDENCY)
+    assert _context(conn, did)['lab_wait']['kind'] == 'transport' and 'maintenance_deferrals' not in _context(conn, did)
+
+
+def test_native_cli_declares_the_dependency(running, monkeypatch, capsys):
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    did = _obligation(conn, task)
+    answer = artifact.parent / 'dependencia.json'
+    answer.write_text(json.dumps({'answer': ANSWER, 'dependency': DEPENDENCY}), encoding='utf-8')
+    monkeypatch.setattr(sys, 'argv', ['nfos', 'decide', '--decision', did, '--resolution', 'continue', '--input', str(answer)])
+    d.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result['saved'] and result['decision']['status'] == 'pending'
+    assert _context(conn, did)['lab_wait']['kind'] == 'dependency'
