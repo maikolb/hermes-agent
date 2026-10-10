@@ -1,6 +1,9 @@
 """LAB_WAIT_20261008: pedido do laboratório na fila do broker espera sem o Principal. A espera é uma decisão que cede o turno, não acorda
 o Principal nem gera lembretes; o runtime confere o recibo com orçamento e responde continue quando o pedido sai da fila; depois de 12 h, ou
-com o recibo ilegível, a decisão vai ao Principal uma vez."""
+com o recibo ilegível, a decisão vai ao Principal uma vez.
+
+WAIT_RULE_20261010: a conferência, o prazo e a saída desta espera moram no registro único (`nfos_waits`); a decisão guarda o que o
+worker declarou. O que acontece depois que a espera vence está em test_nfos_waits.py."""
 import json
 import os
 import time
@@ -65,10 +68,25 @@ def _decision(conn, decision_id):
     return row, json.loads(row["context"])
 
 
+def _wait(conn, decision_id):
+    """A espera aberta no registro único que governa a decisão, ou None (transporte e dependência ainda vivem no contexto)."""
+    from hermes_cli import nfos_waits
+    return nfos_waits.open_for_decision(conn, decision_id)
+
+
 def _shift(conn, decision_id, **fields):
-    row, context = _decision(conn, decision_id)
-    context["lab_wait"].update(fields)
-    conn.execute("UPDATE nfos_decisions SET context=? WHERE id=?", (json.dumps(context), decision_id))
+    """Adianta o relógio de uma espera: `next_check_at` é a próxima conferência e `since`, o início."""
+    wait = _wait(conn, decision_id)
+    if wait:
+        if "next_check_at" in fields:
+            conn.execute("UPDATE nfos_waits SET next_check_at=? WHERE id=?", (fields["next_check_at"], wait["id"]))
+        if "since" in fields:
+            conn.execute("UPDATE nfos_waits SET created_at=?, deadline_at=? WHERE id=?",
+                         (fields["since"], fields["since"] + wait["deadline_at"] - wait["created_at"], wait["id"]))
+    else:
+        row, context = _decision(conn, decision_id)
+        context["lab_wait"].update(fields)
+        conn.execute("UPDATE nfos_decisions SET context=? WHERE id=?", (json.dumps(context), decision_id))
     conn.commit()
 
 
@@ -110,7 +128,7 @@ def test_receipt_out_of_queue_answers_continue_and_releases_the_card(board, brok
         assert delivery.sweep_lab_waits(conn) == [], "não reconfere antes de 5 min"
         _shift(conn, out["decision_id"], next_check_at=0)
         assert delivery.sweep_lab_waits(conn) == [(out["decision_id"], "wait")]
-        assert _decision(conn, out["decision_id"])[1]["lab_wait"]["next_check_at"] > time.time() + 200
+        assert _wait(conn, out["decision_id"])["next_check_at"] > time.time() + 200
 
         _shift(conn, out["decision_id"], next_check_at=0)
         receipts[RECEIPT] = {"status": "ok", "result": {"task": "grupo-cs0013"}}
