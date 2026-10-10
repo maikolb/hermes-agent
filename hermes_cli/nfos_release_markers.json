@@ -75,5 +75,9 @@
   {"pr": 305, "file": "gateway/kanban_watchers.py", "text": "_REQUESTER_REMINDER_KIND = \"nfos_requester_reminder\""},
   {"pr": 305, "file": "gateway/kanban_watchers.py", "text": "def _record_requester_reminder("},
   {"pr": 305, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def _request_reminder("},
-  {"pr": 305, "file": "hermes_cli/nfos_requester_deadline.py", "text": "REQUESTER_REMINDER_20261010"}
+  {"pr": 305, "file": "hermes_cli/nfos_requester_deadline.py", "text": "REQUESTER_REMINDER_20261010"},
+  {"pr": 310, "file": "hermes_cli/nfos_waits.py", "text": "WAIT_RULE_20261010"},
+  {"pr": 310, "file": "hermes_cli/nfos_waits.py", "text": "def step(conn, wait_id"},
+  {"pr": 310, "file": "hermes_cli/nfos_delivery.py", "text": "def _adopt_lab_queue_waits("},
+  {"pr": 310, "file": "hermes_cli/nfos_delivery.py", "text": "nfos_waits.open_for_decision(conn, row['id'])"}
 ]
