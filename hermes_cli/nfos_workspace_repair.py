@@ -306,6 +306,32 @@ def finish_lab_pause(conn, task_id, pause_run_id, *, evidence):
     return True
 
 
+def finish_dependency_pause(conn, task_id, pause_run_id, *, evidence):
+    """Encerra, na transação do chamador, a pausa cuja dependência declarada foi entregue (DEPENDENCY_BY_FACT_20261010): o
+    fato que o Principal declarou foi conferido pelo runtime, e essa conferência é o recibo do reparo. Devolve False quando
+    ela não pode terminar agora (card ocupado ou saída do executor anterior não confirmada, o mesmo _idle do
+    resume-after-repair); pausa de saldo nunca termina por aqui. Pausa já encerrada por outra rota conta como encerrada."""
+    row = conn.execute('SELECT metadata FROM task_runs WHERE task_id=? AND id=?', (task_id, pause_run_id)).fetchone()
+    metadata = json.loads((row['metadata'] if row else None) or '{}')
+    pause = metadata.get('maintenance_pause')
+    if not isinstance(pause, dict) or pause.get('kind') == 'runtime_budget_exhausted':
+        return False
+    if pause.get('repaired_at') is not None:
+        return True
+    try:
+        _idle(conn, task_id)
+    except delivery.WorkflowError:
+        return False
+    reason = 'A dependência declarada no reparo desta pausa foi entregue (fato conferido pelo runtime).'
+    pause.update(repaired_at=time.time(), repaired_by='NFOS automation', repair_kind='dependency_delivered',
+                 repair_reason=reason, repair_evidence=evidence)
+    conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (delivery._json(metadata), pause_run_id))
+    kb._append_event(conn, task_id, 'nfos_maintenance_resumed',
+                     dict(pause_run_id=pause_run_id, actor='NFOS automation', reason=reason, evidence=evidence,
+                          repair_kind='dependency_delivered'), run_id=pause_run_id)
+    return True
+
+
 def repair_card(conn, task_id, *, board, delivery_type, expected_delivery_type,
                 expected_spec_revision, expected_instruction_revision,
                 reason, actor, use_canonical_repo=False, apply=False):

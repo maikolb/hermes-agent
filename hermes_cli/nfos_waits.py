@@ -35,7 +35,8 @@ CREATE INDEX IF NOT EXISTS nfos_waits_task ON nfos_waits(task_id,status);
 OPEN, SATISFIED, EXPIRED, WITHDRAWN = 'open', 'satisfied', 'expired', 'withdrawn'
 # Quem pode tornar o predicado verdadeiro. requester, operator e external são pessoas ou terceiros; os demais são internos.
 EXECUTOR_KINDS = ('requester', 'operator', 'external', 'lab', 'card', 'runtime', 'principal')
-REASONS = ('lab_queue', 'principal_decision')
+REASONS = ('lab_queue', 'principal_decision', 'external_dependency')
+OUTCOMES = {'principal': 'principal_handoff', 'worker': 'returned_to_worker', 'obligation': 'returned_to_obligation'}
 PRINCIPAL = {'kind': 'principal', 'name': 'Principal (sessão coordenadora)'}
 _JSON_FIELDS = ('executor', 'predicate', 'evidence', 'origin')
 
@@ -51,22 +52,43 @@ def policy(reason):
     first_check e recheck: segundos até a primeira conferência e entre as seguintes. deadline: segundos até o prazo final.
     max_attempts: conferências falsas que a espera aguenta. holds_decision: a espera segura uma decisão pendente e perde o
     objeto quando outra rota a responde. on_expire: 'principal' entrega a decisão ao Principal uma vez, com lembretes
-    contados (o reparo interno limitado); 'worker' responde a decisão e devolve o card ao executor sem a dependência."""
+    contados (o reparo interno limitado); 'worker' responde a decisão e devolve o card ao executor sem a dependência;
+    'obligation' devolve a decisão à obrigação de reparo da pausa, que é de onde a espera saiu."""
     d = _delivery()
     if reason == 'lab_queue':
-        return dict(executors=('lab',), predicate='lab_receipt', network=True, holds_decision=True, on_expire='principal',
+        return dict(executors=('lab',), predicates=('lab_receipt',), holds_decision=True, on_expire='principal',
                     first_check=d.LAB_WAIT_RECHECK_SECONDS, recheck=d.LAB_WAIT_RECHECK_SECONDS,
                     deadline=d.LAB_WAIT_ESCALATE_SECONDS,
                     max_attempts=max(1, d.LAB_WAIT_ESCALATE_SECONDS // d.LAB_WAIT_RECHECK_SECONDS),
                     max_unreadable=d.LAB_WAIT_MAX_READ_ERRORS,
-                    check=d._lab_queue_check, satisfied=d._lab_queue_released, expired=d._lab_queue_expired)
+                    satisfied=d._lab_queue_released, expired=d._lab_queue_expired)
     if reason == 'principal_decision':
-        return dict(executors=('principal',), predicate='decision_resolved', network=False, holds_decision=False,
+        return dict(executors=('principal',), predicates=('decision_resolved',), holds_decision=False,
                     on_expire='worker', first_check=d.DECISION_REMINDER_AFTER, recheck=d.DECISION_REMINDER_GAP,
                     deadline=d.DECISION_REMINDER_AFTER + (d.DECISION_MAX_REMINDERS + 1) * d.DECISION_REMINDER_GAP,
-                    max_attempts=d.DECISION_MAX_REMINDERS,
-                    check=_decision_resolved, retry=_remind_principal, expired=_return_to_worker)
+                    max_attempts=d.DECISION_MAX_REMINDERS, retry=_remind_principal, expired=_return_to_worker)
+    if reason == 'external_dependency':
+        # Quem entrega nunca é o Principal nem o motor: o que só eles fariam não é dependência, é trabalho de um card.
+        deadline = int(d.MAINTENANCE_DEPENDENCY_HOURS[1] * 3600)
+        return dict(executors=('lab', 'card', 'external', 'operator'), predicates=('card', 'probe', 'lab_receipt', 'lab_status'),
+                    holds_decision=True, on_expire='obligation', first_check=0, recheck=d.LAB_WAIT_RECHECK_SECONDS,
+                    deadline=deadline, max_attempts=max(1, deadline // d.LAB_WAIT_RECHECK_SECONDS),
+                    satisfied=d._dependency_delivered, expired=d._dependency_expired)
     raise _delivery().WorkflowError('Unknown wait reason; use one of: ' + ', '.join(REASONS))
+
+
+def _checker(kind):
+    """Como o código confere cada predicado, e se a conferência consulta algo fora do banco (gasta o teto do tick).
+    A conferência devolve (True | False | None quando não deu para saber, o que observou). `final` no que observou diz
+    que o predicado não fica mais verdadeiro: a espera vence na hora, com esse motivo."""
+    d = _delivery()
+    return {'lab_receipt': (d._lab_queue_check, True), 'decision_resolved': (_decision_resolved, False),
+            'card': (_card_delivered, False), 'probe': (d._dependency_probe_check, True),
+            'lab_status': (d._lab_status_check, True)}[kind]
+
+
+class NotYet(Exception):
+    """O predicado ficou verdadeiro, mas o card ainda não pode seguir (o executor anterior está saindo): a espera fica."""
 
 
 class Budget:
@@ -74,6 +96,7 @@ class Budget:
 
     def __init__(self, checks, until):
         self.checks, self.until = int(checks), until
+        self.memo = {}  # a mesma consulta serve todas as esperas da passada: uma leitura do laboratório, não uma por card
 
     def take(self):
         if self.checks <= 0 or time.monotonic() >= self.until:
@@ -141,19 +164,67 @@ def episode(conn, task_id):
                         "AND json_extract(payload,'$.previous_status')='done'", (task_id,)).fetchone()[0]
 
 
+CARD_UNTIL = ('done', 'effect')
+CARD_EFFECTS = ('pr', 'merge', 'deploy', 'homolog')
+_SERVICE_NAME = set('abcdefghijklmnopqrstuvwxyz0123456789_-')
+
+
 def _predicate(reason, spec, value):
+    """O predicado declarado, só com os campos que o tipo dele tem. Tipo que o motivo não admite é recusado."""
     d = _delivery()
-    if not isinstance(value, dict) or value.get('kind') != spec['predicate']:
-        raise d.WorkflowError(f"A {reason} wait needs the predicate {spec['predicate']}")
-    if value['kind'] == 'lab_receipt':
+    if not isinstance(value, dict) or value.get('kind') not in spec['predicates']:
+        raise d.WorkflowError(f"A {reason} wait needs a predicate the code can check: kind in {list(spec['predicates'])}")
+    kind = value['kind']
+    if kind == 'lab_receipt':
         receipt = value.get('receipt')
         if not isinstance(receipt, str) or not d._LAB_RECEIPT_RX.fullmatch(receipt):
             raise d.WorkflowError('lab_receipt needs the id of the laboratory request')
-        return {'kind': 'lab_receipt', 'receipt': receipt}
-    decision_id = value.get('decision_id')
-    if not isinstance(decision_id, str) or not decision_id:
-        raise d.WorkflowError('decision_resolved needs the decision id')
-    return {'kind': 'decision_resolved', 'decision_id': decision_id}
+        return {'kind': kind, 'receipt': receipt}
+    if kind == 'decision_resolved':
+        decision_id = value.get('decision_id')
+        if not isinstance(decision_id, str) or not decision_id:
+            raise d.WorkflowError('decision_resolved needs the decision id')
+        return {'kind': kind, 'decision_id': decision_id}
+    if kind == 'card':
+        target, until = value.get('task_id'), value.get('until', 'done')
+        if not isinstance(target, str) or not target or until not in CARD_UNTIL:
+            raise d.WorkflowError(f'card needs task_id and until in {list(CARD_UNTIL)}')
+        if until == 'done':
+            return {'kind': kind, 'task_id': target, 'until': until}
+        if value.get('operation') not in CARD_EFFECTS:
+            raise d.WorkflowError(f'card until effect needs operation in {list(CARD_EFFECTS)}')
+        return {'kind': kind, 'task_id': target, 'until': until, 'operation': value['operation']}
+    if kind == 'probe':
+        d._validate_probe('dependency', value.get('probe'))
+        return {'kind': kind, 'probe': value['probe']}
+    services = value.get('services', [])
+    if (not isinstance(services, list) or len(services) > 8 or any(
+            not isinstance(name, str) or not 0 < len(name) <= 32 or set(name) - _SERVICE_NAME for name in services)):
+        raise d.WorkflowError('lab_status services is a list of up to 8 laboratory app names, such as web or admin')
+    return {'kind': kind, 'services': sorted(set(services))}
+
+
+def _depends_on(conn, task_id):
+    """De quem este card depende para andar: os pais que a ordenação ainda segura e os cards que as esperas dele apontam."""
+    cards = {r[0] for r in conn.execute("SELECT l.parent_id FROM task_links l JOIN tasks p ON p.id=l.parent_id "
+                                        "WHERE l.child_id=? AND p.status NOT IN ('done','archived')", (task_id,))}
+    if _table(conn):
+        cards |= {r[0] for r in conn.execute("SELECT json_extract(predicate,'$.task_id') FROM nfos_waits WHERE task_id=? "
+                                             "AND status='open' AND json_extract(predicate,'$.kind')='card'", (task_id,)) if r[0]}
+    return cards
+
+
+def card_cycle(conn, task_id, target):
+    """O card esperado depende, por ordenação ou por espera, do próprio card que quer esperar por ele?"""
+    seen, pending = set(), [target]
+    while pending:
+        current = pending.pop()
+        if current == task_id:
+            return True
+        if current not in seen:
+            seen.add(current)
+            pending.extend(_depends_on(conn, current))
+    return False
 
 
 def _executor(reason, spec, value):
@@ -213,6 +284,13 @@ def declare(conn, task_id, run_id, *, reason, executor, predicate, decision_id=N
         round_ = episode(conn, task_id)
         if _same(conn, task_id, reason, predicate, EXPIRED, round_):
             raise d.WorkflowError(refusal(conn, task_id, reason=reason, predicate=predicate))
+        if predicate['kind'] == 'card':
+            if not d._kb().get_task(conn, predicate['task_id']):
+                raise d.WorkflowError(f"card {predicate['task_id']} does not exist on this board")
+            if card_cycle(conn, task_id, predicate['task_id']):
+                raise d.WorkflowError(
+                    f"card {predicate['task_id']} cannot move before this card does (it is ordered after it, or already waits "
+                    'for it): waiting for it would stop both. Remove the ordering link first, or wait for another fact')
         wait_id = 'wait_' + uuid.uuid4().hex[:20]
         saved = dict(origin or {})
         if subject:
@@ -275,34 +353,45 @@ def step(conn, wait_id, *, now=None, budget=None):
         return 'withdrawn'
     if now < wait['next_check_at'] and now < wait['deadline_at']:
         return None
-    if spec['network']:
+    check, network = _checker(wait['predicate']['kind'])
+    if network:
         if conn.in_transaction:
             raise d.WorkflowError('A wait is checked outside a write transaction')
         if budget is not None and not budget.take():
             return None
-    state, observed = spec['check'](conn, wait)
-    evidence = dict(wait['evidence'], checked_at=now, **(observed or {}))
+    state, observed = check(conn, wait, budget)
+    observed = dict(observed or {})
+    final = observed.pop('final', None)
+    evidence = dict(wait['evidence'], checked_at=now, **observed)
     evidence['unreadable'] = 0 if state is not None else int(wait['evidence'].get('unreadable') or 0) + 1
+    later = min(now + int(spec['recheck']), wait['deadline_at'])
+    if state is True:
+        try:
+            with d._kb().write_txn(conn, allow_nested=True):
+                if not _move(conn, wait, status=SATISFIED, outcome='resumed', evidence=evidence, closed_at=now, updated_at=now):
+                    return None
+                if spec.get('satisfied'):
+                    spec['satisfied'](conn, wait, evidence, now)
+                d._event(conn, wait['task_id'], wait['run_id'], 'nfos_wait_satisfied',
+                         {'wait_id': wait['id'], 'reason': wait['reason'], 'decision_id': wait['decision_id']})
+                return 'satisfied'
+        except NotYet:
+            if now < wait['deadline_at']:
+                with d._kb().write_txn(conn, allow_nested=True):
+                    _move(conn, wait, evidence=dict(evidence, not_ready=True), next_check_at=max(later, now + 1), updated_at=now)
+                return 'not_ready'
+            final = 'not_ready'
     with d._kb().write_txn(conn, allow_nested=True):
-        if state is True:
-            if not _move(conn, wait, status=SATISFIED, outcome='resumed', evidence=evidence, closed_at=now, updated_at=now):
-                return None
-            if spec.get('satisfied'):
-                spec['satisfied'](conn, wait, evidence, now)
-            d._event(conn, wait['task_id'], wait['run_id'], 'nfos_wait_satisfied',
-                     {'wait_id': wait['id'], 'reason': wait['reason'], 'decision_id': wait['decision_id']})
-            return 'satisfied'
-        why = ('deadline' if now >= wait['deadline_at'] else 'attempts' if wait['attempts'] >= wait['max_attempts']
-               else 'unreadable' if state is None and evidence['unreadable'] >= spec.get('max_unreadable', wait['max_attempts'] + 1)
-               else None)
+        why = (final or ('deadline' if now >= wait['deadline_at'] else 'attempts' if wait['attempts'] >= wait['max_attempts']
+                         else 'unreadable' if state is None and evidence['unreadable'] >= spec.get('max_unreadable', wait['max_attempts'] + 1)
+                         else None))
         if why is None:
-            later = min(now + int(spec['recheck']), wait['deadline_at'])
             if not _move(conn, wait, attempts=wait['attempts'] + 1, evidence=evidence, next_check_at=later, updated_at=now):
                 return None
             if spec.get('retry'):
                 spec['retry'](conn, dict(wait, attempts=wait['attempts'] + 1), now)
             return 'wait' if state is False else 'unreadable'
-        outcome = 'principal_handoff' if spec['on_expire'] == 'principal' else 'returned_to_worker'
+        outcome = OUTCOMES[spec['on_expire']]
         if not _move(conn, wait, status=EXPIRED, outcome=outcome, evidence=dict(evidence, expired_because=why),
                      closed_at=now, updated_at=now):
             return None
@@ -344,7 +433,32 @@ def hand_to_principal(conn, wait, now):
                    origin={'expired_wait': wait['id'], 'expired_reason': wait['reason']})
 
 
-def _decision_resolved(conn, wait):
+def _card_delivered(conn, wait, budget=None):
+    """O card esperado entregou? Concluído com entrega, ou com o efeito pedido confirmado. Card fechado sem entrega, ou
+    fechado sem o efeito, não entrega mais: a espera vence na hora."""
+    d = _delivery()
+    predicate = wait['predicate']
+    task = d._kb().get_task(conn, predicate['task_id'])
+    if not task:
+        return False, {'card_status': 'missing', 'final': 'dependency_missing'}
+    closed = task.status in ('done', 'archived')
+    if predicate['until'] == 'effect':
+        effect = conn.execute("SELECT id,candidate FROM nfos_effects WHERE task_id=? AND operation=? AND status='confirmed' "
+                              'ORDER BY updated_at DESC,rowid DESC LIMIT 1', (task.id, predicate['operation'])).fetchone()
+        if effect:
+            return True, {'card_status': task.status, 'effect_id': effect['id'], 'candidate': effect['candidate']}
+        return False, dict({'card_status': task.status}, **({'final': 'dependency_closed_without_effect'} if closed else {}))
+    if not closed:
+        return False, {'card_status': task.status}
+    workflow = d.get_workflow(conn, task.id)
+    state = json.loads((workflow or {}).get('state_json') or '{}') or {}
+    closure = state.get('administrative_closure') or state.get('closed_not_delivered') or {}
+    if task.completed_at is None or closure.get('functional_delivery') is False:
+        return False, {'card_status': task.status, 'final': 'dependency_not_delivered'}
+    return True, {'card_status': task.status, 'completed_at': task.completed_at}
+
+
+def _decision_resolved(conn, wait, budget=None):
     decision = _delivery().get_decision(conn, wait['predicate']['decision_id'])
     if not decision:
         return True, {'decision_status': 'missing'}

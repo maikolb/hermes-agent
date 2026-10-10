@@ -2338,9 +2338,18 @@ def _reminder_gap(ctx):
 
 
 def _maintenance_dependency(value):
-    """Dependência declarada pelo Principal no reparo de uma pausa: quem entrega, o que falta e em quantas horas reconferir."""
+    """Dependência declarada pelo Principal no reparo de uma pausa. Com `check` (DEPENDENCY_BY_FACT_20261010) é uma espera
+    que o motor confere sozinho: quem entrega (executor), o que falta (need) e o fato conferível (check). Sem `check` é a
+    forma anterior: quem entrega e o que falta em texto, e o Principal reconfere no prazo."""
     if value is None:
         return None
+    if isinstance(value, dict) and ('check' in value or 'executor' in value):
+        need = value.get('need')
+        if (not isinstance(need, str) or not need.strip() or not isinstance(value.get('executor'), dict)
+                or not isinstance(value.get('check'), dict) or set(value) - {'executor', 'need', 'check'}):
+            raise WorkflowError('dependency needs executor {kind, name} (who delivers it), need (what is missing) and check '
+                                '(the fact the runtime verifies by itself), and nothing else')
+        return {'executor': value['executor'], 'need': need.strip()[:600], 'check': value['check']}
     if not isinstance(value, dict) or any(not isinstance(value.get(k), str) or not value[k].strip() for k in ('owner', 'need')):
         raise WorkflowError('dependency needs owner (who delivers it) and need (what is missing)')
     hours = value.get('recheck_hours')
@@ -3405,21 +3414,30 @@ def _lab_transport_up(timeout=LAB_WAIT_READ_TIMEOUT_SECONDS):
     rodam (09/10/2026: um card ficou 45 min na espera com o laboratório atendendo). Saída 255 (o "indisponivel": SSH sem
     execução, "exec request failed on channel 0") ou outra saída sem o JSON (o shell remoto não criou o processo, como no
     contêiner sem PID de 09/10) é fora do ar. None quando não deu para saber."""
+    state, report = _lab_status(timeout)
+    if state is None:
+        return None
+    return state == 'busy' or (state == 'report' and _lab_apps_answer(report))
+
+
+def _lab_status(timeout=LAB_WAIT_READ_TIMEOUT_SECONDS):
+    """O que `concursa-lab status` disse: ('down', None) na saída 255 ou sem o JSON, ('busy', None) na 75, ('report',
+    relatório) quando o programa rodou lá, (None, None) quando não deu para saber."""
     import subprocess
     exe = os.environ.get('NFOS_CONCURSA_LAB') or '/usr/local/bin/concursa-lab'
     try:
         done = subprocess.run([exe, 'status'], capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
-        return None
+        return None, None
     if done.returncode == LAB_TRANSPORT_DOWN_EXIT:
-        return False
+        return 'down', None
     if done.returncode == LAB_BUSY_EXIT:
-        return True
+        return 'busy', None
     try:
         report = json.loads((done.stdout or '').strip().splitlines()[-1])
     except (ValueError, IndexError):
-        return False
-    return isinstance(report, dict) and _lab_apps_answer(report)
+        return 'down', None
+    return ('report', report) if isinstance(report, dict) else ('down', None)
 
 
 def _lab_apps_answer(report):
@@ -3530,7 +3548,111 @@ def _lab_queue_wait(receipt):
             'subject': f'o pedido {receipt} na fila do laboratório'}
 
 
-def _lab_queue_check(conn, wait):
+# DEPENDENCY_BY_FACT_20261010: dependência de pausa com fato conferível. Antes ela era quem entrega e o que falta em texto
+# livre, e no prazo o relógio só refazia a pergunta ao mesmo Principal: em 10/10/2026, seis das nove pausas do Concursa
+# ficaram de 1 a 6 h paradas depois de a dependência ter sido entregue. Agora o motor confere o fato a cada 5 min e, quando
+# ele fica verdadeiro, encerra a pausa e devolve o card à fila sem acordar ninguém.
+def _declare_dependency_wait(conn, row, decision_id, context, declared, recovery, pause, now):
+    from hermes_cli import nfos_waits
+    if pause.get('kind') == 'runtime_budget_exhausted':
+        raise WorkflowError('A budget pause waits for a grant on record, not for a dependency')
+    wait = nfos_waits.declare(conn, row['task_id'], row['run_id'], reason='external_dependency', executor=declared['executor'],
+                              predicate=declared['check'], decision_id=decision_id, subject=declared['need'], now=now,
+                              origin={'pause_run_id': recovery['pause_run_id']})
+    # A decisão guarda o que foi declarado e segue fora da fila e do turno do Principal (hold); o relógio é do registro.
+    context['lab_wait'] = {'kind': 'dependency', 'hold': True, 'since': now, 'until': wait['deadline_at'], 'wait_id': wait['id'],
+                           'owner': wait['executor']['name'], 'need': declared['need'], 'executor': wait['executor'],
+                           'check': wait['predicate'], 'pause_run_id': recovery['pause_run_id']}
+    until = time.strftime('%d/%m %H:%MZ', time.gmtime(wait['deadline_at']))
+    waiting = (f"Pausa esperando dependência: {declared['need']} (quem entrega: {wait['executor']['name']}). O runtime confere o "
+               f"fato declarado a cada 5 min e devolve o card à fila sozinho quando ele for verdadeiro; prazo final {until}.")
+    conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (waiting[:400], now, row['task_id']))
+    _event(conn, row['task_id'], row['run_id'], 'nfos_maintenance_dependency_declared',
+           {'decision_id': decision_id, 'pause_run_id': recovery['pause_run_id'], 'owner': wait['executor']['name'],
+            'need': declared['need'], 'until': wait['deadline_at'], 'executor': wait['executor'], 'check': wait['predicate'],
+            'wait_id': wait['id']})
+
+
+def _dependency_probe_check(conn, wait, budget=None):
+    """A sonda declarada mede o que foi pedido? A mesma sonda sql, http ou header dos critérios da spec, com o cofre e o
+    escopo de hosts do projeto. None quando a medição ficou indeterminada."""
+    state, observed, error = _execute_probe(conn, wait['task_id'], wait['predicate']['probe'])
+    seen = {'probe_state': state}
+    if error:
+        seen['probe_error'] = str(error)[:200]
+    if isinstance(observed, dict) and observed.get('status') is not None:
+        seen['http_status'] = observed['status']
+    return (True if state == 'PASS' else False if state == 'FAIL' else None), seen
+
+
+def _lab_status_check(conn, wait, budget=None):
+    """LAB_CAPABILITY_PER_CARD_20261010: o laboratório atende o que este card precisa? Com `services`, cada app nomeado
+    tem de responder por HTTP; a sonda agregada liberava a espera com um app só respondendo, mesmo que o outro, o que o
+    card usa, seguisse fora do ar. Sem `services`, vale a regra da espera de transporte: um app respondendo basta."""
+    memo = budget.memo if budget is not None else {}
+    if 'lab_status' not in memo:
+        memo['lab_status'] = _lab_status()
+    state, report = memo['lab_status']
+    services = wait['predicate'].get('services') or []
+    if state is None:
+        return None, {}
+    if state == 'down':
+        return False, {'lab': 'indisponivel'}
+    if state == 'busy':  # o canal atende, mas sem o relatório não dá para saber de um app em particular
+        return (None if services else True), {'lab': 'ocupado'}
+    apps = report.get('services') if isinstance(report.get('services'), dict) else {}
+    answered = sorted(name for name, item in apps.items() if isinstance(item, dict) and isinstance(item.get('http'), int))
+    return (all(name in answered for name in services) if services else bool(answered)), {'lab': 'respondeu', 'answered': answered}
+
+
+def _dependency_delivered(conn, wait, evidence, now):
+    """O fato declarado ficou verdadeiro: a pausa termina com a conferência como recibo, a obrigação de reparo é respondida
+    e o card volta à fila pela varredura. Com o executor anterior ainda saindo, a espera fica para a próxima passada."""
+    from hermes_cli import nfos_waits
+    from hermes_cli.nfos_workspace_repair import finish_dependency_pause
+    row = get_decision(conn, wait['decision_id'])
+    context = json.loads(row['context'] or '{}') or {}
+    stamp = time.strftime('%d/%m %H:%MZ', time.gmtime(now))
+    seen = {key: value for key, value in evidence.items() if key not in ('checked_at', 'unreadable', 'not_ready')}
+    proof = [f"dependência conferida pelo runtime em {stamp}: {_json(wait['predicate'])[:300]} -> {_json(seen)[:300]}",
+             f"espera {wait['id']}, decisão {row['id']}"]
+    if not finish_dependency_pause(conn, wait['task_id'], wait['origin'].get('pause_run_id'), evidence=proof):
+        raise nfos_waits.NotYet
+    context['lab_wait'] = dict(context.get('lab_wait') or {}, hold=False, status='entregue', released_at=now)
+    conn.execute("UPDATE nfos_decisions SET context=? WHERE id=? AND status='pending'", (_json(context), row['id']))
+    subject = str(wait['origin'].get('subject') or '')
+    answer = (f"CONTINUE (runtime do NFOS, dependência entregue): {subject} O fato declarado foi conferido em {stamp}. Retome do "
+              'checkpoint preservado, sem repetir o que já foi feito.')
+    resolve_decision(conn, row['id'], action='continue', answer=answer, author='Principal')
+    conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',
+                 (f'Dependência entregue em {stamp}: {subject} Retome do checkpoint preservado.'[:400], now, wait['task_id']))
+    _event(conn, wait['task_id'], row['run_id'], 'nfos_dependency_delivered',
+           {'decision_id': row['id'], 'wait_id': wait['id'], 'pause_run_id': wait['origin'].get('pause_run_id'), 'observed': seen})
+
+
+_DEPENDENCY_EXPIRED = {
+    'dependency_not_delivered': 'o card esperado fechou sem entrega',
+    'dependency_closed_without_effect': 'o card esperado fechou sem o efeito pedido',
+    'dependency_missing': 'o card esperado não existe mais',
+    'not_ready': 'o fato ficou verdadeiro, mas o executor anterior deste card não terminou de sair',
+}
+
+
+def _dependency_expired(conn, wait, why, now):
+    """Prazo final sem a entrega: a decisão volta à obrigação de reparo da pausa, uma vez, com o que o motor conferiu.
+    A mesma dependência não é declarada de novo nesta rodada do card."""
+    row = get_decision(conn, wait['decision_id'])
+    context = json.loads(row['context'] or '{}') or {}
+    context['reminders'] = [now]  # o pedido desta volta já é o aviso; o lembrete seguinte respeita o recuo
+    since = time.strftime('%d/%m %H:%MZ', time.gmtime(int(wait['created_at'])))
+    cause = _DEPENDENCY_EXPIRED.get(why, f"{wait['attempts']} conferências sem o fato ficar verdadeiro")
+    lead = (f"Dependência declarada em {since} não foi entregue ({cause}): {wait['origin'].get('subject')} (quem entrega: "
+            f"{wait['executor']['name']}). O runtime não espera mais por ela e a mesma dependência não é aceita de novo neste "
+            'card. Decida o que o card entrega sem ela. ')
+    _lab_wait_to_principal(conn, dict(row), context, 'dependência não entregue no prazo', now, lead=lead)
+
+
+def _lab_queue_check(conn, wait, budget=None):
     """O pedido saiu da fila? None quando o recibo não pôde ser lido."""
     current = _lab_receipt(wait['predicate']['receipt'], timeout=LAB_WAIT_READ_TIMEOUT_SECONDS)
     if current is None:
@@ -3632,7 +3754,8 @@ def _dependency_recheck_lead(wait):
     since = time.strftime('%d/%m %H:%MZ', time.gmtime(int(wait.get('since') or 0)))
     return (f"Reconferência de dependência declarada em {since}: {wait.get('need')} (quem entrega: {wait.get('owner')}). "
             'Confira por fato se isso já foi entregue (sonde a capacidade, releia as instruções do projeto) antes de declarar '
-            'de novo; se foi, retome. ')
+            'de novo; se foi, retome. Se ainda falta, declare com "check" (o fato que o runtime confere sozinho) no lugar '
+            'de "owner": a pausa volta sozinha quando ele for verdadeiro. ')
 
 
 class _LabPauseNotReady(Exception):
@@ -3706,6 +3829,8 @@ def sweep_lab_waits(conn):
             if wait.get('kind') == 'dependency':
                 # MAINTENANCE_BACKOFF_20261009: a pausa espera quem entrega a dependência; no prazo volta ao Principal, uma vez,
                 # para reconferir. Pausa reparada antes disso: reconcile_maintenance_recovery responde a obrigação.
+                if wait.get('wait_id'):
+                    continue  # DEPENDENCY_BY_FACT_20261010: declarada com check; o registro de espera confere e encerra
                 if now >= int(wait.get('until') or 0):
                     context['reminders'] = [now]  # o pedido desta volta já é o aviso; o lembrete seguinte respeita o recuo
                     if _lab_wait_to_principal(conn, row, context, 'hora de reconferir a dependência', now,
@@ -5353,19 +5478,22 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                     if isinstance(held, dict) and held.get('hold'):
                         raise WorkflowError('This pause already waits natively; there is no dependency to declare on it')
                     earlier = int(context.get('dependency_declarations') or 0)
-                    until = deferred_at + int(_dependency_recheck_hours(declared, earlier) * 3600)
                     context['dependency_declarations'] = earlier + 1
-                    # A mesma estrutura de espera segura do laboratório: sem lembrete, fora da fila e do turno do Principal.
-                    context['lab_wait'] = {'kind': 'dependency', 'hold': True, 'since': deferred_at, 'until': until,
-                                           'next_check_at': until, 'owner': declared['owner'], 'need': declared['need'],
-                                           'pause_run_id': recovery['pause_run_id']}
-                    waiting = (f"Pausa esperando dependência: {declared['need']} (quem entrega: {declared['owner']}). O Principal "
-                               f"reconfere em {time.strftime('%d/%m %H:%MZ', time.gmtime(until))}.")
-                    conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',
-                                 (waiting[:400], deferred_at, row['task_id']))
-                    _event(conn, row['task_id'], row['run_id'], 'nfos_maintenance_dependency_declared',
-                           {'decision_id': decision_id, 'pause_run_id': recovery['pause_run_id'], 'owner': declared['owner'],
-                            'need': declared['need'], 'until': until})
+                    if declared.get('check'):  # DEPENDENCY_BY_FACT_20261010: o motor confere o fato e encerra a pausa
+                        _declare_dependency_wait(conn, row, decision_id, context, declared, recovery, pause, deferred_at)
+                    else:
+                        until = deferred_at + int(_dependency_recheck_hours(declared, earlier) * 3600)
+                        # A mesma estrutura de espera segura do laboratório: sem lembrete, fora da fila e do turno do Principal.
+                        context['lab_wait'] = {'kind': 'dependency', 'hold': True, 'since': deferred_at, 'until': until,
+                                               'next_check_at': until, 'owner': declared['owner'], 'need': declared['need'],
+                                               'pause_run_id': recovery['pause_run_id']}
+                        waiting = (f"Pausa esperando dependência: {declared['need']} (quem entrega: {declared['owner']}). O Principal "
+                                   f"reconfere em {time.strftime('%d/%m %H:%MZ', time.gmtime(until))}.")
+                        conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',
+                                     (waiting[:400], deferred_at, row['task_id']))
+                        _event(conn, row['task_id'], row['run_id'], 'nfos_maintenance_dependency_declared',
+                               {'decision_id': decision_id, 'pause_run_id': recovery['pause_run_id'], 'owner': declared['owner'],
+                                'need': declared['need'], 'until': until})
                 conn.execute("UPDATE nfos_decisions SET status='pending',resolved_at=NULL,context=? WHERE id=?",
                              (_json(context), decision_id))
         if declared and not maintenance_deferred:
