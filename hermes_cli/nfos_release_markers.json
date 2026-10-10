@@ -86,6 +86,8 @@
   {"pr": 311, "file": "agent/chat_completion_helpers.py", "text": "the relay answered 400 MissingSessionID"},
   {"pr": 316, "file": "gateway/kanban_watchers.py", "text": "def _requester_reminder_published("},
   {"pr": 316, "file": "gateway/kanban_watchers.py", "text": "REMINDER_NOT_RESENT_20261010"},
+  {"pr": 316, "file": "gateway/kanban_watchers.py", "text": "def _client_delivery_published("},
+  {"pr": 316, "file": "gateway/kanban_watchers.py", "text": "_kanban_client_texts_published"},
   {"pr": 316, "file": "hermes_cli/nfos_requester_deadline.py", "text": "MAX_REMINDER_REQUESTS = 3"},
   {"pr": 316, "file": "hermes_cli/nfos_requester_deadline.py", "text": "reason='reminder_undelivered'"}
 ]

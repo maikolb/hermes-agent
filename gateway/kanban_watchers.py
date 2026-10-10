@@ -511,6 +511,31 @@ def _reminder_is_for(sub, payload):
             and str(sub.get("thread_id") or "") == str(origin.get("thread_id") or ""))
 
 
+def _client_text_key(kind, board, sub, ev):
+    """CLIENT_TEXT_ONCE_20261010: identidade de uma mensagem que vai ao chat de quem pediu.
+
+    O aviso do prazo é a mesma mensagem enquanto a pergunta e a data forem as mesmas; a devolutiva, enquanto
+    for o mesmo evento de conclusão. O notificador guarda as que este processo já publicou: uma gravação
+    que falha depois do envio faz o cursor da assinatura recuar, e sem essa memória a mesma mensagem sairia
+    de novo a cada tique.
+    """
+    payload = getattr(ev, "payload", None) or {}
+    what = ((payload.get("decision_id"), payload.get("due_at")) if kind == _REQUESTER_REMINDER_KIND
+            else (getattr(ev, "id", None),))
+    return (kind, str(board or ""), sub.get("task_id"), str(sub.get("platform") or ""), str(sub.get("chat_id") or ""),
+            str(sub.get("thread_id") or ""), *what)
+
+
+def _client_delivery_published(board, task_id, event_id):
+    """CLIENT_TEXT_ONCE_20261010: a devolutiva deste evento de conclusão já tem recibo de publicação."""
+    from hermes_cli import kanban_db as _kb
+    with _kb.connect_closing(board=board) as conn:
+        return conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND kind='nfos_client_delivery_published' "
+            "AND json_extract(payload,'$.event_id')=? LIMIT 1", (task_id, event_id),
+        ).fetchone() is not None
+
+
 def _requester_reminder_published(board, task_id, payload):
     """REMINDER_NOT_RESENT_20261010: este aviso (mesma pergunta, mesma data) já tem recibo de publicação.
 
@@ -610,13 +635,15 @@ def _client_delivery_message(board, task_id):
     return corpo
 
 
-def _record_client_delivery(board, task_id, send_res, sub):
+def _record_client_delivery(board, task_id, send_res, sub, event_id=None):
     """Record the published resolution; feedback can be linked but is not required.
 
     Guarda o ``message_id`` da mensagem enviada ao cliente. Uma resposta direta
     a ela é o único vínculo que permite registrar aceite: mesma thread e
     proximidade de horário não provam a qual entrega o cliente se referia,
-    ainda mais com vários cards fechando perto no tempo.
+    ainda mais com vários cards fechando perto no tempo. O ``event_id`` é o do
+    evento de conclusão que gerou a mensagem (CLIENT_TEXT_ONCE_20261010): se
+    esse evento voltar ao notificador, a devolutiva não sai de novo.
     """
     message_id = getattr(send_res, "message_id", None) if send_res is not None else None
     if not message_id:
@@ -633,6 +660,7 @@ def _record_client_delivery(board, task_id, send_res, sub):
                     "thread_id": str(sub.get("thread_id") or ""),
                     "outcome": _progress_outcome(board, task_id),
                     "ack": "not_required",
+                    "event_id": event_id,
                 })
     except Exception:
         logger.debug("kanban notifier: registro da devolutiva falhou para %s", task_id, exc_info=True)
@@ -3030,6 +3058,9 @@ class GatewayKanbanWatchersMixin:
             self, "_kanban_sub_fail_counts", {}
         )
         self._kanban_sub_fail_counts = sub_fail_counts
+        # CLIENT_TEXT_ONCE_20261010: mensagens ao chat de quem pediu que este processo já publicou.
+        client_texts_published: set = getattr(self, "_kanban_client_texts_published", set())
+        self._kanban_client_texts_published = client_texts_published
         # Board-level focus cursors (per slug, in-memory): the display feed
         # below reads task_events independently of notify subscriptions.
         focus_cursors: dict[str, int] = getattr(
@@ -3764,31 +3795,43 @@ class GatewayKanbanWatchersMixin:
                             continue
                         if text_delivery_failed:
                             continue
+                        _already_out = False  # CLIENT_TEXT_ONCE_20261010: a mensagem deste evento já está no chat de quem pediu
                         try:
                             if _client_chat:  # CLIENT_CHAT_20260913: nada publicado no chat do cliente; recibo e wake seguem
                                 _send_res = None
                                 await asyncio.to_thread(_record_client_suppression, board_slug, sub["task_id"], kind, sub)
                             elif _client_delivery:  # CLIENT_DELIVERY_20260915: o cliente é avisado do resultado do pedido dele
-                                _client_msg = await asyncio.to_thread(
-                                    _client_delivery_message, board_slug, sub["task_id"])
-                                _send_res = await adapter.send(
-                                    sub["chat_id"], _client_msg, metadata=metadata,
-                                )
-                                # CLIENT_ACK_20260915: guarda a identidade desta mensagem para
-                                # que uma resposta DIRETA a ela possa ser reconhecida como
-                                # aceite. Sem isso o aceite teria de ser inferido por thread e
-                                # proximidade de horário, que não é vínculo.
-                                await asyncio.to_thread(
-                                    _record_client_delivery, board_slug, sub["task_id"], _send_res, sub)
+                                _once = _client_text_key(kind, board_slug, sub, ev)
+                                if _once in client_texts_published or await asyncio.to_thread(
+                                        _client_delivery_published, board_slug, sub["task_id"], ev.id):
+                                    _send_res = None  # CLIENT_TEXT_ONCE_20261010: o evento voltou; a devolutiva já saiu
+                                    _already_out = True
+                                else:
+                                    _client_msg = await asyncio.to_thread(
+                                        _client_delivery_message, board_slug, sub["task_id"])
+                                    _send_res = await adapter.send(
+                                        sub["chat_id"], _client_msg, metadata=metadata,
+                                    )
+                                    if _send_res is None or getattr(_send_res, "success", True) is not False:
+                                        client_texts_published.add(_once)
+                                    # CLIENT_ACK_20260915: guarda a identidade desta mensagem para
+                                    # que uma resposta DIRETA a ela possa ser reconhecida como
+                                    # aceite. Sem isso o aceite teria de ser inferido por thread e
+                                    # proximidade de horário, que não é vínculo.
+                                    await asyncio.to_thread(
+                                        _record_client_delivery, board_slug, sub["task_id"], _send_res, sub, ev.id)
                             elif kind == _REQUESTER_REMINDER_KIND:  # REQUESTER_REMINDER_20261010: mensagem nova, com recibo
-                                if await asyncio.to_thread(
+                                _once = _client_text_key(kind, board_slug, sub, ev)
+                                if _once in client_texts_published or await asyncio.to_thread(
                                         _requester_reminder_published, board_slug, sub["task_id"], ev.payload):
                                     _send_res = None  # REMINDER_NOT_RESENT_20261010: o evento voltou; a mensagem já saiu
+                                    _already_out = True
                                 else:
                                     _send_res = await adapter.send(
                                         sub["chat_id"], msg, metadata=metadata,
                                     )
                                     if _send_res is None or getattr(_send_res, "success", True) is not False:
+                                        client_texts_published.add(_once)
                                         try:
                                             await asyncio.to_thread(
                                                 _record_requester_reminder, board_slug, sub["task_id"], ev.payload, _send_res, sub)
@@ -3836,7 +3879,7 @@ class GatewayKanbanWatchersMixin:
                             # ``send_document`` / ``send_image_file`` uploads
                             # them. Only fires on the ``completed`` event so
                             # we never spam attachments on retries.
-                            if kind == "completed" and not _client_chat:  # CLIENT_CHAT_20260913
+                            if kind == "completed" and not _client_chat and not _already_out:  # CLIENT_CHAT_20260913
                                 try:
                                     await self._deliver_kanban_artifacts(
                                         adapter=adapter,
