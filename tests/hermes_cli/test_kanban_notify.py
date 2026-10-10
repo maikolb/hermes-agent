@@ -263,8 +263,10 @@ async def test_notifier_notify_plus_wake_sends_and_wakes(kanban_home):
 
     # Both subs still get a passive send (notify AND notify+wake send).
     assert len(sent_msgs) == 2
-    assert any("passive block" in m for m in sent_msgs)
-    assert any("active block" in m for m in sent_msgs)
+    # BAR_STATE_ONLY_20261010: the notice shows the state and the task; the block reason stays on the card.
+    assert any("bloqueado" in m and "passive task" in m for m in sent_msgs)
+    assert any("bloqueado" in m and "active task" in m for m in sent_msgs)
+    assert not any("passive block" in m or "active block" in m for m in sent_msgs)
     # Only the notify+wake sub woke the agent, exactly once.
     wake_mock.assert_awaited_once()
     assert active_tid in wake_mock.await_args.kwargs["text"]
