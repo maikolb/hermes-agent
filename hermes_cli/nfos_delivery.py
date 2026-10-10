@@ -2249,6 +2249,34 @@ DECISION_REMINDER_AFTER = 600
 DECISION_REMINDER_GAP = 900
 DECISION_MAX_REMINDERS = 3
 _MAINTENANCE_RX = re.compile(r'contrato git|git delivery|delivery_contract|policy_json|\bruntime\b|dispatcher|worktree|\blease\b|spawn|gate selado|tampered|mantenedor', re.I)
+# MAINTENANCE_BACKOFF_20261009: reparo de pausa respondido sem reparar volta a pendente (a obrigação não pode ficar órfã), mas o
+# lembrete não segue a cada 15 min: dobra a cada resposta devolvida (30, 60, 120 min). E o Principal pode declarar de quem o
+# reparo depende: a pausa espera sem lembrete e volta para ele reconferir no prazo. Em 09/10/2026, cinco pausas que ele não
+# alcançava (preparo do laboratório, portão do processo) eram de 40 a 70% dos pedidos a ele, com 31 respostas devolvidas em 3 h.
+MAINTENANCE_REMINDER_MAX_GAP = 8 * DECISION_REMINDER_GAP
+MAINTENANCE_DEPENDENCY_DEFAULT_HOURS = 6
+MAINTENANCE_DEPENDENCY_HOURS = (1, 24)
+
+
+def _reminder_gap(ctx):
+    """Intervalo até o próximo lembrete da decisão; só o reparo de pausa já respondido sem reparar recua."""
+    deferrals = ctx.get('maintenance_deferrals')
+    if not ctx.get('maintenance_recovery') or type(deferrals) is not int or deferrals < 1:
+        return DECISION_REMINDER_GAP
+    return min(DECISION_REMINDER_GAP * 2 ** min(deferrals, 8), MAINTENANCE_REMINDER_MAX_GAP)
+
+
+def _maintenance_dependency(value):
+    """Dependência declarada pelo Principal no reparo de uma pausa: quem entrega, o que falta e em quantas horas reconferir."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or any(not isinstance(value.get(k), str) or not value[k].strip() for k in ('owner', 'need')):
+        raise WorkflowError('dependency needs owner (who delivers it) and need (what is missing)')
+    hours = value.get('recheck_hours', MAINTENANCE_DEPENDENCY_DEFAULT_HOURS)
+    low, high = MAINTENANCE_DEPENDENCY_HOURS
+    if type(hours) not in (int, float) or not low <= hours <= high:
+        raise WorkflowError(f'dependency recheck_hours must be between {low} and {high}')
+    return {'owner': value['owner'].strip()[:160], 'need': value['need'].strip()[:600], 'recheck_hours': hours}
 
 
 def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
@@ -2291,7 +2319,7 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
         # Transport acceptance is not a Principal decision. An authenticated
         # owner's instruction remains retryable until it is actually resolved.
         if needs_principal or len(reminders) < DECISION_MAX_REMINDERS:
-            if now - last >= DECISION_REMINDER_GAP or not reminders:
+            if now - last >= _reminder_gap(ctx) or not reminders:
                 reminders.append(now); ctx['reminders'] = reminders
                 with _kb().write_txn(conn, allow_nested=True):
                     conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(ctx), row['id']))
@@ -3407,6 +3435,14 @@ def sweep_lab_waits(conn):
             wait = dict(context.get('lab_wait') or {})
             task = _kb().get_task(conn, row['task_id'])
             if not task or task.status in ('done', 'archived'):
+                continue
+            if wait.get('kind') == 'dependency':
+                # MAINTENANCE_BACKOFF_20261009: a pausa espera quem entrega a dependência; no prazo volta ao Principal, uma vez,
+                # para reconferir. Pausa reparada antes disso: reconcile_maintenance_recovery responde a obrigação.
+                if now >= int(wait.get('until') or 0):
+                    context['reminders'] = [now]  # o pedido desta volta já é o aviso; o lembrete seguinte respeita o recuo
+                    if _lab_wait_to_principal(conn, row, context, 'hora de reconferir a dependência', now):
+                        out.append((row['id'], 'recheck'))
                 continue
             if wait.get('kind') == 'transport':
                 due = now >= int(wait.get('next_check_at') or 0)
@@ -4703,11 +4739,13 @@ def _human_question_valid(question, to):
     return bool(q) and '?' in q and bool(t)
 
 
-def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None, assessment=None, public_message=None):
+def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None, assessment=None, public_message=None,
+                     dependency=None):
     if os.environ.get('HERMES_KANBAN_TASK'):
         raise WorkflowError('The Principal resolves reviews in its own coordinator session')
     if action not in {'continue','approve','changes','human'} or not answer.strip() or author!='Principal':
         raise WorkflowError('Principal decision requires its concrete answer and action')
+    declared = _maintenance_dependency(dependency)
     if action=='human' and _human_is_maintenance(assessment):
         raise WorkflowError(HUMAN_MAINTENANCE_REFUSAL)
     initial=get_decision(conn,decision_id)
@@ -4858,10 +4896,30 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                 maintenance_deferred = True
                 # Keep the actual action owned and retryable; retain the answer in the event ledger.
                 # Starting a new reminder window avoids an immediate paid wake loop after a response.
-                context['reminders'] = [int(time.time())]
-                context['maintenance_response_at'] = int(time.time())
+                deferred_at = int(time.time())
+                context['reminders'] = [deferred_at]
+                context['maintenance_response_at'] = deferred_at
+                context['maintenance_deferrals'] = int(context.get('maintenance_deferrals') or 0) + 1  # MAINTENANCE_BACKOFF_20261009
+                if declared:
+                    held = context.get('lab_wait')
+                    if isinstance(held, dict) and held.get('hold'):
+                        raise WorkflowError('This pause already waits natively; there is no dependency to declare on it')
+                    until = deferred_at + int(declared['recheck_hours'] * 3600)
+                    # A mesma estrutura de espera segura do laboratório: sem lembrete, fora da fila e do turno do Principal.
+                    context['lab_wait'] = {'kind': 'dependency', 'hold': True, 'since': deferred_at, 'until': until,
+                                           'next_check_at': until, 'owner': declared['owner'], 'need': declared['need'],
+                                           'pause_run_id': recovery['pause_run_id']}
+                    waiting = (f"Pausa esperando dependência: {declared['need']} (quem entrega: {declared['owner']}). O Principal "
+                               f"reconfere em {time.strftime('%d/%m %H:%MZ', time.gmtime(until))}.")
+                    conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',
+                                 (waiting[:400], deferred_at, row['task_id']))
+                    _event(conn, row['task_id'], row['run_id'], 'nfos_maintenance_dependency_declared',
+                           {'decision_id': decision_id, 'pause_run_id': recovery['pause_run_id'], 'owner': declared['owner'],
+                            'need': declared['need'], 'until': until})
                 conn.execute("UPDATE nfos_decisions SET status='pending',resolved_at=NULL,context=? WHERE id=?",
                              (_json(context), decision_id))
+        if declared and not maintenance_deferred:
+            raise WorkflowError('dependency applies only to the repair decision of a maintenance pause that is still open')
         if action == 'human':
             root, _ = _open_human_escalation_root(conn, row)
             if root:
@@ -5694,7 +5752,8 @@ def main():
                 payload['answer']='PERGUNTA para '+str(payload['human_to']).strip()+': '+str(payload['human_question']).strip()+'\n'+str(payload.get('answer') or '').strip()
                 payload['public_message'] = {'kind':'question','text':str(payload['human_question']).strip(),'to':str(payload['human_to']).strip()}
             resolve_decision(conn,args.decision,action=args.resolution,answer=payload['answer'],author='Principal',
-                             proposal=payload.get('proposal'),assessment=payload.get('assessment'),public_message=payload.get('public_message'))
+                             proposal=payload.get('proposal'),assessment=payload.get('assessment'),public_message=payload.get('public_message'),
+                             dependency=payload.get('dependency'))  # MAINTENANCE_BACKOFF_20261009
             result={'saved':True,'decision':get_decision(conn,args.decision)}
         elif args.action=='reconsider':
             decision_id=reconsider_decision(conn,args.decision,action=args.resolution,

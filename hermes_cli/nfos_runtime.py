@@ -931,6 +931,12 @@ is not maintenance you can repair: the worker registers `lab-wait --transporte` 
 ends its turn, and the runtime returns the card when the lab answers. Do not pause a
 card for it. If a live worker must stop because the lab is down, pause it with
 "resume_when":"lab_available" in pause-for-repair: that pause ends by itself.
+When a pause repair depends on something outside your authorized tools (a capability
+another team must deliver, an external system), do not answer it with explanations:
+resolve that decision once with "dependency":{"owner":"who delivers","need":"what is
+missing","recheck_hours":6} in the decide JSON. The pause then waits without reminders
+and returns to you at the recheck time; an unrepaired pause answered without it comes
+back at growing intervals.
 Manage the board as well as its workers. Before resuming old work, inspect its
 Git/PR history and actual homologation/production state. Reconcile deliveries
 already made instead of implementing them again. Archive obsolete or superseded

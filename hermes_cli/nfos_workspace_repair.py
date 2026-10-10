@@ -106,8 +106,10 @@ def reconcile_maintenance_recovery(conn):
                         'Confirme a saída do executor anterior e registre o recibo real. Use repair-card/workspace quando '
                         'a causa for o vínculo; nos demais casos use ' + route + ' dry-run/apply para a pausa ' + str(row['id']) + '. '
                         'Não invente escalonamento nem reinicie saldo: este card usa ' + context['maintenance_recovery']['budget_mode'] + '. '
-                        'Não relance o worker para esperar o mesmo reparo. Se faltar acesso indispensável, registre a dependência '
-                        'concreta e o responsável pela rota existente. Preserve sessão, consumo, evidências e aceites. Causa: ' + reason)
+                        'Não relance o worker para esperar o mesmo reparo. Se o reparo depende de algo fora das suas ferramentas '
+                        'autorizadas, não repita a explicação: responda esta decisão uma vez com "dependency":{"owner":"quem '
+                        'entrega","need":"o que falta","recheck_hours":6} no JSON do decide; a pausa espera sem lembrete e volta '
+                        'para você reconferir no prazo. Preserve sessão, consumo, evidências e aceites. Causa: ' + reason)
             conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) "
                          "VALUES(?,?,?,'impediment',?,?,?,?)",
                          (did,row['task_id'],row['id'],question,delivery._json(context),row['spec_revision'],int(time.time())))

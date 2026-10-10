@@ -431,16 +431,21 @@ def test_sweep_owns_recovery_until_native_repair_then_resumes(running, monkeypat
     assert [tuple(r) for r in conn.execute('SELECT * FROM task_runs')] == before_runs
     assert dict(d.get_spec(conn, task.id)) == original_spec
     # A blocked card is absent from dispatch's ready/review loops: the runtime tick must own reminders.
+    # MAINTENANCE_BACKOFF_20261009: after one answer without repair the reminder waits twice the gap, not one.
+    def reminders():
+        wakes = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'",
+                             (task.id,)).fetchall()
+        return [json.loads(r[0]) for r in wakes if json.loads(r[0]).get('decision_id') == did and json.loads(r[0]).get('reminder')]
+
     now = time.time()
     with monkeypatch.context() as clock:
         clock.setattr(d.time, 'time', lambda: now + d.DECISION_REMINDER_GAP + 1)
         runtime.reconcile_runtime(conn)
+        assert reminders() == [], 'no wake yet at one gap'
+        clock.setattr(d.time, 'time', lambda: now + 2 * d.DECISION_REMINDER_GAP + 1)
         runtime.reconcile_runtime(conn)
-    wakes = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_principal_requested'",
-                         (task.id,)).fetchall()
-    reminders = [json.loads(r[0]) for r in wakes if json.loads(r[0]).get('decision_id') == did
-                 and json.loads(r[0]).get('reminder')]
-    assert len(reminders) == 1, 'One due wake across repeated runtime ticks, not an orphan or a busy loop'
+        runtime.reconcile_runtime(conn)
+    assert len(reminders()) == 1, 'One due wake across repeated runtime ticks, not an orphan or a busy loop'
     request = dict(pause_run_id=task.current_run_id, actor='Principal', reason='Environment prepared',
                    evidence=['verified preparation receipt'])
     preview = repair.resume_after_repair(conn, task.id, **request)
