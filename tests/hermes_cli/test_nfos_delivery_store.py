@@ -10,6 +10,9 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import nfos_delivery as delivery
+from tests.hermes_cli.nfos_owner_question_switch import owner_questions_allowed  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures('owner_questions_allowed')  # NO_OWNER_QUESTIONS_UNIVERSAL_20261010
 
 
 @pytest.fixture

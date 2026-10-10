@@ -19,6 +19,16 @@ Owner instruction (2026-10-10): a merge or a release must not erase work that an
 - Every PR that changes NFOS runtime behaviour adds at least one entry to `hermes_cli/nfos_release_markers.json`: a file and a text that exist only because of that PR. `tests/e2e/test_nfos_release_markers.py` runs in the fork CI and fails when a marker disappears from the tree. Removing a marker needs the reason in the PR and lowers `FLOOR` in that test.
 - Before switching the launcher, the activator runs `hermes_cli/nfos_release_guard.py --new <release> --launcher /usr/local/bin/hermes --declared <files this release changes>`. The live release is read from the launcher at that moment, never from a constant in the package. The new release is refused when it lacks a marker of its own list or of the live release's list, or when it differs from the live release in a file that was not declared (a release assembled on a stale base).
 
+## NFOS owner questions (2026-10-10)
+
+Owner instruction (2026-10-10): "Não perguntar ao dono vale pra todos os projetos. As correções no NFOS são pra tudo. Todos os projetos."
+
+- No project asks the owner. `nfos_delivery._owner_questions_refused` refuses the question everywhere; the per-project key `owner_questions: false` is no longer needed. Only an explicit `owner_questions: true` (project or `kanban.delivery`) turns it back on, and no project sets it.
+- A human question goes to the requester: `human_to` names them and the decide records `public_message {kind: "question"}`. A question recorded before `public_message` is read by its `PERGUNTA para <human_to>:` prefix.
+- What would need the owner follows the conservative path (no spending, no budget grant without an authorization already on record, no credential the card does not have) and the card closes as a partial delivery. This is instruction, not a code gate: `grant_iteration_budget` does not check an owner authorization.
+- A maintenance pause never loses its repair obligation: a successor of a human question carries `maintenance_recovery`, and `reconcile_maintenance_recovery` issues the obligation again for an open pause that no pending or human decision carries.
+- Suites that ask with a plain `action='human'` use the fixture `owner_questions_allowed` (`tests/hermes_cli/nfos_owner_question_switch.py`).
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 **Never give up on the right solution.**

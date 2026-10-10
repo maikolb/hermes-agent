@@ -2526,21 +2526,46 @@ def _human_is_maintenance(answer):
 
 
 # NO_OWNER_QUESTIONS_20261009 (Maikol, 09/10/2026: "Não quero que essas merdas de card fiquem perguntando coisas pra mim ou
-# travando" e "Eu preciso acordar com o nfos funcionando sem sua intervenção e os cards entregues"). Projeto com
-# owner_questions: false não pergunta ao dono: o único humano que o card pode consultar é o solicitante, pelo Balcão.
+# travando" e "Eu preciso acordar com o nfos funcionando sem sua intervenção e os cards entregues"). O único humano que o
+# card pode consultar é o solicitante, pelo canal do pedido.
+# NO_OWNER_QUESTIONS_UNIVERSAL_20261010 (Maikol, 10/10/2026: "Não perguntar ao dono vale pra todos os projetos. As correções
+# no NFOS são pra tudo. Todos os projetos."): a regra deixa de depender de chave por projeto. Em 10/10 havia cinco perguntas
+# ao dono abertas fora do Concursa, a mais antiga com 32 dias. Só `owner_questions: true`, no projeto ou em kanban.delivery,
+# religa a pergunta; nenhum projeto usa.
 _OWNER_RX = re.compile(r'maikol|owner|dono', re.I)
+OWNER_QUESTIONS_DEFAULT = False
 OWNER_QUESTION_REFUSAL = (
-    'Neste projeto não há pergunta ao Maikol (NO_OWNER_QUESTIONS_20261009). Maikol, 09/10/2026: "Não quero que essas merdas de '
-    'card fiquem perguntando coisas pra mim ou travando". Decida com continue ou changes. Dentro da faixa do contrato, autorize. Fora '
-    'dela, escolha o caminho conservador que entrega algo ao aluno agora: dado conferido no PDF, sem mexer em atividade do aluno, dentro '
-    'do teto de US$ 2, com aviso honesto do que ficou de fora. Capacidade que falta fica registrada no card e o card segue no que dá. '
-    'Pergunta só ao solicitante, pelo Balcão: action human com public_message {kind: "question", text: "..."}.')
+    'Neste e em todo projeto não há pergunta ao Maikol (NO_OWNER_QUESTIONS_20261009, universal desde 10/10/2026). Maikol, '
+    '09/10/2026: "Não quero que essas merdas de card fiquem perguntando coisas pra mim ou travando"; 10/10/2026: "Não perguntar ao '
+    'dono vale pra todos os projetos". Decida com continue ou changes. O que as instruções do projeto já autorizam, autorize. O '
+    'resto segue o caminho conservador que entrega algo agora: não gaste, não conceda orçamento sem autorização já registrada, não '
+    'use credencial ou acesso que o card não tem e não faça o que não tem volta. Entregue o que cabe, com aviso honesto do que ficou '
+    'de fora, e feche como entrega parcial (partial_delivery=true com blockers e follow_ups). Capacidade que falta fica registrada '
+    'no card e o card segue no que dá. Pergunta só ao solicitante, pelo canal do pedido: action human com public_message {kind: '
+    '"question", text: "..."}.')
 
 
 def _requester_question(public_message):
     """Pergunta pública ao solicitante pelo Balcão; endereçada ao dono não conta."""
     return (isinstance(public_message, dict) and public_message.get('kind') == 'question'
             and not _OWNER_RX.search(str(public_message.get('to') or '')))
+
+
+_ASKED_TO = re.compile(r'\s*PERGUNTA para (?P<to>[^:\n]{1,160}):')
+
+
+def _asked_to_requester(ctx, answer):
+    """Pergunta já gravada que foi feita ao solicitante e não ao dono. A decisão atual traz public_message com o destinatário;
+    a anterior a ele só o tem no prefixo que o próprio decide grava ("PERGUNTA para <human_to>: ..."). Em 10/10/2026 duas das
+    oito perguntas humanas abertas fora do Concursa eram desse formato antigo e eram para quem pediu (ccm-web e
+    conferencia-folha, "PERGUNTA para Jhonatan"): a regra universal não pode devolvê-las ao Principal como pergunta ao dono.
+    Sem public_message e sem o prefixo, não há a quem atribuir a pergunta e ela conta como pergunta ao dono."""
+    if _requester_question(ctx.get('public_message')):
+        return True
+    if ctx.get('public_message'):
+        return False
+    found = _ASKED_TO.match(str(answer or ''))
+    return bool(found) and not _OWNER_RX.search(found.group('to'))
 
 
 def _require_public_form(field, text, *, question=False):
@@ -2552,16 +2577,26 @@ def _require_public_form(field, text, *, question=False):
 
 
 def _owner_questions_refused(conn, task_id):
+    """A pergunta ao dono é recusada em todo projeto (NO_OWNER_QUESTIONS_UNIVERSAL_20261010). Só o valor `true` explícito de
+    `owner_questions`, no projeto ou em kanban.delivery, religa; erro ao ler a configuração não religa."""
     try:
         from hermes_cli.nfos_principal_review import settings
+        conf = settings() or {}
         workflow = get_workflow(conn, task_id)
         request = get_request(conn, workflow['request_id']) if workflow else None
         project = json.loads(request['payload']).get('project', {}) if request else {}
         board = project.get('board') or project.get('project_id')
-        scope = (settings().get('projects') or {}).get(board) or {} if board else {}
-        return scope.get('owner_questions') is False
+        scope = (conf.get('projects') or {}).get(board) or {} if board else {}
+        return scope.get('owner_questions', conf.get('owner_questions', OWNER_QUESTIONS_DEFAULT)) is not True
     except Exception:
-        return False
+        return True
+
+
+def _carried_pause(ctx):
+    """O que a sucessora de uma pergunta humana herda quando a antiga era a obrigação de reparo de uma pausa de manutenção.
+    Sem isso a resposta à sucessora resolve como decisão comum, a pausa segue aberta sem obrigação e sem lembrete, e o card
+    fica em awaiting_principal para sempre: em 10/10/2026 era o estado de dovcrm t_e49b4951 e conferencia-folha t_56d65bd8."""
+    return {key: ctx[key] for key in ('maintenance_recovery', 'maintenance_deferrals', 'dependency_declarations') if key in ctx}
 
 
 def review_maintenance_human_decisions(conn):
@@ -2599,22 +2634,22 @@ def review_maintenance_human_decisions(conn):
             conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?", (_json(ctx), row['id']))
             conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
                          (new_id, task.id, row['run_id'], 'impediment', question,
-                          _json({'supersedes': row['id'], 'human_last_resort': True}), wf['spec_revision'], now))
+                          _json({'supersedes': row['id'], 'human_last_resort': True, **_carried_pause(ctx)}), wf['spec_revision'], now))
             _event(conn, task.id, row['run_id'], 'nfos_human_question_refused',
                    {'decision_id': row['id'], 'new_decision_id': new_id, 'question': refused[:400]})
             _event(conn, task.id, row['run_id'], 'nfos_principal_requested', {'decision_id': new_id, 'kind': 'impediment', 'question': question})
-        if task.status == 'blocked':
+        if task.status == 'blocked' and not _carried_pause(ctx):  # card em pausa segue bloqueado até o reparo
             _kb().unblock_task(conn, task.id)
         out.append((row['id'], new_id))
     return out
 
 
 def review_owner_questions(conn):
-    """NO_OWNER_QUESTIONS_20261009: pergunta ao dono já aberta em projeto com owner_questions: false volta ao Principal.
+    """NO_OWNER_QUESTIONS_20261009: pergunta ao dono já aberta volta ao Principal, em todo projeto.
 
     Mesmo caminho da revisão de manutenção acima: a pergunta fica superseded com rastro, o Principal recebe uma decisão pendente
-    com a recusa e o card sai do bloqueio. Pergunta ao solicitante pelo Balcão (public_message question) e resposta já recebida
-    ficam como estão."""
+    com a recusa e o card sai do bloqueio. Pergunta ao solicitante (public_message question) e resposta já recebida ficam como
+    estão. Se a pergunta era a obrigação de reparo de uma pausa, a sucessora herda a obrigação e o card segue bloqueado."""
     from hermes_cli.nfos_runtime import run_termination_pending
     out = []
     for row in [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()]:
@@ -2622,7 +2657,7 @@ def review_owner_questions(conn):
             ctx = json.loads(row.get('context') or '{}') or {}
         except Exception:
             ctx = {}
-        if not isinstance(ctx, dict) or ctx.get('human_reply') or _requester_question(ctx.get('public_message')):
+        if not isinstance(ctx, dict) or ctx.get('human_reply') or _asked_to_requester(ctx, row.get('answer')):
             continue
         if not _owner_questions_refused(conn, row['task_id']):
             continue
@@ -2644,11 +2679,11 @@ def review_owner_questions(conn):
             conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?", (_json(ctx), row['id']))
             conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
                          (new_id, task.id, row['run_id'], 'impediment', question,
-                          _json({'supersedes': row['id'], 'no_owner_questions': True}), wf['spec_revision'], now))
+                          _json({'supersedes': row['id'], 'no_owner_questions': True, **_carried_pause(ctx)}), wf['spec_revision'], now))
             _event(conn, task.id, row['run_id'], 'nfos_human_question_refused',
                    {'decision_id': row['id'], 'new_decision_id': new_id, 'question': refused[:400], 'reason': 'no_owner_questions'})
             _event(conn, task.id, row['run_id'], 'nfos_principal_requested', {'decision_id': new_id, 'kind': 'impediment', 'question': question})
-        if task.status == 'blocked':
+        if task.status == 'blocked' and not _carried_pause(ctx):  # card em pausa segue bloqueado até o reparo
             _kb().unblock_task(conn, task.id)
         out.append((row['id'], new_id))
     return out

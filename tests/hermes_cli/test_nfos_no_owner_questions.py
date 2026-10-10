@@ -21,7 +21,7 @@ QUESTION = ("PERGUNTA para Maikol: Maikol, qual acesso ou canal autorizado da ad
 
 
 def _settings(owner_questions):
-    projects = {'pilot': {'owner_questions': False}} if owner_questions is False else {'pilot': {}}
+    projects = {'pilot': {} if owner_questions is None else {'owner_questions': owner_questions}}
     return lambda: {'principal_validation': False, 'projects': projects}
 
 
@@ -81,16 +81,18 @@ def test_principal_can_still_ask_the_requester(board, worker):
     assert delivery.get_decision(board, decision)['status'] == 'human'
 
 
-def test_project_without_the_switch_keeps_owner_questions(board, worker, monkeypatch):
+def test_project_without_the_switch_refuses_the_owner_question_too(board, worker, monkeypatch):
+    # NO_OWNER_QUESTIONS_UNIVERSAL_20261010: até 10/10 este projeto, sem a chave, ainda perguntava ao dono.
     monkeypatch.setattr(review, "settings", _settings(None))
     task, decision = _ready_card_with_open_question(board, worker.pid)
-    delivery.resolve_decision(board, decision, action='human', answer=QUESTION, author='Principal')
-    assert delivery.get_decision(board, decision)['status'] == 'human'
+    with pytest.raises(delivery.WorkflowError, match='não há pergunta ao Maikol'):
+        delivery.resolve_decision(board, decision, action='human', answer=QUESTION, author='Principal')
+    assert delivery.get_decision(board, decision)['status'] == 'pending'
     assert delivery.review_owner_questions(board) == []
 
 
 def test_open_owner_question_returns_to_the_principal(board, worker, monkeypatch):
-    monkeypatch.setattr(review, "settings", _settings(None))
+    monkeypatch.setattr(review, "settings", _settings(True))  # o estado de antes: o projeto ainda perguntava
     task, decision = _ready_card_with_open_question(board, worker.pid)
     delivery.resolve_decision(board, decision, action='human', answer=QUESTION, author='Principal')
     assert kb.get_task(board, task.id).status == 'blocked', 'reprodução: a pergunta ao dono prende o card'

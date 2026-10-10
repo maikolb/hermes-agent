@@ -3,6 +3,9 @@ import pytest
 
 from hermes_cli import kanban_db as kb, nfos_delivery as delivery, nfos_runtime as runtime
 from tests.hermes_cli.test_nfos_worker_shutdown import board, worker, enrolled, assert_exited
+from tests.hermes_cli.nfos_owner_question_switch import owner_questions_allowed  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures('owner_questions_allowed')  # NO_OWNER_QUESTIONS_UNIVERSAL_20261010
 
 
 def test_principal_human_decision_stops_uncooperative_worker_and_children(board, worker):

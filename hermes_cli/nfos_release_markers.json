@@ -1,5 +1,8 @@
 [
   {"pr": null, "note": "anterior ao #277", "file": "hermes_cli/nfos_delivery.py", "text": "def review_owner_questions("},
+  {"pr": 301, "file": "hermes_cli/nfos_delivery.py", "text": "OWNER_QUESTIONS_DEFAULT = False"},
+  {"pr": 301, "file": "hermes_cli/nfos_delivery.py", "text": "def _carried_pause("},
+  {"pr": 301, "file": "hermes_cli/nfos_workspace_repair.py", "text": "PAUSE_OBLIGATION_REISSUED_20261010"},
   {"pr": null, "note": "anterior ao #277", "file": "hermes_cli/nfos_delivery.py", "text": "def _current_decision("},
   {"pr": null, "note": "anterior ao #277", "file": "hermes_cli/nfos_delivery.py", "text": "def _transient_released_by_principal("},
   {"pr": null, "note": "anterior ao #277", "file": "hermes_cli/nfos_process.py", "text": "workspace_path"},
