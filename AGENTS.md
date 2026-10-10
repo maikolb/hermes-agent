@@ -14,6 +14,13 @@ The executor runs a fast gate: lock consistency, install, Ruff and `tests/e2e/`.
 
 Owner instruction (2026-10-10): a merged PR leaves no branch behind. GitHub already deletes the remote head on merge (`delete_branch_on_merge` is on). In the same run, the agent that merged also deletes the local branch and removes the worktree it created, after confirming the branch is contained in `main`. Leave branches and worktrees of other sessions alone.
 
+## NFOS release guard (2026-10-10)
+
+Owner instruction (2026-10-10): a merge or a release must not erase work that another change already published.
+
+- Every PR that changes NFOS runtime behaviour adds at least one entry to `hermes_cli/nfos_release_markers.json`: a file and a text that exist only because of that PR. `tests/e2e/test_nfos_release_markers.py` runs in the fork CI and fails when a marker disappears from the tree. Removing a marker needs the reason in the PR and lowers `FLOOR` in that test.
+- Before switching the launcher, the activator runs `hermes_cli/nfos_release_guard.py --new <release> --launcher /usr/local/bin/hermes --declared <files this release changes>`. The live release is read from the launcher at that moment, never from a constant in the package. The new release is refused when it lacks a marker of its own list or of the live release's list, or when it differs from the live release in a file that was not declared (a release assembled on a stale base).
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 **Never give up on the right solution.**
