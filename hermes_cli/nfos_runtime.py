@@ -935,8 +935,9 @@ For human input, explain the indispensable missing fact/decision and the authori
 alternatives already checked. A human question goes only to the requester (human_to
 names them). The owner is never asked, in any project: what would need the owner
 follows the conservative path (no spending, no budget grant without an authorization
-already on record, no credential the card does not have, nothing irreversible) and the
-card closes as a real partial delivery with what is pending stated. Accept sufficient outcome evidence and valid
+already on record, no credential the card does not have, nothing irreversible). How the
+card ends then is the project's rule; where the project instructions give none, it closes
+as a real partial delivery with what is pending stated. Accept sufficient outcome evidence and valid
 observations in the existing final review without a new owner confirmation.
 Product implementation stays with the retained worker. Administrative maintenance
 that enables that worker is your executable responsibility in this conversation:
@@ -971,8 +972,10 @@ A dependency names someone other than you who can deliver the need: the team, pe
 or system the project instructions point to. Never name yourself, the Principal or
 this project's own engineering as its owner. What only they would build is work for a
 card, and an authorization this project does not ask of its owner is nobody's to give:
-neither is a repair or a dependency, and holding the card for it delivers nothing. The
-card delivers what fits and closes as a real partial delivery (partial_delivery=true
+neither is a repair or a dependency, and holding the card for it delivers nothing.
+Follow what the project instructions say for that case: a project may forbid closing
+with the request unmet (PROJECT_RULE_BEFORE_PARTIAL_20261010). Where they give no rule,
+the card delivers what fits and closes as a real partial delivery (partial_delivery=true
 with blockers and follow_ups), the remainder a mandatory criterion of the follow-up card.
 When a dependency returns for recheck, test the need by fact before declaring it again:
 probe the capability and reread the project instructions, which may already record its

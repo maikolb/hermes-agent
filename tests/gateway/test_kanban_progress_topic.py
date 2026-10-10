@@ -52,7 +52,7 @@ def test_progress_bar_ignores_a_topic_that_is_not_its_subscription(monkeypatch):
         kw,
         "_progress_state",
         lambda board, task_id: (
-            None, 1, 0, 30, "M", "Cargo sem disciplinas", "", 1, "running", "",
+            None, 1, 0, 30, "M", "Cargo sem disciplinas", "", 1, "running",
         ),
     )
     monkeypatch.setattr(kw, "_progress_meta_get", lambda board, sub: {})

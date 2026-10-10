@@ -127,8 +127,9 @@ def reconcile_maintenance_recovery(conn):
                         'e volta para você '
                         'reconferir em 1 h (depois 2, 4 e 6 h na mesma pausa); "recheck_hours" de 1 a 24 só quando você sabe '
                         'a hora em que o fato muda. Quem entrega não é você nem a engenharia deste projeto: o que só vocês '
-                        'fariam, ou uma autorização que este projeto não pergunta ao dono, não é reparo nem dependência, e o card '
-                        'entrega o que cabe e fecha como entrega parcial, com o resto obrigatório no card de continuação. '
+                        'fariam, ou uma autorização que este projeto não pergunta ao dono, não é reparo nem dependência. Siga o '
+                        'que as instruções do projeto mandam para esse caso; se não mandam nada, o card entrega o que cabe e '
+                        'fecha como entrega parcial, com o resto obrigatório no card de continuação. '
                         'Preserve sessão, consumo, evidências e aceites. Causa: ' + reason)
             conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) "
                          "VALUES(?,?,?,'impediment',?,?,?,?)",

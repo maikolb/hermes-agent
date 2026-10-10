@@ -47,6 +47,7 @@ def test_reminders_of_an_unrepaired_pause_back_off_with_each_answer(running, mon
     question = d.get_decision(conn, did)['question']
     assert '"dependency"' in question, 'a obrigação diz como declarar a dependência'
     assert 'Quem entrega não é você nem a engenharia deste projeto' in question and 'fecha como entrega parcial, com o resto obrigatório no card de continuação' in question
+    assert question.index('Siga o que as instruções do projeto mandam para esse caso') < question.index('fecha como entrega parcial')
     gap = d.DECISION_REMINDER_GAP
     clock = [time.time()]
     monkeypatch.setattr(d.time, 'time', lambda: clock[0])
@@ -186,6 +187,10 @@ def test_principal_instructions_say_who_can_own_a_dependency_and_how_to_recheck_
     assert ('closes as a real partial delivery (partial_delivery=true with blockers and follow_ups), the remainder a '
             'mandatory criterion of the follow-up card') in text
     assert 'test the need by fact before declaring it again' in text
+    # PROJECT_RULE_BEFORE_PARTIAL_20261010: às 09:56 UTC de 10/10 o Principal leu "closes as a real partial delivery" e
+    # encaminhou o fechamento parcial de um chamado com dado errado, que o dono tinha acabado de recusar para o projeto.
+    assert text.index('Follow what the project instructions say for that case') < text.index('closes as a real partial delivery (partial_delivery=true')
+    assert 'a project may forbid closing with the request unmet' in text and 'Where they give no rule' in text
 
 
 def test_dependency_without_hours_returns_in_one_hour_and_backs_off_on_the_same_pause(running, monkeypatch):
