@@ -386,13 +386,16 @@ def reconcile_terminal_workers(conn, *, worker_exit_grace_seconds=15):
     return changed
 
 
-def reconcile_runtime(conn, *, worker_exit_grace_seconds=15):
-    """Run NFOS recovery inside the existing canonical dispatcher tick."""
-    delivery.reconcile_human_answers(conn)
+def reconcile_runtime(conn, *, worker_exit_grace_seconds=15, lab_sweep=True):
+    """Run NFOS recovery inside the existing canonical dispatcher tick.
+
+    The laboratory sweep reads the broker under a budget that belongs to the tick: it runs in the first
+    pass only, and a tick that reconciles a second time passes lab_sweep=False."""
+    delivery.reconcile_human_answers(conn, lab_sweep=lab_sweep)
     reconcile_terminal_workers(conn,worker_exit_grace_seconds=worker_exit_grace_seconds)
     delivery.reconcile_owner_guidance(conn)
     delivery.reconcile_incomplete_reviews(conn)
-    delivery.reconcile_human_answers(conn)
+    delivery.reconcile_human_answers(conn, lab_sweep=False)
     from hermes_cli.nfos_tool import reconcile_calls
     # Blocked/completed cards never enter the ready/review dispatch loops.
     # Their owner instructions and maintenance obligations still need recovery

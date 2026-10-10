@@ -14398,7 +14398,8 @@ def _dispatch_once_locked(
         # Reclaim can close a run after the initial reconciliation. Finish its
         # recorded process tree before this tick considers a replacement;
         # claim_task also refuses the claim if termination remains pending.
-        reconcile_runtime(conn)
+        # The laboratory sweep already ran in this tick's first reconciliation.
+        reconcile_runtime(conn, lab_sweep=False)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
     from hermes_cli.nfos_runtime import project_config, dispatch_requests, adopt_existing_tasks
     delivery_project = project_config(_normalize_board_slug(board) or get_current_board())
