@@ -12,6 +12,8 @@ Owner decision: GitHub Actions is disabled on `maikolb/hermes-agent`. CI for thi
 
 The executor runs a fast gate: lock consistency, install, Ruff and `tests/e2e/`. It does not run the per-file suite (`scripts/run_tests.sh`), which remains part of the release proof under the pinned-release policy. A PR that changes `uv.lock` fails before any test until the CI images are rebuilt from that revision. The workflow files under `.github/workflows` stay only to keep upstream syncs mergeable; they do not run on this fork.
 
+Owner instruction (2026-10-10): a merged PR leaves no branch behind. GitHub already deletes the remote head on merge (`delete_branch_on_merge` is on). In the same run, the agent that merged also deletes the local branch and removes the worktree it created, after confirming the branch is contained in `main`. Leave branches and worktrees of other sessions alone.
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 **Never give up on the right solution.**
