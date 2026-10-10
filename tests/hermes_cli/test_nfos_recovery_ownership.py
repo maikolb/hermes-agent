@@ -9,6 +9,9 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import nfos_delivery as d
 from hermes_cli import nfos_runtime as runtime
 from tests.hermes_cli.test_nfos_candidate_delivery import delivery, A
+from tests.hermes_cli.nfos_owner_question_switch import owner_questions_allowed  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures('owner_questions_allowed')  # NO_OWNER_QUESTIONS_UNIVERSAL_20261010
 
 
 def set_prior_worker(conn, task, pid):

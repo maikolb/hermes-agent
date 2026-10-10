@@ -7,6 +7,9 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import nfos_delivery as delivery
 from tests.gateway.test_kanban_notifier import _make_runner,_run_one_notifier_tick
 from tests.gateway.test_kanban_notifier_durable import RecordingAdapter
+from tests.hermes_cli.nfos_owner_question_switch import owner_questions_allowed  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures('owner_questions_allowed')  # NO_OWNER_QUESTIONS_UNIVERSAL_20261010
 
 
 @pytest.mark.parametrize('card_count', [1, 2])

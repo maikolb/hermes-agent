@@ -18,6 +18,9 @@ from hermes_cli import goals
 from hermes_cli import kanban_db as kb
 from hermes_cli import nfos_delivery as delivery
 from hermes_cli import nfos_principal_review as review
+from tests.hermes_cli.nfos_owner_question_switch import owner_questions_allowed  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures('owner_questions_allowed')  # NO_OWNER_QUESTIONS_UNIVERSAL_20261010
 
 QUESTION = "PERGUNTA para Maikol: pode enviar o link ou print do cargo Delegado em que aparecem disciplinas erradas?"
 PAUSE = "Capacidade: o runtime recusou o fechamento do relatório com NOT_RUN; como fechar?"

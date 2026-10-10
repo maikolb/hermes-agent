@@ -13,6 +13,9 @@ from hermes_cli import kanban_db as kb, nfos_delivery as d, nfos_runtime as runt
 from hermes_cli import nfos_workspace_repair as repair
 from tests.hermes_cli.test_nfos_principal_acceptance import assessment, task_context
 from tests.hermes_cli.test_nfos_workspace_repair import git
+from tests.hermes_cli.nfos_owner_question_switch import owner_questions_allowed  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures('owner_questions_allowed')  # NO_OWNER_QUESTIONS_UNIVERSAL_20261010
 
 
 @pytest.fixture
