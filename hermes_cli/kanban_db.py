@@ -11860,10 +11860,10 @@ def _worker_process_state(pid: int, started_at: Any) -> str:
     created at another time, so the worker is gone. ``unverified``: the process
     is alive and either side of the identity is missing. ``same``: the worker.
     """
-    if not _pid_alive(pid):
-        return "gone"
     observed = _process_start_time(int(pid))
-    if started_at is None or observed is None:
+    if observed is None:
+        return "unverified" if _pid_alive(pid) else "gone"
+    if started_at is None:
         return "unverified"
     try:
         return "same" if abs(observed - float(started_at)) < 0.01 else "reused"
@@ -11929,7 +11929,7 @@ def _terminate_reclaimed_worker(
         return info
 
     def same_worker() -> bool:
-        return _worker_process_state(int(pid), started_at) == "same"
+        return bool(_pid_alive(pid)) and _worker_process_state(int(pid), started_at) == "same"
 
     info["termination_attempted"] = True
     try:

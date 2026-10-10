@@ -122,6 +122,23 @@ def test_os_killpg_blocks_foreign_pgid():
         os.killpg(FOREIGN_PID, signal.SIGTERM)
 
 
+@pytest.mark.parametrize("fatal", ["SIGTERM", "SIGKILL"])
+def test_os_kill_blocks_the_test_process_itself(fatal):
+    """A test that takes the runner for a worker must fail, not end the run with 137."""
+    sig = getattr(signal, fatal, signal.SIGTERM)
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        os.kill(os.getpid(), sig)
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        os.kill(0, sig)
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="killpg POSIX-only")
+@pytest.mark.parametrize("fatal", ["SIGTERM", "SIGKILL"])
+def test_os_killpg_blocks_the_test_process_group(fatal):
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        os.killpg(os.getpgrp(), getattr(signal, fatal))
+
+
 # ──────────────────── subprocess regex bypasses ────────────────
 
 

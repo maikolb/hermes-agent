@@ -135,3 +135,18 @@ def test_deferred_terminations_carry_the_worker_identity(conn):
     assert ref == (4242, "host:1") and tuple(ref) == (4242, "host:1")
     pid, claim_lock = ref
     assert (pid, claim_lock, ref.started_at) == (4242, "host:1", 1700000000.5)
+
+
+def test_nfos_tree_stop_never_signals_the_process_running_it(monkeypatch):
+    """A receipt that names the reconciling process as the worker must not take the dispatcher down."""
+    import psutil
+    from hermes_cli import nfos_tool as tool
+
+    delivered = []
+    monkeypatch.setattr(psutil.Process, "kill", lambda self: delivered.append(("kill", self.pid)))
+    monkeypatch.setattr(psutil.Process, "terminate", lambda self: delivered.append(("terminate", self.pid)))
+    own = {"pid": os.getpid(), "started_at": psutil.Process(os.getpid()).create_time()}
+    tool._signal_identity(own, kill=True)
+    tool._signal_identity(own)
+    tool._stop_tree({"worker_pid": own["pid"], "worker_started_at": own["started_at"], "descendants_json": "[]"}, grace=0)
+    assert [pid for _, pid in delivered if pid == os.getpid()] == []
