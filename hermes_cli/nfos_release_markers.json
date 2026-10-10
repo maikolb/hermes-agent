@@ -26,6 +26,7 @@
   {"pr": 299, "file": "hermes_cli/nfos_delivery.py", "text": "def _dependency_recheck_lead("},
   {"pr": 312, "file": "hermes_cli/nfos_delivery.py", "text": "RECHECK_WITHOUT_SIX_20261010"},
   {"pr": 299, "file": "hermes_cli/nfos_runtime.py", "text": "test the need by fact before declaring it again"},
+  {"pr": 313, "file": "hermes_cli/nfos_runtime.py", "text": "PROJECT_RULE_BEFORE_PARTIAL_20261010"},
   {"pr": 299, "file": "hermes_cli/nfos_workspace_repair.py", "text": "Quem entrega não é você nem a engenharia deste projeto"},
   {"pr": 300, "file": "hermes_cli/nfos_delivery.py", "text": "def _dependency_recheck_hours("},
   {"pr": 300, "file": "hermes_cli/nfos_runtime.py", "text": "in 1 hour, then 2, 4 and 6 for the same pause"},
