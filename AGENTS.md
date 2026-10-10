@@ -6,7 +6,7 @@ Preserve running workers, their work and temporary files, the latest shared serv
 
 ## Fork CI (2026-10-10)
 
-Owner decision: GitHub Actions is disabled on `maikolb/hermes-agent`. CI for this fork runs on the NFOS executor on the VPS (`deploy/ci` in `maikolb/nexa-factory-os`). It validates every trusted open PR head (same repository, not a draft, no HOLD in the title) and the head of `main`, and publishes the commit statuses `NFOS CI / Linux Python 3.11` and `NFOS CI / Linux Python 3.12`. Merge a PR only after both are `success` on its head SHA. `error` means no test ran and is retried; it is not a verdict.
+Owner decision: GitHub Actions is disabled on `maikolb/hermes-agent`. CI for this fork runs on the NFOS executor on the VPS (`deploy/ci` in `maikolb/nexa-factory-os`). It validates every trusted open PR head (same repository, not a draft, no HOLD in the title) and the head of `main`, and publishes the commit status `NFOS CI / Linux Python 3.12` (the 3.11 leg was removed by owner decision on 2026-10-10; production runs 3.12). Merge a PR only after it is `success` on its head SHA. `error` means no test ran and is retried; it is not a verdict.
 
 The executor runs a fast gate: lock consistency, install, Ruff and `tests/e2e/`. It does not run the per-file suite (`scripts/run_tests.sh`), which remains part of the release proof under the pinned-release policy. A PR that changes `uv.lock` fails before any test until the CI images are rebuilt from that revision. The workflow files under `.github/workflows` stay only to keep upstream syncs mergeable; they do not run on this fork.
 
