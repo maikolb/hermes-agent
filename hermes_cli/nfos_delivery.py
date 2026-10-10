@@ -2466,7 +2466,12 @@ def _transient_released_by_principal(conn, task_id):
     (09/10/2026) ficou blocked das 00:49 às 04:14 com o CONTINUE das 00:57 ("a retenção técnica já foi efetivada e agora
     sua precondição foi removida"). A resposta dada depois do bloqueio é a liberação. Ficam de fora a espera do destino,
     em que continue mantém a espera por desenho, a pausa de manutenção e qualquer decisão ainda aberta (a espera do
-    laboratório é uma delas)."""
+    laboratório é uma delas).
+
+    LAB_ANSWER_KEEPS_RETENTION_20261010: a resposta que a varredura do laboratório grava sozinha (lab_wait.released_at)
+    também fica de fora. A espera do laboratório segura o card pela decisão aberta, não por bloqueio; um transient no
+    mesmo card é outra retenção e aquela resposta fala só da fila do laboratório. Espera escalada e respondida pelo
+    Principal não tem released_at e segue contando."""
     from hermes_cli.nfos_workspace_repair import maintenance_pause_pending
     if maintenance_pause_pending(conn, task_id):
         return False
@@ -2481,7 +2486,8 @@ def _transient_released_by_principal(conn, task_id):
     blocked_at = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected')",
                               (task_id,)).fetchone()[0]
     return bool(blocked_at and conn.execute(
-        "SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='resolved' AND action IN ('continue','changes') AND resolved_at>=? LIMIT 1",
+        "SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='resolved' AND action IN ('continue','changes') AND resolved_at>=? "
+        "AND (CASE WHEN json_valid(context) THEN json_extract(context,'$.lab_wait.released_at') END) IS NULL LIMIT 1",
         (task_id, blocked_at)).fetchone())
 
 
@@ -4574,6 +4580,8 @@ def pending_decisions(conn):
 
 SHOW_DECISION_QUESTION_CHARS = 500
 SHOW_DECISION_ANSWER_CHARS = 1500
+# Decisão com desfecho: só estas o limite do show reduz. Qualquer outro status é obrigação aberta e volta inteira.
+SHOW_DECISION_CLOSED = ('resolved', 'superseded')
 
 
 def _show_limit(key):
@@ -4592,19 +4600,22 @@ def card_calls(conn, task_id, limit=0):
     """SHOW_CALLS_LIMIT_20261010: com limite, o show devolve as chamadas nativas que ainda importam, não todas.
 
     Em 10/10/2026, com o limite das decisões já no ar, o show do t_8ed13ed7 ainda tinha 273 KB: 143 KB eram native_calls,
-    com 151 chamadas. Com limite ficam as ``limit`` mais recentes e toda chamada ainda em execução (o recibo que o worker
+    com 151 chamadas. Com limite ficam as ``limit`` mais recentes e toda chamada sem desfecho (o recibo que o worker
     precisa ler antes de tentar de novo); o resto se lê por id (ação call). Sem limite (0, o padrão) devolve tudo, como
-    antes. Devolve as linhas e, quando cortou algo, o resumo do corte."""
-    from hermes_cli.nfos_tool import read_calls
+    antes. Devolve as linhas e, quando cortou algo, o resumo do corte.
+
+    SHOW_CALLS_ACTIVE_20261010: sem desfecho é o ``ACTIVE`` do nfos_tool (intent, running, stopping), não só running. A
+    chamada parada em intent ou stopping é a de efeito incerto, a que o worker mais precisa ver antes de repetir."""
+    from hermes_cli.nfos_tool import ACTIVE, read_calls
     rows = read_calls(conn, task_id)
     if not limit or limit < 0:
         return rows, None
-    keep = {row['id'] for row in rows[-limit:]} | {row['id'] for row in rows if row['status'] == 'running'}
+    keep = {row['id'] for row in rows[-limit:]} | {row['id'] for row in rows if row['status'] in ACTIVE}
     if len(keep) == len(rows):
         return rows, None
     return [row for row in rows if row['id'] in keep], {
         'total': len(rows), 'omitted': len(rows) - len(keep),
-        'hint': 'Only the most recent native calls and the ones still running are listed; older calls are not. '
+        'hint': 'Only the most recent native calls and the ones without an outcome yet are listed; older calls are not. '
                 'Read one call by id: call --call <id>. Every call of the card: show --full.'}
 
 
@@ -4621,15 +4632,28 @@ def card_decisions(conn, task_id, limit=0):
     """SHOW_DECISIONS_LIMIT_20261010: com limite, o show devolve as decisões que valem agora, não o histórico inteiro.
 
     Em 10/10/2026 o show do t_8ed13ed7 devolvia 437 KB só em decisions (147 decisões) e o do t_39e0a22e, 231 KB, a cada
-    execução de worker. Com limite ficam inteiras as pendentes e a última resolvida de cada tipo (a revisão que o contexto
+    execução de worker. Com limite ficam inteiras as abertas e a última resolvida de cada tipo (a revisão que o contexto
     do caso manda ler no show); das outras, as ``limit`` mais recentes vêm com pergunta e resposta cortadas e sem o
     contexto. O resto se lê por id (ação decision). Sem limite (0, o padrão) devolve tudo, como antes.
-    Devolve as linhas e, quando cortou algo, o resumo do corte."""
+    Devolve as linhas e, quando cortou algo, o resumo do corte.
+
+    SHOW_DECISIONS_OPEN_20261010: aberta é toda decisão sem desfecho, não só a 'pending'. A pergunta em 'human' (espera
+    uma pessoa) é a obrigação vigente do card e entrava na regra do histórico: cortada entre as ``limit`` mais recentes,
+    omitida se mais antiga. Só o histórico encerrado (SHOW_DECISION_CLOSED) é reduzido; status que o corte não conhece
+    fica inteiro."""
     rows = [dict(r) for r in conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? ORDER BY created_at', (task_id,))]
     if not limit or limit < 0:
         return rows, None
-    whole = {row['id'] for row in rows if row['status'] == 'pending'}
-    whole.update({row['kind']: row['id'] for row in rows if row['status'] == 'resolved'}.values())
+    whole = {row['id'] for row in rows if row['status'] not in SHOW_DECISION_CLOSED}
+    # A última resolvida de cada tipo é a de resposta mais recente (resolved_at, como no contexto da retomada), não a
+    # criada por último: uma pergunta antiga pode ter sido respondida depois de uma nova.
+    latest = {}
+    for order, row in enumerate(rows):
+        if row['status'] == 'resolved':
+            answered = (row['resolved_at'] or row['created_at'] or 0, order)
+            if row['kind'] not in latest or answered > latest[row['kind']][0]:
+                latest[row['kind']] = (answered, row['id'])
+    whole.update(decision_id for _, decision_id in latest.values())
     recent = {row['id'] for row in [r for r in rows if r['id'] not in whole][-limit:]}
     listed = []
     for row in rows:
@@ -4644,7 +4668,7 @@ def card_decisions(conn, task_id, limit=0):
     if len(listed) == len(rows) and not recent:
         return listed, None
     return listed, {'total': len(rows), 'omitted': len(rows) - len(listed),
-                    'hint': 'Pending decisions and the latest resolved decision of each kind are whole. Rows marked excerpt carry a cut '
+                    'hint': 'Open decisions (pending or waiting for a person) and the latest resolved decision of each kind are whole. Rows marked excerpt carry a cut '
                             'question and answer and no context; older decisions are not listed. Read one whole decision by id: '
                             'decision --decision <id>. Every decision of the card: show --full.'}
 
