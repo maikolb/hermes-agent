@@ -258,6 +258,11 @@ def test_existing_repair_obligation_becomes_the_wait_when_the_pause_waits_for_th
 @pytest.mark.parametrize("returncode,stdout,expected", [
     (0, '{"scope": "Concursa-Isolado", "services": {"web": {"http": 200}, "admin": {"http": 200}}}\n', True),
     (1, '{"scope": "Concursa-Isolado", "services": {"web": {"error_type": "URLError"}, "admin": {"http": 200}}}\n', True),
+    # LAB_APPS_DOWN_20261010: o programa rodou, mas nenhum app do laboratório respondeu por HTTP.
+    (1, '{"scope": "Concursa-Isolado", "services": {"web": {"error_type": "TimeoutError"}, "admin": {"error_type": "TimeoutError"}}}\n', False),
+    (1, '{"scope": "Concursa-Isolado", "services": {"web": {"error_type": "HTTPError"}, "admin": {"error_type": "URLError"}}}\n', False),
+    (1, '{"scope": "Concursa-Isolado", "services": {}}\n', False),
+    (1, '{"scope": "Concursa-Isolado"}\n', False),
     (75, "Execucao ocupada. Pedido e checkpoint preservados; nenhuma operacao executada.\n", True),
     (255, "", False),
     (1, "", False),
@@ -267,7 +272,8 @@ def test_lab_counts_as_up_only_when_its_status_program_ran(monkeypatch, returnco
     """09/10/2026: o sshd aceitava a conexão e o contêiner de controle, sem PID livre, não criava o processo. No ar é o
     programa de status ter rodado lá e devolvido o JSON dele; 255 ou saída sem o JSON é fora do ar. Saída 75 é o
     laboratório respondendo "execução ocupada": o status sem tarefa disputa a trava e o canal atende (às 23:06 UTC o
-    t_2515758e ficou 45 min na espera por isso)."""
+    t_2515758e ficou 45 min na espera por isso). Em 10/10/2026 o canal respondia e os apps não (rede entre contêineres
+    caída por 36 min): com os dois apps sem resposta HTTP também é fora do ar."""
     import subprocess
     calls = []
 
