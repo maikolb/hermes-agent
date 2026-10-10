@@ -52,5 +52,9 @@
   {"pr": 303, "file": "hermes_cli/kanban_db.py", "text": "reconcile_runtime(conn, lab_sweep=False)"},
   {"pr": 304, "file": "hermes_cli/nfos_delivery.py", "text": "LAB_ANSWER_KEEPS_RETENTION_20261010"},
   {"pr": 304, "file": "hermes_cli/nfos_delivery.py", "text": "json_extract(context,'$.lab_wait.released_at') END) IS NULL"},
-  {"pr": 298, "file": "hermes_cli/nfos_delivery.py", "text": "SHARED_GRAPH_20261010"}
+  {"pr": 298, "file": "hermes_cli/nfos_delivery.py", "text": "SHARED_GRAPH_20261010"},
+  {"pr": 302, "file": "hermes_cli/nfos_requester_deadline.py", "text": "REQUESTER_DEADLINE_20261010"},
+  {"pr": 302, "file": "hermes_cli/nfos_delivery.py", "text": "nfos_requester_deadline.sweep(conn)"},
+  {"pr": 302, "file": "hermes_cli/nfos_delivery.py", "text": "nfos_requester_deadline.arm(conn, row['task_id'], context)"},
+  {"pr": 302, "file": "hermes_cli/nfos_runtime.py", "text": "kanban.delivery.requester_answer_hours"}
 ]
