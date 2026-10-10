@@ -45,6 +45,8 @@
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "def card_calls("},
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "def read_call("},
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "card_calls(conn,args.task"},
+  {"pr": 296, "file": "hermes_cli/nfos_delivery.py", "text": "def request_text("},
+  {"pr": 296, "file": "gateway/kanban_watchers.py", "text": "text=delivery.request_text(text,media)"},
   {"pr": 298, "file": "hermes_cli/nfos_delivery.py", "text": "SHARED_GRAPH_20261010"},
   {"pr": 302, "file": "hermes_cli/nfos_requester_deadline.py", "text": "REQUESTER_DEADLINE_20261010"},
   {"pr": 302, "file": "hermes_cli/nfos_delivery.py", "text": "nfos_requester_deadline.sweep(conn)"},

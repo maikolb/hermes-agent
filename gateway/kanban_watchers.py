@@ -1567,6 +1567,8 @@ class GatewayKanbanWatchersMixin:
         from hermes_cli.nfos_runtime import project_config,preserve_attachments
         from hermes_cli import kanban_db as kb
         from hermes_cli import nfos_delivery as delivery
+        # The adapter's cache note for a file is transport; the request keeps that file as an attachment.
+        text=delivery.request_text(text,media)
         board=str(project_context.board_slug)
         project=project_config(board,config)
         if not project:
