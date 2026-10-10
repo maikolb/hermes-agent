@@ -4574,6 +4574,8 @@ def pending_decisions(conn):
 
 SHOW_DECISION_QUESTION_CHARS = 500
 SHOW_DECISION_ANSWER_CHARS = 1500
+# Decisão com desfecho: só estas o limite do show reduz. Qualquer outro status é obrigação aberta e volta inteira.
+SHOW_DECISION_CLOSED = ('resolved', 'superseded')
 
 
 def _show_limit(key):
@@ -4624,15 +4626,28 @@ def card_decisions(conn, task_id, limit=0):
     """SHOW_DECISIONS_LIMIT_20261010: com limite, o show devolve as decisões que valem agora, não o histórico inteiro.
 
     Em 10/10/2026 o show do t_8ed13ed7 devolvia 437 KB só em decisions (147 decisões) e o do t_39e0a22e, 231 KB, a cada
-    execução de worker. Com limite ficam inteiras as pendentes e a última resolvida de cada tipo (a revisão que o contexto
+    execução de worker. Com limite ficam inteiras as abertas e a última resolvida de cada tipo (a revisão que o contexto
     do caso manda ler no show); das outras, as ``limit`` mais recentes vêm com pergunta e resposta cortadas e sem o
     contexto. O resto se lê por id (ação decision). Sem limite (0, o padrão) devolve tudo, como antes.
-    Devolve as linhas e, quando cortou algo, o resumo do corte."""
+    Devolve as linhas e, quando cortou algo, o resumo do corte.
+
+    SHOW_DECISIONS_OPEN_20261010: aberta é toda decisão sem desfecho, não só a 'pending'. A pergunta em 'human' (espera
+    uma pessoa) é a obrigação vigente do card e entrava na regra do histórico: cortada entre as ``limit`` mais recentes,
+    omitida se mais antiga. Só o histórico encerrado (SHOW_DECISION_CLOSED) é reduzido; status que o corte não conhece
+    fica inteiro."""
     rows = [dict(r) for r in conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? ORDER BY created_at', (task_id,))]
     if not limit or limit < 0:
         return rows, None
-    whole = {row['id'] for row in rows if row['status'] == 'pending'}
-    whole.update({row['kind']: row['id'] for row in rows if row['status'] == 'resolved'}.values())
+    whole = {row['id'] for row in rows if row['status'] not in SHOW_DECISION_CLOSED}
+    # A última resolvida de cada tipo é a de resposta mais recente (resolved_at, como no contexto da retomada), não a
+    # criada por último: uma pergunta antiga pode ter sido respondida depois de uma nova.
+    latest = {}
+    for order, row in enumerate(rows):
+        if row['status'] == 'resolved':
+            answered = (row['resolved_at'] or row['created_at'] or 0, order)
+            if row['kind'] not in latest or answered > latest[row['kind']][0]:
+                latest[row['kind']] = (answered, row['id'])
+    whole.update(decision_id for _, decision_id in latest.values())
     recent = {row['id'] for row in [r for r in rows if r['id'] not in whole][-limit:]}
     listed = []
     for row in rows:
@@ -4647,7 +4662,7 @@ def card_decisions(conn, task_id, limit=0):
     if len(listed) == len(rows) and not recent:
         return listed, None
     return listed, {'total': len(rows), 'omitted': len(rows) - len(listed),
-                    'hint': 'Pending decisions and the latest resolved decision of each kind are whole. Rows marked excerpt carry a cut '
+                    'hint': 'Open decisions (pending or waiting for a person) and the latest resolved decision of each kind are whole. Rows marked excerpt carry a cut '
                             'question and answer and no context; older decisions are not listed. Read one whole decision by id: '
                             'decision --decision <id>. Every decision of the card: show --full.'}
 

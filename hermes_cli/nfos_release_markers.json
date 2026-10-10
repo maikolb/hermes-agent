@@ -35,6 +35,7 @@
   {"pr": 288, "file": "hermes_cli/nfos_delivery.py", "text": "def read_decision("},
   {"pr": 288, "file": "hermes_cli/nfos_delivery.py", "text": "card_decisions(conn,args.task"},
   {"pr": 301, "file": "hermes_cli/nfos_delivery.py", "text": "SHOW_CALLS_ACTIVE_20261010"},
+  {"pr": 301, "file": "hermes_cli/nfos_delivery.py", "text": "SHOW_DECISIONS_OPEN_20261010"},
   {"pr": 289, "file": "hermes_cli/nfos_delivery.py", "text": "IMPEDIMENT_CAUSES"},
   {"pr": 289, "file": "hermes_cli/nfos_delivery.py", "text": "_declared_cause(context)"},
   {"pr": 286, "file": "hermes_cli/nfos_delivery.py", "text": "PUBLIC_TEXT_FORM_20261009"},
