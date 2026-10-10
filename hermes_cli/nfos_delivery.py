@@ -632,6 +632,24 @@ def explicit_request_title(project):
     return title
 
 
+def request_text(text, media_paths=()):
+    """What the person asked, without the adapter's cache notes for attached files.
+
+    A platform adapter points a chat agent at a cached file by appending the
+    block ``[<kind> '<name>' saved at: <path>]`` (or ``[Replied-to ...]``) to the
+    message text. A request preserves that file as an attachment and the cache
+    path expires, so the note is transport: left in the text it becomes the card
+    title and is quoted back as the request. A note for a file that is not
+    attached stays, because it is then the only pointer to that file.
+    """
+    endings=tuple(' saved at: '+str(path)+']' for path in media_paths if path)
+    if not endings:
+        return text
+    blocks=[block for block in str(text or '').split('\n\n')
+            if not (block.strip().startswith('[') and block.strip().endswith(endings))]
+    return '\n\n'.join(blocks).strip()
+
+
 def request_card_title(text, attachments=()):
     """Title a request card with the request itself.
 

@@ -95,6 +95,38 @@ async def test_media_original_survives_cache_removal(setup):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('reply_to,asked,title', [
+    (None,'Arruma o total desta tela.','Arruma o total desta tela.'),
+    ('122','Arruma o total desta tela.','Arruma o total desta tela.'),
+    (None,'@hermes_nexafactory_bot','Analyze attached request (image)'),
+])
+async def test_replied_media_note_is_not_stored_as_what_the_person_asked(setup,reply_to,asked,title):
+    """The adapter's cache note points a chat agent at a file; a request keeps that file as an attachment."""
+    import os
+    from hermes_cli import nfos_delivery as delivery
+    runner,event,adapter,root=setup
+    image=root/'cache'/'img_0ba84bac6dff.jpg';image.parent.mkdir();image.write_bytes(b'replied-image')
+    event.text=f"[Maikol|owner]\n{asked}\n\n[Replied-to image 'file_279.jpg' saved at: {image}]"
+    event.media_urls=[str(image)];event.media_types=['image/jpeg'];event.reply_to_message_id=reply_to
+    assert await runner._nfos_receive(event) is not None
+    with kb.connect_closing() as conn:
+        row=conn.execute('SELECT * FROM nfos_requests').fetchone()
+        payload=json.loads(row['payload'])
+        assert payload['text']==f'[Maikol|owner]\n{asked}'
+        assert payload['attachments'][0]['source_path']==str(image)
+        assert payload['attachments'][0]['mime_type']=='image/jpeg'
+        if reply_to:
+            assert row['status']=='coordinating'
+            return
+        reservation=delivery.reserve_request(conn,capacity=2)
+        task=delivery.bootstrap_card(conn,row['id'],reservation['claim_token'],pid=os.getpid())
+        assert task.title==title
+        text,_,attachments=task.body.partition('\n\nOriginal attachments:\n')
+        assert text==f'[Maikol|owner]\n{asked}'
+        assert json.loads(attachments)[0]['source_path']==str(image)
+
+
+@pytest.mark.asyncio
 async def test_status_and_replies_stay_with_principal(setup):
     runner,event,adapter,root=setup
     event.text='Qual é o status?'
