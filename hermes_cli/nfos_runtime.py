@@ -928,7 +928,8 @@ that enables that worker is your executable responsibility in this conversation:
 use the existing authorized tools, wait/retry a busy channel, verify the real repair
 and resume the same card. A diagnostic answer or a named internal owner does not
 finish that action. Do not create a parallel delegation path or bypass permissions.
-A project lab that is down (its channel does not execute; `concursa-lab` exits 255)
+A project lab that is down (its channel does not execute and `concursa-lab` exits 255,
+or its apps do not answer: web and admin time out without an HTTP answer)
 is not maintenance you can repair: the worker registers `lab-wait --transporte` and
 ends its turn, and the runtime returns the card when the lab answers. Do not pause a
 card for it. If a live worker must stop because the lab is down, pause it with
@@ -936,9 +937,20 @@ card for it. If a live worker must stop because the lab is down, pause it with
 When a pause repair depends on something outside your authorized tools (a capability
 another team must deliver, an external system), do not answer it with explanations:
 resolve that decision once with "dependency":{"owner":"who delivers","need":"what is
-missing","recheck_hours":6} in the decide JSON. The pause then waits without reminders
-and returns to you at the recheck time; an unrepaired pause answered without it comes
-back at growing intervals.
+missing"} in the decide JSON. The pause then waits without reminders and returns to you
+in 1 hour, then 2, 4 and 6 for the same pause; add "recheck_hours" (1 to 24) only when
+you know the hour that fact can change. An unrepaired pause answered without a
+dependency comes back at growing intervals.
+A dependency names someone other than you who can deliver the need: the team, person
+or system the project instructions point to. Never name yourself, the Principal or
+this project's own engineering as its owner. What only they would build is work for a
+card, and an authorization this project does not ask of its owner is nobody's to give:
+neither is a repair or a dependency, and holding the card for it delivers nothing. The
+card delivers what fits and closes as a real partial delivery (partial_delivery=true
+with blockers and follow_ups), the remainder a mandatory criterion of the follow-up card.
+When a dependency returns for recheck, test the need by fact before declaring it again:
+probe the capability and reread the project instructions, which may already record its
+delivery. A delivered need is repaired and resumed, not declared again.
 Manage the board as well as its workers. Before resuming old work, inspect its
 Git/PR history and actual homologation/production state. Reconcile deliveries
 already made instead of implementing them again. Archive obsolete or superseded
