@@ -18,6 +18,11 @@
   {"pr": 283, "file": "hermes_cli/nfos_delivery.py", "text": "def _reminder_gap("},
   {"pr": 283, "file": "hermes_cli/nfos_delivery.py", "text": "dependency=payload.get('dependency')"},
   {"pr": 283, "file": "hermes_cli/nfos_runtime.py", "text": "recheck_hours"},
+  {"pr": 299, "file": "hermes_cli/nfos_delivery.py", "text": "def _dependency_recheck_lead("},
+  {"pr": 299, "file": "hermes_cli/nfos_runtime.py", "text": "test the need by fact before declaring it again"},
+  {"pr": 299, "file": "hermes_cli/nfos_workspace_repair.py", "text": "Quem entrega não é você nem a engenharia deste projeto"},
+  {"pr": 300, "file": "hermes_cli/nfos_delivery.py", "text": "def _dependency_recheck_hours("},
+  {"pr": 300, "file": "hermes_cli/nfos_runtime.py", "text": "in 1 hour, then 2, 4 and 6 for the same pause"},
   {"pr": 284, "file": "hermes_cli/nfos_delivery.py", "text": "_current_decisions_context(conn, task_id)"},
   {"pr": 284, "file": "hermes_cli/nfos_delivery.py", "text": "_answer_replaced_reference"},
   {"pr": 250, "file": "gateway/stream_consumer.py", "text": "_is_intentional_silence_response(text)"},
@@ -43,7 +48,10 @@
   {"pr": 286, "file": "hermes_cli/nfos_delivery.py", "text": "def _require_public_form("},
   {"pr": 286, "file": "hermes_cli/nfos_public_text.py", "text": "QUESTION_MAX_WORDS = 120"},
   {"pr": 286, "file": "hermes_cli/nfos_public_text.py", "text": "RESULT_MAX_WORDS = 200"},
+  {"pr": 293, "file": "hermes_cli/nfos_delivery.py", "text": "def _lab_apps_answer("},
+  {"pr": 293, "file": "hermes_cli/nfos_delivery.py", "text": "LAB_APPS_DOWN_20261010"},
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "def card_calls("},
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "def read_call("},
-  {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "card_calls(conn,args.task"}
+  {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "card_calls(conn,args.task"},
+  {"pr": 298, "file": "hermes_cli/nfos_delivery.py", "text": "SHARED_GRAPH_20261010"}
 ]
