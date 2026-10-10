@@ -2265,7 +2265,22 @@ def project_knowledge_context(conn, task_id):
            'Do not revive AOF/AIRC gates, approvals or operating rules from old pages. '
            'After a verified result, consolidate reusable project learning in native memory and ai-memory with source references and limitations; '
            'do not save speculative diagnoses as proven facts.']
-    if repo and policy.get('graphify_command'):
+    # SHARED_GRAPH_20261010: grafo da main gerado fora do card e comando de impacto pronto. Em 10/10/2026 nenhum dos 67
+    # worktrees do Concursa tinha gerado o próprio grafo; a instrução de gerar não era seguida.
+    shared = scope.get('graph_path')
+    if shared and policy.get('graphify_command'):
+        import shlex
+        command = str(policy['graphify_command'])
+        out += ['Shared code graph of the main branch (rebuilt when main moves; local code parsing, no LLM): '+_json(str(shared))+'. '
+                'Do not build a graph in this checkout. Query it with: '
+                +shlex.join([command,'query','<symbol or symptom>','--graph',str(shared),'--budget','1500'])+'. '
+                'It describes main, not your uncommitted changes: verify graph findings in the current files. '
+                'If it is unavailable, continue with targeted search; it is not a delivery gate.']
+        if scope.get('impact_command') and repo:
+            out += ['Impact of a candidate, with no AI: the files it changes, prior commits of the same stretch, who consumes each '
+                    'file and whether the notice extraction touches or directly uses what changed. Run it before classifying domain '
+                    'and impact: '+str(scope['impact_command']).replace('{repo}', shlex.quote(str(repo)))+'.']
+    elif repo and policy.get('graphify_command'):
         import shlex
         command = str(policy['graphify_command'])
         graph = str(Path(repo) / 'graphify-out' / 'graph.json')
