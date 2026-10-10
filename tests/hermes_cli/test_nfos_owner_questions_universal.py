@@ -39,6 +39,7 @@ def test_a_project_with_no_switch_at_all_refuses_the_owner_question(board, worke
         d.resolve_decision(board, decision, action='human', answer=QUESTION, author='Principal')
     text = str(refused.value)
     assert 'todo projeto' in text and 'entrega parcial' in text and 'não conceda orçamento sem autorização já registrada' in text
+    assert text.index('Como o card termina é regra do projeto') < text.index('feche como entrega parcial'), 'a regra do projeto vem antes'
     assert 'aluno' not in text and 'US$' not in text and 'Balcão' not in text, 'a recusa não fala de um projeto só'
     assert d.get_decision(board, decision)['status'] == 'pending'
     # O solicitante segue podendo ser consultado, em qualquer projeto.

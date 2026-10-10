@@ -253,7 +253,12 @@ def _progress_recebido(task_id, title, cls, body):  # CLIENT_CHAT_20260913: tít
 
 
 def _progress_state(board, task_id):
-    """Lê progresso, execução e bloqueio atuais do kanban.db do board."""
+    """Lê progresso, execução e estado atuais do kanban.db do board.
+
+    BAR_STATE_ONLY_20261010: a barra mostra um estado, não um texto. O next_action do fluxo ("Pausa esperando dependência:
+    Restaurar resposta JSON legível do recibo...") e o reason do bloqueio são escritos pelo runtime e pelo worker para o
+    Principal; em 10/10/2026, na primeira hora com a barra lendo os dois, quatro bloqueios do Concursa editaram a barra de um
+    tópico do Telegram com esse texto. Daqui só saem a etapa e o status."""
     from hermes_cli import kanban_db as _kb
     with _kb.connect_closing(board=board) as conn:
         task = _kb.get_task(conn, task_id)
@@ -295,28 +300,12 @@ def _progress_state(board, task_id):
                     str(workflow["stage"] or "").strip().lower(),
                     (1, "ler"),
                 )
-                latest = (
-                    number,
-                    label,
-                    str(workflow["next_action"] or "").strip()[:80],
-                )
+                latest = (number, label, "")
         status = str(getattr(task, "status", "") or "")
-        blocked_reason = ""
-        if status == "blocked":
-            row = conn.execute(
-                "SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' "
-                "ORDER BY id DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-            if row:
-                try:
-                    blocked_reason = str((json.loads(row["payload"] or "{}") or {}).get("reason") or "").strip()[:160]
-                except Exception:
-                    blocked_reason = ""
         budget, cls = _progress_budget(getattr(task, "max_runtime_seconds", None))
         return (latest, minutes, tools, budget, cls,
                 getattr(task, "title", "") or "", getattr(task, "body", "") or "", int(n_runs or 0),
-                status, blocked_reason)
+                status)
 
 
 def _progress_meta_get(board, sub):
@@ -362,7 +351,7 @@ async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
         metadata.pop("thread_id", None)
     board = board or ""
     task_id = sub["task_id"]
-    latest, minutes, tools, budget, cls, title, body, n_runs, status, blocked_reason = await asyncio.to_thread(_progress_state, board, task_id)
+    latest, minutes, tools, budget, cls, title, body, n_runs, status = await asyncio.to_thread(_progress_state, board, task_id)
     meta = await asyncio.to_thread(_progress_meta_get, board, sub)
     msg_id = meta.get("progress_message_id")
     if kind == "claimed":
@@ -385,7 +374,7 @@ async def _kanban_progress_bar(kind, sub, board, adapter, metadata):
             latest = (1, "aguardando", "")
         n, name, nxt = latest
         is_blocked = kind == "blocked" or status == "blocked"
-        next_text = (blocked_reason or nxt) if is_blocked else nxt
+        next_text = "" if is_blocked else nxt  # BAR_STATE_ONLY_20261010: bloqueado é um estado; o motivo fica no card
         text = _progress_render(
             task_id, n, name, minutes, tools, budget, cls,
             next_text,

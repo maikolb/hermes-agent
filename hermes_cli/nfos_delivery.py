@@ -2564,7 +2564,8 @@ OWNER_QUESTION_REFUSAL = (
     'dono vale pra todos os projetos". Decida com continue ou changes. O que as instruções do projeto já autorizam, autorize. O '
     'resto segue o caminho conservador que entrega algo agora: não gaste, não conceda orçamento sem autorização já registrada, não '
     'use credencial ou acesso que o card não tem e não faça o que não tem volta. Entregue o que cabe, com aviso honesto do que ficou '
-    'de fora, e feche como entrega parcial (partial_delivery=true com blockers e follow_ups). Capacidade que falta fica registrada '
+    'de fora. Como o card termina é regra do projeto; se as instruções dele não dizem, feche como entrega parcial '
+    '(partial_delivery=true com blockers e follow_ups). Capacidade que falta fica registrada '
     'no card e o card segue no que dá. Pergunta só ao solicitante, pelo canal do pedido: action human com public_message {kind: '
     '"question", text: "..."}.')
 
