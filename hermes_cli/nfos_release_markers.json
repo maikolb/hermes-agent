@@ -36,5 +36,8 @@
   {"pr": 286, "file": "hermes_cli/nfos_public_text.py", "text": "QUESTION_MAX_WORDS = 120"},
   {"pr": 286, "file": "hermes_cli/nfos_public_text.py", "text": "RESULT_MAX_WORDS = 200"},
   {"pr": 293, "file": "hermes_cli/nfos_delivery.py", "text": "def _lab_apps_answer("},
-  {"pr": 293, "file": "hermes_cli/nfos_delivery.py", "text": "LAB_APPS_DOWN_20261010"}
+  {"pr": 293, "file": "hermes_cli/nfos_delivery.py", "text": "LAB_APPS_DOWN_20261010"},
+  {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "def card_calls("},
+  {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "def read_call("},
+  {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "card_calls(conn,args.task"}
 ]

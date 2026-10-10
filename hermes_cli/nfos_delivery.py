@@ -4521,12 +4521,45 @@ SHOW_DECISION_QUESTION_CHARS = 500
 SHOW_DECISION_ANSWER_CHARS = 1500
 
 
-def _show_decisions_limit():
+def _show_limit(key):
     from hermes_cli.nfos_principal_review import settings
     try:
-        return max(0, int(settings().get('show_decisions_limit') or 0))
+        return max(0, int(settings().get(key) or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _show_decisions_limit():
+    return _show_limit('show_decisions_limit')
+
+
+def card_calls(conn, task_id, limit=0):
+    """SHOW_CALLS_LIMIT_20261010: com limite, o show devolve as chamadas nativas que ainda importam, não todas.
+
+    Em 10/10/2026, com o limite das decisões já no ar, o show do t_8ed13ed7 ainda tinha 273 KB: 143 KB eram native_calls,
+    com 151 chamadas. Com limite ficam as ``limit`` mais recentes e toda chamada ainda em execução (o recibo que o worker
+    precisa ler antes de tentar de novo); o resto se lê por id (ação call). Sem limite (0, o padrão) devolve tudo, como
+    antes. Devolve as linhas e, quando cortou algo, o resumo do corte."""
+    from hermes_cli.nfos_tool import read_calls
+    rows = read_calls(conn, task_id)
+    if not limit or limit < 0:
+        return rows, None
+    keep = {row['id'] for row in rows[-limit:]} | {row['id'] for row in rows if row['status'] == 'running'}
+    if len(keep) == len(rows):
+        return rows, None
+    return [row for row in rows if row['id'] in keep], {
+        'total': len(rows), 'omitted': len(rows) - len(keep),
+        'hint': 'Only the most recent native calls and the ones still running are listed; older calls are not. '
+                'Read one call by id: call --call <id>. Every call of the card: show --full.'}
+
+
+def read_call(conn, call_id):
+    """SHOW_CALLS_LIMIT_20261010: uma chamada nativa inteira por id."""
+    from hermes_cli.nfos_tool import get_call
+    call = get_call(conn, call_id) if call_id else None
+    if call is None:
+        raise WorkflowError('Unknown native call')
+    return {'call': call}
 
 
 def card_decisions(conn, task_id, limit=0):
@@ -5823,7 +5856,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','probe','probe-env','lesson','rework','precheck','cancel','save-spec','save-report','progress','ask','decide',
-        'pending','decision','effect','reconcile','reconcile-spec','repair-workspace','repair-card','repair-execution','pause-for-repair','resume-after-repair','grant-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider','lab-wait'])
+        'pending','decision','call','effect','reconcile','reconcile-spec','repair-workspace','repair-card','repair-execution','pause-for-repair','resume-after-repair','grant-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider','lab-wait'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -5834,7 +5867,8 @@ def main():
     parser.add_argument('--next',dest='next_action',default='')
     parser.add_argument('--kind',choices=['review','spec_review','final_review','impediment','additional_tasks','homologation','preparation'])
     parser.add_argument('--decision')
-    parser.add_argument('--full',action='store_true',help='show: every decision of the card, whole')  # SHOW_DECISIONS_LIMIT_20261010
+    parser.add_argument('--full',action='store_true',help='show: every decision and native call of the card, whole')  # SHOW_DECISIONS_LIMIT_20261010
+    parser.add_argument('--call',help='call: id of the native call to read whole')  # SHOW_CALLS_LIMIT_20261010
     parser.add_argument('--timeout',type=float,default=300,help='Maximum wait duration; pending is not failure')
     parser.add_argument('--resolution',choices=['continue','approve','changes','human'])
     parser.add_argument('--operation',choices=['homolog','pr','merge','deploy','staging_pr','staging_merge','repair'])  # RESULT_PROBE_20260911
@@ -5893,8 +5927,9 @@ def main():
                 result['request']=get_request(conn,result['workflow']['request_id'])
                 result['production_precheck']=(json.loads(result['workflow']['state_json'] or '{}') or {}).get('production_precheck')  # BLOCK_LESS7_20260910
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_tool_calls'").fetchone():
-                from hermes_cli.nfos_tool import read_calls
-                result['native_calls']=read_calls(conn,args.task)
+                result['native_calls'],_cut=card_calls(conn,args.task,0 if args.full else _show_limit('show_native_calls_limit'))  # SHOW_CALLS_LIMIT_20261010
+                if _cut:
+                    result['native_calls_total']=_cut['total']; result['native_calls_omitted']=_cut['omitted']; result['native_calls_hint']=_cut['hint']
         elif args.action=='precheck':  # BLOCK_LESS7_20260910
             result={'precheck':record_precheck(conn,args.task,args.run,payload)}
         elif args.action=='cancel':
@@ -5956,6 +5991,8 @@ def main():
             result=pending_decisions(conn)
         elif args.action=='decision':  # SHOW_DECISIONS_LIMIT_20261010
             result=read_decision(conn,args.decision)
+        elif args.action=='call':  # SHOW_CALLS_LIMIT_20261010
+            result=read_call(conn,args.call)
         elif args.action=='wait':
             result=wait_decision(conn,args.decision,timeout=args.timeout)
         elif args.action=='resume':
