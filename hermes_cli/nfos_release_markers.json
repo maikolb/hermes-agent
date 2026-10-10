@@ -37,5 +37,6 @@
   {"pr": 286, "file": "hermes_cli/nfos_public_text.py", "text": "RESULT_MAX_WORDS = 200"},
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "def card_calls("},
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "def read_call("},
-  {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "card_calls(conn,args.task"}
+  {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "card_calls(conn,args.task"},
+  {"pr": 298, "file": "hermes_cli/nfos_delivery.py", "text": "SHARED_GRAPH_20261010"}
 ]
