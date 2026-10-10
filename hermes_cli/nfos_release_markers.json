@@ -100,7 +100,7 @@
   {"pr": 316, "file": "hermes_cli/nfos_requester_deadline.py", "text": "MAX_REMINDER_REQUESTS = 3"},
   {"pr": 316, "file": "hermes_cli/nfos_requester_deadline.py", "text": "reason='reminder_undelivered'"},
   {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "CREATE TABLE IF NOT EXISTS task_run_processes"},
-  {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "def register_worker_processes("},
+  {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "def _run_marked_processes("},
   {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "def end_closed_run_processes("},
   {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "_register_run_processes(conn, task_id, run_id)"},
   {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "return with_processes_ended()"}
