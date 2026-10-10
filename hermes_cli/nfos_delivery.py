@@ -4854,7 +4854,7 @@ def resume_after_answer(conn,task_id,*,answer,source):
             context['human_reply']={'answer':answer,'source':source,'author':source.get('actor') or 'Human','received_at':int(time.time())}
             conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?',(_json(context),row['id']))
         _event(conn,task_id,None,'nfos_human_answer_received',{'answer':answer,'source':source,'decisions':[r['id'] for r in rows]})
-    return task_id in reconcile_human_answers(conn)
+    return task_id in reconcile_human_answers(conn, lab_sweep=False)
 
 
 def _resume_reviewed_support_input(conn):
@@ -4949,9 +4949,12 @@ def reopen_support_task(conn, task_id, *, text, source):
     return {'duplicate':False}
 
 
-def reconcile_human_answers(conn):
+def reconcile_human_answers(conn, *, lab_sweep=True):
     from hermes_cli.nfos_runtime import run_termination_pending
-    """The same runtime tick retains human blocks and applies saved replies."""
+    """The same runtime tick retains human blocks and applies saved replies.
+
+    LAB_SWEEP_PER_TICK_20261010: a varredura do laboratório consulta o broker com um teto que vale para o tick. Quem chama esta
+    função de novo no mesmo tick, ou fora dele (o comando resume), passa lab_sweep=False."""
     resumed=_resume_reviewed_support_input(conn)
     sweep_awaiting_principal(conn)  # CLOSURE_RECOVERY_20260911
     try:  # HUMAN_LAST_RESORT_20260914: pergunta de manutenção parada volta ao Principal; destino fora do ar espera e volta sozinho
@@ -4962,7 +4965,8 @@ def reconcile_human_answers(conn):
         import logging
         logging.getLogger(__name__).warning('HUMAN_LAST_RESORT_20260914 sweep failed', exc_info=True)
     try:  # LAB_WAIT_20261008: pedido do laboratório que saiu da fila devolve o card sem o Principal
-        sweep_lab_waits(conn)
+        if lab_sweep:
+            sweep_lab_waits(conn)
     except Exception:
         import logging
         logging.getLogger(__name__).warning('LAB_WAIT_20261008 sweep failed', exc_info=True)
