@@ -12,6 +12,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import nfos_delivery as delivery
 from hermes_cli import nfos_principal_review as review
 from hermes_cli import nfos_runtime as runtime
+from tests.hermes_cli.nfos_owner_question_switch import owner_questions_allowed  # noqa: F401
 
 RECEIPT = "t-c553fe15-p12"
 
@@ -308,6 +309,7 @@ def test_a_tick_that_reconciles_twice_sweeps_the_laboratory_once(board, broker, 
         assert len(reads) == delivery.LAB_WAIT_MAX_CHECKS_PER_SWEEP
 
 
+@pytest.mark.usefixtures('owner_questions_allowed')  # NO_OWNER_QUESTIONS_UNIVERSAL_20261010: pergunta com action='human' puro
 def test_applying_a_human_answer_does_not_sweep_the_laboratory(board, broker):
     """O comando resume grava a resposta de uma pessoa e a aplica; consultar o laboratório é do tick do despacho."""
     receipts, reads = broker
