@@ -75,6 +75,8 @@ def reconcile_maintenance_recovery(conn):
                             "json_type(r.metadata,'$.maintenance_pause')='object'").fetchall()
         for row in rows:
             pause = json.loads(row['metadata'])['maintenance_pause']
+            if pause.get('terminal'):  # BUDGET_EXITS_20261010: retido sem saída do runtime; não há obrigação a reabrir
+                continue
             identity = [row['task_id'], row['id'], pause.get('identity'), pause.get('at')]
             did = 'dec_' + hashlib.sha256(delivery._json(['maintenance-recovery', identity]).encode()).hexdigest()[:24]
             decision = delivery.get_decision(conn, did)
@@ -105,6 +107,10 @@ def reconcile_maintenance_recovery(conn):
                 did = 'dec_' + hashlib.sha256(delivery._json(['maintenance-recovery', identity, 'reissued', held[0]]).encode()).hexdigest()[:24]
                 if delivery.get_decision(conn, did):
                     continue
+            # BUDGET_EXITS_20261010: uma obrigação por orçamento esgotado. O estouro de tempo já abre a revisão do saldo; a
+            # da pausa só nasce quando nenhuma obrigação de orçamento do card está aberta.
+            if pause.get('kind') == 'runtime_budget_exhausted' and delivery.open_budget_obligations(conn, row['task_id']):
+                continue
             reason = pause.get('reason') or 'Pausa de manutenção sem motivo registrado; recuperar a causa no histórico antes de retomar.'
             accumulated = bool(worker_escalation(conn, row['task_id']).get('first_run_id'))
             route = 'repair-execution' if pause.get('kind') == 'runtime_budget_exhausted' else 'resume-after-repair'
@@ -124,6 +130,10 @@ def reconcile_maintenance_recovery(conn):
                         'que as instruções do projeto mandam para esse caso; se não mandam nada, o card entrega o que cabe e '
                         'fecha como entrega parcial, com o resto obrigatório no card de continuação. '
                         'Preserve sessão, consumo, evidências e aceites. Causa: ' + reason)
+            if pause.get('kind') == 'runtime_budget_exhausted':  # BUDGET_EXITS_20261010: saídas do runtime, não reparo nem dependência
+                from hermes_cli.nfos_principal_review import budget_question
+                question = budget_question(conn, row['task_id'], pause_run_id=row['id']) + ' Causa: ' + reason
+                context['budget_exits'] = True  # já nasce com as saídas: a varredura não a reescreve
             conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) "
                          "VALUES(?,?,?,'impediment',?,?,?,?)",
                          (did,row['task_id'],row['id'],question,delivery._json(context),row['spec_revision'],int(time.time())))
@@ -507,11 +517,22 @@ def request_execution_budget_review(conn, task, balance):
     context = dict(execution_budget_identity=identity,
                    balance={k: v for k, v in balance.items() if k != 'config_sha256'})
     decision_id = 'dec_' + hashlib.sha256(delivery._json([task.id, context]).encode()).hexdigest()[:24]
-    if delivery.get_decision(conn, decision_id):
-        return decision_id
-    question = ('Saldo de execução esgotado. Verifique a autorização existente para concessão finita com '
-                'grant-budget; após saldo positivo e saída confirmada, use repair-execution dry-run/apply. '
-                'Continue não concede orçamento e esta revisão não aceita a entrega.')
+    existing = delivery.get_decision(conn, decision_id)
+    if existing:
+        if existing['status'] in ('pending', 'human') or delivery.open_budget_obligations(conn, task.id):
+            return decision_id
+        # BUDGET_EXITS_20261010: a revisão deste mesmo estado já foi encerrada com o saldo como estava (respondida antes
+        # de o adiamento existir, por resposta humana ou no prazo do solicitante). Sem pergunta nova o card voltava à
+        # fila e o claim o recusava a cada tick, sem nenhuma decisão aberta.
+        earlier = conn.execute("SELECT count(*) FROM nfos_decisions WHERE task_id=? AND CASE WHEN json_valid(context) THEN "
+                               "json_extract(context,'$.execution_budget_identity') IS NOT NULL ELSE 0 END", (task.id,)).fetchone()[0]
+        decision_id = 'dec_' + hashlib.sha256(delivery._json([task.id, context, 'reissued', earlier]).encode()).hexdigest()[:24]
+        if delivery.get_decision(conn, decision_id):
+            return decision_id
+    context = dict(context, budget_exits=True)  # depois do id: já nasce com as saídas e a varredura não a reescreve
+    # BUDGET_EXITS_20261010: the question no longer sends the Principal after an authorization; it lists the exits left.
+    from hermes_cli.nfos_principal_review import budget_question
+    question = budget_question(conn, task.id)
     conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) '
                  "VALUES(?,?,?,'impediment',?,?,?,?)",
                  (decision_id, task.id, last, question, delivery._json(context), wf['spec_revision'], int(time.time())))
@@ -592,9 +613,10 @@ def repair_execution(conn, task_id, *, board, expected_run_id, expected_instruct
             conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (delivery._json(metadata), current['pause_run_id']))
         kb.unblock_task(conn, task_id)
         current['status'] = kb.get_task(conn, task_id).status
-        identity = {k: current[k] for k in ('run_id', 'instruction_revision', 'spec_revision')}
         for decision in conn.execute("SELECT id,context FROM nfos_decisions WHERE task_id=? AND status='pending'", (task_id,)).fetchall():
-            if json.loads(decision['context']).get('execution_budget_identity') == identity:
+            # BUDGET_EXITS_20261010: toda revisão de saldo do card, e não só a deste estado. A de uma instrução ou spec
+            # anterior ficava pendente e segurava o card liberado até o Principal gastar um turno com ela.
+            if json.loads(decision['context']).get('execution_budget_identity'):
                 answer = 'Execution readiness verified by authorized repair; this is not delivery acceptance'
                 conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',author=?,answer=?,resolved_at=? WHERE id=?",
                              (actor, answer, int(time.time()), decision['id']))

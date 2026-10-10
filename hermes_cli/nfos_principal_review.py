@@ -392,6 +392,297 @@ def iteration_grants(conn, task_id):
 def grant_iteration_budget(conn, task_id, *, grant_id, iterations, actor, reason,
                            expected_run_id, expected_instruction_revision, runtime_seconds=0):
     """Grant a finite allowance to an idle escalation lineage, without resuming it."""
+    return _grant_budget(conn, task_id, grant_id=grant_id, iterations=iterations, actor=actor, reason=reason,
+                         expected_run_id=expected_run_id, expected_instruction_revision=expected_instruction_revision,
+                         runtime_seconds=runtime_seconds)
+
+
+# BUDGET_EXITS_20261010: a lineage whose cumulative budget ran out had one way forward, a grant, and the engine told
+# the Principal to "verify the existing authorization". Without one it asked the owner, and a decision in `human` has
+# no clock: on 10/10/2026 a card had been waiting 40 h for that answer. The runtime now offers two exits the Principal
+# takes alone, each once per lineage and sized by the runtime, not by whoever asks:
+#   reclassify       one class up (P to M, M to G), up to the ceiling of that class;
+#   partial_closure  the request moves to its continuation and this card gets one run that only closes it as a
+#                    partial delivery, through the usual report and final review.
+# With no exit left the runtime retains the card with the reason in sight and asks nobody (budget_terminal).
+# `grant-budget` stays as it was, for a concession its owner authorized.
+BUDGET_LADDER = ('P', 'M', 'G')
+# The closing run saves the partial report and waits for the final review inside the run; the Principal answers in
+# about 2 min at the median and 15 to 27 min at the 90th percentile (measured on 09/10/2026). It gets the smallest class.
+BUDGET_CLOSING_SECONDS = 2700
+BUDGET_CLOSING_ITERATIONS = 60
+# Cards of one request, counted along its continuation chain, that the runtime may open by itself.
+BUDGET_CHAIN_LIMIT = 3
+BUDGET_EXIT_COMMANDS = {'reclassify': 'reclassify-budget', 'partial_closure': 'partial-closure-budget'}
+
+
+def _open_continuation(conn, task_id):
+    for child in d.continuation_links(conn, task_id)['children']:
+        row = conn.execute('SELECT status FROM tasks WHERE id=?', (child,)).fetchone()
+        if row and row['status'] not in ('done', 'archived'):
+            return child
+    return None
+
+
+def budget_exits(conn, task_id):
+    """What a lineage out of budget can still do without its owner. Read-only; None when the card has no lineage."""
+    from hermes_cli.nfos_workspace_repair import execution_budget
+    task = d._kb().get_task(conn, task_id)
+    first = worker_escalation(conn, task_id).get('first_run_id') if task else None
+    if not first:
+        return None
+    grants = [g for g in iteration_grants(conn, task_id) if g.get('first_run_id') == first]
+    used = sorted({g['exit'] for g in grants if g.get('exit')})
+    limit = task.max_runtime_seconds if type(task.max_runtime_seconds) is int and task.max_runtime_seconds > 0 else None
+    timed = [g for g in grants if g.get('runtime_seconds')]
+    # The class is the size the spec declared; a card without one is read by the limit it started with.
+    original = timed[0].get('previous_max_runtime_seconds') if timed else limit
+    spec = d.get_spec(conn, task_id)
+    try:
+        size = str(json.loads(spec['content']).get('size') or '').strip().upper() if spec else ''
+    except (TypeError, ValueError):
+        size = ''
+    if size not in d.SPEC_SIZE_BUDGET:
+        size = next((name for name in BUDGET_LADDER if original is not None and original <= d.SPEC_SIZE_BUDGET[name]), 'G')
+    balance = execution_budget(conn, task) or {}
+    left_seconds, left_iterations = balance.get('remaining_runtime_seconds'), balance.get('remaining_iterations')
+    left_turns = balance.get('remaining_goal_turns')
+    # The balance of each dimension is measured here; the outcome label of the run (an iteration ceiling is also
+    # recorded as timed_out) is never read to decide.
+    exhausted_by = [name for name, value in (('runtime', left_seconds), ('iterations', left_iterations),
+                                              ('goal_turns', left_turns)) if value is not None and value <= 0]
+    exhausted = bool(exhausted_by)
+    # Neither exit adds goal turns: a lineage out of them has no exit to take.
+    extendable = left_turns is None or left_turns > 0
+    spent = limit - left_seconds if limit is not None and left_seconds is not None else None
+    higher = BUDGET_LADDER[BUDGET_LADDER.index(size) + 1] if size != 'G' else None
+    raised = any(g.get('exit') != 'partial_closure' for g in timed)
+    reclassify = None
+    # After the closing exit the request lives in the continuation: this card only closes, so no class up.
+    if (exhausted and extendable and higher and not raised and 'partial_closure' not in used and limit is not None
+            and d.SPEC_SIZE_BUDGET[higher] > max(limit, spent or 0)):
+        reclassify = dict(from_class=size, to_class=higher, runtime_seconds=d.SPEC_SIZE_BUDGET[higher] - limit,
+                          iterations=int(balance.get('base_iterations') or 0) or BUDGET_CLOSING_ITERATIONS,
+                          max_runtime_seconds=d.SPEC_SIZE_BUDGET[higher])
+    closure = None
+    short = ((left_seconds is not None and left_seconds < BUDGET_CLOSING_SECONDS)
+             or (left_iterations is not None and left_iterations < BUDGET_CLOSING_ITERATIONS))
+    child = _open_continuation(conn, task_id)
+    chain = d.continuation_chain(conn, task_id)
+    if (exhausted and 'partial_closure' not in used and extendable and short
+            and (child or len(chain) < BUDGET_CHAIN_LIMIT)):
+        closure = dict(runtime_seconds=max(0, BUDGET_CLOSING_SECONDS - left_seconds) if left_seconds is not None else 0,
+                       iterations=max(1, BUDGET_CLOSING_ITERATIONS - left_iterations) if left_iterations is not None else 1,
+                       continuation=child)
+    return dict(task_id=task_id, first_run_id=first, size=size, max_runtime_seconds=limit,
+                remaining_runtime_seconds=left_seconds, remaining_iterations=left_iterations,
+                remaining_goal_turns=left_turns, exhausted=exhausted, exhausted_by=exhausted_by,
+                reclassify=reclassify, partial_closure=closure,
+                terminal=bool(exhausted and not reclassify and not closure), chain=chain, used=used)
+
+
+def budget_exits_text(exits, pause_run_id=None):
+    """What the Principal reads when a lineage runs out of budget: the exits left, never a question to a human."""
+    release = 'repair-execution dry-run/apply' + (f' para a pausa {pause_run_id}' if pause_run_id else '')
+    if exits is None:
+        return ('Saldo de execução esgotado. Este card não tem linhagem de escalonamento registrada; leia o card atual antes '
+                'de decidir. Concessão que o dono autorizou continua pelo grant-budget. Continue não concede orçamento e esta '
+                'revisão não aceita a entrega.')
+    if not exits['exhausted']:
+        return ('O saldo de execução desta linhagem está positivo. Com a saída do executor confirmada, use ' + release
+                + '. Orçamento não é pergunta ao dono nem a outro humano. Continue não libera a execução e esta revisão não '
+                'aceita a entrega.')
+    names = dict(runtime='tempo', iterations='iterações', goal_turns='turnos do objetivo')
+    balance = (f"Esgotou por {' e '.join(names[name] for name in exits['exhausted_by'])}; saldo medido: tempo "
+               f"{exits['remaining_runtime_seconds']} s, iterações {exits['remaining_iterations']}, turnos do objetivo "
+               f"{exits['remaining_goal_turns']} (None é sem limite).")
+    lines = ['Saldo de execução esgotado. Isto não é pergunta ao dono nem a outro humano: escolha uma saída abaixo e, com o '
+             'saldo positivo e a saída do executor confirmada, use ' + release + '. O runtime calcula o valor e grava o recibo.',
+             balance]
+    offer = exits.get('reclassify')
+    if offer:
+        lines.append(f"- reclassify-budget: sobe a classe uma vez, de {offer['from_class']} para {offer['to_class']} "
+                     f"(+{offer['runtime_seconds']} s, limite {offer['max_runtime_seconds']} s, +{offer['iterations']} iterações). "
+                     'Use quando o que falta cabe nessa folga.')
+    offer = exits.get('partial_closure')
+    if offer:
+        lines.append(f'- partial-closure-budget: o pedido segue no card de continuação (o runtime o cria agora, se ainda não '
+                     f'existe) e este card recebe uma execução só de fechamento, com saldo de {BUDGET_CLOSING_SECONDS} s e '
+                     f"{BUDGET_CLOSING_ITERATIONS} iterações (+{offer['runtime_seconds']} s, +{offer['iterations']} iterações): "
+                     'gravar o relatório com partial_delivery=true e a continuação, e pedir a revisão final. Use quando o que '
+                     'falta não cabe ou a classe já subiu.')
+    if exits['terminal']:
+        lines = [balance,
+                 'Saldo de execução esgotado e as saídas do runtime já foram usadas ou não se aplicam a este card. Não há '
+                 'pergunta a fazer, nem ao dono nem a outro humano: assim que o término do executor anterior estiver '
+                 'confirmado, o runtime encerra esta obrigação e o card fica retido, sem execução, com o motivo à vista. O '
+                 'pedido segue no card de continuação, quando a cadeia permite.']
+    else:
+        lines.append(('Entrada das duas' if exits.get('reclassify') and exits.get('partial_closure') else 'Entrada')
+                     + ': {"actor":"Principal","reason":"...","expected_run_id":N,"expected_instruction_revision":N}.')
+        if pause_run_id:
+            lines.append('Se a saída não puder ser tomada agora porque o término do executor anterior ainda não foi confirmado, '
+                         'não repita a explicação: responda esta decisão uma vez com "dependency":{"owner":"runtime (término '
+                         'do executor anterior)","need":"o que falta","recheck_hours":1} no JSON do decide.')
+    if 'goal_turns' in exits['exhausted_by']:
+        lines.append('Turnos do objetivo não têm concessão: nem as saídas nem o grant-budget os repõem.')
+    else:
+        lines.append('Concessão que o dono autorizou continua pelo grant-budget.')
+    lines.append('Continue não concede orçamento e esta revisão não aceita a entrega.')
+    return '\n'.join(lines)
+
+
+def budget_question(conn, task_id, pause_run_id=None):
+    """The exits as the Principal reads them. It is built inside the claim and the sweeps: a failure to read the offer
+    must not break either, so the question then only points at the command that reads it."""
+    try:
+        return budget_exits_text(budget_exits(conn, task_id), pause_run_id=pause_run_id)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning('BUDGET_EXITS_20261010 offer failed for %s', task_id, exc_info=True)
+        return ('Saldo de execução esgotado. Isto não é pergunta ao dono nem a outro humano: leia as saídas do runtime com '
+                'budget-exits e, com o saldo positivo e a saída do executor confirmada, use repair-execution dry-run/apply'
+                + (f' para a pausa {pause_run_id}' if pause_run_id else '') + '. Concessão que o dono autorizou continua pelo '
+                'grant-budget. Continue não concede orçamento e esta revisão não aceita a entrega.')
+
+
+def reclassify_budget(conn, task_id, *, actor, reason, expected_run_id, expected_instruction_revision):
+    """One class up for an idle lineage out of budget; the runtime sizes it and refuses a second one."""
+    return _budget_exit(conn, task_id, 'reclassify', actor, reason, expected_run_id, expected_instruction_revision)
+
+
+def partial_closure_budget(conn, task_id, *, actor, reason, expected_run_id, expected_instruction_revision):
+    """The request moves to its continuation and this card gets one run that only closes it as a partial delivery."""
+    _require_maintainer()
+    from hermes_cli.nfos_workspace_repair import _idle
+    _idle(conn, task_id)  # no continuation for a card whose executor is still leaving: the grant would be refused
+    exits = budget_exits(conn, task_id)
+    offer = exits.get('partial_closure') if exits else None
+    task = d._kb().get_task(conn, task_id)
+    last = conn.execute('SELECT MAX(id) FROM task_runs WHERE task_id=?', (task_id,)).fetchone()[0]
+    current = bool(task and last == expected_run_id and task.instruction_revision == expected_instruction_revision)
+    if offer and current and not offer['continuation']:
+        # A card held for budget waits for the Principal. A legacy timeout left another kind, and a continuation is
+        # born blocked with the reason of a parent blocked for input.
+        with d._kb().write_txn(conn):
+            conn.execute("UPDATE tasks SET block_kind='awaiting_principal' WHERE id=? AND status='blocked'", (task_id,))
+        # Before the grant: the request must already be moving when the closing run starts, and it keeps moving if that
+        # run does not close. Asking again finds this same child.
+        d.create_continuation(conn, task_id, requester='runtime', body=(
+            'O orçamento de execução do card de origem acabou (BUDGET_EXITS_20261010). O card de origem recebe só uma '
+            'execução de fechamento como entrega parcial; todo o saldo do pedido segue neste card.'))
+    return _budget_exit(conn, task_id, 'partial_closure', actor, reason, expected_run_id, expected_instruction_revision)
+
+
+def _require_maintainer():
+    from agent.delegation_context import is_dispatcher_owned_worker_context
+    if (os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT')
+            or not is_dispatcher_owned_worker_context()):
+        raise d.WorkflowError('Budget grants belong to the Principal maintainer, outside a worker')
+
+
+def _budget_exit(conn, task_id, exit_kind, actor, reason, expected_run_id, expected_instruction_revision):
+    first = worker_escalation(conn, task_id).get('first_run_id')
+    if not first:
+        raise d.WorkflowError('Budget exits apply to a card with an escalation lineage; read the current card')
+    return _grant_budget(conn, task_id, grant_id=f'{exit_kind}-{first}', iterations=1, actor=actor, reason=reason,
+                         expected_run_id=expected_run_id, expected_instruction_revision=expected_instruction_revision,
+                         exit_kind=exit_kind)
+
+
+def budget_terminal(conn, task_id):
+    """No exit left on an exhausted, idle lineage: the runtime ends the budget obligations and retains the card.
+
+    Nothing closes a card without a run, a report and the final review, and the runtime has no closure of its own yet.
+    So the card stays held by its pause, marked terminal, with the reason in sight and no open question: nobody is
+    woken again for it. The request goes on in a continuation card: the one the closing exit created, or one created
+    here when the card never had one and the chain allows it (goal turns ran out, so no closing run was possible)."""
+    from hermes_cli.nfos_workspace_repair import _idle
+
+    def settled():
+        exits = budget_exits(conn, task_id)
+        if not exits or not exits['terminal']:
+            return None
+        try:
+            _idle(conn, task_id)
+        except d.WorkflowError:
+            return None  # an executor still alive or unconfirmed keeps its obligation until it is gone
+        return exits
+
+    for row in conn.execute("SELECT context FROM nfos_decisions WHERE task_id=? AND status='human'", (task_id,)).fetchall():
+        try:
+            asked = json.loads(row['context'] or '{}') or {}
+        except ValueError:
+            continue
+        # An answer already given is applied by its own path, and a question to the requester has its own deadline.
+        if d._budget_context(asked) and (asked.get('human_reply') or d._requester_question(asked.get('public_message'))):
+            return None
+    exits = settled()
+    if not exits:
+        return None
+    child = _open_continuation(conn, task_id)
+    if not child and not d.continuation_links(conn, task_id)['children'] and len(exits['chain']) < BUDGET_CHAIN_LIMIT:
+        if conn.in_transaction:
+            return None  # the continuation is created under its own transaction; the next sweep does it
+        child = d.create_continuation(conn, task_id, requester='runtime', body=(
+            'O orçamento de execução do card de origem acabou e o runtime não tem mais saída para ele '
+            '(BUDGET_EXITS_20261010). O card de origem fica retido; todo o saldo do pedido segue neste card.'))['task_id']
+    now = int(time.time())
+    with d._kb().write_txn(conn, allow_nested=True):
+        exits = settled()  # read again under the write lock: a grant taken meanwhile leaves the lineage with a balance
+        if not exits:
+            return None
+        marker = dict(kind='budget_exits_used', at=now, used=exits['used'], exhausted_by=exits['exhausted_by'], continuation=child,
+                      remaining_runtime_seconds=exits['remaining_runtime_seconds'],
+                      remaining_iterations=exits['remaining_iterations'], remaining_goal_turns=exits['remaining_goal_turns'])
+        note = ('Orçamento de execução esgotado e sem saída do runtime: card retido, sem execução e sem pergunta aberta. '
+                + (f'O pedido continua no card {child}.' if child else 'Não há card de continuação aberto para este pedido.'))
+        held = [(row['id'], json.loads(row['metadata'])) for row in conn.execute(
+            "SELECT id,metadata FROM task_runs WHERE task_id=? AND json_type(metadata,'$.maintenance_pause')='object' "
+            "AND json_extract(metadata,'$.maintenance_pause.repaired_at') IS NULL", (task_id,)).fetchall()]
+        pauses = [(run_id, metadata) for run_id, metadata in held
+                  if metadata['maintenance_pause'].get('kind') == 'runtime_budget_exhausted']
+        if held and not pauses:
+            return None  # held by another pause: its repair comes first, and the claim then meets the exhausted balance
+        obligations = [row for row in conn.execute(
+            "SELECT id,status,context FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human')", (task_id,)).fetchall()
+            if d._budget_obligation(dict(row))]
+        fresh = [(run_id, metadata) for run_id, metadata in pauses if not metadata['maintenance_pause'].get('terminal')]
+        if pauses and not fresh and not obligations:
+            return None  # already retained
+        if not pauses:  # a hold refused at claim time has no pause yet; the terminal state needs one to stay held
+            last = conn.execute('SELECT id,metadata FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1', (task_id,)).fetchone()
+            metadata = json.loads(last['metadata'] or '{}')
+            if metadata.get('maintenance_pause'):  # a pause already repaired on this run keeps its record
+                metadata.setdefault('maintenance_pause_history', []).append(metadata['maintenance_pause'])
+            metadata['maintenance_pause'] = dict(kind='runtime_budget_exhausted', actor='runtime', at=now,
+                                                 reason='Execution budget exhausted and no runtime exit left')
+            fresh = [(last['id'], metadata)]
+        for run_id, metadata in fresh:
+            metadata['maintenance_pause']['terminal'] = marker
+            conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (d._json(metadata), run_id))
+        closed = []
+        for row in obligations:
+            if row['status'] == 'human':
+                context = json.loads(row['context'])
+                context.update(superseded_reason='budget_terminal')
+                conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?", (d._json(context), row['id']))
+            else:
+                conn.execute("UPDATE nfos_decisions SET status='resolved',action='continue',answer=?,author='NFOS automation',"
+                             "resolved_at=? WHERE id=?", (note, now, row['id']))
+            closed.append(row['id'])
+        conn.execute("UPDATE tasks SET status='blocked',block_kind='awaiting_principal' WHERE id=? AND status IN ('ready','blocked')",
+                     (task_id,))
+        conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (note[:400], now, task_id))
+        # The public Project Ops event contract is consumed by both native show and Vigilia.
+        d._kb()._append_event(conn, task_id, 'blocked', dict(reason=note, kind='awaiting_principal', source='budget_terminal'),
+                              run_id=exits['first_run_id'])
+        d._event(conn, task_id, exits['first_run_id'], 'nfos_budget_terminal', dict(marker, decisions=closed))
+    return dict(marker, decisions=closed)
+
+
+def _grant_budget(conn, task_id, *, grant_id, iterations, actor, reason, expected_run_id, expected_instruction_revision,
+                  runtime_seconds=0, exit_kind=None):
     from agent.delegation_context import is_dispatcher_owned_worker_context
     if (os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT')
             or not is_dispatcher_owned_worker_context()):
@@ -410,7 +701,8 @@ def grant_iteration_budget(conn, task_id, *, grant_id, iterations, actor, reason
         grants = iteration_grants(conn, task_id)
         for saved in grants:
             if saved['grant_id'] == grant_id:
-                if any(saved.get(k, 0 if k == 'runtime_seconds' else None) != v for k, v in request.items()):
+                # An exit is once per lineage and sized by the runtime: asking again returns the receipt it has.
+                if exit_kind is None and any(saved.get(k, 0 if k == 'runtime_seconds' else None) != v for k, v in request.items()):
                     raise d.WorkflowError('Grant id already exists with different parameters')
                 return saved
         task = _idle(conn, task_id)
@@ -419,6 +711,16 @@ def grant_iteration_budget(conn, task_id, *, grant_id, iterations, actor, reason
         if (not last or last['id'] != expected_run_id or task.instruction_revision != expected_instruction_revision
                 or not first or not conn.execute('SELECT 1 FROM task_runs WHERE task_id=? AND id=?', (task_id, first)).fetchone()):
             raise d.WorkflowError('Card run, instruction or escalation lineage changed; read the current card')
+        if exit_kind is not None:
+            exits = budget_exits(conn, task_id)
+            offer = exits.get(exit_kind) if exits else None
+            if not offer:
+                raise d.WorkflowError(f'{BUDGET_EXIT_COMMANDS[exit_kind]} is not available for this card. '
+                                      + budget_exits_text(exits))
+            iterations, runtime_seconds = offer['iterations'], offer['runtime_seconds']
+            request.update(iterations=iterations, runtime_seconds=runtime_seconds)
+            if exit_kind == 'partial_closure' and not offer['continuation']:
+                raise d.WorkflowError('partial-closure-budget needs the continuation card of this request; ask again')
         usage = escalation_usage(conn, task_id, expected_run_id + 1)
         previous_limit = task.max_runtime_seconds
         if runtime_seconds and (type(previous_limit) is not int or previous_limit <= 0):
@@ -432,6 +734,10 @@ def grant_iteration_budget(conn, task_id, *, grant_id, iterations, actor, reason
                        remaining_runtime_seconds=max(0, new_limit - usage['seconds']) if new_limit else None,
                        prior_iterations=usage['iterations'],
                        granted_iterations=sum(g['iterations'] for g in grants if g['first_run_id'] == first) + iterations)
+        if exit_kind is not None:
+            receipt['exit'] = exit_kind
+            if exit_kind == 'partial_closure':
+                receipt['continuation'] = offer['continuation']
         d._event(conn, task_id, expected_run_id, 'nfos_iteration_budget_granted', receipt)
         return receipt
 

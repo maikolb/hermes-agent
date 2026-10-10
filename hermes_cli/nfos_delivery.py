@@ -2136,7 +2136,7 @@ def case_context(conn, task_id):
     if not wf:
         return ''
     st = json.loads(wf['state_json'] or '{}') or {}
-    parts = []
+    parts = list(_budget_closure_context(conn, task_id))  # BUDGET_EXITS_20261010: primeiro, antes do corte do worker_context
     reviews = []
     if _spec_matches_instruction(conn, task_id):
         reviews = [dict(r) for r in conn.execute(
@@ -2330,9 +2330,10 @@ MAINTENANCE_DEPENDENCY_HOURS = (1, 24)
 
 
 def _reminder_gap(ctx):
-    """Intervalo até o próximo lembrete da decisão; só o reparo de pausa já respondido sem reparar recua."""
+    """Intervalo até o próximo lembrete da decisão; só o reparo de pausa e a obrigação de orçamento já respondidos sem
+    efeito recuam."""
     deferrals = ctx.get('maintenance_deferrals')
-    if not ctx.get('maintenance_recovery') or type(deferrals) is not int or deferrals < 1:
+    if not (ctx.get('maintenance_recovery') or _budget_context(ctx)) or type(deferrals) is not int or deferrals < 1:
         return DECISION_REMINDER_GAP
     return min(DECISION_REMINDER_GAP * 2 ** min(deferrals, 8), MAINTENANCE_REMINDER_MAX_GAP)
 
@@ -2381,7 +2382,7 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
             continue  # WAIT_RULE_20261010: lembrete, teto e saída desta decisão são do registro de espera
         if human_wait and not (ctx.get('owner_guidance') or ctx.get('human_reply')):
             continue
-        needs_principal = bool(internal_hold or ctx.get('owner_guidance') or ctx.get('maintenance_recovery')
+        needs_principal = bool(internal_hold or ctx.get('owner_guidance') or ctx.get('maintenance_recovery') or _budget_context(ctx)
                                or (ctx.get('human_reply', {}).get('source') or {}).get('platform') == 'portal')
         if owner_guidance_only and not needs_principal:
             continue
@@ -2578,7 +2579,9 @@ OWNER_QUESTION_REFUSAL = (
     '09/10/2026: "Não quero que essas merdas de card fiquem perguntando coisas pra mim ou travando"; 10/10/2026: "Não perguntar ao '
     'dono vale pra todos os projetos". Decida com continue ou changes. O que as instruções do projeto já autorizam, autorize. O '
     'resto segue o caminho conservador que entrega algo agora: não gaste, não conceda orçamento sem autorização já registrada, não '
-    'use credencial ou acesso que o card não tem e não faça o que não tem volta. Entregue o que cabe, com aviso honesto do que ficou '
+    'use credencial ou acesso que o card não tem e não faça o que não tem volta. A concessão que pede autorização é a do '
+    'grant-budget; orçamento de execução esgotado tem as saídas do runtime (budget-exits), que você toma sem perguntar a ninguém. '
+    'Entregue o que cabe, com aviso honesto do que ficou '
     'de fora. Como o card termina é regra do projeto; se as instruções dele não dizem, feche como entrega parcial '
     '(partial_delivery=true com blockers e follow_ups). Capacidade que falta fica registrada '
     'no card e o card segue no que dá. Pergunta só ao solicitante, pelo canal do pedido: action human com public_message {kind: '
@@ -2737,6 +2740,183 @@ def review_owner_questions(conn):
             _kb().unblock_task(conn, task.id)
         out.append((row['id'], new_id))
     return out
+
+
+def _budget_context(ctx):
+    """BUDGET_EXITS_20261010: o contexto é de uma obrigação de orçamento esgotado (revisão do saldo, pausa do runtime ou a que as substituiu)."""
+    return isinstance(ctx, dict) and bool(ctx.get('execution_budget_identity') or ctx.get('budget_exits')
+                                          or (ctx.get('maintenance_recovery') or {}).get('resume_route') == 'repair-execution')
+
+
+def _budget_obligation(row):
+    try:
+        return _budget_context(json.loads((row or {}).get('context') or '{}') or {})
+    except Exception:
+        return False
+
+
+def _budget_obligation_sql(alias=''):
+    """Predicado SQL de uma obrigação de orçamento em nfos_decisions; contexto que não é JSON nunca casa."""
+    column = (alias + '.' if alias else '') + 'context'
+    return (f"CASE WHEN json_valid({column}) THEN json_extract({column},'$.execution_budget_identity') IS NOT NULL "
+            f"OR json_extract({column},'$.budget_exits') IS NOT NULL "
+            f"OR json_extract({column},'$.maintenance_recovery.resume_route')='repair-execution' ELSE 0 END")
+
+
+def open_budget_obligations(conn, task_id):
+    """Ids das obrigações de orçamento do card ainda abertas, com o Principal ou com um humano."""
+    return [r[0] for r in conn.execute("SELECT id FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human') AND "
+                                       + _budget_obligation_sql() + " ORDER BY created_at,id", (task_id,))]
+
+
+def _budget_exhausted(conn, task_id):
+    from hermes_cli.nfos_workspace_repair import execution_budget
+    task = _kb().get_task(conn, task_id)
+    balance = execution_budget(conn, task) if task else None
+    return bool(balance) and any(balance[key] is not None and balance[key] <= 0
+                                 for key in ('remaining_iterations', 'remaining_runtime_seconds', 'remaining_goal_turns'))
+
+
+def _granted_runtime_limit(conn, task_id):
+    """Limite de tempo que a última concessão da linhagem atual deixou; 0 quando não houve concessão de tempo."""
+    try:
+        from hermes_cli.nfos_principal_review import iteration_grants, worker_escalation
+        first = worker_escalation(conn, task_id).get('first_run_id')
+        limits = [g.get('max_runtime_seconds') for g in iteration_grants(conn, task_id)
+                  if first and g.get('first_run_id') == first and g.get('runtime_seconds')]
+        return max([value for value in limits if type(value) is int] or [0])
+    except Exception:
+        return 0
+
+
+BUDGET_HUMAN_REFUSAL = ('human recusado (BUDGET_EXITS_20261010): orçamento de execução esgotado não é pergunta ao dono, ao solicitante '
+                        'nem a outro humano. Decida com continue ou changes.')
+
+
+def review_budget_human_decisions(conn):
+    """BUDGET_EXITS_20261010: pergunta a humano sobre orçamento esgotado, já aberta, volta ao Principal com as saídas do runtime.
+
+    Mesmo caminho das duas revisões acima (a pergunta fica superseded, com rastro), com duas diferenças: a decisão nova herda a
+    obrigação da pausa e do saldo, para o repair-execution encerrá-la, e o card continua retido, porque o saldo segue esgotado.
+    Em 10/10/2026 o t_56d65bd8 esperava havia 40 h a resposta do dono a uma concessão; decisão em human não tinha relógio.
+    Pergunta ao solicitante fica com o prazo dela (REQUESTER_DEADLINE_20261010) e resposta já recebida segue o caminho normal.
+    Sem saída do runtime o card não volta ao Principal: budget_terminal o retém e encerra a pergunta."""
+    from hermes_cli.nfos_principal_review import budget_exits, budget_exits_text, budget_terminal
+    from hermes_cli.nfos_runtime import run_termination_pending
+    out = []
+    for row in [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()]:
+        if not _budget_obligation(row):
+            continue
+        ctx = json.loads(row['context'])
+        if ctx.get('human_reply') or _requester_question(ctx.get('public_message')):
+            continue
+        task = _kb().get_task(conn, row['task_id'])
+        wf = get_workflow(conn, row['task_id'])
+        if not task or not wf or task.status not in ('blocked', 'ready'):
+            continue
+        if _run_process_alive(conn, task.id, row['run_id']) or run_termination_pending(conn, task.id, row['run_id']):
+            continue
+        exits = budget_exits(conn, task.id)
+        if not exits:
+            continue  # sem linhagem não há saldo acumulado a julgar; a pergunta fica como está
+        if exits['terminal']:
+            if budget_terminal(conn, task.id):
+                out.append((row['id'], 'terminal'))
+            continue
+        recovery = ctx.get('maintenance_recovery') or {}
+        refused = _human_question_part(row.get('answer'))
+        question = ('Revisão de autonomia (BUDGET_EXITS_20261010): a pergunta a humano deste card pedia orçamento e foi recusada; o card '
+                    'voltou para você. ' + budget_exits_text(exits, pause_run_id=recovery.get('pause_run_id'))
+                    + ' Pergunta recusada: ' + refused[:500])
+        new_id = 'dec_' + uuid.uuid4().hex[:20]
+        now = int(time.time())
+        inherited = {key: ctx[key] for key in ('maintenance_recovery', 'execution_budget_identity', 'maintenance_deferrals',
+                                              'dependency_declarations') if ctx.get(key)}
+        with _kb().write_txn(conn, allow_nested=True):
+            current = get_decision(conn, row['id'])
+            if not current or current['status'] != 'human':
+                continue
+            ctx.update(superseded_by=new_id, superseded_reason='budget_exits')
+            conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?", (_json(ctx), row['id']))
+            conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
+                         (new_id, task.id, row['run_id'], 'impediment', question,
+                          _json({'supersedes': row['id'], 'budget_exits': True, **inherited}), wf['spec_revision'], now))
+            _event(conn, task.id, row['run_id'], 'nfos_human_question_refused',
+                   {'decision_id': row['id'], 'new_decision_id': new_id, 'question': refused[:400], 'reason': 'budget_exits'})
+            _event(conn, task.id, row['run_id'], 'nfos_principal_requested', {'decision_id': new_id, 'kind': 'impediment', 'question': question})
+        out.append((row['id'], new_id))
+    return out
+
+
+def sweep_budget_exits(conn):
+    """BUDGET_EXITS_20261010: a cada tick, o que já estava preso por orçamento volta a andar sem ninguém tocar no card.
+
+    1. Pergunta de orçamento a humano volta ao Principal com as saídas (review_budget_human_decisions).
+    2. Card retido por orçamento espera o Principal: o estouro de antes desta regra deixava o tipo de bloqueio como
+       estava, e nem a obrigação da pausa nem o lembrete o alcançavam.
+    3. Linhagem sem saída é retida pelo runtime (budget_terminal confere o saldo e o término do executor anterior).
+    4. Obrigação de orçamento aberta antes desta regra, ou devolvida por outra revisão, recebe as saídas no texto uma vez.
+
+    Candidatos: card com pausa de orçamento aberta ainda não marcada, ou com obrigação de orçamento pendente."""
+    from hermes_cli.nfos_principal_review import budget_question, budget_terminal
+    out = review_budget_human_decisions(conn)
+    tasks = {r[0] for r in conn.execute(
+        "SELECT r.task_id FROM task_runs r JOIN tasks t ON t.id=r.task_id WHERE t.status IN ('blocked','ready') "
+        "AND CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata,'$.maintenance_pause.kind')='runtime_budget_exhausted' "
+        "AND json_extract(r.metadata,'$.maintenance_pause.repaired_at') IS NULL "
+        "AND json_extract(r.metadata,'$.maintenance_pause.terminal') IS NULL ELSE 0 END")}
+    pending = ("SELECT d.id,d.task_id,d.run_id,d.kind,d.question,d.context FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
+               "WHERE d.status='pending' AND t.status IN ('blocked','ready') AND " + _budget_obligation_sql('d')
+               + " ORDER BY d.created_at,d.id")
+    tasks |= {r['task_id'] for r in conn.execute(pending)}
+    for task_id in sorted(tasks):
+        # Uma espera genuína por humano (decisão em human) mantém o tipo de bloqueio dela.
+        if not conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='human' LIMIT 1", (task_id,)).fetchone():
+            with _kb().write_txn(conn, allow_nested=True):
+                if conn.execute("UPDATE tasks SET block_kind='awaiting_principal' WHERE id=? AND status='blocked' "
+                                "AND COALESCE(block_kind,'')<>'awaiting_principal'", (task_id,)).rowcount == 1:
+                    _event(conn, task_id, None, 'nfos_budget_hold_restored', {'block_kind': 'awaiting_principal'})
+        if budget_terminal(conn, task_id):
+            out.append((task_id, 'terminal'))
+    for row in [dict(r) for r in conn.execute(pending).fetchall()]:
+        context = json.loads(row['context'])
+        if context.get('budget_exits'):
+            continue
+        recovery = context.get('maintenance_recovery') or {}
+        question = ('Revisão de autonomia (BUDGET_EXITS_20261010): esta obrigação é de orçamento esgotado e o runtime oferece saídas '
+                    'que você toma sem humano. ' + budget_question(conn, row['task_id'], pause_run_id=recovery.get('pause_run_id'))
+                    + ' Texto anterior desta decisão: ' + ' '.join(str(row['question'] or '').split())[:400])
+        context['budget_exits'] = True
+        waiting = isinstance(context.get('lab_wait'), dict) and context['lab_wait'].get('hold')
+        with _kb().write_txn(conn, allow_nested=True):
+            if conn.execute("UPDATE nfos_decisions SET question=?,context=? WHERE id=? AND status='pending'",
+                            (question, _json(context), row['id'])).rowcount != 1:
+                continue
+            if not waiting:  # a que espera dependência acorda o Principal na reconferência, já com o texto novo
+                _event(conn, row['task_id'], row['run_id'], 'nfos_principal_requested',
+                       {'decision_id': row['id'], 'kind': row['kind'], 'question': question, 'budget_exits': True})
+        out.append((row['id'], 'exits'))
+    return out
+
+
+def _budget_closure_context(conn, task_id):
+    """BUDGET_EXITS_20261010: a execução retomada pela saída de fechamento recebe só a tarefa de fechar."""
+    try:
+        from hermes_cli.nfos_principal_review import iteration_grants, worker_escalation
+        first = worker_escalation(conn, task_id).get('first_run_id')
+        grants = [g for g in iteration_grants(conn, task_id) if g.get('first_run_id') == first] if first else []
+    except Exception:
+        return []
+    closing = [g for g in grants if g.get('exit') == 'partial_closure']
+    if not closing:
+        return []
+    child = closing[-1].get('continuation')
+    return ['Budget closing run (BUDGET_EXITS_20261010): the execution budget of this card ran out and the card received a '
+            'closing allowance. This run only closes it: do not implement, investigate or test anything else. '
+            f'The request already continues in the continuation card {child}; do not create another. '
+            f'1) Save the report with partial_delivery=true, continuation="{child}", every criterion as it was measured '
+            '(a FAIL stays FAIL), blockers and follow_ups. 2) Ask the final review. Whatever does not fit goes to the '
+            'continuation, not to this run.']
 
 
 def _destination_reachable(target, timeout=5):
@@ -3844,8 +4024,11 @@ def save_spec(conn, task_id, run_id, spec, *, author, evidence):
                                     spec_revision=wf['spec_revision']+1)
         _size=str(spec.get('size') or '').strip().upper()  # BLOCK_LESS9_20260910: quem escreve a spec define o orçamento
         if _size in SPEC_SIZE_BUDGET:
-            conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?',(SPEC_SIZE_BUDGET[_size],task_id))
-            _event(conn,task_id,run_id,'nfos_spec_size',{'size':_size,'max_runtime_seconds':SPEC_SIZE_BUDGET[_size]})
+            # BUDGET_EXITS_20261010: a spec regravada não rebaixa o limite que uma concessão desta linhagem subiu; rebaixado,
+            # o saldo voltava a negativo e o claim seguinte recusava o card que acabara de ser liberado.
+            _limit=max(SPEC_SIZE_BUDGET[_size], _granted_runtime_limit(conn, task_id))
+            conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?',(_limit,task_id))
+            _event(conn,task_id,run_id,'nfos_spec_size',{'size':_size,'max_runtime_seconds':_limit})
         if spec.get('delivery_type')!=task.delivery_type:
             # The project default is provisional until TL has analyzed the
             # request. An audit must not inherit a Git delivery requirement.
@@ -5120,6 +5303,11 @@ def reconcile_human_answers(conn, *, lab_sweep=True):
     LAB_SWEEP_PER_TICK_20261010: a varredura do laboratório consulta o broker com um teto que vale para o tick. Quem chama esta
     função de novo no mesmo tick, ou fora dele (o comando resume), passa lab_sweep=False."""
     resumed=_resume_reviewed_support_input(conn)
+    try:  # BUDGET_EXITS_20261010: antes das outras; a linhagem sem saída é retida aqui e não ganha obrigação nova abaixo
+        sweep_budget_exits(conn)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning('BUDGET_EXITS_20261010 sweep failed', exc_info=True)
     sweep_awaiting_principal(conn)  # CLOSURE_RECOVERY_20260911
     try:  # HUMAN_LAST_RESORT_20260914: pergunta de manutenção parada volta ao Principal; destino fora do ar espera e volta sozinho
         review_maintenance_human_decisions(conn)
@@ -5210,6 +5398,12 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
     if action=='human' and _human_is_maintenance(assessment):
         raise WorkflowError(HUMAN_MAINTENANCE_REFUSAL)
     initial=get_decision(conn,decision_id)
+    # Antes da recusa geral de pergunta ao dono: para orçamento o Principal lê as saídas do runtime, e nem o solicitante é perguntado.
+    if action=='human' and initial and _budget_obligation(initial):  # BUDGET_EXITS_20261010
+        from hermes_cli.nfos_principal_review import budget_question
+        _recovery=(json.loads(initial['context']).get('maintenance_recovery') or {})
+        raise WorkflowError(BUDGET_HUMAN_REFUSAL+' '+budget_question(conn, initial['task_id'],
+                                                                     pause_run_id=_recovery.get('pause_run_id')))
     if action=='human' and initial and not _requester_question(public_message) and _owner_questions_refused(conn, initial['task_id']):
         raise WorkflowError(OWNER_QUESTION_REFUSAL)
     if action=='human' and initial and initial['status']=='pending' and _requester_question(public_message):
@@ -5398,6 +5592,18 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                              (_json(context), decision_id))
         if declared and not maintenance_deferred:
             raise WorkflowError('dependency applies only to the repair decision of a maintenance pause that is still open')
+        # BUDGET_EXITS_20261010: a revisão do saldo respondida sem saída tomada continua do Principal, com o lembrete
+        # recuando. Em 24/09/2026 o t_56d65bd8 teve essa revisão respondida com changes e ficou 12 dias retido sem
+        # nenhuma decisão aberta; resolvida sem pausa, o card voltava à fila e o claim o recusava a cada tick.
+        if (not maintenance_deferred and context.get('execution_budget_identity') and action in {'continue','changes'}
+                and _budget_exhausted(conn, row['task_id'])):
+            maintenance_deferred = True
+            deferred_at = int(time.time())
+            context['reminders'] = [deferred_at]
+            context['maintenance_response_at'] = deferred_at
+            context['maintenance_deferrals'] = int(context.get('maintenance_deferrals') or 0) + 1
+            conn.execute("UPDATE nfos_decisions SET status='pending',resolved_at=NULL,context=? WHERE id=?",
+                         (_json(context), decision_id))
         if action == 'human':
             root, _ = _open_human_escalation_root(conn, row)
             if root:
@@ -6095,7 +6301,7 @@ def main():
     from pathlib import Path
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['show','probe','probe-env','lesson','rework','precheck','cancel','save-spec','save-report','progress','ask','decide',
-        'pending','decision','call','effect','reconcile','reconcile-spec','repair-workspace','repair-card','repair-execution','pause-for-repair','resume-after-repair','grant-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider','lab-wait'])
+        'pending','decision','call','effect','reconcile','reconcile-spec','repair-workspace','repair-card','repair-execution','pause-for-repair','resume-after-repair','grant-budget','budget-exits','reclassify-budget','partial-closure-budget','acquire-project','release-project','receive','urgent','resume','wait','reconsider','lab-wait'])
     parser.add_argument('--task',default=os.environ.get('HERMES_KANBAN_TASK'))
     parser.add_argument('--run',type=int,default=int(os.environ.get('HERMES_KANBAN_RUN_ID') or 0))
     parser.add_argument('--input',help='JSON file with spec/report/state/question/receipt/request')
@@ -6199,6 +6405,15 @@ def main():
         elif args.action=='grant-budget':
             from hermes_cli.nfos_principal_review import grant_iteration_budget
             result=grant_iteration_budget(conn,args.task,**payload)
+        elif args.action=='budget-exits':  # BUDGET_EXITS_20261010: leitura do que o runtime ainda oferece
+            from hermes_cli.nfos_principal_review import budget_exits
+            result=budget_exits(conn,args.task) or {'task_id':args.task,'lineage':False}
+        elif args.action=='reclassify-budget':
+            from hermes_cli.nfos_principal_review import reclassify_budget
+            result=reclassify_budget(conn,args.task,**payload)
+        elif args.action=='partial-closure-budget':
+            from hermes_cli.nfos_principal_review import partial_closure_budget
+            result=partial_closure_budget(conn,args.task,**payload)
         elif args.action=='repair-execution':
             from hermes_cli.nfos_workspace_repair import repair_execution
             result=repair_execution(conn,args.task,board=args.project,**payload)

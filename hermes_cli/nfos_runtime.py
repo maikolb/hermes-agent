@@ -406,6 +406,8 @@ def reconcile_runtime(conn, *, worker_exit_grace_seconds=15, lab_sweep=True):
             "AND ((t.status='blocked' AND t.block_kind='awaiting_principal') "
             "OR json_extract(d.context,'$.owner_guidance') IS NOT NULL "
             "OR json_extract(d.context,'$.maintenance_recovery') IS NOT NULL "
+            "OR json_extract(d.context,'$.execution_budget_identity') IS NOT NULL "
+            "OR json_extract(d.context,'$.budget_exits') IS NOT NULL "
             "OR json_extract(d.context,'$.human_reply.source.platform')='portal')").fetchall():
         delivery.nudge_open_decisions(conn, row['task_id'], owner_guidance_only=True)
     for call in reconcile_calls(conn):
@@ -937,7 +939,10 @@ names them). The owner is never asked, in any project: what would need the owner
 follows the conservative path (no spending, no budget grant without an authorization
 already on record, no credential the card does not have, nothing irreversible). How the
 card ends then is the project's rule; where the project instructions give none, it closes
-as a real partial delivery with what is pending stated. Accept sufficient outcome evidence and valid
+as a real partial delivery with what is pending stated. An exhausted execution
+budget is never a human question: read `budget-exits` and take `reclassify-budget` or
+`partial-closure-budget`, which the runtime sizes; `grant-budget` is only for a concession
+its owner already authorized. Accept sufficient outcome evidence and valid
 observations in the existing final review without a new owner confirmation.
 Product implementation stays with the retained worker. Administrative maintenance
 that enables that worker is your executable responsibility in this conversation:

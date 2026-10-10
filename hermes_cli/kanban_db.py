@@ -12304,10 +12304,14 @@ def enforce_max_runtime(
                     "retry_status": retry_status,
                 }
                 if cumulative_budget:
+                    # BUDGET_EXITS_20261010: sem este estado a varredura não criava a obrigação da pausa, e o card
+                    # ficava retido sem pergunta aberta depois de um continue na revisão do saldo.
+                    conn.execute("UPDATE tasks SET block_kind='awaiting_principal' WHERE id=? AND status='blocked'", (tid,))
                     payload['nfos_cleanup'] = cleanup
                     payload['maintenance_pause'] = dict(
                         kind='runtime_budget_exhausted', actor='runtime', at=now,
-                        reason='Cumulative runtime exhausted; grant-budget then repair-execution before resuming')
+                        reason='Cumulative runtime exhausted; a runtime budget exit (budget-exits) or an authorized '
+                               'grant-budget, then repair-execution before resuming')
                 run_id = _end_run(
                     conn, tid,
                     outcome="timed_out", status="timed_out",
