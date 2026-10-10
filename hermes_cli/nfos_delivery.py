@@ -2466,7 +2466,12 @@ def _transient_released_by_principal(conn, task_id):
     (09/10/2026) ficou blocked das 00:49 às 04:14 com o CONTINUE das 00:57 ("a retenção técnica já foi efetivada e agora
     sua precondição foi removida"). A resposta dada depois do bloqueio é a liberação. Ficam de fora a espera do destino,
     em que continue mantém a espera por desenho, a pausa de manutenção e qualquer decisão ainda aberta (a espera do
-    laboratório é uma delas)."""
+    laboratório é uma delas).
+
+    LAB_ANSWER_KEEPS_RETENTION_20261010: a resposta que a varredura do laboratório grava sozinha (lab_wait.released_at)
+    também fica de fora. A espera do laboratório segura o card pela decisão aberta, não por bloqueio; um transient no
+    mesmo card é outra retenção e aquela resposta fala só da fila do laboratório. Espera escalada e respondida pelo
+    Principal não tem released_at e segue contando."""
     from hermes_cli.nfos_workspace_repair import maintenance_pause_pending
     if maintenance_pause_pending(conn, task_id):
         return False
@@ -2481,7 +2486,8 @@ def _transient_released_by_principal(conn, task_id):
     blocked_at = conn.execute("SELECT max(created_at) FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected')",
                               (task_id,)).fetchone()[0]
     return bool(blocked_at and conn.execute(
-        "SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='resolved' AND action IN ('continue','changes') AND resolved_at>=? LIMIT 1",
+        "SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='resolved' AND action IN ('continue','changes') AND resolved_at>=? "
+        "AND (CASE WHEN json_valid(context) THEN json_extract(context,'$.lab_wait.released_at') END) IS NULL LIMIT 1",
         (task_id, blocked_at)).fetchone())
 
 
