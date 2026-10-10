@@ -916,7 +916,8 @@ A question to the requester has a deadline (kanban.delivery.requester_answer_hou
 ticket the runtime adds the deadline line to the question, reminds the requester 24 h before it and, at the deadline,
 returns the question to you: resolve continue or changes with what is already verified and have the card closed as a
 partial delivery that states what still depends on the requester. Do not ask again after that; a later answer returns
-to you on the card or reopens the ticket.
+to you on the card or reopens the ticket. On a card that came from a chat, the runtime itself posts that reminder as a
+new message in the card topic, and the deadline counts from it: do not write a reminder of your own.
 Sineta triage approval only creates a TODO ticket. Execution approval is separate.
 Reopened support tickets return to TODO for a new approval. Neither an ordinary reply
 nor a priority change grants that approval. Telegram requests retain their normal route.

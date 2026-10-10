@@ -504,6 +504,43 @@ _CLIENT_SILENT_KINDS = frozenset({  # CLIENT_CHAT_20260913: no chat do cliente n
 # pediu, e sem ela não existe aceite, só card fechado.
 _CLIENT_DELIVERY_KINDS = frozenset({"completed"})
 
+# REQUESTER_REMINDER_20261010: segunda exceção ao contrato de 13/09. O aviso do
+# prazo de uma pergunta ao solicitante (REQUESTER_DEADLINE_20261010) é escrito
+# pelo motor e existe só para quem tem de responder. A pergunta em si chega pelo
+# texto do Principal, e o evento blocked vira edição da barra, que não notifica
+# ninguém: sem esta mensagem o prazo de um card nascido num chat venceria sem o
+# cliente saber. Por isso o motor só conta o prazo depois do recibo gravado
+# aqui. Uma mensagem nova por pergunta, só no tópico de origem do card.
+_REQUESTER_REMINDER_KIND = "nfos_requester_reminder"
+
+
+def _reminder_is_for(sub, payload):
+    """O aviso vai só à assinatura do chat de onde o pedido veio, nunca a outro chat que acompanhe o card."""
+    origin = (payload or {}).get("origin") or {}
+    return (str(sub.get("platform") or "").lower() == str(origin.get("platform") or "").lower()
+            and str(sub.get("chat_id") or "") == str(origin.get("chat_id") or "")
+            and str(sub.get("thread_id") or "") == str(origin.get("thread_id") or ""))
+
+
+def _record_requester_reminder(board, task_id, payload, send_res, sub):
+    """Recibo que o motor exige para contar o prazo: qual pergunta, qual data e a mensagem publicada.
+
+    O ``message_id`` fica guardado pelo mesmo motivo da devolutiva: uma resposta
+    direta ao aviso só se liga à pergunta certa por ele.
+    """
+    message_id = getattr(send_res, "message_id", None) if send_res is not None else None
+    from hermes_cli import kanban_db as _kb
+    with _kb.connect_closing(board=board) as conn:
+        with _kb.write_txn(conn):
+            _kb._append_event(conn, task_id, "nfos_requester_reminder_delivered", {
+                "decision_id": (payload or {}).get("decision_id"),
+                "due_at": (payload or {}).get("due_at"),
+                "message_id": str(message_id) if message_id else None,
+                "platform": sub.get("platform"),
+                "chat_id": str(sub.get("chat_id") or ""),
+                "thread_id": str(sub.get("thread_id") or ""),
+            })
+
 
 def _client_source_for_board(board):
     """CLIENT_CHAT_20260913: (source do projeto, é projeto de entrega). Board sem projeto de entrega = chat de operação."""
@@ -657,8 +694,8 @@ def _notify_kind_allowed(kind, load_config):
     """Patch local 10/09/2026 (Maikol, modo quieto): `kanban.notify_kinds` lista os kinds que geram
     mensagem passiva no chat. Ausente ou vazio = todos (comportamento original). `completed` e
     `blocked` passam sempre, porque alimentam o wake com resumo do worker."""
-    if kind in ("completed", "blocked", "support_approval_requested"):
-        return True
+    if kind in ("completed", "blocked", "support_approval_requested", _REQUESTER_REMINDER_KIND):
+        return True  # REQUESTER_REMINDER_20261010: o modo quieto não pode descartar o aviso de que o prazo depende
     try:
         kcfg = (load_config() or {}).get("kanban") or {}
         kinds = kcfg.get("notify_kinds")
@@ -2956,6 +2993,7 @@ class GatewayKanbanWatchersMixin:
             "claimed", "completed", "blocked", "gave_up", "status",
             "block_loop_detected", "review_requested", "nfos_principal_requested",
             "commented", "nfos_progress", "model_fallback", "support_approval_requested",
+            _REQUESTER_REMINDER_KIND,
         )
         # Focus accounting consumes worker-run boundaries too, but these
         # internal retry/recovery events must never become chat messages.
@@ -3533,6 +3571,7 @@ class GatewayKanbanWatchersMixin:
                             "blocked": {"blocked"}, "block_loop_detected": {"blocked"},
                             "review_requested": {"review"},
                             "support_approval_requested": {"todo", "backlog", "triage"},
+                            _REQUESTER_REMINDER_KIND: {"blocked", "ready"},  # pergunta já respondida não é lembrada
                         }
                         if task and ((task.task_role == "activity" and kind != "model_fallback") or (
                             kind in expected_states and task.status not in expected_states[kind]
@@ -3638,6 +3677,11 @@ class GatewayKanbanWatchersMixin:
                                 f"⏸ {board_tag}{tag}Kanban {sub['task_id']} continua aguardando"
                                 f"{rc}{reason}"
                             )
+                        elif kind == _REQUESTER_REMINDER_KIND:
+                            # REQUESTER_REMINDER_20261010: o texto vem pronto do motor.
+                            msg = str((ev.payload or {}).get("text") or "").strip()
+                            if not msg or not _reminder_is_for(sub, ev.payload):
+                                continue
                         else:
                             # archived / unblocked are claimed by TERMINAL_KINDS
                             # (so the cursor advances past them and they can't
@@ -3731,6 +3775,13 @@ class GatewayKanbanWatchersMixin:
                                 # proximidade de horário, que não é vínculo.
                                 await asyncio.to_thread(
                                     _record_client_delivery, board_slug, sub["task_id"], _send_res, sub)
+                            elif kind == _REQUESTER_REMINDER_KIND:  # REQUESTER_REMINDER_20261010: mensagem nova, com recibo
+                                _send_res = await adapter.send(
+                                    sub["chat_id"], msg, metadata=metadata,
+                                )
+                                if _send_res is None or getattr(_send_res, "success", True) is not False:
+                                    await asyncio.to_thread(
+                                        _record_requester_reminder, board_slug, sub["task_id"], ev.payload, _send_res, sub)
                             elif kind == "support_approval_requested":
                                 sender = getattr(adapter, "send_support_approval", None)
                                 if not callable(sender):

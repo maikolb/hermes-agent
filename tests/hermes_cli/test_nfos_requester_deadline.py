@@ -212,18 +212,49 @@ def test_successor_keeps_the_maintenance_pause_obligation_of_the_question_it_rep
                          "AND json_extract(context,'$.maintenance_recovery.pause_run_id')=7", (task.id,)).fetchone()[0] == 1
 
 
-def test_card_from_another_origin_has_no_deadline_and_says_why(board, worker):
+def _receipt(conn, task_id, decision, due_at):
+    """O recibo que o notificador do gateway grava quando publica o aviso no tópico do card."""
+    with kb.write_txn(conn):
+        kb._append_event(conn, task_id, "nfos_requester_reminder_delivered",
+                         {"decision_id": decision, "due_at": due_at, "message_id": "77", "platform": "telegram",
+                          "chat_id": "-10001", "thread_id": "8"})
+
+
+def test_card_born_in_a_chat_counts_the_deadline_only_from_the_receipt_of_its_reminder(board, worker):
+    from hermes_cli import nfos_public_text
     task, decision = _card(board, worker, origin=TELEGRAM, message_id="42")
     _ask(board, decision, to="Jhonatan")
     context = _context(board, decision)
-    assert context["public_message"]["text"] == QUESTION
-    assert context["requester_deadline"]["unarmed"] == "no_warning_channel" and "due_at" not in context["requester_deadline"]
-    (action,) = deadline.sweep(board, now=int(time.time()) + 30 * DAY)
-    assert action["action"] == "no_warning_channel" and action["channel"] == "telegram" and action["recipient"] == "Jhonatan"
+    clock = context["requester_deadline"]
+    assert context["public_message"]["text"] == QUESTION  # no grupo quem escreve a pergunta é o Principal
+    assert clock["channel"] == "telegram" and clock["warn_at"] == clock["asked_at"] + DAY and "due_at" not in clock
+    assert deadline.sweep(board, now=clock["warn_at"] - 1)[0]["action"] == "waiting"
+    (asked,) = deadline.sweep(board, now=clock["warn_at"])
+    assert asked["action"] == "request_reminder" and asked["due_at"] == clock["asked_at"] + 48 * HOUR
+    assert asked["origin"] == {"platform": "telegram", "chat_id": "-10001", "thread_id": "8"}
+    (event,) = _events(board, task.id, "nfos_requester_reminder")
+    assert event["decision_id"] == decision and event["origin"] == asked["origin"] and event["due_at"] == asked["due_at"]
+    assert event["text"].startswith(f"PERGUNTA para Jhonatan: {QUESTION}\n\nSe não recebermos sua resposta até")
+    assert event["text"].endswith("Se você responder depois, retomamos o pedido.")
+    assert nfos_public_text.form_problems(event["text"], question=True) == []
+    # Sem recibo o prazo não conta, nem depois da data escrita no aviso.
+    assert deadline.sweep(board, now=clock["warn_at"] + 600)[0]["action"] == "waiting_delivery"
     assert delivery.get_decision(board, decision)["status"] == "human"
+    # Aviso que o gateway não entregou em uma hora é pedido de novo, com data nova.
+    later = asked["due_at"] + HOUR
+    (again,) = deadline.sweep(board, now=later)
+    assert again["action"] == "request_reminder" and again["due_at"] == later + DAY
+    assert len(_events(board, task.id, "nfos_requester_reminder")) == 2
+    _receipt(board, task.id, decision, again["due_at"])
+    assert deadline.sweep(board, now=later + 60)[0]["action"] == "warned"
+    warned = _context(board, decision)["requester_deadline"]
+    assert warned["due_at"] == again["due_at"] and warned["reminder_message_id"] == "77"
+    assert deadline.sweep(board, now=again["due_at"] - 1)[0]["action"] == "waiting"
+    assert deadline.sweep(board, now=again["due_at"])[0]["action"] == "expire"
+    assert delivery.get_decision(board, decision)["status"] == "superseded"
 
 
-def test_older_question_without_a_public_message_is_recognised_by_its_addressee(board, worker):
+def test_older_question_without_a_public_message_is_reminded_by_its_addressee(board, worker):
     task, decision = _card(board, worker, origin=TELEGRAM, message_id="43")
     _ask(board, decision, to="Jhonatan")
 
@@ -233,11 +264,38 @@ def test_older_question_without_a_public_message_is_recognised_by_its_addressee(
     _rewrite(board, decision, to_legacy)
     board.execute("UPDATE nfos_decisions SET answer=? WHERE id=?", ("PERGUNTA para Jhonatan: qual competência conferir?\nContexto interno.", decision))
     board.commit()
-    for _ in range(2):
-        (action,) = deadline.sweep(board, now=int(time.time()) + 17 * DAY)
-        assert action["action"] == "no_warning_channel" and action["recipient"] == "Jhonatan"
-    assert len(_events(board, task.id, "nfos_requester_deadline_unarmed")) == 1
+    now = int(time.time()) + 17 * DAY
+    (action,) = deadline.sweep(board, now=now)
+    assert action["action"] == "request_reminder" and action["recipient"] == "Jhonatan" and action["due_at"] == now + DAY
+    assert action["text"].startswith("PERGUNTA para Jhonatan: qual competência conferir?\n\nSe não recebermos")
+    assert "Contexto interno" not in action["text"]
     assert deadline.requester({}, "PERGUNTA para Maikol: autoriza publicar?") == ""
+
+
+def test_old_question_out_of_form_is_not_published_again():
+    from zoneinfo import ZoneInfo
+    from hermes_cli import nfos_public_text
+    due = int(datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc).timestamp())
+    text = deadline.topic_reminder("Jhonatan", "Qual competência " + chr(0x2014) + " a de agosto?", due, ZoneInfo("America/Sao_Paulo"))
+    assert text.startswith("Jhonatan, a pergunta deste pedido segue sem resposta.\n\nSe não recebermos sua resposta até 12/10 às 09:00,")
+    assert nfos_public_text.form_problems(text, question=True) == []
+    with_id = deadline.topic_reminder("Jhonatan", "PERGUNTA para Jhonatan (7550030839): qual servidor usar?", due, ZoneInfo("America/Sao_Paulo"))
+    assert with_id.startswith("PERGUNTA para Jhonatan: qual servidor usar?\n\n")
+
+
+def test_card_without_a_desk_or_a_chat_has_no_deadline_and_says_why(board, worker):
+    task, decision = _card(board, worker, origin=TELEGRAM, message_id="44")
+    _ask(board, decision, to="Jhonatan")
+    request = delivery.get_workflow(board, task.id)["request_id"]
+    payload = json.loads(delivery.get_request(board, request)["payload"])
+    payload["source"] = {"platform": "cli"}
+    board.execute("UPDATE nfos_requests SET payload=? WHERE id=?", (json.dumps(payload), request))
+    board.commit()
+    for _ in range(2):
+        (action,) = deadline.sweep(board, now=int(time.time()) + 30 * DAY)
+        assert action["action"] == "no_warning_channel" and action["channel"] == "cli"
+    assert len(_events(board, task.id, "nfos_requester_deadline_unarmed")) == 1
+    assert delivery.get_decision(board, decision)["status"] == "human"
 
 
 def test_question_to_the_owner_is_left_alone(board, worker):
