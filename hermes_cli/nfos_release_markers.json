@@ -38,6 +38,7 @@
   {"pr": 250, "file": "gateway/kanban_watchers.py", "text": "_WORKFLOW_PROGRESS = {"},
   {"pr": 250, "file": "gateway/kanban_watchers.py", "text": "stale blocked event; current task state already advanced"},
   {"pr": 255, "file": "gateway/kanban_watchers.py", "text": "Retrying a wake must not re-publish progress"},
+  {"pr": 314, "file": "gateway/kanban_watchers.py", "text": "BAR_STATE_ONLY_20261010"},
   {"pr": 255, "file": "tools/environments/base.py", "text": "HERMES_BROWSER_CONTROL_|HERMES_PROJECT_)"},
   {"pr": 255, "file": "hermes_cli/nfos_workspace_repair.py", "text": "cfg = load_config_readonly()"},
   {"pr": null, "note": "commit 4ba960e1bb", "file": "tools/delegate_tool.py", "text": "parts.append(QUALITY_POLICY)"},
