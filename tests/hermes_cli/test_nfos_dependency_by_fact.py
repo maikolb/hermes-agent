@@ -136,10 +136,9 @@ def test_dependency_on_a_confirmed_effect_of_another_card(paused):
     {'owner': 'Executor do card de engenharia CAUSE', 'need': NEED, 'check': {'kind': 'card', 'task_id': 'CAUSE'}},
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['exec', 'rm', '-rf', '/'], 'exit': 0}},
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['job', 'status', '../x'], 'exit': 0}},
-    {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['job', 'status', 'job-abc123'], 'exit': 0, 'exit_not': 64}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['job', 'status', 'job-abc123'], 'exit_not': 64}},
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['status']}},
-    {'executor': LAB, 'need': NEED, 'check': {'kind': 'event', 'name': 'evento com espaço'}},
-    {'executor': LAB, 'need': NEED, 'check': {'kind': 'event', 'name': 'nfos_effect_reconciled', 'task_id': 't_inexistente'}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'event', 'name': 'nfos_wait_declared'}},
 ])
 def test_dependency_the_runtime_could_not_check_or_nobody_can_deliver_is_refused(paused, dependency):
     conn, task, did, _ = paused
@@ -307,30 +306,25 @@ def test_read_only_laboratory_command_with_the_declared_exit_code(paused, monkey
     assert d.get_decision(conn, did)['status'] == 'resolved' and not repair.maintenance_pause_pending(conn, task.id)
 
 
-def test_laboratory_command_that_stops_exiting_with_the_refusal_code(paused, monkeypatch):
+def test_laboratory_out_of_reach_does_not_satisfy_a_command(paused, monkeypatch):
+    """Só o código esperado prova o fato: com o laboratório fora do ar o comando sai com 255, e a pausa segue."""
     conn, task, did, advance = paused
     import subprocess
-    code = [64]
-    monkeypatch.setattr(subprocess, 'run', lambda argv, **kwargs: subprocess.CompletedProcess(argv, code[0], stdout='', stderr=''))
-    _declare(conn, did, {'kind': 'lab_command', 'command': ['runtime', 'capabilities'], 'exit_not': 64}, executor=LAB)
-    advance()
-    assert repair.maintenance_pause_pending(conn, task.id)
-    code[0] = 1
-    advance()
-    assert not repair.maintenance_pause_pending(conn, task.id)
+    monkeypatch.setattr(subprocess, 'run', lambda argv, **kwargs: subprocess.CompletedProcess(argv, 255, stdout='', stderr=''))
+    _declare(conn, did, {'kind': 'lab_command', 'command': ['runtime', 'capabilities'], 'exit': 0}, executor=LAB)
+    for _ in range(3):
+        advance()
+    assert repair.maintenance_pause_pending(conn, task.id) and waits.open_for_decision(conn, did)['evidence']['exit'] == 255
 
 
-def test_event_recorded_after_the_declaration_releases_the_pause(paused):
-    conn, task, did, advance = paused
-    kb._append_event(conn, task.id, 'nfos_effect_reconciled', {'effect_id': 'antigo'})
-    conn.commit()
-    _declare(conn, did, {'kind': 'event', 'name': 'nfos_effect_reconciled'}, executor=LAB)
-    advance()
-    assert waits.open_for_decision(conn, did)['attempts'] == 1, 'o evento anterior à declaração não conta'
-    kb._append_event(conn, task.id, 'nfos_effect_reconciled', {'effect_id': 'novo'})
-    conn.commit()
-    advance()
-    assert d.get_decision(conn, did)['status'] == 'resolved' and not repair.maintenance_pause_pending(conn, task.id)
+def test_declaring_the_fact_has_the_same_gate_as_ending_the_pause(paused, monkeypatch):
+    conn, task, did, _ = paused
+    from agent import delegation_context
+    cause = _cause(conn)
+    with delegation_context.non_dispatcher_owned_context():  # tarefa agendada disparada de dentro de um worker, por exemplo
+        with pytest.raises(d.WorkflowError, match='Only the Principal maintainer'):
+            _declare(conn, did, {'kind': 'card', 'task_id': cause})
+    assert waits.open_for_decision(conn, did) is None and 'lab_wait' not in _context(conn, did)
 
 
 def test_dependency_without_a_fact_needs_someone_real_and_is_bounded(paused):

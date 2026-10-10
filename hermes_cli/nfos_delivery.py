@@ -2339,7 +2339,7 @@ def _reminder_gap(ctx):
 
 DEPENDENCY_SHAPE = (
     'dependency needs executor {"kind": "lab|card|external|operator", "name": "who delivers it"}, need (what is missing) and, '
-    'whenever a fact can be checked by code, check (card, probe, lab_status, lab_receipt, lab_command or event): the runtime '
+    'whenever a fact can be checked by code, check (card, probe, lab_status, lab_receipt or lab_command): the runtime '
     'verifies it by itself and ends the pause. "owner" as free text is no longer a dependency: it did not say who delivers. '
     'What only the Principal, this runtime or the project owner would deliver is not a dependency at all: the card delivers '
     'what fits and closes as a partial delivery, the remainder a mandatory criterion of the follow-up card.')
@@ -3567,7 +3567,11 @@ def _lab_queue_wait(receipt):
 # ficaram de 1 a 6 h paradas depois de a dependência ter sido entregue. Agora o motor confere o fato a cada 5 min e, quando
 # ele fica verdadeiro, encerra a pausa e devolve o card à fila sem acordar ninguém.
 def _declare_dependency_wait(conn, row, decision_id, context, declared, recovery, pause, now):
+    from agent.delegation_context import is_dispatcher_owned_worker_context
     from hermes_cli import nfos_waits
+    # Declarar o fato é o que encerra a pausa quando ele fica verdadeiro: vale o mesmo portão do resume-after-repair.
+    if os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT') or not is_dispatcher_owned_worker_context():
+        raise WorkflowError('Only the Principal maintainer declares the fact that ends a maintenance pause')
     if pause.get('kind') == 'runtime_budget_exhausted':
         raise WorkflowError('A budget pause waits for a grant on record, not for a dependency')
     wait = nfos_waits.declare(conn, row['task_id'], row['run_id'], reason='external_dependency', executor=declared['executor'],
@@ -3677,10 +3681,7 @@ def _lab_command_check(conn, wait, budget=None):
         done = subprocess.run([exe, *predicate['command']], capture_output=True, text=True, timeout=LAB_WAIT_READ_TIMEOUT_SECONDS)
     except (OSError, subprocess.SubprocessError):
         return None, {}
-    seen = {'exit': done.returncode}
-    if 'exit' in predicate:
-        return done.returncode == predicate['exit'], seen
-    return done.returncode != predicate['exit_not'], seen
+    return done.returncode == predicate['exit'], {'exit': done.returncode}
 
 
 def _lab_queue_check(conn, wait, budget=None):
@@ -3745,8 +3746,10 @@ def _adopt_lab_queue_waits(conn, now):
                                    attempts=min(len(reminders), DECISION_MAX_REMINDERS))
             else:
                 continue
-        except WorkflowError as refused:
-            if saved.get('hold'):  # o mesmo pedido já venceu nesta rodada do card: a espera antiga não fica sem dono
+        except WorkflowError:
+            # Só a recusa de espera vencida responde a decisão. Qualquer outro erro deixa a espera antiga como está.
+            refused = nfos_waits.refusal(conn, row['task_id'], reason=declared['reason'], predicate=declared['predicate'])
+            if saved.get('hold') and refused:  # o mesmo pedido já venceu nesta rodada: a espera antiga não fica sem dono
                 context['lab_wait'] = dict(saved, hold=False, released_at=now)
                 context['wait_rule'] = {'resolved_by': 'runtime', 'outcome': 'refused', 'at': now}
                 with _kb().write_txn(conn, allow_nested=True):
