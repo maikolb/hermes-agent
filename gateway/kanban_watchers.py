@@ -522,6 +522,22 @@ def _reminder_is_for(sub, payload):
             and str(sub.get("thread_id") or "") == str(origin.get("thread_id") or ""))
 
 
+def _requester_reminder_published(board, task_id, payload):
+    """REMINDER_NOT_RESENT_20261010: este aviso (mesma pergunta, mesma data) já tem recibo de publicação.
+
+    O evento do aviso pode voltar ao notificador depois de a mensagem sair: o gateway cai entre publicar e
+    avançar o cursor da assinatura, ou um passo posterior do mesmo tique falha e o cursor recua. A mensagem
+    já está no chat de quem pediu e não sai de novo.
+    """
+    from hermes_cli import kanban_db as _kb
+    with _kb.connect_closing(board=board) as conn:
+        return conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND kind='nfos_requester_reminder_delivered' "
+            "AND json_extract(payload,'$.decision_id')=? AND json_extract(payload,'$.due_at')=? LIMIT 1",
+            (task_id, (payload or {}).get("decision_id"), (payload or {}).get("due_at")),
+        ).fetchone() is not None
+
+
 def _record_requester_reminder(board, task_id, payload, send_res, sub):
     """Recibo que o motor exige para contar o prazo: qual pergunta, qual data e a mensagem publicada.
 
@@ -3776,12 +3792,25 @@ class GatewayKanbanWatchersMixin:
                                 await asyncio.to_thread(
                                     _record_client_delivery, board_slug, sub["task_id"], _send_res, sub)
                             elif kind == _REQUESTER_REMINDER_KIND:  # REQUESTER_REMINDER_20261010: mensagem nova, com recibo
-                                _send_res = await adapter.send(
-                                    sub["chat_id"], msg, metadata=metadata,
-                                )
-                                if _send_res is None or getattr(_send_res, "success", True) is not False:
-                                    await asyncio.to_thread(
-                                        _record_requester_reminder, board_slug, sub["task_id"], ev.payload, _send_res, sub)
+                                if await asyncio.to_thread(
+                                        _requester_reminder_published, board_slug, sub["task_id"], ev.payload):
+                                    _send_res = None  # REMINDER_NOT_RESENT_20261010: o evento voltou; a mensagem já saiu
+                                else:
+                                    _send_res = await adapter.send(
+                                        sub["chat_id"], msg, metadata=metadata,
+                                    )
+                                    if _send_res is None or getattr(_send_res, "success", True) is not False:
+                                        try:
+                                            await asyncio.to_thread(
+                                                _record_requester_reminder, board_slug, sub["task_id"], ev.payload, _send_res, sub)
+                                        except Exception:
+                                            # A mensagem saiu. Recibo que não grava não é falha de envio: tratar como
+                                            # tal faz o cursor recuar e a mesma mensagem sair de novo a cada tique.
+                                            # Sem recibo o motor pede outro aviso mais tarde, no máximo três por
+                                            # pergunta (REMINDER_LIMIT_20261010).
+                                            logger.error(
+                                                "kanban notifier: reminder for %s was published but its receipt was "
+                                                "not recorded; it is not sent again", sub["task_id"], exc_info=True)
                             elif kind == "support_approval_requested":
                                 sender = getattr(adapter, "send_support_approval", None)
                                 if not callable(sender):

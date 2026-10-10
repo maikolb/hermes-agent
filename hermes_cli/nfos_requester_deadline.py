@@ -12,7 +12,8 @@ O prazo só vence onde o aviso chega ao solicitante por caminho que o motor cont
 decisão. Em card que nasceu num chat (REQUESTER_REMINDER_20261010), o motor pede o aviso com o evento
 nfos_requester_reminder, o notificador do gateway o publica como mensagem nova no tópico de origem e grava o recibo
 nfos_requester_reminder_delivered; só com esse recibo o prazo passa a contar. Card sem um dos dois caminhos fica sem prazo, com
-o motivo registrado.
+o motivo registrado. Aviso sem recibo é pedido de novo depois de uma hora, no máximo três vezes por pergunta
+(REMINDER_LIMIT_20261010); depois disso a pergunta fica sem prazo, com o motivo reminder_undelivered.
 """
 import json
 import re
@@ -23,6 +24,9 @@ DEFAULT_HOURS = 48
 WARNING_HOURS = 24
 DEFAULT_TIMEZONE = 'America/Sao_Paulo'
 REMINDER_RETRY_SECONDS = 3600  # aviso pedido e não entregue pelo gateway é pedido de novo, com data nova
+# REMINDER_LIMIT_20261010: sem recibo o motor não sabe se a mensagem saiu. Pedir de hora em hora para sempre viraria a
+# mesma mensagem repetida no grupo de quem pediu; depois do terceiro pedido a pergunta fica sem prazo, com o motivo.
+MAX_REMINDER_REQUESTS = 3
 _GAP = '\n\n'
 
 SILENCE_REFUSAL = (
@@ -233,6 +237,8 @@ def _topic(conn, row, task, workflow, context, deadline, recipient, asked, limit
         if not dry_run and deadline.get('unarmed') != 'no_warning_channel':
             _unarmed(conn, row, asked, limit, base['channel'])
         return dict(base, action='no_warning_channel')
+    if deadline.get('unarmed') == 'reminder_undelivered':
+        return dict(base, action='reminder_undelivered')
     if deadline.get('warned_at'):
         due = int(deadline['due_at'])
         if now < due:
@@ -251,6 +257,10 @@ def _topic(conn, row, task, workflow, context, deadline, recipient, asked, limit
             return dict(base, action='warned', due_at=requested['due_at'], warned_at=int(receipt['created_at']))
         if now - int(requested['requested_at']) < REMINDER_RETRY_SECONDS:
             return dict(base, action='waiting_delivery', due_at=requested['due_at'])
+        if int(requested.get('attempts') or 1) >= MAX_REMINDER_REQUESTS:
+            if not dry_run:
+                _unarmed(conn, row, asked, limit, base['channel'], reason='reminder_undelivered')
+            return dict(base, action='reminder_undelivered')
     else:
         warn_at = int(deadline.get('warn_at') or asked + int(limit * 3600) - _lead(limit))
         if now < warn_at:
@@ -271,8 +281,10 @@ def _request_reminder(conn, row, asked, limit, due, text, where, recipient, now)
         if context is None:
             return
         previous = context.get('requester_deadline') if isinstance(context.get('requester_deadline'), dict) else {}
+        before = previous.get('reminder') if isinstance(previous.get('reminder'), dict) else None
+        attempts = int(before.get('attempts') or 1) + 1 if before else 1  # pedido gravado antes da contagem vale por um
         context['requester_deadline'] = {'asked_at': asked, 'hours': limit, 'channel': where['platform'],
-                                         'reminder': {'requested_at': now, 'due_at': due}}
+                                         'reminder': {'requested_at': now, 'due_at': due, 'attempts': attempts}}
         if previous.get('question_text'):
             context['requester_deadline']['question_text'] = previous['question_text']
         conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (d._json(context), row['id']))
@@ -301,16 +313,16 @@ def _still_waiting(conn, decision_id):
     return None if context.get('human_reply') else context
 
 
-def _unarmed(conn, row, asked, limit, route):
+def _unarmed(conn, row, asked, limit, route, reason='no_warning_channel'):
     d = _delivery()
     with d._kb().write_txn(conn, allow_nested=True):
         context = _still_waiting(conn, row['id'])
         if context is None:
             return
-        context['requester_deadline'] = {'asked_at': asked, 'hours': limit, 'channel': route, 'unarmed': 'no_warning_channel'}
+        context['requester_deadline'] = {'asked_at': asked, 'hours': limit, 'channel': route, 'unarmed': reason}
         conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (d._json(context), row['id']))
         d._event(conn, row['task_id'], row['run_id'], 'nfos_requester_deadline_unarmed',
-                 {'decision_id': row['id'], 'channel': route, 'reason': 'no_warning_channel'})
+                 {'decision_id': row['id'], 'channel': route, 'reason': reason})
 
 
 def _warn(conn, row, asked, limit, due, text, now):

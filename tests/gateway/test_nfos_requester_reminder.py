@@ -7,6 +7,7 @@ recibo que o motor exige para contar o prazo. A barra de progresso e a rotação
 """
 import asyncio
 import json
+import sqlite3
 
 from gateway import kanban_watchers as kw
 from hermes_cli import kanban_db as kb
@@ -99,3 +100,32 @@ def test_progress_bar_does_not_take_the_reminder(tmp_path, monkeypatch):
     sub = {"task_id": "t_x", "platform": "telegram", "chat_id": "origin-chat", "thread_id": "8"}
     assert asyncio.run(kw._kanban_progress_bar("nfos_requester_reminder", sub, None, adapter, {})) is False
     assert adapter.sent == [] and adapter.edited == []
+
+
+def test_receipt_that_cannot_be_written_never_publishes_the_reminder_again(tmp_path, monkeypatch):
+    """REMINDER_NOT_RESENT_20261010: a mensagem já está no chat de quem pediu. O recibo que não grava não a repete."""
+    tid, adapter, tick = _setup(tmp_path, monkeypatch, "no-receipt")
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(kw, "_record_requester_reminder", locked)
+    for _ in range(3):
+        tick()
+    assert [message["text"] for message in adapter.sent] == [TEXT]
+    assert _events(tid, "nfos_requester_reminder_delivered") == []
+
+
+def test_reminder_with_a_receipt_is_not_published_again_when_its_event_comes_back(tmp_path, monkeypatch):
+    """O gateway pode cair entre publicar e avançar o cursor da assinatura: o evento volta, a mensagem não."""
+    tid, adapter, tick = _setup(tmp_path, monkeypatch, "replayed")
+    tick()
+    conn = kb.connect()
+    try:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE kanban_notify_subs SET last_event_id=0 WHERE task_id=?", (tid,))
+    finally:
+        conn.close()
+    tick()
+    assert [message["text"] for message in adapter.sent] == [TEXT]
+    assert len(_events(tid, "nfos_requester_reminder_delivered")) == 1
