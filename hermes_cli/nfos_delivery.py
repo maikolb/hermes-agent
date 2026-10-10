@@ -4848,6 +4848,9 @@ def resume_after_answer(conn,task_id,*,answer,source):
                     selected.append(row)
             rows = selected
         if not rows:
+            from hermes_cli import nfos_requester_deadline  # REQUESTER_DEADLINE_20261010: resposta depois do prazo
+            if nfos_requester_deadline.late_answer(conn, task_id, answer=answer, source=source):
+                return False
             raise WorkflowError('No pending human question on this card')
         for row in rows:
             context=json.loads(row['context'])
@@ -4970,6 +4973,12 @@ def reconcile_human_answers(conn, *, lab_sweep=True):
     except Exception:
         import logging
         logging.getLogger(__name__).warning('LAB_WAIT_20261008 sweep failed', exc_info=True)
+    try:  # REQUESTER_DEADLINE_20261010: pergunta ao solicitante sem resposta avisa, vence e volta ao Principal
+        from hermes_cli import nfos_requester_deadline
+        nfos_requester_deadline.sweep(conn)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning('REQUESTER_DEADLINE_20261010 sweep failed', exc_info=True)
     rows=conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()
     for row in rows:
         task=_kb().get_task(conn,row['task_id'])
@@ -5042,6 +5051,11 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
     initial=get_decision(conn,decision_id)
     if action=='human' and initial and not _requester_question(public_message) and _owner_questions_refused(conn, initial['task_id']):
         raise WorkflowError(OWNER_QUESTION_REFUSAL)
+    if action=='human' and initial and initial['status']=='pending' and _requester_question(public_message):
+        from hermes_cli import nfos_requester_deadline  # REQUESTER_DEADLINE_20261010: silêncio vencido não vira nova pergunta
+        silence_refusal = nfos_requester_deadline.refusal_after_silence(conn, initial['task_id'])
+        if silence_refusal:
+            raise WorkflowError(silence_refusal)
     # PUBLIC_TEXT_FORM_20261009: só a decisão pendente publica texto novo; repetir uma já resolvida segue sem efeito.
     if (initial and initial['status']=='pending' and isinstance(public_message, dict)
             and public_message.get('kind') in {'question','delivery'}):
@@ -5173,6 +5187,9 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                 raise WorkflowError('A public question requires a human decision')
             context['public_message'] = {key:public_message[key] for key in ('kind','text','to') if key in public_message}
             published = True
+            if action == 'human':
+                from hermes_cli import nfos_requester_deadline  # REQUESTER_DEADLINE_20261010: a pergunta sai com o prazo
+                nfos_requester_deadline.arm(conn, row['task_id'], context)
         elif (context.get('human_reply', {}).get('source') or {}).get('platform') == 'portal' and action in {'continue','changes'}:
             if previous_public:
                 context.setdefault('public_message_history', []).append(previous_public)
