@@ -30,5 +30,9 @@
   {"pr": 288, "file": "hermes_cli/nfos_delivery.py", "text": "def read_decision("},
   {"pr": 288, "file": "hermes_cli/nfos_delivery.py", "text": "card_decisions(conn,args.task"},
   {"pr": 289, "file": "hermes_cli/nfos_delivery.py", "text": "IMPEDIMENT_CAUSES"},
-  {"pr": 289, "file": "hermes_cli/nfos_delivery.py", "text": "_declared_cause(context)"}
+  {"pr": 289, "file": "hermes_cli/nfos_delivery.py", "text": "_declared_cause(context)"},
+  {"pr": 286, "file": "hermes_cli/nfos_delivery.py", "text": "PUBLIC_TEXT_FORM_20261009"},
+  {"pr": 286, "file": "hermes_cli/nfos_delivery.py", "text": "def _require_public_form("},
+  {"pr": 286, "file": "hermes_cli/nfos_public_text.py", "text": "QUESTION_MAX_WORDS = 120"},
+  {"pr": 286, "file": "hermes_cli/nfos_public_text.py", "text": "RESULT_MAX_WORDS = 200"}
 ]
