@@ -2431,7 +2431,17 @@ def sweep_awaiting_principal(conn):
     à vista, em vez de voltar a ready para o claim recusar a cada tick. Card que algo já devolveu a ready com a
     pausa pendente (estado anterior a esta regra ou requeue manual) volta a blocked uma vez, com um evento; como
     sai de ready, o evento não se repete a cada tick (MAINTENANCE_PAUSE_HONEST_20261005)."""
-    from hermes_cli.nfos_workspace_repair import maintenance_pause_pending, reconcile_maintenance_recovery
+    from hermes_cli.nfos_workspace_repair import maintenance_pause_pending, own_breaker_stop, reconcile_maintenance_recovery
+    # BREAKER_OWNER_20261010: o card que o disjuntor de falhas estacionou sem dono (antes da regra, ou quando o registro do
+    # dono falhou na transação do disjuntor) ganha aqui o mesmo dono, uma vez. Vem antes da cobrança das pausas porque a
+    # falha de workspace vira pausa.
+    for (task_id,) in conn.execute("SELECT t.id FROM tasks t JOIN nfos_workflows w ON w.task_id=t.id "
+                                   "WHERE t.status='blocked' AND (t.block_kind IS NULL OR t.block_kind='')").fetchall():
+        try:
+            own_breaker_stop(conn, task_id)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning('BREAKER_OWNER_20261010 sweep failed for %s', task_id, exc_info=True)
     reconcile_maintenance_recovery(conn)
     freed = []
     try:

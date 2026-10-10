@@ -135,6 +135,90 @@ def reconcile_maintenance_recovery(conn):
                 dict(decision_id=did,kind='impediment',question=question,maintenance_recovery=True),run_id=row['id'])
 
 
+# BREAKER_OWNER_20261010: o disjuntor de falhas (kanban_db._record_task_failure) desistia e deixava o card blocked sem tipo,
+# sem decisão e sem pausa: ninguém era cobrado e nenhuma varredura o devolvia. dovcrm t_4cb4df58 ficou assim desde
+# 06/10/2026 14:00Z (lacre do worktree inválido, duas falhas de spawn) e ccm t_b2c7c034 desde 22/09/2026 17:50Z (duas
+# quedas do worker). Ao desistir, o card passa a ter dono. Falha ao preparar o workspace vira pausa de manutenção, que
+# reconcile_maintenance_recovery cobra do Principal e que repair-workspace ou resume-after-repair encerram. As outras
+# falhas viram decisão pendente do Principal com o erro. A causa vai tipada em `breaker`, igual nos dois lugares.
+BREAKER_PAUSE_KIND = 'failure_breaker'
+# Os mesmos eventos que a projeção do card em blocked (kanban_db) lê para dizer por que ele parou.
+_BLOCK_CAUSE_EVENTS = ('blocked', 'block_loop_detected', 'dependency_wait', 'unblocked', 'claimed', 'status', 'reclaimed',
+                       'claim_reaped', 'completed', 'archived', 'changes_requested', 'gave_up')
+_BREAKER_OUTCOME = dict(crashed='o worker caiu', timed_out='o worker passou do tempo limite',
+                        spawn_failed='o worker não chegou a iniciar')
+
+
+def own_breaker_stop(conn, task_id):
+    """Dá dono ao card que o disjuntor de falhas estacionou. Devolve 'pause', o id da decisão aberta ou None.
+
+    Age só no bloqueio do próprio disjuntor: card do NFOS em blocked sem tipo cujo último evento de bloqueio é gave_up.
+    Serve à desistência nova, na transação do disjuntor, e ao card que já estava assim antes da regra. Roda uma vez por
+    desistência: depois daqui o card tem tipo."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_workflows'").fetchone():
+        return None
+    task = kb.get_task(conn, task_id)
+    if not task or task.status != 'blocked' or task.block_kind:
+        return None
+    wf = delivery.get_workflow(conn, task_id)
+    if not wf:
+        return None
+    last = conn.execute('SELECT id,kind,run_id,payload,created_at FROM task_events WHERE task_id=? AND kind IN (%s) '
+                        'ORDER BY id DESC LIMIT 1' % ','.join('?' * len(_BLOCK_CAUSE_EVENTS)),
+                        (task_id, *_BLOCK_CAUSE_EVENTS)).fetchone()
+    if not last or last['kind'] != 'gave_up':
+        return None
+    try:
+        payload = json.loads(last['payload'] or '{}')
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    error = str(payload.get('error') or task.last_failure_error or '')[:500]
+    outcome = str(payload.get('trigger_outcome') or 'unknown')
+    breaker = dict(outcome=outcome, failures=payload.get('failures'), limit=payload.get('effective_limit'),
+                   gave_up_event_id=last['id'], error=error, at=last['created_at'])
+    run_id = last['run_id'] or conn.execute('SELECT MAX(id) FROM task_runs WHERE task_id=?', (task_id,)).fetchone()[0]
+    stopped = 'O runtime parou de tentar este card depois de ' + (
+        str(breaker['failures']) + ' falhas seguidas' if breaker['failures'] else 'falhas seguidas')
+    with kb.write_txn(conn, allow_nested=True):
+        if conn.execute("UPDATE tasks SET block_kind='awaiting_principal' WHERE id=? AND status='blocked' "
+                        "AND (block_kind IS NULL OR block_kind='')", (task_id,)).rowcount != 1:
+            return None
+        row = conn.execute('SELECT metadata FROM task_runs WHERE task_id=? AND id=?', (task_id, run_id)).fetchone()
+        metadata = json.loads(row['metadata'] or '{}') if row else None
+        if (outcome == 'spawn_failed' and error.startswith(kb.WORKSPACE_FAILURE_PREFIX)
+                and metadata is not None and 'maintenance_pause' not in metadata):
+            reason = stopped + ' ao preparar o workspace. Erro: ' + error
+            pause = dict(kind=BREAKER_PAUSE_KIND, identity=dict(run_id=run_id, gave_up_event_id=last['id']),
+                         actor='runtime', reason=reason, at=last['created_at'], breaker=breaker)
+            metadata['maintenance_pause'] = pause
+            conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (delivery._json(metadata), run_id))
+            kb._append_event(conn, task_id, 'nfos_maintenance_paused', pause, run_id=run_id)
+            return 'pause'
+        reason = (stopped + ': ' + _BREAKER_OUTCOME.get(outcome, 'a execução falhou (' + outcome + ')')
+                  + '. Erro: ' + error)
+        question = (reason + ' O card fica retido com você. Leia a última execução e os registros do worker para achar a '
+                    'causa. Responda continue só depois de tratar a causa: o card volta à fila com a contagem de falhas '
+                    'zerada.')
+        decision_id = 'dec_' + hashlib.sha256(delivery._json(['failure-breaker', task_id, last['id']]).encode()).hexdigest()[:24]
+        now = int(time.time())
+        # Zero diz que o card não tem execução para apontar, como na adoção legada.
+        conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) '
+                     "VALUES(?,?,?,'impediment',?,?,?,?)",
+                     (decision_id, task_id, run_id or 0, question, delivery._json(dict(breaker=breaker)),
+                      wf['spec_revision'], now))
+        conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',
+                     ('Principal: tratar a causa das falhas e responder a decisão. ' + reason, now, task_id))
+        blocked = dict(reason=reason, kind='awaiting_principal', source='failure_breaker', decision_id=decision_id)
+        if payload.get('retry_status') == 'review':
+            blocked['retry_status'] = 'review'  # o card volta à fase em que falhou, como diria o gave_up
+        kb._append_event(conn, task_id, 'blocked', blocked, run_id=run_id)
+        kb._append_event(conn, task_id, 'nfos_principal_requested',
+                         dict(decision_id=decision_id, kind='impediment', question=question, retained_card=True), run_id=run_id)
+        return decision_id
+
+
 def _finish_maintenance_pause(conn, task_id, *, actor, repair_kind):
     """Release the native claim hold only in the successful repair transaction."""
     rows = conn.execute("SELECT id,metadata FROM task_runs WHERE task_id=? "
