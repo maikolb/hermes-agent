@@ -3219,13 +3219,16 @@ def _lab_receipt(receipt, timeout=90):
 # cards do Concursa). Esta espera não escala ao Principal: ele não alcança o laboratório, e a decisão escalada de uma pausa
 # voltaria ao mesmo laço. O card volta sozinho quando o laboratório responder; quem o opera é a dependência.
 LAB_TRANSPORT_DOWN_EXIT = 255
+LAB_BUSY_EXIT = 75
 
 
 def _lab_transport_up(timeout=LAB_WAIT_READ_TIMEOUT_SECONDS):
-    """O laboratório executa? Só quando o programa de `concursa-lab status` rodou lá e devolveu o JSON dele (saída 0 ou 1; 1 só
-    diz que a página de login ainda não respondeu). Saída 255 (o "indisponivel": SSH sem execução, "exec request failed on
-    channel 0") ou status sem o JSON (o shell remoto não criou o processo, como no contêiner sem PID de 09/10) é fora do ar.
-    None quando não deu para saber."""
+    """O laboratório executa? Quando o programa de `concursa-lab status` rodou lá e devolveu o JSON dele (saída 0 ou 1; 1 só
+    diz que a página de login ainda não respondeu), ou quando o laboratório respondeu "execução ocupada" (saída 75): o
+    status sem tarefa disputa a trava de execução, e com outra execução em curso o canal atende e os comandos por tarefa
+    rodam (09/10/2026: um card ficou 45 min na espera com o laboratório atendendo). Saída 255 (o "indisponivel": SSH sem
+    execução, "exec request failed on channel 0") ou outra saída sem o JSON (o shell remoto não criou o processo, como no
+    contêiner sem PID de 09/10) é fora do ar. None quando não deu para saber."""
     import subprocess
     exe = os.environ.get('NFOS_CONCURSA_LAB') or '/usr/local/bin/concursa-lab'
     try:
@@ -3234,6 +3237,8 @@ def _lab_transport_up(timeout=LAB_WAIT_READ_TIMEOUT_SECONDS):
         return None
     if done.returncode == LAB_TRANSPORT_DOWN_EXIT:
         return False
+    if done.returncode == LAB_BUSY_EXIT:
+        return True
     try:
         report = json.loads((done.stdout or '').strip().splitlines()[-1])
     except (ValueError, IndexError):
