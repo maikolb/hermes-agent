@@ -4125,10 +4125,24 @@ def _unmet_criteria_text(conn, task_id):
     return text
 
 
+def _continuation_workspace(parent):
+    """CONTINUATION_NON_CODE_WORKSPACE_20261010: tipo e caminho do workspace do filho. Card de código nasce em worktree novo
+    (REWORK_IDEMPOTENT_20260911). Card report ou operation fica no scratch ou no dir do pai: create_task recusa worktree para
+    trabalho que não é código, então pai em dir, ou em worktree de classificação antiga, nunca recebia continuação."""
+    if parent.delivery_type in ('report', 'operation'):
+        if parent.workspace_kind in ('scratch', 'dir'):
+            return parent.workspace_kind, parent.workspace_path
+        return 'scratch', None
+    if parent.workspace_kind == 'scratch' and parent.delivery_type != 'code':
+        return 'scratch', parent.workspace_path
+    return 'worktree', None
+
+
 def create_continuation(conn, parent_id, *, title=None, body=None, requester='worker', allow_closed=False):  # CONTINUATION_CLOSED_PARENT_20260911
     """RECORD_CONTINUATION_20260911: continuação executável do mesmo pedido. Sem `parents` (sem dependência circular); herda prioridade,
-    executor, tipo, projeto, tenant e workspace scratch; recebe os critérios não atendidos e as evidências do pai; idempotente
-    (um filho aberto por pai); pai bloqueado com pergunta a humano gera filho bloqueado com a mesma pergunta."""
+    executor, tipo, projeto, tenant e workspace (scratch ou dir do pai; worktree novo se for código); recebe os critérios não
+    atendidos e as evidências do pai; idempotente (um filho aberto por pai); pai bloqueado com pergunta a humano gera filho
+    bloqueado com a mesma pergunta."""
     kb = _kb()
     parent = kb.get_task(conn, parent_id)
     if not parent:
@@ -4146,7 +4160,7 @@ def create_continuation(conn, parent_id, *, title=None, body=None, requester='wo
         if existing:
             child = kb.get_task(conn, existing[0])
             return {'task_id': child.id, 'continuation_of': parent_id, 'priority': child.priority, 'status': child.status, 'existing': True}
-        _child_kind = 'scratch' if (parent.workspace_kind == 'scratch' and parent.delivery_type != 'code') else 'worktree'  # REWORK_IDEMPOTENT_20260911
+        _child_kind, _child_path = _continuation_workspace(parent)
         trial_model = {}
         if (parent.provider_override, parent.model_override) in {
                 ('opencode-go', 'deepseek-v4.1-flash'), ('openai-codex', 'gpt-5.6-luna'),
@@ -4156,8 +4170,7 @@ def create_continuation(conn, parent_id, *, title=None, body=None, requester='wo
                                reasoning_effort=parent.reasoning_effort)
         child_id = kb.create_task(conn, title=child_title, body=child_body, assignee=parent.assignee,
                                   created_by=f"continuation:{requester}",
-                                  workspace_kind=_child_kind,
-                                  workspace_path=parent.workspace_path if _child_kind == 'scratch' else None,
+                                  workspace_kind=_child_kind, workspace_path=_child_path,
                                   tenant=parent.tenant, priority=max(int(parent.priority or 0), 0), parents=(),
                                   project_id=parent.project_id, delivery_type=parent.delivery_type,
                                   max_runtime_seconds=parent.max_runtime_seconds, **trial_model)
