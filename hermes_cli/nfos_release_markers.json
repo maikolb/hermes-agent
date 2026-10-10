@@ -91,5 +91,13 @@
   {"pr": 310, "file": "hermes_cli/nfos_waits.py", "text": "WAIT_RULE_20261010"},
   {"pr": 310, "file": "hermes_cli/nfos_waits.py", "text": "def step(conn, wait_id"},
   {"pr": 310, "file": "hermes_cli/nfos_delivery.py", "text": "def _adopt_lab_queue_waits("},
-  {"pr": 310, "file": "hermes_cli/nfos_delivery.py", "text": "nfos_waits.open_for_decision(conn, row['id'])"}
+  {"pr": 310, "file": "hermes_cli/nfos_delivery.py", "text": "nfos_waits.open_for_decision(conn, row['id'])"},
+  {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "DEPENDENCY_BY_FACT_20261010"},
+  {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "def _declare_dependency_wait("},
+  {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "LAB_CAPABILITY_PER_CARD_20261010"},
+  {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "def _lab_command_check("},
+  {"pr": 319, "file": "hermes_cli/nfos_workspace_repair.py", "text": "def finish_dependency_pause("},
+  {"pr": 319, "file": "hermes_cli/nfos_waits.py", "text": "def card_cycle("},
+  {"pr": 319, "file": "hermes_cli/nfos_waits.py", "text": "LAB_COMMANDS = {"},
+  {"pr": 319, "file": "hermes_cli/nfos_runtime.py", "text": "the fact the runtime verifies by itself"}
 ]
