@@ -106,6 +106,41 @@ def test_limit_keeps_what_is_in_force_whole_and_cuts_the_recent_history(board, w
         assert row["question"] == LONG_QUESTION[:delivery.SHOW_DECISION_QUESTION_CHARS] + " [...]"
 
 
+@pytest.mark.parametrize("status", ["human", "pending", "esperando_algo_novo"])
+@pytest.mark.parametrize("limit", [1, 8])
+def test_open_decision_stays_whole_however_old(board, worker, status, limit):
+    # SHOW_DECISIONS_OPEN_20261010: decisão sem desfecho é a obrigação vigente do card. Em 10/10/2026, com o limite em 8,
+    # as 10 perguntas em 'human' dos cards abertos voltavam com a pergunta cortada e sem contexto; com mais de 8 decisões
+    # depois dela, a pergunta sumia do show. Só histórico encerrado (resolved, superseded) é reduzido.
+    task = _card(board, worker)
+    old = _decision(board, task, 1, status=status, question=LONG_QUESTION, answer=None, context={"evidence": "y" * 900})
+    later = [_decision(board, task, order, answer=LONG_ANSWER, question=LONG_QUESTION) for order in range(2, 14)]
+    board.commit()
+    rows, cut = delivery.card_decisions(board, task.id, limit)
+    by_id = {row["id"]: row for row in rows}
+    assert old in by_id, "a decisão aberta sumiu do show"
+    assert not by_id[old].get("excerpt") and by_id[old]["question"] == LONG_QUESTION
+    assert json.loads(by_id[old]["context"]) == {"evidence": "y" * 900}
+    # O histórico encerrado continua reduzido: a última resolvida do tipo inteira, as ``limit`` anteriores cortadas.
+    assert not by_id[later[-1]].get("excerpt")
+    assert sum(1 for row in rows if row.get("excerpt")) == limit
+    assert cut["total"] == 13 and cut["omitted"] == 13 - len(rows)
+
+
+def test_latest_resolved_of_a_kind_is_the_latest_answer_not_the_latest_question(board, worker):
+    # A pergunta 2 foi criada antes da 3 e respondida depois: a resposta que vale para o tipo é a dela.
+    task = _card(board, worker)
+    first = _decision(board, task, 1, answer=LONG_ANSWER)
+    answered_last = _decision(board, task, 2, answer=LONG_ANSWER)
+    created_last = _decision(board, task, 3, answer=LONG_ANSWER)
+    board.execute("UPDATE nfos_decisions SET resolved_at=? WHERE id=?", (9000, answered_last))
+    board.commit()
+    rows, _ = delivery.card_decisions(board, task.id, 1)
+    by_id = {row["id"]: row for row in rows}
+    assert not by_id[answered_last].get("excerpt") and by_id[answered_last]["answer"] == LONG_ANSWER
+    assert by_id[created_last].get("excerpt") and first not in by_id
+
+
 def test_short_card_is_not_cut_by_the_limit(board, worker):
     task = _card(board, worker)
     _decision(board, task, 1, kind="spec_review")

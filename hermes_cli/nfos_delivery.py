@@ -4574,6 +4574,8 @@ def pending_decisions(conn):
 
 SHOW_DECISION_QUESTION_CHARS = 500
 SHOW_DECISION_ANSWER_CHARS = 1500
+# Decisão com desfecho: só estas o limite do show reduz. Qualquer outro status é obrigação aberta e volta inteira.
+SHOW_DECISION_CLOSED = ('resolved', 'superseded')
 
 
 def _show_limit(key):
@@ -4592,19 +4594,22 @@ def card_calls(conn, task_id, limit=0):
     """SHOW_CALLS_LIMIT_20261010: com limite, o show devolve as chamadas nativas que ainda importam, não todas.
 
     Em 10/10/2026, com o limite das decisões já no ar, o show do t_8ed13ed7 ainda tinha 273 KB: 143 KB eram native_calls,
-    com 151 chamadas. Com limite ficam as ``limit`` mais recentes e toda chamada ainda em execução (o recibo que o worker
+    com 151 chamadas. Com limite ficam as ``limit`` mais recentes e toda chamada sem desfecho (o recibo que o worker
     precisa ler antes de tentar de novo); o resto se lê por id (ação call). Sem limite (0, o padrão) devolve tudo, como
-    antes. Devolve as linhas e, quando cortou algo, o resumo do corte."""
-    from hermes_cli.nfos_tool import read_calls
+    antes. Devolve as linhas e, quando cortou algo, o resumo do corte.
+
+    SHOW_CALLS_ACTIVE_20261010: sem desfecho é o ``ACTIVE`` do nfos_tool (intent, running, stopping), não só running. A
+    chamada parada em intent ou stopping é a de efeito incerto, a que o worker mais precisa ver antes de repetir."""
+    from hermes_cli.nfos_tool import ACTIVE, read_calls
     rows = read_calls(conn, task_id)
     if not limit or limit < 0:
         return rows, None
-    keep = {row['id'] for row in rows[-limit:]} | {row['id'] for row in rows if row['status'] == 'running'}
+    keep = {row['id'] for row in rows[-limit:]} | {row['id'] for row in rows if row['status'] in ACTIVE}
     if len(keep) == len(rows):
         return rows, None
     return [row for row in rows if row['id'] in keep], {
         'total': len(rows), 'omitted': len(rows) - len(keep),
-        'hint': 'Only the most recent native calls and the ones still running are listed; older calls are not. '
+        'hint': 'Only the most recent native calls and the ones without an outcome yet are listed; older calls are not. '
                 'Read one call by id: call --call <id>. Every call of the card: show --full.'}
 
 
@@ -4621,15 +4626,28 @@ def card_decisions(conn, task_id, limit=0):
     """SHOW_DECISIONS_LIMIT_20261010: com limite, o show devolve as decisões que valem agora, não o histórico inteiro.
 
     Em 10/10/2026 o show do t_8ed13ed7 devolvia 437 KB só em decisions (147 decisões) e o do t_39e0a22e, 231 KB, a cada
-    execução de worker. Com limite ficam inteiras as pendentes e a última resolvida de cada tipo (a revisão que o contexto
+    execução de worker. Com limite ficam inteiras as abertas e a última resolvida de cada tipo (a revisão que o contexto
     do caso manda ler no show); das outras, as ``limit`` mais recentes vêm com pergunta e resposta cortadas e sem o
     contexto. O resto se lê por id (ação decision). Sem limite (0, o padrão) devolve tudo, como antes.
-    Devolve as linhas e, quando cortou algo, o resumo do corte."""
+    Devolve as linhas e, quando cortou algo, o resumo do corte.
+
+    SHOW_DECISIONS_OPEN_20261010: aberta é toda decisão sem desfecho, não só a 'pending'. A pergunta em 'human' (espera
+    uma pessoa) é a obrigação vigente do card e entrava na regra do histórico: cortada entre as ``limit`` mais recentes,
+    omitida se mais antiga. Só o histórico encerrado (SHOW_DECISION_CLOSED) é reduzido; status que o corte não conhece
+    fica inteiro."""
     rows = [dict(r) for r in conn.execute('SELECT * FROM nfos_decisions WHERE task_id=? ORDER BY created_at', (task_id,))]
     if not limit or limit < 0:
         return rows, None
-    whole = {row['id'] for row in rows if row['status'] == 'pending'}
-    whole.update({row['kind']: row['id'] for row in rows if row['status'] == 'resolved'}.values())
+    whole = {row['id'] for row in rows if row['status'] not in SHOW_DECISION_CLOSED}
+    # A última resolvida de cada tipo é a de resposta mais recente (resolved_at, como no contexto da retomada), não a
+    # criada por último: uma pergunta antiga pode ter sido respondida depois de uma nova.
+    latest = {}
+    for order, row in enumerate(rows):
+        if row['status'] == 'resolved':
+            answered = (row['resolved_at'] or row['created_at'] or 0, order)
+            if row['kind'] not in latest or answered > latest[row['kind']][0]:
+                latest[row['kind']] = (answered, row['id'])
+    whole.update(decision_id for _, decision_id in latest.values())
     recent = {row['id'] for row in [r for r in rows if r['id'] not in whole][-limit:]}
     listed = []
     for row in rows:
@@ -4644,7 +4662,7 @@ def card_decisions(conn, task_id, limit=0):
     if len(listed) == len(rows) and not recent:
         return listed, None
     return listed, {'total': len(rows), 'omitted': len(rows) - len(listed),
-                    'hint': 'Pending decisions and the latest resolved decision of each kind are whole. Rows marked excerpt carry a cut '
+                    'hint': 'Open decisions (pending or waiting for a person) and the latest resolved decision of each kind are whole. Rows marked excerpt carry a cut '
                             'question and answer and no context; older decisions are not listed. Read one whole decision by id: '
                             'decision --decision <id>. Every decision of the card: show --full.'}
 
@@ -4848,6 +4866,9 @@ def resume_after_answer(conn,task_id,*,answer,source):
                     selected.append(row)
             rows = selected
         if not rows:
+            from hermes_cli import nfos_requester_deadline  # REQUESTER_DEADLINE_20261010: resposta depois do prazo
+            if nfos_requester_deadline.late_answer(conn, task_id, answer=answer, source=source):
+                return False
             raise WorkflowError('No pending human question on this card')
         for row in rows:
             context=json.loads(row['context'])
@@ -4970,6 +4991,12 @@ def reconcile_human_answers(conn, *, lab_sweep=True):
     except Exception:
         import logging
         logging.getLogger(__name__).warning('LAB_WAIT_20261008 sweep failed', exc_info=True)
+    try:  # REQUESTER_DEADLINE_20261010: pergunta ao solicitante sem resposta avisa, vence e volta ao Principal
+        from hermes_cli import nfos_requester_deadline
+        nfos_requester_deadline.sweep(conn)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning('REQUESTER_DEADLINE_20261010 sweep failed', exc_info=True)
     rows=conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()
     for row in rows:
         task=_kb().get_task(conn,row['task_id'])
@@ -5042,6 +5069,11 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
     initial=get_decision(conn,decision_id)
     if action=='human' and initial and not _requester_question(public_message) and _owner_questions_refused(conn, initial['task_id']):
         raise WorkflowError(OWNER_QUESTION_REFUSAL)
+    if action=='human' and initial and initial['status']=='pending' and _requester_question(public_message):
+        from hermes_cli import nfos_requester_deadline  # REQUESTER_DEADLINE_20261010: silêncio vencido não vira nova pergunta
+        silence_refusal = nfos_requester_deadline.refusal_after_silence(conn, initial['task_id'])
+        if silence_refusal:
+            raise WorkflowError(silence_refusal)
     # PUBLIC_TEXT_FORM_20261009: só a decisão pendente publica texto novo; repetir uma já resolvida segue sem efeito.
     if (initial and initial['status']=='pending' and isinstance(public_message, dict)
             and public_message.get('kind') in {'question','delivery'}):
@@ -5173,6 +5205,9 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                 raise WorkflowError('A public question requires a human decision')
             context['public_message'] = {key:public_message[key] for key in ('kind','text','to') if key in public_message}
             published = True
+            if action == 'human':
+                from hermes_cli import nfos_requester_deadline  # REQUESTER_DEADLINE_20261010: a pergunta sai com o prazo
+                nfos_requester_deadline.arm(conn, row['task_id'], context)
         elif (context.get('human_reply', {}).get('source') or {}).get('platform') == 'portal' and action in {'continue','changes'}:
             if previous_public:
                 context.setdefault('public_message_history', []).append(previous_public)
