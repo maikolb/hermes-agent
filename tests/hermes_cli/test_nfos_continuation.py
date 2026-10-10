@@ -188,3 +188,24 @@ def test_concurrent_continuations_yield_one_child(board):
     assert len(set(results)) == 1, set(results)
     with kb.connect_closing() as conn:
         assert conn.execute("SELECT count(*) FROM nfos_continuations WHERE parent_id=?", (parent.id,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("kind,child_kind", [("dir", "dir"), ("worktree", "scratch")])
+def test_non_code_parent_outside_scratch_gets_a_continuation(board, monkeypatch, kind, child_kind):
+    # CONTINUATION_NON_CODE_WORKSPACE_20261010: operation em dir (ou em worktree de classificação antiga) recebia filho
+    # worktree, que create_task recusa para trabalho que não é código. A rota é a do worker: kanban_create continuation_of.
+    place = board / "evidence"
+    place.mkdir()
+    with kb.connect_closing() as conn:
+        parent = _card(conn, board, 8)
+        conn.execute("UPDATE tasks SET delivery_type='operation', workspace_kind=?, workspace_path=? WHERE id=?",
+                     (kind, str(place), parent.id)); conn.commit()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", parent.id)
+    from tools import kanban_tools as kt
+    out = kt._handle_create({"continuation_of": parent.id, "title": "Reparar o dado", "workspace_kind": "scratch"})
+    assert "not a worktree" not in out and '"ok": true' in out, out
+    with kb.connect_closing() as conn:
+        child = kb.get_task(conn, json.loads(out)["task_id"])
+        assert child.delivery_type == "operation" and child.workspace_kind == child_kind
+        assert child.workspace_path == (str(place) if kind == "dir" else None)
+        assert str(place) in (child.body or "")

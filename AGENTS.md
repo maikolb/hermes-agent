@@ -29,6 +29,16 @@ Owner instruction (2026-10-10): "Não perguntar ao dono vale pra todos os projet
 - A maintenance pause never loses its repair obligation: a successor of a human question carries `maintenance_recovery`, and `reconcile_maintenance_recovery` issues the obligation again for an open pause that no pending or human decision carries.
 - Suites that ask with a plain `action='human'` use the fixture `owner_questions_allowed` (`tests/hermes_cli/nfos_owner_question_switch.py`).
 
+## NFOS wait registry (2026-10-10)
+
+Owner instruction (2026-10-10): "O NFOS tem que ser autonomo, eu não quero ser babá de IA." A card that waits has an exit the engine reaches by itself.
+
+- Every wait is a row of `nfos_waits` (`hermes_cli/nfos_waits.py`): card, run and round, typed reason, executor, a predicate the code checks, evidence, next check, final deadline and attempt cap. `policy(reason)` is the single table of deadlines and caps, the same for every project.
+- The agent declares a wait in structured fields; code never reads free text to find one. Waking the Principal satisfies no predicate: a reminder is an attempt and spends the cap.
+- `step` is the only transition. An expired wait gets one bounded internal repair or an explicit outcome: never `[CANCELADO]`, never counted as a delivery, never a grant of budget, access or permission.
+- In the registry so far: the laboratory queue wait (`lab_queue`) and the decision an expired wait hands to the Principal (`principal_decision`). Each remaining kind (laboratory transport, pause dependency, destination, human question, parent card) moves in its own PR and deletes its own clock. Do not add a wait that lives only in a decision context, in `state_json` or in a reminder.
+- The table is created on first use and no existing table changes, so the previous release keeps operating a board that already has it.
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 **Never give up on the right solution.**
