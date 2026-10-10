@@ -254,6 +254,32 @@ def test_card_born_in_a_chat_counts_the_deadline_only_from_the_receipt_of_its_re
     assert delivery.get_decision(board, decision)["status"] == "superseded"
 
 
+def test_reminder_never_confirmed_is_requested_three_times_and_then_the_question_loses_its_deadline(board, worker):
+    """REMINDER_LIMIT_20261010: sem recibo o motor não sabe se a mensagem saiu. Pedir de hora em hora para sempre viraria a
+    mesma mensagem repetida no grupo de quem pediu."""
+    task, decision = _card(board, worker, origin=TELEGRAM, message_id="44")
+    _ask(board, decision, to="Jhonatan")
+    start = _context(board, decision)["requester_deadline"]["warn_at"]
+    actions = [deadline.sweep(board, now=start + n * HOUR)[0]["action"] for n in range(6)]
+    assert actions == ["request_reminder"] * 3 + ["reminder_undelivered"] * 3
+    assert len(_events(board, task.id, "nfos_requester_reminder")) == 3
+    (unarmed,) = _events(board, task.id, "nfos_requester_deadline_unarmed")
+    assert unarmed["decision_id"] == decision and unarmed["reason"] == "reminder_undelivered"
+    assert deadline.sweep(board, now=start + 60 * DAY)[0]["action"] == "reminder_undelivered"  # ninguém vence sem aviso
+    assert delivery.get_decision(board, decision)["status"] == "human"
+
+
+def test_receipt_of_the_last_request_still_starts_the_deadline(board, worker):
+    task, decision = _card(board, worker, origin=TELEGRAM, message_id="45")
+    _ask(board, decision, to="Jhonatan")
+    start = _context(board, decision)["requester_deadline"]["warn_at"]
+    last = [deadline.sweep(board, now=start + n * HOUR)[0] for n in range(3)][-1]
+    assert _context(board, decision)["requester_deadline"]["reminder"]["attempts"] == 3
+    _receipt(board, task.id, decision, last["due_at"])
+    assert deadline.sweep(board, now=start + 3 * HOUR)[0]["action"] == "warned"
+    assert _events(board, task.id, "nfos_requester_deadline_unarmed") == []
+
+
 def test_older_question_without_a_public_message_is_reminded_by_its_addressee(board, worker):
     task, decision = _card(board, worker, origin=TELEGRAM, message_id="43")
     _ask(board, decision, to="Jhonatan")
