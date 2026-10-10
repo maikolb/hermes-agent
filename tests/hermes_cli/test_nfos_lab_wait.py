@@ -273,3 +273,49 @@ def test_principal_continuation_is_bounded_per_wake(board, broker, monkeypatch):
         assert delivery.get_decision(conn, decision_id)["status"] == "pending"
         assert decision_id in [d["id"] for d in delivery.pending_decisions(conn)], "a decisão segue na fila do Principal"
     assert kanban_stop._principal_continuation(_wake(board, task.id, "wake-limite-2")), "o próximo despertar tem a própria janela"
+
+
+def _overdue_waits(conn, count, start):
+    """Esperas do laboratório vencidas em cards distintos, a mais atrasada primeiro."""
+    waits = []
+    for n in range(count):
+        task = _card(conn, start + n)
+        waits.append(delivery.lab_wait(conn, task.id, task.current_run_id, f"t-tick{start + n}-p6")["decision_id"])
+    for i, decision_id in enumerate(waits):
+        _shift(conn, decision_id, next_check_at=i)
+    return waits
+
+
+def test_one_reconciliation_reads_the_broker_within_one_sweep_budget(board, broker):
+    """LAB_SWEEP_PER_TICK_20261010: o teto de consultas ao broker é do tick. A reconciliação aplica respostas humanas duas vezes
+    e cada passada fazia a própria varredura do laboratório, com o próprio teto."""
+    receipts, reads = broker
+    with kb.connect_closing() as conn:
+        _overdue_waits(conn, 12, 50)
+        reads.clear()
+        runtime.reconcile_runtime(conn)
+        assert len(reads) == delivery.LAB_WAIT_MAX_CHECKS_PER_SWEEP
+
+
+def test_a_tick_that_reconciles_twice_sweeps_the_laboratory_once(board, broker, monkeypatch):
+    """O tick reconcilia de novo quando encerra uma execução; essa segunda reconciliação não consulta o broker outra vez."""
+    receipts, reads = broker
+    with kb.connect_closing() as conn:
+        _overdue_waits(conn, 12, 70)
+        monkeypatch.setattr(kb, "enforce_max_runtime", lambda conn, **kwargs: ["execucao-encerrada"])
+        reads.clear()
+        kb.dispatch_once(conn, spawn_fn=lambda *args, **kwargs: None, board="concursa-ai")
+        assert len(reads) == delivery.LAB_WAIT_MAX_CHECKS_PER_SWEEP
+
+
+def test_applying_a_human_answer_does_not_sweep_the_laboratory(board, broker):
+    """O comando resume grava a resposta de uma pessoa e a aplica; consultar o laboratório é do tick do despacho."""
+    receipts, reads = broker
+    with kb.connect_closing() as conn:
+        _overdue_waits(conn, 2, 90)
+        task = _card(conn, 95)
+        decision = delivery.ask_principal(conn, task.id, task.current_run_id, kind="impediment", question="Qual regra vale?", context={})
+        delivery.resolve_decision(conn, decision, action="human", answer="PERGUNTA para Maikol: A ou B?", author="Principal")
+        reads.clear()
+        delivery.resume_after_answer(conn, task.id, answer="Use A", source={"platform": "telegram", "message_id": "955"})
+        assert reads == []
