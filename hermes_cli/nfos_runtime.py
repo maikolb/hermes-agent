@@ -939,6 +939,17 @@ resolve that decision once with "dependency":{"owner":"who delivers","need":"wha
 missing","recheck_hours":6} in the decide JSON. The pause then waits without reminders
 and returns to you at the recheck time; an unrepaired pause answered without it comes
 back at growing intervals.
+A dependency names someone other than you who can deliver the need: the team, person
+or system the project instructions point to. Never name yourself, the Principal or
+this project's own engineering as its owner. What only they would build is work for a
+card, and an authorization this project does not ask of its owner is nobody's to give:
+neither is a repair or a dependency, and holding the card for it delivers nothing. The
+card delivers what fits and closes as a real partial delivery (partial_delivery=true
+with blockers and follow_ups), the remainder a mandatory criterion of the follow-up card.
+When a dependency returns for recheck, test the need by fact before declaring it again:
+probe the capability and reread the project instructions, which may already record its
+delivery. A delivered need is repaired and resumed, not declared again. Choose
+recheck_hours (1 to 24) by when that fact can change.
 Manage the board as well as its workers. Before resuming old work, inspect its
 Git/PR history and actual homologation/production state. Reconcile deliveries
 already made instead of implementing them again. Archive obsolete or superseded
