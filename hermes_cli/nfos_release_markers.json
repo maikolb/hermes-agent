@@ -45,5 +45,6 @@
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "def card_calls("},
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "def read_call("},
   {"pr": 294, "file": "hermes_cli/nfos_delivery.py", "text": "card_calls(conn,args.task"},
-  {"pr": 298, "file": "hermes_cli/nfos_delivery.py", "text": "SHARED_GRAPH_20261010"}
+  {"pr": 298, "file": "hermes_cli/nfos_delivery.py", "text": "SHARED_GRAPH_20261010"},
+  {"pr": 301, "file": "hermes_cli/nfos_delivery.py", "text": "SHOW_CALLS_ACTIVE_20261010"}
 ]
