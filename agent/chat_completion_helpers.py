@@ -2973,6 +2973,17 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
 
     def _managed_summary_call(request, callback, *, retry_count: int):
         from agent import relay_llm
+        from agent.opencode_affinity import merge_opencode_session_headers
+
+        # These requests are built by hand below, outside build_api_kwargs, so the OpenCode session header was
+        # missing: the relay answered 400 MissingSessionID and a worker that hit the iteration ceiling ended with
+        # an empty summary (7 runs on board dovcrm, read on 2026-10-10). No-op for every other provider.
+        request = merge_opencode_session_headers(
+            request,
+            getattr(agent, "provider", None),
+            getattr(agent, "base_url", None),
+            getattr(agent, "session_id", None),
+        )
 
         return relay_llm.execute_current(
             request,
