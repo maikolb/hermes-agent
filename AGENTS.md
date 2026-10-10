@@ -6,6 +6,12 @@ Maikol designated thread `01a0a8ad-dd7b-7000-9528-77e45c50e8c3` as the master co
 
 Preserve running workers, their work and temporary files, the latest shared service packages/configuration, and other threads' integrated changes. Report an already-running rollout immediately and finish its critical operation safely. Record the final runtime/PIDs, configuration and API readbacks with the master thread. A documentation-only change does not justify republishing the runtime.
 
+## Fork CI (2026-10-10)
+
+Owner decision: GitHub Actions is disabled on `maikolb/hermes-agent`. CI for this fork runs on the NFOS executor on the VPS (`deploy/ci` in `maikolb/nexa-factory-os`). It validates every trusted open PR head (same repository, not a draft, no HOLD in the title) and the head of `main`, and publishes the commit statuses `NFOS CI / Linux Python 3.11` and `NFOS CI / Linux Python 3.12`. Merge a PR only after both are `success` on its head SHA. `error` means no test ran and is retried; it is not a verdict.
+
+The executor runs a fast gate: lock consistency, install, Ruff and `tests/e2e/`. It does not run the per-file suite (`scripts/run_tests.sh`), which remains part of the release proof under the pinned-release policy. A PR that changes `uv.lock` fails before any test until the CI images are rebuilt from that revision. The workflow files under `.github/workflows` stay only to keep upstream syncs mergeable; they do not run on this fork.
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 **Never give up on the right solution.**
