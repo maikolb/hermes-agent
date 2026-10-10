@@ -6102,8 +6102,8 @@ def release_stale_claims(
     reclaimed = 0
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
     stale = conn.execute(
-        "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at, "
-        "       assignee "
+        "SELECT id, claim_lock, worker_pid, worker_started_at, claim_expires, "
+        "       last_heartbeat_at, assignee "
         "FROM tasks "
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
         "  AND claim_expires < ?",
@@ -6164,7 +6164,8 @@ def release_stale_claims(
             continue
 
         termination = _terminate_reclaimed_worker(
-            row["worker_pid"], row["claim_lock"], signal_fn=signal_fn,
+            row["worker_pid"], row["claim_lock"],
+            started_at=row["worker_started_at"], signal_fn=signal_fn,
         )
         # Never release a claim while our own worker is still alive: that would
         # spawn a duplicate beside it. Hold the claim and retry next tick.
@@ -6254,7 +6255,7 @@ def reclaim_task(
     reclaimable state (not running, or doesn't exist).
     """
     row = conn.execute(
-        "SELECT status, claim_lock, worker_pid FROM tasks "
+        "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks "
         "WHERE id = ? AND status IN ('running', 'ready', 'blocked')",
         (task_id,),
     ).fetchone()
@@ -6265,7 +6266,8 @@ def reclaim_task(
         return False
     prev_lock = row["claim_lock"]
     termination = _terminate_reclaimed_worker(
-        row["worker_pid"], prev_lock, signal_fn=signal_fn,
+        row["worker_pid"], prev_lock,
+        started_at=row["worker_started_at"], signal_fn=signal_fn,
     )
     with write_txn(conn):
         retry_status = _retry_status_for_run(conn, task_id)
@@ -9739,8 +9741,8 @@ def invalidate_descendants_for_parent_reopen(
                 FROM task_links l
                 JOIN descendants d ON d.id = l.parent_id
             )
-            SELECT t.id, t.status, t.current_run_id, t.worker_pid, t.claim_lock,
-                   t.workspace_kind
+            SELECT t.id, t.status, t.current_run_id, t.worker_pid, t.worker_started_at,
+                   t.claim_lock, t.workspace_kind
             FROM descendants d
             JOIN tasks t ON t.id = d.id
             ORDER BY t.id
@@ -9759,7 +9761,9 @@ def invalidate_descendants_for_parent_reopen(
                 resume_status = _retry_status_for_run(
                     conn, row["id"], row["current_run_id"]
                 )
-                terminations.append((row["worker_pid"], row["claim_lock"]))
+                terminations.append(_WorkerRef(
+                    row["worker_pid"], row["claim_lock"], row["worker_started_at"],
+                ))
                 run_id = _end_run(
                     conn,
                     row["id"],
@@ -9835,8 +9839,10 @@ def invalidate_descendants_for_parent_reopen(
         # Standalone call: we committed above, so the audit trail is durable
         # — safe to kill workers now. Composed calls leave this to the
         # caller (post-commit), preserving events-before-termination.
-        for pid, claim_lock in terminations:
-            _terminate_reclaimed_worker(pid, claim_lock)
+        for ref in terminations:
+            _terminate_reclaimed_worker(
+                ref[0], ref[1], started_at=getattr(ref, "started_at", None),
+            )
     return {"invalidated": invalidated, "terminations": terminations}
 
 
@@ -10386,6 +10392,7 @@ def _terminate_archived_worker(
             termination = _terminate_reclaimed_worker(
                 worker_pid,
                 claim_lock,
+                started_at=worker_started_at,
                 signal_fn=_identity_guarded_signal,
             )
     except Exception as exc:
@@ -11831,13 +11838,57 @@ def _seed_running_workspace_leases(
             _WORKSPACE_SEEDED_ROOTS.add(root_key)
 
 
+class _WorkerRef(tuple):
+    """``(pid, claim_lock)`` of a worker to terminate after the commit.
+
+    Still the pair every caller unpacks; ``started_at`` carries the creation
+    time that makes the PID an identity (see ``_terminate_reclaimed_worker``).
+    """
+
+    started_at: Any = None
+
+    def __new__(cls, pid, claim_lock, started_at=None):
+        ref = super().__new__(cls, (pid, claim_lock))
+        ref.started_at = started_at
+        return ref
+
+
+def _worker_process_state(pid: int, started_at: Any) -> str:
+    """Whether ``pid`` is still the worker recorded with ``started_at``.
+
+    ``gone``: no such process. ``reused``: the PID now belongs to a process
+    created at another time, so the worker is gone. ``unverified``: the process
+    is alive and either side of the identity is missing. ``same``: the worker.
+    """
+    observed = _process_start_time(int(pid))
+    if observed is None:
+        return "unverified" if _pid_alive(pid) else "gone"
+    if started_at is None:
+        return "unverified"
+    try:
+        return "same" if abs(observed - float(started_at)) < 0.01 else "reused"
+    except (TypeError, ValueError):
+        return "unverified"
+
+
 def _terminate_reclaimed_worker(
     pid: Optional[int],
     claim_lock: Optional[str],
     *,
+    started_at: Any = None,
     signal_fn=None,
 ) -> dict[str, Any]:
-    """Best-effort host-local worker termination for reclaim paths."""
+    """Best-effort host-local worker termination for every reclaim and timeout path.
+
+    WORKER_IDENTITY_20261010: a PID alone is never authority to signal. The
+    worker is the process with this PID *and* the creation time persisted when
+    it was spawned (``tasks.worker_started_at``). A reused PID is somebody
+    else's process: it is not signalled and the worker counts as gone. A live
+    process whose identity cannot be verified is not signalled either, and the
+    claim is held as for a worker that survived (``identity_unavailable``).
+    The identity is checked again before each signal. Without a ``signal_fn``
+    the process running this code is never the target.
+    """
     import signal
 
     info: dict[str, Any] = {
@@ -11861,6 +11912,25 @@ def _terminate_reclaimed_worker(
     if kill is None:
         return info
 
+    state = _worker_process_state(int(pid), started_at)
+    if state == "gone":
+        info["terminated"] = True
+        info["already_exited"] = True
+        return info
+    if state == "reused":
+        info["terminated"] = True
+        info["pid_reused"] = True
+        return info
+    if state == "unverified":
+        info["identity_unavailable"] = True
+        return info
+    if signal_fn is None and int(pid) == os.getpid():
+        info["own_process"] = True
+        return info
+
+    def same_worker() -> bool:
+        return bool(_pid_alive(pid)) and _worker_process_state(int(pid), started_at) == "same"
+
     info["termination_attempted"] = True
     try:
         kill(int(pid), signal.SIGTERM)
@@ -11874,12 +11944,12 @@ def _terminate_reclaimed_worker(
         return info
 
     for _ in range(10):
-        if not _pid_alive(pid):
+        if not same_worker():
             info["terminated"] = True
             return info
         time.sleep(0.5)
 
-    if _pid_alive(pid):
+    if same_worker():
         try:
             # signal.SIGKILL doesn't exist on Windows; fall back to SIGTERM
             # (which maps to TerminateProcess via the stdlib shim).
@@ -11889,23 +11959,25 @@ def _terminate_reclaimed_worker(
         except (ProcessLookupError, OSError):
             return info
 
-    info["terminated"] = not _pid_alive(pid)
+    info["terminated"] = not same_worker()
     return info
 
 
 def _worker_survived_termination(termination: dict) -> bool:
-    """True when we tried to kill our own host-local worker and it is still alive.
+    """True when our own host-local worker may still be alive after the attempt.
 
     Reclaiming in this state would release the claim and let the dispatcher
     spawn a second worker while the first is still running — the duplication
-    loop. Only host-local workers we actually signalled count: a non-local
-    claim lock or a no-op attempt (no ``os.kill`` available) must fall through
-    to the normal release path, since we cannot manage that worker anyway.
+    loop. Only host-local workers we actually signalled count, plus a live
+    process whose identity could not be verified (it was not signalled, and it
+    may be the worker): a non-local claim lock or a no-op attempt (no
+    ``os.kill`` available) must fall through to the normal release path, since
+    we cannot manage that worker anyway.
     """
     return bool(
-        termination.get("termination_attempted")
-        and termination.get("host_local")
+        termination.get("host_local")
         and not termination.get("terminated")
+        and (termination.get("termination_attempted") or termination.get("identity_unavailable"))
     )
 
 
@@ -12155,13 +12227,12 @@ def enforce_max_runtime(
     (same reasoning as ``detect_crashed_workers``). ``signal_fn`` is a
     test hook; defaults to ``os.kill`` on POSIX.
     """
-    import signal
     timed_out: list[str] = []
     now = int(time.time())
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
 
     rows = conn.execute(
-        "SELECT t.id, t.worker_pid, "
+        "SELECT t.id, t.worker_pid, t.worker_started_at, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
         "       t.max_runtime_seconds, t.claim_lock "
         "FROM tasks t "
@@ -12198,29 +12269,21 @@ def enforce_max_runtime(
             cleanup['descendants_json'] = json.dumps(_descendants(cleanup, include_group=True))
         # SIGTERM then SIGKILL. Keep it simple: 5 s grace. Workers that
         # want a cleaner shutdown can install their own SIGTERM handler
-        # before the grace expires.
-        killed = False
-        kill = signal_fn if signal_fn is not None else (
-            os.kill if hasattr(os, "kill") else None
+        # before the grace expires. Same primitive as the reclaim paths: the
+        # PID is signalled only while it is still the worker that was spawned.
+        termination = _terminate_reclaimed_worker(
+            pid, row["claim_lock"],
+            started_at=row["worker_started_at"], signal_fn=signal_fn,
         )
-        if kill is not None:
-            try:
-                kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
-            # Short polling wait — no time.sleep on the write txn.
-            for _ in range(10):
-                if not _pid_alive(pid):
-                    break
-                time.sleep(0.5)
-            if _pid_alive(pid):
-                try:
-                    # signal.SIGKILL doesn't exist on Windows.
-                    _sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-                    kill(pid, _sigkill)
-                    killed = True
-                except (ProcessLookupError, OSError):
-                    pass
+        killed = bool(termination.get("sigkill"))
+        if termination.get("identity_unavailable"):
+            # A live process we cannot tell from the worker: neither signal it
+            # nor hand the card to a second worker beside it.
+            _defer_reclaim_for_live_worker(
+                conn, tid, row["claim_lock"], now, termination,
+                reason="max_runtime_worker_identity_unavailable",
+            )
+            continue
 
         with write_txn(conn):
             retry_status = 'blocked' if cumulative_budget else _retry_status_for_run(conn, tid)
@@ -12323,7 +12386,7 @@ def detect_stale_running(
     reclaimed: list[str] = []
 
     rows = conn.execute(
-        "SELECT t.id, t.worker_pid, t.last_heartbeat_at, t.claim_lock, "
+        "SELECT t.id, t.worker_pid, t.worker_started_at, t.last_heartbeat_at, t.claim_lock, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
@@ -12350,7 +12413,7 @@ def detect_stale_running(
 
         # Terminate the worker if it's still host-local.
         termination = _terminate_reclaimed_worker(
-            pid, lock, signal_fn=signal_fn,
+            pid, lock, started_at=row["worker_started_at"], signal_fn=signal_fn,
         )
 
         # Never release a claim while our own worker is still alive: that would

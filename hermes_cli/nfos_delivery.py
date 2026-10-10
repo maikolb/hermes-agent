@@ -3629,10 +3629,14 @@ def _dependency_recheck_lead(wait):
     """DEPENDENCY_HAS_OWNER_20261010: o pedido de reconferência abre com a dependência, e não com o "Execute o reparo" de
     sempre. Em 10/10/2026 nove pausas do Concursa esperavam dependência com prazo de 6 h; o que faltava a seis delas tinha
     sido entregue de 1 a 6 h antes do prazo (rede do laboratório, base e PDFs) e nada no pedido dizia o que reconferir."""
+    # RECHECK_WITHOUT_SIX_20261010: a orientação vem antes do texto da necessidade, que pode ter 600 caracteres e o aviso
+    # corta em 500. A obrigação gravada antes do #300 ainda traz o exemplo com "recheck_hours":6: às 09:33 UTC de 10/10, já
+    # na release com o prazo de 1 h, o Principal conferiu por fato, redeclarou e copiou o 6 do texto antigo (t_f29a5c9b).
     since = time.strftime('%d/%m %H:%MZ', time.gmtime(int(wait.get('since') or 0)))
-    return (f"Reconferência de dependência declarada em {since}: {wait.get('need')} (quem entrega: {wait.get('owner')}). "
-            'Confira por fato se isso já foi entregue (sonde a capacidade, releia as instruções do projeto) antes de declarar '
-            'de novo; se foi, retome. ')
+    return (f'Reconferência de dependência declarada em {since}. Confira por fato se já foi entregue (sonde a capacidade, '
+            'releia as instruções do projeto); se foi, retome. Se declarar de novo, não informe recheck_hours: sem ele a pausa '
+            'volta em 1 h, e o 6 do exemplo desta obrigação é texto antigo. '
+            f"Falta: {wait.get('need')} (quem entrega: {wait.get('owner')}). ")
 
 
 class _LabPauseNotReady(Exception):
