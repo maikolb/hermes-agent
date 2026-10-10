@@ -184,3 +184,32 @@ def test_principal_instructions_say_who_can_own_a_dependency_and_how_to_recheck_
             'mandatory criterion of the follow-up card') in text
     assert 'test the need by fact before declaring it again' in text
 
+
+def test_dependency_without_hours_returns_in_one_hour_and_backs_off_on_the_same_pause(running, monkeypatch):
+    """DEPENDENCY_RECHECK_20261010: sem prazo dito, a pausa volta em 1 h; declarada de novo, em 2, 4 e 6 h. O prazo dito pelo
+    Principal vale como dito e não reinicia o recuo."""
+    conn, task, artifact, process, args = running
+    _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
+    did = _obligation(conn, task)
+    assert '"recheck_hours":6' not in d.get_decision(conn, did)['question'], 'o exemplo não ensina mais as 6 h'
+    clock = [int(time.time())]
+    monkeypatch.setattr(d.time, 'time', lambda: clock[0])
+    bare = {k: DEPENDENCY[k] for k in ('owner', 'need')}
+    for hours in (1, 2, 4, 6, 6):
+        d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=bare)
+        wait = _context(conn, did)['lab_wait']
+        assert wait['hold'] is True and wait['until'] == clock[0] + hours * 3600, hours
+        clock[0] = wait['until'] + 1
+        runtime.reconcile_runtime(conn)
+        runtime.reconcile_runtime(conn)
+        assert _context(conn, did)['lab_wait']['hold'] is False, 'no prazo volta ao Principal'
+    d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=dict(bare, recheck_hours=3))
+    assert _context(conn, did)['lab_wait']['until'] == clock[0] + 3 * 3600
+
+
+def test_principal_instructions_no_longer_teach_a_fixed_six_hours():
+    text = ' '.join(runtime.principal_instructions().split())
+    assert '"recheck_hours":6' not in text
+    assert 'returns to you in 1 hour, then 2, 4 and 6 for the same pause' in text
+    assert 'add "recheck_hours" (1 to 24) only when you know the hour that fact can change' in text
+

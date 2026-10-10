@@ -108,8 +108,9 @@ def reconcile_maintenance_recovery(conn):
                         'Não invente escalonamento nem reinicie saldo: este card usa ' + context['maintenance_recovery']['budget_mode'] + '. '
                         'Não relance o worker para esperar o mesmo reparo. Se o reparo depende de algo fora das suas ferramentas '
                         'autorizadas, não repita a explicação: responda esta decisão uma vez com "dependency":{"owner":"quem '
-                        'entrega","need":"o que falta","recheck_hours":6} no JSON do decide; a pausa espera sem lembrete e volta '
-                        'para você reconferir no prazo. Quem entrega não é você nem a engenharia deste projeto: o que só vocês '
+                        'entrega","need":"o que falta"} no JSON do decide; a pausa espera sem lembrete e volta para você '
+                        'reconferir em 1 h (depois 2, 4 e 6 h na mesma pausa); "recheck_hours" de 1 a 24 só quando você sabe '
+                        'a hora em que o fato muda. Quem entrega não é você nem a engenharia deste projeto: o que só vocês '
                         'fariam, ou uma autorização que este projeto não pergunta ao dono, não é reparo nem dependência, e o card '
                         'entrega o que cabe e fecha como entrega parcial, com o resto obrigatório no card de continuação. '
                         'Preserve sessão, consumo, evidências e aceites. Causa: ' + reason)

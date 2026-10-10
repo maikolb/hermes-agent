@@ -2289,7 +2289,10 @@ _MAINTENANCE_RX = re.compile(r'contrato git|git delivery|delivery_contract|polic
 # reparo depende: a pausa espera sem lembrete e volta para ele reconferir no prazo. Em 09/10/2026, cinco pausas que ele não
 # alcançava (preparo do laboratório, portão do processo) eram de 40 a 70% dos pedidos a ele, com 31 respostas devolvidas em 3 h.
 MAINTENANCE_REMINDER_MAX_GAP = 8 * DECISION_REMINDER_GAP
-MAINTENANCE_DEPENDENCY_DEFAULT_HOURS = 6
+# DEPENDENCY_RECHECK_20261010: sem prazo dito pelo Principal, a primeira reconferência vem em 1 h e as seguintes da mesma
+# pausa em 2, 4 e 6 h. Com 6 h fixas (o exemplo da instrução dizia 6 e ele copiava), em 10/10/2026 seis cards do Concursa
+# ficaram de 1 a 6 h parados depois de a dependência ter sido entregue.
+MAINTENANCE_DEPENDENCY_DEFAULT_HOURS = (1, 2, 4, 6)
 MAINTENANCE_DEPENDENCY_HOURS = (1, 24)
 
 
@@ -2307,11 +2310,18 @@ def _maintenance_dependency(value):
         return None
     if not isinstance(value, dict) or any(not isinstance(value.get(k), str) or not value[k].strip() for k in ('owner', 'need')):
         raise WorkflowError('dependency needs owner (who delivers it) and need (what is missing)')
-    hours = value.get('recheck_hours', MAINTENANCE_DEPENDENCY_DEFAULT_HOURS)
+    hours = value.get('recheck_hours')
     low, high = MAINTENANCE_DEPENDENCY_HOURS
-    if type(hours) not in (int, float) or not low <= hours <= high:
+    if hours is not None and (type(hours) not in (int, float) or not low <= hours <= high):
         raise WorkflowError(f'dependency recheck_hours must be between {low} and {high}')
     return {'owner': value['owner'].strip()[:160], 'need': value['need'].strip()[:600], 'recheck_hours': hours}
+
+
+def _dependency_recheck_hours(declared, earlier):
+    """Prazo da reconferência: o que o Principal disse, ou o padrão que recua com as declarações anteriores da mesma pausa."""
+    if declared['recheck_hours'] is not None:
+        return declared['recheck_hours']
+    return MAINTENANCE_DEPENDENCY_DEFAULT_HOURS[min(earlier, len(MAINTENANCE_DEPENDENCY_DEFAULT_HOURS) - 1)]
 
 
 def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
@@ -5155,7 +5165,9 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                     held = context.get('lab_wait')
                     if isinstance(held, dict) and held.get('hold'):
                         raise WorkflowError('This pause already waits natively; there is no dependency to declare on it')
-                    until = deferred_at + int(declared['recheck_hours'] * 3600)
+                    earlier = int(context.get('dependency_declarations') or 0)
+                    until = deferred_at + int(_dependency_recheck_hours(declared, earlier) * 3600)
+                    context['dependency_declarations'] = earlier + 1
                     # A mesma estrutura de espera segura do laboratório: sem lembrete, fora da fila e do turno do Principal.
                     context['lab_wait'] = {'kind': 'dependency', 'hold': True, 'since': deferred_at, 'until': until,
                                            'next_check_at': until, 'owner': declared['owner'], 'need': declared['need'],
