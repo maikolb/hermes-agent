@@ -1509,7 +1509,7 @@ class GatewayKanbanWatchersMixin:
                     if retry_at>now:continue
                     if walled:
                         route=walls.entry_route(payload,self._nfos_receipt_owner(payload))
-                        if route and walls.closed(*route) is not None:continue
+                        if route and walls.entry_held(*route) is not None:continue
                     if coordination:payload['_request_part']=json.loads(row['source_key'])[-1]
                     pending.append((path,row['id'],payload))
                     if walled:arrived[(path,row['id'])]=row['created_at']
