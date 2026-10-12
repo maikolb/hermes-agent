@@ -47,7 +47,8 @@ the limit (``metadata.limitName``), the reset time (``resets_at`` / ``reset_at``
   request (PRINCIPAL_WALL_20261012, "The intake's side" below): the request goes back to the Principal's inbox and
   is offered again when the route is due, the oldest entry first, its turn being the route's probe. A turn of a
   request that ends on quota with no window named closes the route as well, with no reset time: the wall is the
-  only clock a held request has, and its notices the only word about it.
+  only clock a held request has, and its notices the only word about it. With a reset time still ahead a request
+  is not the probe of the hour: it waits for that time (``entry_held``), and the hourly probe is of the cards.
 
 Nothing here selects another provider or model: a closed route makes its cards, and the requests whose decision
 is the Principal's, wait.
@@ -464,6 +465,11 @@ def _holds(wall, now):
     return bool(probe and now - float(probe.get('at') or 0) < PROBE_LEASE_SECONDS) or now < open_at(wall)
 
 
+def _awaits_reset(wall, now):
+    """The provider gave this wall a reset time and it is still ahead."""
+    return now < float(wall.get('reset_at') or 0)
+
+
 def closed(profile, provider, model, *, now=None):
     """The wall holding launches on this route right now, or ``None``: the route is open, or its next launch is
     due and no probe is in flight, so the next launch is the probe (``take_probe``)."""
@@ -534,24 +540,32 @@ def _reset_time(wall):
     return time.strftime('%d/%m %H:%M UTC', time.gmtime(float(wall['reset_at'])))
 
 
+# What becomes of the inbox entries of a wall with a reset time still ahead (``entry_held``, ``session_answered``).
+ENTRIES_RESUMED = ('Os pedidos na caixa do Principal são retomados nessa hora, ou antes se o provedor responder a '
+                   'qualquer turno de sessão desse perfil nessa rota.')
+
+
 def notice(wall):
     """The message of a wall when its route closes, for the operations channel. It says whose route closed:
     another profile on the same provider and model goes on with its own credential."""
     route = f"{wall['provider']}/{wall['model']}"
     ceiling = PROBE_CEILING_SECONDS // 60
+    # PRINCIPAL_WALL_20261012: the window was met by the coordinating session, on the turn of a request.
+    by_session = bool((wall.get('closed_by') or {}).get('request_id'))
     if wall.get('reset_at'):
         asked = _span(float(wall['reset_at']) - float(wall.get('walled_at') or wall.get('closed_at') or 0))
+        # A request is not the probe of the hour (``entry_held``): the text promises no probe on its account.
         reopening = (f'com reinício informado para {_reset_time(wall)} (o provedor pediu {asked} de espera). '
-                     f'Um lançamento sonda a rota a cada {ceiling} min e nessa hora; ela reabre quando o provedor '
-                     'responder, mesmo antes da hora informada.')
+                     + (ENTRIES_RESUMED if by_session else
+                        f'Um lançamento sonda a rota a cada {ceiling} min e nessa hora; ela reabre quando o provedor '
+                        'responder, mesmo antes da hora informada.'))
     else:
         first = _probe_spacing(0) // 60
         reopening = (f'sem hora de reinício informada. Um lançamento sonda a rota em {first} min e depois a intervalos '
                      f'que dobram até {ceiling} min; ela reabre quando o provedor responder.')
-    # PRINCIPAL_WALL_20261012: the window was met by the coordinating session, on the turn of a request.
     intake = (' É a rota da sessão coordenadora (Principal): os pedidos que chegam pelo Telegram ficam gravados e a '
               'decisão de entrada de cada um é retomada, na ordem de chegada, quando a rota reabrir.'
-              if (wall.get('closed_by') or {}).get('request_id') else '')
+              if by_session else '')
     return (f"Rota {route} fechada para o perfil {wall['profile']}: o provedor recusou pelo limite {wall['limit']}, "
             f'{reopening} Os cards desse perfil nessa rota esperam sem ocupar vaga e sem contar falha. '
             f'Nenhuma outra rota é usada no lugar. Enquanto ela seguir fechada com card ou pedido esperando por ela, '
@@ -566,7 +580,9 @@ def still_closed(wall, count, *, now=None):
     and gets the day's again from the day something waits for it.
 
     The probe is the launch of what waits, so the text speaks of it only when the count shows a card or an entry
-    (a count that is only partial says neither)."""
+    (a count that is only partial says neither). An entry that waits for the reset time is not a probe
+    (``entry_held``): of the entries the text then says when they are resumed, and the probe it speaks of is the
+    one of a card, when a card waits."""
     now = time.time() if now is None else float(now)
     waits = bool(count['cards'] or count['entries'])
     if not waits and not count.get('unread'):
@@ -575,12 +591,15 @@ def still_closed(wall, count, *, now=None):
     reset = (f'O reinício informado pelo provedor é {_reset_time(wall)}.' if wall.get('reset_at')
              else 'O provedor não informou hora de reinício.')
     partial = (' A contagem é parcial: houve quadro que não pôde ser lido.' if count.get('unread') else '')
-    probing = (f' Um lançamento sonda a rota a intervalos de até {PROBE_CEILING_SECONDS // 60} min e ela reabre '
-               'quando o provedor responder.' if waits else '')
+    resumed = bool(count['entries']) and _awaits_reset(wall, now)
+    probes = 'O lançamento de um card' if resumed else 'Um lançamento'
+    probing = (f' {probes} sonda a rota a intervalos de até {PROBE_CEILING_SECONDS // 60} min e ela reabre '
+               'quando o provedor responder.' if count['cards'] or (waits and not resumed) else '')
     since = _span(now - float(wall.get('closed_at') or now))
     return (f"Rota {route} do perfil {wall['profile']} segue fechada há {since}, pelo limite {wall['limit']}. "
             f"Cards esperando por ela: {count['cards']}. Pedidos na caixa do Principal, ainda sem card: "
-            f"{count['entries']}.{partial} {reset}{probing} Nenhuma outra rota é usada no lugar.")
+            f"{count['entries']}.{partial} {reset}{' ' + ENTRIES_RESUMED if resumed else ''}{probing} "
+            'Nenhuma outra rota é usada no lugar.')
 
 
 def waiting(wall, *, owner_of):
@@ -998,17 +1017,36 @@ def entry_route(payload, profile):
     return session_route(profile)
 
 
+def entry_held(profile, provider, model, *, now=None):
+    """The wall that keeps the inbox entries of this route from being offered now, or ``None``.
+
+    It holds an entry as it holds a card (``closed``), and for longer when the provider gave a reset time: until
+    that time the entry waits and is not the probe of the hour. The probe of an entry is the whole turn of its
+    request, and every one the provider refuses leaves the wake of the request once more in the session of the
+    topic (measured on a wall of 150 h with a reset time: 151 refused turns and 151 copies, about 135 thousand
+    tokens, against 1 and 1 when the entry waits). And it finds nothing the session does not find by itself: any
+    turn of that profile on that model the provider answers, a person's message or the wake of a card's decision,
+    reopens the route (``session_answered``). The probe of the hour is left to the cards of the route. With no
+    reset time the wall is the only clock the entry has, and it probes at the route's spacing."""
+    wall = read(profile, provider, model)
+    if wall is None:
+        return None
+    now = time.time() if now is None else float(now)
+    return wall if _holds(wall, now) or _awaits_reset(wall, now) else None
+
+
 def entry_turn(payload, profile, request_id):
-    """May this inbox entry be offered to the Principal now? ``False`` while a wall holds its route. On a route
-    whose reopening is due the offer is the probe, and is taken here, so one entry probes at a time. Returns the
-    route when the offer is that probe, else ``True``."""
+    """May this inbox entry be offered to the Principal now? ``False`` while a wall holds it (``entry_held``). On
+    a route whose reopening is due, at the reset time the provider gave or at the route's spacing when it gave
+    none, the offer is the probe, and is taken here, so one entry probes at a time. Returns the route when the
+    offer is that probe, else ``True``."""
     try:
         if not any_closed():
             return True
         route = entry_route(payload, profile)
         if not route or read(*route) is None:
             return True
-        if closed(*route) is not None:
+        if entry_held(*route) is not None:
             return False
         taken = take_probe(*route, task_id=request_id)
         if taken is False:  # a card's launch took the probe between the two readings

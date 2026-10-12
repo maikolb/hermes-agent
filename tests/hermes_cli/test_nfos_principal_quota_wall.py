@@ -16,10 +16,14 @@ What these tests hold:
 * that route is closed like an executor's (`nfos_route_walls`), with one notice in the management topic; while it
   is closed no request is offered to the Principal, the one that met the wall or one that arrives later, so nothing
   is spent on a refused call;
-* the same request is offered again as the probe of its route, the oldest request first and one at a time: every
-  hour and at the reset time when the provider gave one (whichever comes first), at spaced intervals when it gave
-  none; the probe the provider answers reopens the route, the request becomes one card, and a request the
-  Principal had released before its turn died is not offered again;
+* the same request is offered again as the probe of its route, the oldest request first and one at a time: at the
+  reset time when the provider gave one, at spaced intervals when it gave none; the probe the provider answers
+  reopens the route, the request becomes one card, and a request the Principal had released before its turn died
+  is not offered again;
+* with a reset time ahead a request is not the probe of the hour, which is left to the cards of the route: in 150
+  hours of wall its turn is refused once and its wake stands once in the session of the topic; a turn of that
+  session the provider answers before that time (a person's message) reopens the route and the request comes
+  back;
 * a turn that ends on quota with no usage window named (a throttle that outlasts the client's retries) closes the
   route too, with no reset time: the request waits on the wall, never on a clock of its own with nobody told;
 * a billing verdict the classifier holds unverified is not a quota wall; a delegated child inside the turn is not
@@ -74,6 +78,9 @@ SESSION_KEY = 'agent:main:telegram:group:-1000:8'
 # `limit_window_minutes: 10080`, `resets_in_seconds: 522167`.
 PRINCIPAL = ('default', PROFILE_CONFIG['model']['provider'], PROFILE_CONFIG['model']['default'])
 WEEKLY_RESET = 522167
+# The wall the review of the hourly probe measured: 150 hours, under a reset time 153.1 hours away.
+WALL_HOURS, LONG_RESET = 150, 551226
+WAKE = '[NFOS: mensagem original preservada'
 SECOND_REQUEST = '[Japa|1]\nCorrija a ordenação da tela de pedidos.'
 PORTAL = {'platform': 'portal', 'chat_id': 'dov', 'thread_id': 'suporte', 'message_id': 'DV-0031',
           'chat_type': 'portal', 'user_id': 'portal:dov:lucas'}
@@ -153,7 +160,23 @@ class Session:
                 delivery.receive_request(conn, **self.request)
         if self.refusal is not None:
             raise self.refusal()
-        return metered_reply('Registered as new work.')
+        return metered_reply('Registered as new work.' if self.request else 'The card of the sheet is in review.')
+
+    def keeps_its_conversation(self):
+        """The two things of the gateway's session this suite leaves out, put back: the agent writes the session
+        to `state.db`, and each turn starts from the conversation read from there."""
+        del self.agent._persist_session  # the suite's stand-in: the agent's own is the class's
+        turn, store = self.agent.run_conversation, self.agent._session_db
+
+        def from_what_is_kept(text, **more):
+            return turn(text, conversation_history=store.get_messages_as_conversation(self.agent.session_id), **more)
+
+        self.agent.run_conversation = from_what_is_kept
+
+    def wakes_kept(self):
+        """The messages of the session's stored conversation that carry the wake of a request."""
+        kept = self.agent._session_db.get_messages_as_conversation(self.agent.session_id)
+        return [message for message in kept if message.get('role') == 'user' and WAKE in str(message.get('content'))]
 
     def other_turn(self, text):
         """A turn of the same session that is not the turn of a request (a card's question, say). Only its effect
@@ -171,9 +194,18 @@ class Session:
 
     async def handle_message(self, event):
         self.wakes.append(event)
-        self.request = event.metadata['nfos_coordinator_intake']['request']
+        await self._turn(event, event.metadata['nfos_coordinator_intake']['request'],
+                         event.metadata['kanban_wake_delivery'])
+
+    async def person_says(self, text, source):
+        """A message a person typed in the topic: a turn of the same session through the gateway's own handler,
+        with no wake and no request behind it."""
+        await self._turn(MessageEvent(text=text, message_id='200', message_type=MessageType.TEXT, source=source),
+                         None, None)
+
+    async def _turn(self, event, request, receipt):
+        self.request = request
         self.turn.source, self.turn._loop_for_step = event.source, asyncio.get_running_loop()
-        receipt = event.metadata['kanban_wake_delivery']
         token = current_notify_receipt.set(receipt)
         try:
             result = self.agent.run_conversation(event.text)
@@ -359,15 +391,18 @@ async def test_a_bare_imperative_request_becomes_a_card_without_the_principal(in
 
 
 @pytest.mark.asyncio
-async def test_the_same_request_is_resumed_once_by_the_first_hourly_probe_the_provider_answers(
+async def test_the_same_request_is_resumed_once_at_the_reset_time_with_one_refused_turn_in_150_hours_of_wall(
         desk, monkeypatch, ops):
-    """The provider gave a reset time six days away. The route is tried every hour all the same, by the oldest
-    request: the limit may be lifted before that time (quota bought, plan changed), and nobody should have to
-    erase a file for the Principal to find out."""
+    """The provider gave a reset time days away. The request waits for that time and is not the probe of the hour.
+    Its probe is the whole turn of the request, and each refused one leaves the wake once more in the session of
+    the topic: measured on this same wall, 151 refused turns and 151 copies of the wake when the request probed
+    every hour. Here the session is kept as the gateway keeps it, so the copies are counted where they stand."""
     runner, event, adapter, session = desk
+    session.keeps_its_conversation()
     clock = Clock(monkeypatch)
     start = clock.now
-    session.refusal = lambda: CodexUsageLimit(resets_in=int(start + WEEKLY_RESET - clock.now))
+    reset = start + LONG_RESET
+    session.refusal = lambda: CodexUsageLimit(resets_in=int(reset - clock.now))
 
     assert await runner._nfos_receive(event) == '', 'no receipt by code: the message went to the Principal'
     await _settle(runner)
@@ -381,53 +416,60 @@ async def test_the_same_request_is_resumed_once_by_the_first_hourly_probe_the_pr
     assert (request['status'], request['task_id'], cards) == ('coordinating', None, 0)
     assert payload['text'] == REQUEST and payload['source']['message_id'] == '123'
     assert entry['wake_accepted'] is False and 'claim_token' not in entry
-    assert entry['quota']['route'] == list(PRINCIPAL) and entry['quota']['reset_at'] == start + WEEKLY_RESET
+    assert entry['quota']['route'] == list(PRINCIPAL) and entry['quota']['reset_at'] == reset
     assert (entry['quota']['reason'], entry['quota']['turns']) == ('rate_limit', 1)
-    # The Principal's route is closed by that request. The wall keeps the reset time the provider gave, and the
-    # route's next launch is the probe of the hour, which comes first.
+    # The Principal's route is closed by that request, and the wall keeps the reset time the provider gave. The
+    # route's next launch is the probe of the hour, which is a card's; the request is held until the reset time.
     wall = walls.read(*PRINCIPAL)
-    assert (wall['limit'], wall['reset_at']) == ('usage_limit_reached', start + WEEKLY_RESET)
+    assert (wall['limit'], wall['reset_at']) == ('usage_limit_reached', reset)
     assert wall['closed_by']['request_id'] == request_id and walls.open_at(wall) == start + 3600
     assert session.said_in_the_topic() == [], 'neither the reply of the dead turn nor its status'
 
-    # Four hours on the wall. Between two probes nothing is offered and no call is spent. Another turn of the same
-    # session starts meanwhile (a card's question): it replaces the checkpoint of the dead turn, which flushes
-    # that turn's acceptance. The request stays owed.
-    await _through(runner, clock, 3600 - TICK, ops)
-    assert session.offered() == [request_id] and session.seen.provider_calls == 1, 'nothing before the hour'
-    await _through(runner, clock, OUTAGE // 2 - (3600 - TICK), ops)
+    # Four hours on the wall. Another turn of the same session starts meanwhile (a card's question): it replaces
+    # the checkpoint of the dead turn, which flushes that turn's acceptance. The request stays owed.
+    await _through(runner, clock, OUTAGE // 2, ops)
     assert session.other_turn('[kanban] a card asks')['failure_reason'] == 'rate_limit'
     await _through(runner, clock, OUTAGE // 2, ops)
     request, payload, cards = _board()
-    # One probe an hour, by the same request: one refused call each, which is the probe's verdict.
-    assert session.offered() == [request_id] * 5, 'the turn that met the wall, then one probe an hour'
-    assert [int(at - start) for at in session.calls] == [0, 3600, 7200, 7200, 10800, 14400]
-    assert session.seen.provider_calls == 6 and session.seen.waits.waited == 0, 'the fourth call is the other turn'
+    assert session.offered() == [request_id], 'not offered again while the route is closed'
+    assert session.seen.provider_calls == 2, 'no call spent on the request during the outage'
     assert (request['status'], cards, payload['coordination']['wake_accepted']) == ('coordinating', 0, False)
-    wall = walls.read(*PRINCIPAL)
-    assert (wall['probes'], wall['probe'], wall['reset_at']) == (4, None, start + WEEKLY_RESET)
-    assert walls.open_at(wall) == clock.now + 3600 and wall['closed_at'] == start, 'the same wall, tried again in 1 h'
     (chat, topic, notice), = ops.sent
     assert (chat, topic) == MANAGEMENT_TOPIC, 'the one notice of the wall, in the management topic'
     assert f'Rota {PRINCIPAL[1]}/{PRINCIPAL[2]} fechada para o perfil {PRINCIPAL[0]}' in notice
-    assert time.strftime('%d/%m %H:%M UTC', time.gmtime(start + WEEKLY_RESET)) in notice
-    assert 'a cada 60 min' in notice and 'mesmo antes da hora informada' in notice
+    assert time.strftime('%d/%m %H:%M UTC', time.gmtime(reset)) in notice
+    # It says what happens to the requests, and promises no probe: no request is one before that time.
+    assert walls.ENTRIES_RESUMED in notice and 'sonda' not in notice and 'a cada 60 min' not in notice
     assert 'sessão coordenadora (Principal)' in notice and 'retomada, na ordem de chegada' in notice
     adapter._send_with_retry.assert_not_called()
-    assert session.said_in_the_topic() == [], 'a refused probe says nothing in the topic of who asked either'
 
-    # The limit is lifted days before the time the provider gave. One tick before the next probe: nothing. At the
-    # probe: the same request, and the provider answers it.
+    # The 150 hours of the wall, a round of the gateway an hour: one refused turn of the request, the first, and
+    # its wake once in the session. The route itself is due every hour, for the launch of a card of it.
+    await _through(runner, clock, WALL_HOURS * 3600 - OUTAGE, ops, step=3600)
+    assert clock.now - start == WALL_HOURS * 3600 < LONG_RESET
+    assert session.offered() == [request_id] and len(session.results) == 1, 'one refused turn of the request'
+    assert session.seen.provider_calls == 2, 'its one call, and the one of the other turn'
+    assert len(session.wakes_kept()) == 1, 'one copy of the wake in the session of the topic'
+    wall = walls.read(*PRINCIPAL)
+    assert (wall['probes'], wall['probe'], wall['reset_at'], wall['closed_at']) == (0, None, reset, start)
+    assert walls.closed(*PRINCIPAL) is None and walls.entry_held(*PRINCIPAL) == wall
+    # The day's notices of those six days: the request that waits, when it is resumed, and no probe.
+    opening, *daily = [text for chat, topic, text in ops.sent]
+    assert opening == notice and len(daily) == 6
+    assert all('ainda sem card: 1.' in text and walls.ENTRIES_RESUMED in text and 'sonda' not in text for text in daily)
+    assert session.said_in_the_topic() == [] and not adapter._send_with_retry.await_count
+
+    # The limit is lifted three hours before the time the provider gave: nothing until one second before it. At
+    # the reset time the same request is offered, once, and the provider answers it.
     session.refusal = None
-    await _through(runner, clock, 3600 - TICK, ops)
-    assert session.offered() == [request_id] * 5 and _board()[2] == 0
-    await _tick(runner, clock, TICK, ops)
+    await _through(runner, clock, 3 * 3600, ops, step=3600)
+    await _tick(runner, clock, int(reset - 1 - clock.now), ops)
+    assert session.offered() == [request_id] and _board()[2] == 0
+    await _tick(runner, clock, 1, ops)
     request, payload, cards = _board()
-    assert session.offered() == [request_id] * 6, 'the same request, by its id'
-    assert clock.now - start == 5 * 3600 and clock.now < start + WEEKLY_RESET - 5 * 86400, 'days before that time'
-    first, again = (wake.metadata['nfos_coordinator_intake']['request'] for wake in session.wakes[:2])
+    assert session.offered() == [request_id, request_id], 'the same request, by its id'
+    first, again = (wake.metadata['nfos_coordinator_intake']['request'] for wake in session.wakes)
     assert first == again and again['source']['message_id'] == '123' and again['text'] == REQUEST
-    assert all(wake.metadata['nfos_coordinator_intake']['request'] == first for wake in session.wakes)
     # The second offer is the first one plus what became of it: the provider answered no call of that turn.
     told = resumed_intake_note(0)
     assert 'nothing was decided or done for it' in told and told not in session.wakes[0].text
@@ -437,15 +479,56 @@ async def test_the_same_request_is_resumed_once_by_the_first_hourly_probe_the_pr
     (card,) = _cards()
     assert request['task_id'] == card['id'] and REQUEST.split('\n', 1)[1] in card['body']
     assert walls.read(*PRINCIPAL) is None, 'the provider answered: the route is open'
+    assert len(session.wakes_kept()) == 2, 'the turn that met the wall and the one that resumed the request'
     # Whoever asked gets the intake's own receipt for the message they sent, now and only now.
     (receipt,) = adapter._send_with_retry.await_args_list
     assert receipt.kwargs['reply_to'] == '123' and receipt.kwargs['content'].startswith(f'Pedido registrado: {request_id}')
 
     await _through(runner, clock, 3600, ops)
-    assert session.offered() == [request_id] * 6 and len(_cards()) == 1, 'once: no further offer, no second card'
-    assert adapter._send_with_retry.await_count == 1 and len(ops.sent) == 1
+    assert session.offered() == [request_id, request_id] and len(_cards()) == 1, 'once: no second offer, no second card'
+    assert adapter._send_with_retry.await_count == 1 and len(ops.sent) == 7
     (said,) = session.said_in_the_topic()
     assert said.startswith('Registered as new work.'), 'only what the Principal said with quota'
+
+
+@pytest.mark.asyncio
+async def test_a_turn_of_a_person_the_provider_answers_before_the_reset_time_brings_the_request_back(
+        desk, monkeypatch, ops):
+    """What finds a limit lifted before the time the provider gave, with the request held until that time: any
+    turn of the session the provider answers. A person writes in the topic, the answer reopens the route, and the
+    request that waited is offered in the next round of the gateway."""
+    runner, event, adapter, session = desk
+    clock = Clock(monkeypatch)
+    start = clock.now
+    reset = start + WEEKLY_RESET
+    session.refusal = lambda: CodexUsageLimit(resets_in=int(reset - clock.now))
+
+    await runner._nfos_receive(event)
+    await _settle(runner)
+    request_id = _board()[0]['id']
+    await _through(runner, clock, 6 * 3600, ops)
+    assert session.offered() == [request_id] and session.seen.provider_calls == 1, 'held: not the probe of the hour'
+
+    # The limit is lifted days before the reset time. The held request does not find it out: a person's message does.
+    session.refusal = None
+    await _through(runner, clock, 3600, ops)
+    assert session.offered() == [request_id] and walls.entry_held(*PRINCIPAL) is not None and not _cards()
+    await session.person_says('E o card da folha?', event.source)
+    assert session.results[-1]['failed'] is False and clock.now == start + 7 * 3600 < reset - 5 * 86400
+    assert walls.read(*PRINCIPAL) is None, 'the provider answered a turn of the session: the route is open'
+    (said,) = session.said_in_the_topic()
+    assert said.startswith('The card of the sheet is in review.'), 'the person got the answer to what they asked'
+    assert _board()[0]['status'] == 'coordinating' and session.offered() == [request_id], 'that turn was not the request'
+
+    await _tick(runner, clock, 5, ops)
+    request, payload, cards = _board()
+    assert session.offered() == [request_id, request_id], 'the request that waited, in the next round'
+    assert resumed_intake_note(0) in session.wakes[1].text
+    assert (request['status'], cards) == ('attached', 1), 'it became its card, days before the reset time'
+    (receipt,) = adapter._send_with_retry.await_args_list
+    assert receipt.kwargs['reply_to'] == '123'
+    await _through(runner, clock, 3600, ops)
+    assert len(session.wakes) == 2 and len(_cards()) == 1 and len(ops.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -966,7 +1049,7 @@ async def test_the_days_notice_counts_the_requests_and_the_cards_that_wait_and_s
     assert (chat, topic) == MANAGEMENT_TOPIC and 'sai aqui um aviso por dia' in opening
     announced = start + TICK  # the first round of the gateway after the wall
 
-    # The first day, a round an hour: the oldest request probes the route every hour and nothing more is said.
+    # The first day, a round an hour: the requests wait for the reset time and nothing more is said.
     await _through(runner, clock, 23 * 3600, ops, step=3600)
     assert clock.now < announced + day and len(ops.sent) == 1
     await _tick(runner, clock, 3600, ops)
@@ -978,9 +1061,12 @@ async def test_the_days_notice_counts_the_requests_and_the_cards_that_wait_and_s
     assert 'Cards esperando por ela: 1.' in daily
     assert 'Pedidos na caixa do Principal, ainda sem card: 2.' in daily
     assert time.strftime('%d/%m %H:%M UTC', time.gmtime(start + WEEKLY_RESET)) in daily
+    # What happens to each: the requests are resumed at that time, and the probe of the hour is the card's.
+    assert walls.ENTRIES_RESUMED in daily
+    assert 'O lançamento de um card sonda a rota a intervalos de até 60 min' in daily
     first, second = _requests()
     assert [r['status'] for r in (first, second)] == ['coordinating', 'coordinating'] and len(_cards()) == 1
-    assert set(session.offered()) == {first['id']}, 'the oldest request is the one that probes'
+    assert session.offered() == [first['id']], 'no request was offered again: none is the probe of the hour'
 
     # The same day: nothing more, from this gateway or from one that restarts.
     restarted = Operations()
@@ -999,10 +1085,10 @@ async def test_the_days_notice_counts_the_requests_and_the_cards_that_wait_and_s
     assert session.said_in_the_topic() == [] and not adapter._send_with_retry.await_count
     assert all((chat, topic) == MANAGEMENT_TOPIC and 'conta ' not in text for chat, topic, text in ops.sent)
 
-    # The limit is lifted: the probe of the next hour is answered, the route reopens, the requests become their
-    # cards in the order they arrived. No notice after that, that day or the three after it.
+    # The window ends: at the reset time the oldest request is offered and answered, the route reopens, the
+    # requests become their cards in the order they arrived. No notice after that, that day or the three after it.
     session.refusal = None
-    await _tick(runner, clock, 3600, ops)
+    await _tick(runner, clock, int(start + WEEKLY_RESET - clock.now), ops)
     await _tick(runner, clock, 5, ops)
     assert walls.read(*PRINCIPAL) is None and [r['status'] for r in _requests()] == ['attached', 'attached']
     await _through(runner, clock, 3 * day, ops, step=3600)

@@ -26,7 +26,8 @@ single-query path of the worker (only the provider call, the goal judge and the 
   and at the reset time when the provider gave one (the reset time only brings the launch forward), at spaced
   intervals when it gave none; a probe the provider refuses does not send a second notice; of the launchers that
   see a route due at the same moment one takes the probe, two launchers of the same card or inbox entry included;
-  a route that closes again at once is the same wall going on;
+  a route that closes again at once is the same wall going on; the probe of the hour is a card's: an inbox entry
+  waits for the reset time the provider gave, and the notices promise no probe on its account;
 * a probe the provider refuses spends nothing of the balance of the escalated card that probes: not a goal turn,
   not an iteration, not a second of its runtime;
 * a throttle that resets inside the client's own wait is retried as before;
@@ -1067,10 +1068,10 @@ def test_of_two_gateways_offering_the_same_inbox_entry_one_is_the_probe_and_keep
     of what it launches made both of them its owner: the one that then lost the claim of the entry gave the probe
     back, and it was the other's, with its turn running."""
     clock = Clock(monkeypatch)
-    walls.close(*ROUTE, limit='usage_limit_reached', reset_at=clock.now + 6 * DAY, request_id='req_1')
+    walls.close(*ROUTE, limit='usage_limit_reached', request_id='req_1')
     entry = {'coordination': {'quota': {'route': list(ROUTE)}}}
-    clock.advance(3600)
-    read_the_wall, theirs = walls.closed, []
+    clock.advance(300)
+    read_the_wall, theirs = walls.entry_held, []
 
     def read_then_the_other_gateway_offers(*route, **kwargs):
         held = read_the_wall(*route, **kwargs)
@@ -1080,18 +1081,71 @@ def test_of_two_gateways_offering_the_same_inbox_entry_one_is_the_probe_and_keep
             theirs[0] = walls.entry_turn(entry, PROFILE, 'req_1')
         return held
 
-    monkeypatch.setattr(walls, 'closed', read_then_the_other_gateway_offers)
+    monkeypatch.setattr(walls, 'entry_held', read_then_the_other_gateway_offers)
     ours = walls.entry_turn(entry, PROFILE, 'req_1')
-    monkeypatch.setattr(walls, 'closed', read_the_wall)
+    monkeypatch.setattr(walls, 'entry_held', read_the_wall)
     assert theirs == [ROUTE], 'the gateway that asked first offers the entry: its turn is the probe'
     assert ours is False, 'the other is held by the wall: it offers nothing, so it has no claim to lose'
     probe = walls.read(*ROUTE)['probe']
     assert probe == {'task_id': 'req_1', 'board': None, 'at': clock.now}
     # A card of the route is held beside that probe, and the probe's refusal is the one verdict.
     assert walls.take_probe(*ROUTE, task_id='t_card') is False and walls.read(*ROUTE)['probe'] == probe
-    refused, opened = walls.close(*ROUTE, limit='usage_limit_reached', reset_at=clock.now + 6 * DAY,
-                                  request_id='req_1')
-    assert not opened and (refused['probes'], refused['probe'], refused['next_probe_at']) == (1, None, clock.now + 3600)
+    refused, opened = walls.close(*ROUTE, limit='usage_limit_reached', request_id='req_1')
+    assert not opened and (refused['probes'], refused['probe'], refused['next_probe_at']) == (1, None, clock.now + 600)
+
+
+def test_an_inbox_entry_waits_for_the_reset_time_and_the_probe_of_the_hour_is_left_to_the_cards(
+        quota_board, monkeypatch):
+    """The probe of an inbox entry is the whole turn of its request, and each refused one leaves the wake of the
+    request once more in the session of the topic. With a reset time ahead the entry waits for it; a card of the
+    same route is still launched every hour, and the notices say of each what happens to it."""
+    clock = Clock(monkeypatch)
+    start, reset = clock.now, clock.now + 6 * DAY
+    entry = {'coordination': {'quota': {'route': list(ROUTE)}}}
+    wall, _ = walls.close(*ROUTE, limit='usage_limit_reached', reset_at=reset, request_id='req_1')
+    assert walls.open_at(wall) == start + 3600 and walls.entry_held(*ROUTE) == wall
+
+    for hour in (1, 2, 3):
+        clock.advance(3600)
+        assert walls.closed(*ROUTE) is None, 'due: the launch of a card of this route is its probe'
+        assert walls.entry_turn(entry, PROFILE, 'req_1') is False, 'the entry is held all the same'
+        assert walls.read(*ROUTE)['probe'] is None, 'and took no probe'
+        assert walls.take_probe(*ROUTE, task_id='t_card')['probe']['task_id'] == 't_card'
+        refused, opened = walls.close(*ROUTE, limit='usage_limit_reached', reset_at=reset, task_id='t_card')
+        assert (refused['probes'], refused['probe'], refused['next_probe_at']) == (hour, None, clock.now + 3600)
+
+    # The first notice of this wall promises no probe: no entry is one, and it cannot tell whether a card waits.
+    opening = walls.notice(wall)
+    assert walls.ENTRIES_RESUMED in opening and 'sonda' not in opening and 'a cada 60 min' not in opening
+    of_a_card = walls.notice(dict(wall, closed_by={'task_id': 't_a', 'board': None}))
+    assert 'Um lançamento sonda a rota a cada 60 min e nessa hora' in of_a_card
+    assert walls.ENTRIES_RESUMED not in of_a_card
+
+    def daily(cards, entries, standing=wall):
+        return walls.still_closed(standing, {'cards': cards, 'entries': entries, 'unread': 0})
+
+    # The day's notice knows what waits: of the entries it says when they are resumed, and a probe is a card's.
+    assert walls.ENTRIES_RESUMED in daily(0, 2) and 'sonda' not in daily(0, 2)
+    both = daily(1, 2)
+    assert walls.ENTRIES_RESUMED in both and 'O lançamento de um card sonda a rota a intervalos de até 60 min' in both
+    assert 'Um lançamento sonda a rota a intervalos de até 60 min' in daily(1, 0)
+    assert walls.ENTRIES_RESUMED not in daily(1, 0)
+    no_reset = dict(wall, reset_at=None)
+    assert 'Um lançamento sonda a rota a intervalos de até 60 min' in daily(0, 2, no_reset)
+    assert walls.ENTRIES_RESUMED not in daily(0, 2, no_reset)
+
+    # One second before the reset time the entry is still held. At that time its offer is the probe of the route.
+    clock.advance(reset - 1 - clock.now)
+    assert walls.closed(*ROUTE) is None and walls.entry_turn(entry, PROFILE, 'req_1') is False
+    clock.advance(1)
+    assert walls.entry_turn(entry, PROFILE, 'req_1') == ROUTE and walls.read(*ROUTE)['probe']['task_id'] == 'req_1'
+    assert 'Um lançamento sonda a rota a intervalos de até 60 min' in daily(0, 2)
+    assert walls.ENTRIES_RESUMED not in daily(0, 2)
+    # Refused there with no reset time: the wall is now the only clock the entry has, and it probes at its spacing.
+    refused, _ = walls.close(*ROUTE, limit='usage_limit_reached', request_id='req_1')
+    assert (refused['reset_at'], refused['probe'], refused['next_probe_at']) == (None, None, clock.now + 3600)
+    clock.advance(3600)
+    assert walls.entry_turn(entry, PROFILE, 'req_1') == ROUTE
 
 
 def test_a_writer_of_a_wall_does_not_wait_for_ever_for_its_lock(quota_board, monkeypatch, caplog):
