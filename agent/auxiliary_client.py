@@ -4781,8 +4781,15 @@ def _pool_cache_hint(
 
 
 def _pool_error_context(exc: Exception) -> Dict[str, Any]:
+    """What the pool is told about a failed auxiliary call: the same reason
+    and reset time the main loop reads from the provider's answer.  A mark
+    without them forgot the reset time of a usage window and put the
+    exhausted credential back in rotation one hour later."""
+    from agent.agent_runtime_helpers import extract_api_error_context
+
     status = getattr(exc, "status_code", None)
     payload: Dict[str, Any] = {"message": str(exc)}
+    payload.update(extract_api_error_context(exc))
     if status is not None:
         payload["status_code"] = status
     return payload

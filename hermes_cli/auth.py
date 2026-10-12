@@ -4275,6 +4275,7 @@ def resolve_codex_runtime_credentials(
             if stale_token and _probe_codex_quota_restored(
                 stale_token,
                 base_url=pool_rate_limit.get("base_url"),
+                not_before=pool_rate_limit.get("status_at"),
             ):
                 logger.info(
                     "Codex quota restored upstream — clearing stale pool cooldown(s)."
@@ -4422,6 +4423,7 @@ def _probe_codex_quota_restored(
     *,
     base_url: Optional[str] = None,
     min_interval_seconds: float = CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS,
+    not_before: Optional[float] = None,
 ) -> Optional[bool]:
     """Ask the Codex usage endpoint whether this account's quota is usable again.
 
@@ -4443,6 +4445,14 @@ def _probe_codex_quota_restored(
 
     Probes are throttled per access token (module-local cache) so the hot
     selection path can fire this freely.
+
+    *not_before* is the epoch time of the refusal that benched the credential
+    (the pool entry's ``last_status_at``).  A cached verdict taken before it
+    is not served: the provider refused the account after that verdict, so it
+    describes a window that has closed since, and serving it lifted the
+    cooldown the refusal had just written (the "rotation" then handed the
+    same account back on every 429 until the cache expired).  The endpoint is
+    asked again instead, once per refusal.
     """
     token = str(access_token or "").strip()
     if not token:
@@ -4458,7 +4468,9 @@ def _probe_codex_quota_restored(
     with _codex_quota_probe_lock:
         cached = _codex_quota_probe_cache.get(cache_key)
         if cached is not None and (now - cached[0]) < min_interval_seconds:
-            return cached[1]
+            # Both ages are measured from now, one on each clock.
+            if not_before is None or (now - cached[0]) < (time.time() - float(not_before)):
+                return cached[1]
         # Reserve the slot immediately so concurrent selectors don't stampede
         # the endpoint while this probe is in flight.
         _codex_quota_probe_cache[cache_key] = (now, None)
@@ -4621,6 +4633,7 @@ def _codex_pool_rate_limit_status() -> Optional[Dict[str, Any]]:
                 "label": entry.get("label"),
                 "last_refresh": entry.get("last_refresh"),
                 "reset_at": reset_at,
+                "status_at": _parse_reset_at(entry.get("last_status_at")),
                 "reason": entry.get("last_error_reason"),
                 "message": entry.get("last_error_message"),
                 "access_token": token.strip(),
