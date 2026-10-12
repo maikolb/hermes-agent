@@ -60,6 +60,30 @@ class ProviderRateLimit(Exception):
         return 'Error code: 429 - Rate limit exceeded.'
 
 
+class GoUsageLimit(ProviderRateLimit):
+    """The opencode-go weekly wall, as the profile's log has it on 2026-10-10: this body (the workspace id is not the
+    real one) and a Retry-After longer than the client's 600 s cap, so the client reads it as a throttle and waits
+    600 s before each new attempt."""
+    body = {'type': 'error', 'error': {'type': 'GoUsageLimitError', 'message': 'Go usage limit exceeded'},
+            'metadata': {'workspace': 'wrk_quota_wall_suite', 'limitName': 'weekly'}}
+    response = SimpleNamespace(status_code=429, headers={'retry-after': '86400'})
+
+    def __str__(self):
+        return f'Error code: 429 - {self.body}'
+
+
+class GoUsageLimitNoReset(GoUsageLimit):
+    """The same body with no reset signal: the classifier reads it as billing and the client does not retry."""
+    response = SimpleNamespace(status_code=429, headers={})
+
+
+def reply(text):
+    """What a provider answers when it has quota: plain text, no tool call."""
+    message = SimpleNamespace(content=text, tool_calls=None)
+    return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason='stop')], model=EXECUTOR_MODEL,
+                           usage=None)
+
+
 class SkippedWaits:
     """`time` for the retry loop only: its backoff advances this clock instead of sleeping."""
 
@@ -77,16 +101,18 @@ class SkippedWaits:
         self.waited += seconds
 
 
-def agent_on_quota_wall(monkeypatch, *, provider, model):
-    """A real AIAgent with the profile's fallback chain whose provider answers every call with 429.
-    Returns the agent and what it did: provider calls, turns, results, fallback switches, other clients asked for."""
+def agent_on_quota_wall(monkeypatch, *, provider, model, answer=None):
+    """A real AIAgent with the profile's fallback chain whose provider answers every call with 429, or with what
+    `answer(seen)` returns or raises when a test scripts the provider.
+    Returns the agent and what it did: provider calls, refusals, turns, results, fallback switches, other clients
+    asked for."""
     from agent import auxiliary_client, conversation_loop
     from hermes_cli.config import load_config
     from hermes_cli.fallback_config import get_fallback_chain
     from run_agent import AIAgent
 
     clear_env(monkeypatch, PROCESS_ENV)
-    seen = SimpleNamespace(provider_calls=0, turns=0, results=[], fallback=[], reserve=[])
+    seen = SimpleNamespace(provider_calls=0, refused=0, turns=0, results=[], fallback=[], reserve=[])
     with (patch('run_agent.get_tool_definitions', return_value=[]),
           patch('run_agent.check_toolset_requirements', return_value={}),
           patch('run_agent.OpenAI')):
@@ -99,7 +125,13 @@ def agent_on_quota_wall(monkeypatch, *, provider, model):
 
     def wall(*args, **kwargs):
         seen.provider_calls += 1
-        raise ProviderRateLimit()
+        try:
+            if answer is None:
+                raise ProviderRateLimit()
+            return answer(seen)
+        except ProviderRateLimit:
+            seen.refused += 1
+            raise
 
     agent._interruptible_api_call = wall
     agent._interruptible_streaming_api_call = wall
@@ -209,6 +241,10 @@ def quota_board(tmp_path, monkeypatch, all_assignees_spawnable):
     monkeypatch.delenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', raising=False)
     clear_env(monkeypatch, WORKER_ENV + PROCESS_ENV)
     (home / 'config.yaml').write_text(yaml.safe_dump(PROFILE_CONFIG), encoding='utf-8')
+    # A profile's state.db always has its session tables. Without this the first test of a process gets a state.db
+    # holding only what another store created there, and a relaunch that looks its session up fails to spawn.
+    from hermes_state import SessionDB
+    SessionDB(db_path=home / 'state.db').close()
     monkeypatch.setattr(kb, '_retag_legacy_worker_sessions', lambda path: None)
     monkeypatch.setattr(kb, '_resolve_worker_cli_toolsets', lambda home: ['terminal'])
     monkeypatch.setattr(kb, '_memory_pressure_level', lambda: 'normal')
