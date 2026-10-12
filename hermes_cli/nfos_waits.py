@@ -160,10 +160,10 @@ def _predicate(reason, spec, value):
             raise d.WorkflowError('lab_receipt needs the id of the laboratory request')
         return {'kind': 'lab_receipt', 'receipt': receipt}
     if value['kind'] == 'route_open':
-        provider, model = value.get('provider'), value.get('model')
-        if not isinstance(provider, str) or not provider or not isinstance(model, str) or not model:
-            raise d.WorkflowError('route_open needs the provider and the model of the route')
-        return {'kind': 'route_open', 'provider': provider, 'model': model}
+        route = {part: value.get(part) for part in ('profile', 'provider', 'model')}
+        if not all(isinstance(part, str) and part for part in route.values()):
+            raise d.WorkflowError('route_open needs the profile, the provider and the model of the route')
+        return {'kind': 'route_open', **route}
     decision_id = value.get('decision_id')
     if not isinstance(decision_id, str) or not decision_id:
         raise d.WorkflowError('decision_resolved needs the decision id')

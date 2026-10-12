@@ -124,5 +124,9 @@
   {"pr": 327, "file": "hermes_cli/nfos_route_walls.py", "text": "def claim_notice("},
   {"pr": 327, "file": "gateway/kanban_watchers.py", "text": "async def _kanban_route_wall_notices("},
   {"pr": 327, "file": "gateway/kanban_watchers.py", "text": "await self._kanban_route_wall_notices()"},
-  {"pr": 327, "file": "gateway/kanban_watchers.py", "text": "(profile, int(bool(management))),"}
+  {"pr": 327, "file": "gateway/kanban_watchers.py", "text": "(profile, int(bool(management))),"},
+  {"pr": 327, "file": "hermes_cli/nfos_route_walls.py", "text": "def _key(profile, provider, model):"},
+  {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "return f\"route_closed:{walls.label(wall)}\" if wall else None"},
+  {"pr": 327, "file": "gateway/kanban_watchers.py", "text": "route = _walls.label(wall)"},
+  {"pr": 327, "file": "hermes_cli/nfos_waits.py", "text": "route_open needs the profile, the provider and the model of the route"}
 ]

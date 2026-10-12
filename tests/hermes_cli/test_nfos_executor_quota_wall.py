@@ -82,7 +82,7 @@ def quota_wall(launcher, monkeypatch, answer=None, judge_reply=None):
     return run
 
 
-ROUTE_CLOSED = f'route_closed:{EXECUTOR_PROVIDER}/{EXECUTOR_MODEL}'
+ROUTE_CLOSED = f'route_closed:{EXECUTOR_PROVIDER}/{EXECUTOR_MODEL}@default'  # the route of the profile launched
 
 
 def assert_left_on_the_wall(run, launcher, route_closed_until_reset=False):

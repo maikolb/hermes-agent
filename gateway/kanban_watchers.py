@@ -4642,8 +4642,9 @@ class GatewayKanbanWatchersMixin:
     async def _kanban_route_wall_notices(self) -> None:
         """One notice per provider route a long usage window closed (ROUTE_WALL_20261012).
 
-        A closed route is a fact of the host, not of the card whose worker met
-        the wall. As a ``model_fallback`` event on that card the notice only
+        A closed route is a fact of one profile of the host (the quota of its
+        credential ran out), not of the card whose worker met the wall, and the
+        notice names that profile. As a ``model_fallback`` event on that card the notice only
         reached a chat through the card's subscription, and a card born in its
         project's topic has no other: there the notifier publishes nothing
         passive (CLIENT_CHAT_20260913), so the route would close in silence
@@ -4697,7 +4698,7 @@ class GatewayKanbanWatchersMixin:
         warned: set = getattr(self, "_kanban_route_wall_unsent", set())
         self._kanban_route_wall_unsent = warned
         for wall in pending:
-            route = f"{wall.get('provider')}/{wall.get('model')}"
+            route = _walls.label(wall)  # provider/model@profile: a wall is of one profile's credential
             key = (route, wall.get("closed_at"))
             if not senders:
                 if key not in warned:

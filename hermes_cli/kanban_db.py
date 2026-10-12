@@ -13889,10 +13889,13 @@ _clear_spawn_failures = _clear_failure_counter
 def _route_wall_hold(
     conn: sqlite3.Connection, task_id: str, *, dry_run: bool = False,
 ) -> Optional[str]:
-    """``route_closed:<provider>/<model>`` when a provider's long usage window closes this card's route, else None.
+    """``route_closed:<provider>/<model>@<profile>`` when a provider's long usage window closes this card's route,
+    else None.
 
     ROUTE_WALL_20261012. Asked for each ready/review card before any claim. A held card is not launched, holds no
     slot and counts no failure; it stands in the wait registry until the route reopens (``nfos_route_walls``).
+    The route is the card's own: the profile it is launched as (its assignee, whose credential the worker uses),
+    the provider and the model. Another profile's wall on the same provider and model does not hold it.
     A card with an open decision is left to that hold, which keeps its reminders and its own wait: one wait at a
     time. Never a reason to stop dispatch: an unreadable wall lets the card through, as before this rule.
     """
@@ -13902,7 +13905,7 @@ def _route_wall_hold(
             return None
         task = get_task(conn, task_id)
         wall = walls.hold(conn, task, dry_run=dry_run) if task is not None else None
-        return f"route_closed:{wall['provider']}/{wall['model']}" if wall else None
+        return f"route_closed:{walls.label(wall)}" if wall else None
     except Exception:  # noqa: BLE001
         _log.warning("kanban dispatcher: route wall check failed for %s", task_id, exc_info=True)
         return None

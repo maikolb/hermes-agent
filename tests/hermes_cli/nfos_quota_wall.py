@@ -5,6 +5,7 @@ Nothing here reaches a provider. The board is a real SQLite board in a temporary
 tick, and a worker is a real child process whose exit status the test decides, so the dispatcher reaps and classifies
 a real wait status. The clock is the only thing moved by hand.
 """
+import os
 import signal
 import subprocess
 import sys
@@ -38,6 +39,9 @@ PROFILE_CONFIG = {
 WORKER_ENV = ('HERMES_KANBAN_TASK', 'HERMES_KANBAN_WORKSPACE', 'HERMES_KANBAN_RUN_ID', 'HERMES_KANBAN_CLAIM_LOCK',
               'HERMES_KANBAN_GOAL_MODE', 'HERMES_KANBAN_GOAL_MAX_TURNS', 'HERMES_KANBAN_BOARD',
               'HERMES_KANBAN_WORKSPACES_ROOT', 'HERMES_SESSION_SOURCE', 'HERMES_PROFILE', 'HERMES_KANBAN_ROUTE')
+# Where the dispatcher puts its worker: the home of the profile the card is launched as (its config and its
+# credentials) and the board's database. This process has its own value of each, put back when the worker leaves.
+WORKER_PLACE = ('HERMES_HOME', 'HERMES_KANBAN_DB')
 # Variables the single-query path writes into the process on its own.
 PROCESS_ENV = ('HERMES_INTERACTIVE', 'HERMES_SINGLE_QUERY_SESSION', 'HERMES_SESSION_ID')
 
@@ -332,7 +336,8 @@ def run_executor(monkeypatch, argv, env, answer=None, judge_reply=None):
     import cli as cli_mod
     from agent import auxiliary_client
 
-    for key in WORKER_ENV:
+    place = {key: os.environ.get(key) for key in WORKER_PLACE}
+    for key in WORKER_ENV + WORKER_PLACE:
         if key in env:
             monkeypatch.setenv(key, env[key])
     agent, seen = agent_on_quota_wall(monkeypatch, provider=option(argv, '--provider'), model=option(argv, '-m'),
@@ -387,5 +392,10 @@ def run_executor(monkeypatch, argv, env, answer=None, judge_reply=None):
             signal.signal(number, handler)
         for key in WORKER_ENV:
             monkeypatch.delenv(key, raising=False)
+        for key, value in place.items():
+            if value is None:
+                monkeypatch.delenv(key, raising=False)
+            else:
+                monkeypatch.setenv(key, value)
     seen.exit_code = left.value.code
     return seen

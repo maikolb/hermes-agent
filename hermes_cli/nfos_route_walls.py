@@ -15,7 +15,17 @@ the limit (``metadata.limitName``), the reset time (``resets_at`` / ``reset_at``
   does. A named limit with no reset time is a window whose end is unknown. Anything else stays what it was.
 * ``on_quota_error`` is the conversation loop's single question: leave the turn on this attempt? A dispatcher-owned
   kanban worker also closes its route here.
-* A closed route is one file under the shared kanban root, so every board and every profile of the host sees it.
+* A route is the profile a card is launched as, the provider and the model. The profile is part of it because the
+  quota that ran out belongs to a credential, and the credential is the profile's: two profiles of one host on the
+  same provider and model with an account each do not share a window, and the wall of one must not hold the cards
+  of the other. The profile's name stands for its credential because the dispatcher has to name the route before
+  it launches, and what identifies the credential a launch will use (which pool entry, the profile's or the
+  root's, or a key in the environment) is only settled inside the worker, by reading the secret store. Two
+  profiles that do share one account each meet the wall themselves: two walls, two notices, two probes. The
+  account the provider names in its refusal (``metadata.workspace``) is kept on the wall for whoever reads it,
+  and decides nothing.
+* A closed route is one file under the shared kanban root, so every board of the host sees it and every
+  dispatcher finds the wall of the profile it launches a card as.
   The dispatcher asks ``closed`` before it claims a card: while the route is closed the card is not launched,
   holds no slot, counts no failure and stands in the wait registry (``nfos_waits``, reason ``provider_quota``).
   That wait is the card's only while the route is what the card waits for: a card whose route changed, or that
@@ -187,10 +197,29 @@ def quota_window(error, *, now=None):
     return {'limit': name or _error_kind(payloads) or 'retry-after', 'reset_at': reset_at}
 
 
+def quota_account(error):
+    """The account the provider says it refused (opencode-go: ``metadata.workspace``), or ``None``.
+
+    Kept on the wall so a person can tell whose quota ran out. It is no part of the route and of no decision:
+    the dispatcher cannot know it before a launch, and most providers do not say it."""
+    for payload in _payloads(error):
+        metadata = payload.get('metadata')
+        account = metadata.get('workspace') if isinstance(metadata, dict) else None
+        if isinstance(account, str) and account.strip():
+            return account.strip()[:120]
+    return None
+
+
 # ── The closed routes of this host ──────────────────────────────────────
 
-def _key(provider, model):
-    return str(provider or '').strip().lower(), str(model or '').strip().lower()
+def _key(profile, provider, model):
+    """A route: the profile the card is launched as (its credential), the provider and the model. The profile is
+    spelled as ``profiles.normalize_profile_name`` spells it, which is what the launch passes to ``-p``."""
+    return tuple(str(part or '').strip().lower() for part in (profile, provider, model))
+
+
+def _route(wall):
+    return wall.get('profile'), wall.get('provider'), wall.get('model')
 
 
 def _dir():
@@ -198,12 +227,12 @@ def _dir():
     return kanban_home() / 'kanban' / 'route_walls'
 
 
-def _path(provider, model, kind='.json'):
+def _path(profile, provider, model, kind='.json'):
     """The file of this route: named by the route so a person can find it, and by its digest so two routes
     never share one."""
-    provider, model = _key(provider, model)
-    digest = hashlib.sha256(f'{provider}\n{model}'.encode()).hexdigest()[:12]
-    readable = re.sub(r'[^a-z0-9._-]+', '_', f'{provider}--{model}')[:80]
+    profile, provider, model = _key(profile, provider, model)
+    digest = hashlib.sha256(f'{profile}\n{provider}\n{model}'.encode()).hexdigest()[:12]
+    readable = re.sub(r'[^a-z0-9._-]+', '_', f'{profile}--{provider}--{model}')[:120]
     return _dir() / f'{readable}.{digest}{kind}'
 
 
@@ -215,9 +244,9 @@ def _load(path):
     return record if isinstance(record, dict) else None
 
 
-def read(provider, model):
+def read(profile, provider, model):
     """The wall closing this route, or ``None``."""
-    return _load(_path(provider, model))
+    return _load(_path(profile, provider, model))
 
 
 def walls():
@@ -226,7 +255,7 @@ def walls():
         files = sorted(_dir().glob('*.json'))
     except OSError:
         return []
-    return [record for record in map(_load, files) if record and record.get('provider') and record.get('model')]
+    return [record for record in map(_load, files) if record and all(_route(record))]
 
 
 def any_closed():
@@ -288,9 +317,10 @@ def open_at(wall):
     return max(float(wall.get('reset_at') or 0), float(wall.get('next_probe_at') or 0))
 
 
-def close(provider, model, *, limit, reset_at=None, task_id=None, board=None, now=None):
+def close(profile, provider, model, *, limit, reset_at=None, account=None, task_id=None, board=None, now=None):
     """A worker met a long usage window on this route. Returns ``(wall, opened)``; ``opened`` is true only for
-    the call that closed an open route with a new wall.
+    the call that closed an open route with a new wall. ``account`` is what the provider named in its refusal,
+    kept as information.
 
     A route that closes again by the same limit sooner after it reopened than its next probe would have waited
     had not reached the end of the window (a rolling window gives quota back a little at a time). It is the same
@@ -299,55 +329,57 @@ def close(provider, model, *, limit, reset_at=None, task_id=None, board=None, no
 
     On a route already closed nothing changes unless the caller is the probe: its refusal is the verdict of the
     probe, so the next one is scheduled and the provider's current reset time replaces the old one."""
-    provider, model = _key(provider, model)
-    if not provider or not model:
+    route = profile, provider, model = _key(profile, provider, model)
+    if not all(route):
         return None, False
     now = time.time() if now is None else float(now)
-    wall = {'provider': provider, 'model': model, 'limit': str(limit), 'reset_at': reset_at, 'closed_at': now,
-            'walled_at': now, 'probes': 0, 'next_probe_at': now + _probe_spacing(0), 'probe': None,
+    wall = {'profile': profile, 'provider': provider, 'model': model, 'limit': str(limit), 'reset_at': reset_at,
+            'account': account, 'closed_at': now, 'walled_at': now, 'probes': 0,
+            'next_probe_at': now + _probe_spacing(0), 'probe': None,
             'closed_by': {'task_id': task_id, 'board': board}}
-    before = _load(_path(provider, model, REOPENED)) or {}
+    before = _load(_path(*route, REOPENED)) or {}
     probes = int(before.get('probes') or 0) + 1
     goes_on = (before.get('limit') == wall['limit'] and before.get('closed_at')
                and now - float(before.get('reopened_at') or 0) < _probe_spacing(probes))
     if goes_on:
         wall.update(closed_at=before['closed_at'], closed_by=before.get('closed_by') or wall['closed_by'],
                     probes=probes, next_probe_at=now + _probe_spacing(probes))
-    if _create(_path(provider, model), wall):
+    if _create(_path(*route), wall):
         return wall, not goes_on
-    existing = read(provider, model)
+    existing = read(*route)
     if existing is None:
         return None, False
     if task_id and (existing.get('probe') or {}).get('task_id') == task_id:
         probes = int(existing.get('probes') or 0) + 1
         existing.update(probes=probes, probe=None, walled_at=now, limit=str(limit), reset_at=reset_at,
-                        next_probe_at=now + _probe_spacing(probes))
-        _write(_path(provider, model), existing)
+                        account=account or existing.get('account'), next_probe_at=now + _probe_spacing(probes))
+        _write(_path(*route), existing)
     return existing, False
 
 
-def reopen(provider, model, *, now=None):
+def reopen(profile, provider, model, *, now=None):
     """The provider answered: the route is open. The wall is put aside, not erased, so ``close`` can tell a
     route that closes again at once from a new wall."""
-    wall = read(provider, model)
+    route = _key(profile, provider, model)
+    wall = read(*route)
     if wall is None:
         return False
     wall.update(reopened_at=time.time() if now is None else float(now), probe=None)
     try:
-        _write(_path(provider, model, REOPENED), wall)
+        _write(_path(*route, REOPENED), wall)
     except OSError:  # the route opens all the same; its next wall will be a new one
-        logger.warning('ROUTE_WALL_20261012 could not keep the reopened wall of %s/%s', provider, model, exc_info=True)
+        logger.warning('ROUTE_WALL_20261012 could not keep the reopened wall of %s', label(wall), exc_info=True)
     try:
-        _path(provider, model).unlink()
+        _path(*route).unlink()
         return True
     except OSError:
         return False
 
 
-def closed(provider, model, *, now=None):
+def closed(profile, provider, model, *, now=None):
     """The wall holding launches on this route right now, or ``None``: the route is open, or its reopening is
     due and no probe is in flight, so the next launch is the probe (``take_probe``)."""
-    wall = read(provider, model)
+    wall = read(profile, provider, model)
     if wall is None:
         return None
     now = time.time() if now is None else float(now)
@@ -357,14 +389,19 @@ def closed(provider, model, *, now=None):
     return wall if now < open_at(wall) else None
 
 
-def take_probe(provider, model, *, task_id, board=None, now=None):
+def take_probe(profile, provider, model, *, task_id, board=None, now=None):
     """The dispatcher claimed ``task_id`` on a closed route whose reopening is due: that launch is the probe."""
-    wall = read(provider, model)
+    wall = read(profile, provider, model)
     if wall is None:
         return None
     wall['probe'] = {'task_id': task_id, 'board': board, 'at': time.time() if now is None else float(now)}
-    _write(_path(provider, model), wall)
+    _write(_path(profile, provider, model), wall)
     return wall
+
+
+def label(wall):
+    """A route as logs and the dispatcher's diagnosis name it: ``<provider>/<model>@<profile>``."""
+    return f"{wall.get('provider')}/{wall.get('model')}@{wall.get('profile')}"
 
 
 # ── The one notice of a wall ────────────────────────────────────────────
@@ -377,8 +414,10 @@ def _span(seconds):
 
 
 def notice(wall):
-    """The one message of a wall, for the operations channel."""
+    """The one message of a wall, for the operations channel. It says whose route closed: another profile on the
+    same provider and model goes on with its own credential."""
     route = f"{wall['provider']}/{wall['model']}"
+    account = f" (conta {wall['account']})" if wall.get('account') else ''
     if wall.get('reset_at'):
         when = time.strftime('%d/%m %H:%M UTC', time.gmtime(float(wall['reset_at'])))
         asked = _span(float(wall['reset_at']) - float(wall.get('walled_at') or wall.get('closed_at') or 0))
@@ -388,8 +427,9 @@ def notice(wall):
         first, ceiling = _probe_spacing(0) // 60, PROBE_CEILING_SECONDS // 60
         reopening = (f'sem hora de reinício informada. Um lançamento sonda a rota em {first} min e depois a intervalos '
                      f'que dobram até {ceiling} min; ela reabre quando o provedor responder.')
-    return (f"Rota {route} fechada: o provedor recusou pelo limite {wall['limit']}, {reopening} "
-            'Os cards dessa rota esperam sem ocupar vaga e sem contar falha. Nenhuma outra rota é usada no lugar.')
+    return (f"Rota {route} fechada para o perfil {wall['profile']}: o provedor recusou pelo limite {wall['limit']}"
+            f'{account}, {reopening} Os cards desse perfil nessa rota esperam sem ocupar vaga e sem contar falha. '
+            'Nenhuma outra rota é usada no lugar.')
 
 
 def _noticed(wall, sent, now):
@@ -402,14 +442,13 @@ def _noticed(wall, sent, now):
 def unannounced(*, now=None):
     """The closed routes whose notice has not gone out. The gateway's notifier sends it."""
     now = time.time() if now is None else float(now)
-    return [wall for wall in walls()
-            if not _noticed(wall, _load(_path(wall.get('provider'), wall.get('model'), NOTICE)), now)]
+    return [wall for wall in walls() if not _noticed(wall, _load(_path(*_route(wall), NOTICE)), now)]
 
 
 def claim_notice(wall, *, now=None):
     """Take this wall's notice for the caller. False when another notifier holds it or has sent it."""
     now = time.time() if now is None else float(now)
-    path = _path(wall['provider'], wall['model'], NOTICE)
+    path = _path(*_route(wall), NOTICE)
     claim = {'closed_at': wall.get('closed_at'), 'claimed_at': now, 'sent_at': None, 'deliveries': []}
     sent = _load(path)
     if _noticed(wall, sent, now):
@@ -422,7 +461,7 @@ def claim_notice(wall, *, now=None):
 
 def notice_sent(wall, deliveries, *, now=None):
     """The receipt of the notice: a restart or a second gateway does not send it again."""
-    _write(_path(wall['provider'], wall['model'], NOTICE),
+    _write(_path(*_route(wall), NOTICE),
            {'closed_at': wall.get('closed_at'), 'claimed_at': None, 'deliveries': list(deliveries),
             'sent_at': time.time() if now is None else float(now)})
 
@@ -437,17 +476,25 @@ def _owns_card():
     return is_dispatcher_owned_worker_context() and os.environ.get(DELEGATED_CHILD_ENV_MARKER) != '1'
 
 
+def _own_profile():
+    """The profile this process runs as: the one whose home, and so whose credentials, it reads. For a card's
+    worker that is the profile the dispatcher launched it as (``-p`` and ``HERMES_HOME`` of ``_default_spawn``)."""
+    from hermes_cli.profiles import get_active_profile_name
+    return get_active_profile_name()
+
+
 def worker_route(agent):
     """The route this worker is on: the one the dispatcher launched it with while it runs its primary model
-    (the dispatcher's own spelling, so both sides name the same route), else what the agent switched to."""
-    if not getattr(agent, '_fallback_activated', False):
-        try:
-            provider, model = json.loads(os.environ.get(ROUTE_ENV) or 'null') or (None, None)
-        except (ValueError, TypeError):
-            provider = model = None
-        if provider and model:
-            return _key(provider, model)
-    return _key(getattr(agent, 'provider', ''), getattr(agent, 'model', ''))
+    (the dispatcher's own spelling, so both sides name the same route), else what the agent switched to. The
+    profile is the launch's in both cases, and this process's own when the launch did not say."""
+    try:
+        launched = json.loads(os.environ.get(ROUTE_ENV) or 'null')
+    except (ValueError, TypeError):
+        launched = None
+    profile, provider, model = launched if isinstance(launched, list) and len(launched) == 3 else (None, None, None)
+    if getattr(agent, '_fallback_activated', False) or not (provider and model):
+        provider, model = getattr(agent, 'provider', ''), getattr(agent, 'model', '')
+    return _key(profile or _own_profile(), provider, model)
 
 
 def on_quota_error(agent, error):
@@ -465,13 +512,13 @@ def on_quota_error(agent, error):
         return False
     try:
         if _owns_card() and not agent._has_pending_fallback():
-            provider, model = worker_route(agent)
-            wall, opened = close(provider, model, limit=window['limit'], reset_at=window['reset_at'],
+            wall, opened = close(*worker_route(agent), limit=window['limit'], reset_at=window['reset_at'],
+                                 account=quota_account(error),
                                  task_id=os.environ.get('HERMES_KANBAN_TASK', '').strip(),
                                  board=os.environ.get('HERMES_KANBAN_BOARD', '').strip() or None)
             if opened:
-                logger.warning('ROUTE_WALL_20261012 route %s/%s closed by limit %s (reset_at=%s)',
-                               provider, model, wall['limit'], wall['reset_at'])
+                logger.warning('ROUTE_WALL_20261012 route %s closed by limit %s (reset_at=%s)',
+                               label(wall), wall['limit'], wall['reset_at'])
     except Exception:  # noqa: BLE001 - the verdict stands; a route left unmarked is launched on as before this rule
         logger.warning('ROUTE_WALL_20261012 could not close the route', exc_info=True)
     return True
@@ -495,7 +542,7 @@ def answered(agent):
         if wall is None or float(wall.get('walled_at') or 0) >= mark[0]:
             return False
         if reopen(*route):
-            logger.warning('ROUTE_WALL_20261012 route %s/%s reopened: the provider answered', *route)
+            logger.warning('ROUTE_WALL_20261012 route %s reopened: the provider answered', label(wall))
             return True
     except Exception:  # noqa: BLE001
         logger.debug('ROUTE_WALL_20261012 answer check failed', exc_info=True)
@@ -524,8 +571,11 @@ def _profile_route(assignee):
 
 
 def card_route(conn, task):
-    """The (provider, model) ``_default_spawn`` launches this card on, or ``None`` when it cannot be told."""
+    """The route ``_default_spawn`` launches this card on, or ``None`` when it cannot be told: the profile the
+    worker runs as (the card's assignee, whatever profile this dispatcher is), the provider and the model."""
     from hermes_cli import nfos_delivery as delivery
+    if not task.assignee:
+        return None  # the launch itself refuses a card with no assignee
     provider = model = None
     if delivery.get_workflow(conn, task.id):
         from hermes_cli.nfos_principal_review import worker_model_args
@@ -534,10 +584,10 @@ def card_route(conn, task):
         provider = args[args.index('--provider') + 1] if '--provider' in args else None
     elif task.model_override:
         model, provider = task.model_override, task.provider_override
-    if not (provider and model) and task.assignee:
+    if not (provider and model):
         base_provider, base_model = _profile_route(task.assignee)
         provider, model = provider or base_provider, model or base_model
-    return _key(provider, model) if provider and model else None
+    return _key(task.assignee, provider, model) if provider and model else None
 
 
 def _other_hold(conn, task_id):
@@ -561,12 +611,13 @@ def hold(conn, task, *, dry_run=False):
     if wall is None or dry_run or _other_hold(conn, task.id):
         return wall
     from hermes_cli import nfos_delivery as delivery, nfos_waits
-    label = f"{wall['provider']}/{wall['model']}"
+    name = f"{wall['provider']}/{wall['model']}"
     try:
         nfos_waits.declare(
-            conn, task.id, None, reason='provider_quota', executor={'kind': 'external', 'name': label},
-            predicate={'kind': 'route_open', 'provider': wall['provider'], 'model': wall['model']},
-            subject=f"a rota {label} (limite {wall['limit']} do provedor)",
+            conn, task.id, None, reason='provider_quota', executor={'kind': 'external', 'name': name},
+            predicate={'kind': 'route_open', 'profile': wall['profile'], 'provider': wall['provider'],
+                       'model': wall['model']},
+            subject=f"a rota {name} do perfil {wall['profile']} (limite {wall['limit']} do provedor)",
             evidence={'limit': wall['limit'], 'reset_at': wall.get('reset_at'), 'closed_at': wall.get('closed_at')})
     except delivery.WorkflowError:
         pass  # this card's wait already ran its whole deadline in this round: it stays held, no longer as a wait
@@ -591,7 +642,7 @@ def spawn_route(conn, task):
 def wait_check(conn, wait):
     """Predicate ``route_open``: true once the route has no wall."""
     predicate = wait['predicate']
-    wall = read(predicate.get('provider'), predicate.get('model'))
+    wall = read(predicate.get('profile'), predicate.get('provider'), predicate.get('model'))
     if wall is None:
         return True, {'route': 'open'}
     return False, {'route': 'closed', 'limit': wall.get('limit'), 'reset_at': wall.get('reset_at'),
@@ -603,14 +654,15 @@ def wait_withdrawn(conn, wait):
 
     The wall file tells whether the route is closed; only the card tells whether that route is still the one it
     is launched on. A card moved to another route (the profile's worker route changed, a model pinned on the
-    card, an escalation) is launched there while the old wall stands with no card left to probe it, and a wait
-    left open would keep saying the card waits. The same for a card another hold took over."""
+    card, an escalation, the card given to another profile) is launched there while the old wall stands with no
+    card left to probe it, and a wait left open would keep saying the card waits. The same for a card another
+    hold took over."""
     from hermes_cli import kanban_db as kb
     task = kb.get_task(conn, wait['task_id'])
     if task is None:
         return None
     predicate = wait['predicate']
-    if card_route(conn, task) != _key(predicate.get('provider'), predicate.get('model')):
+    if card_route(conn, task) != _key(predicate.get('profile'), predicate.get('provider'), predicate.get('model')):
         return 'route_changed'
     return 'other_hold' if _other_hold(conn, task.id) else None
 

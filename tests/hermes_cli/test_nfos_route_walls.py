@@ -10,9 +10,13 @@ What these tests hold, with the real dispatcher tick, a real board, real child p
 single-query path of the worker (only the provider call, the goal judge and the clock are stand-ins):
 
 * the worker leaves on the first refusal of a usage window, with no wait inside the turn;
-* the route (provider and model) is closed for the whole host, with the name of the limit and the reset time when
-  the provider gives one, and one notice goes out for it, from the gateway's notifier to the management topic,
-  whatever chat the card that met the wall was born in;
+* the route (the profile the card is launched as, the provider and the model) is closed on every board of the
+  host, with the name of the limit, the reset time when the provider gives one and the account it named, and one
+  notice goes out for it, from the gateway's notifier to the management topic, whatever chat the card that met
+  the wall was born in;
+* the wall is of that profile's credential: another profile of the host on the same provider and model, with an
+  account of its own, goes on being launched and delivers, and gets a wall and a notice of its own when its own
+  window ends; the dispatcher and the worker name the same route when the card's profile is not the dispatcher's;
 * while it is closed no card of that route is launched: the cards hold no slot, count no failure and stand in the
   wait registry; a card of another route is launched as always, and a card that leaves the route, or that another
   hold takes, stops being said to wait for it;
@@ -45,8 +49,10 @@ from tests.hermes_cli.nfos_quota_wall import (  # noqa: F401
 
 pytestmark = pytest.mark.skipif(os.name != 'posix', reason='the dispatcher reaps a worker exit status only on POSIX')
 
-ROUTE = (EXECUTOR_PROVIDER, EXECUTOR_MODEL)
-HELD = f'route_closed:{EXECUTOR_PROVIDER}/{EXECUTOR_MODEL}'
+# The profile the suite's cards are launched as (the dispatcher's own), and its route on the executor's provider.
+PROFILE = 'default'
+ROUTE = (PROFILE, EXECUTOR_PROVIDER, EXECUTOR_MODEL)
+HELD = f'route_closed:{EXECUTOR_PROVIDER}/{EXECUTOR_MODEL}@{PROFILE}'
 DAY = 86400
 CONTINUE = json.dumps({'verdict': 'continue', 'reason': 'the total on the screen is not corrected yet'})
 SECOND_REQUEST = '[Japa|1]\nCorrija a ordenação da tela de pedidos.'
@@ -65,11 +71,18 @@ def answered_once(seen):
     raise ProviderRateLimit()
 
 
+def launch_of(launcher, task_id):
+    """The argv and environment of this card's latest launch."""
+    return next(launch for launch in reversed(launcher.launches) if launch[1]['HERMES_KANBAN_TASK'] == task_id)
+
+
 def run_card(conn, launcher, monkeypatch, task_id, answer, judge_reply=None):
-    """The worker of this card's latest launch, run in this process, leaving with the code it chose."""
-    argv, env = next(launch for launch in reversed(launcher.launches) if launch[1]['HERMES_KANBAN_TASK'] == task_id)
+    """The worker of this card's latest launch, run in this process, in the home and on the board the launch gave
+    it, leaving with the code it chose."""
+    argv, env = launch_of(launcher, task_id)
+    pid = kb.get_task(conn, task_id).worker_pid  # a card its worker hands in no longer names the process
     run = run_executor(monkeypatch, argv, env, answer=answer, judge_reply=judge_reply)
-    launcher.exit(kb.get_task(conn, task_id).worker_pid, run.exit_code)
+    launcher.exit(pid, run.exit_code)
     return run
 
 
@@ -138,7 +151,8 @@ def assert_waiting(conn, tick, task_ids):
         assert card.status == 'ready' and card.consecutive_failures == 0 and card.claim_lock is None
         (wait,) = [wait for wait in quota_waits(conn, task_id) if wait['status'] == 'open']
         assert wait['executor'] == {'kind': 'external', 'name': f'{EXECUTOR_PROVIDER}/{EXECUTOR_MODEL}'}
-        assert wait['predicate'] == {'kind': 'route_open', 'provider': EXECUTOR_PROVIDER, 'model': EXECUTOR_MODEL}
+        assert wait['predicate'] == {'kind': 'route_open', 'profile': PROFILE, 'provider': EXECUTOR_PROVIDER,
+                                     'model': EXECUTOR_MODEL}
 
 
 def close_route_with_two_cards(conn, launcher, monkeypatch, wall):
@@ -165,18 +179,19 @@ def test_worker_on_a_weekly_window_leaves_on_the_first_refusal_and_the_route_clo
 
         # (2) the route is closed with the limit's name and the reset time the provider gave
         wall = walls.read(*ROUTE)
-        assert (wall['provider'], wall['model'], wall['limit']) == (*ROUTE, 'weekly')
+        assert (*walls._route(wall), wall['limit'], wall['account']) == (*ROUTE, 'weekly', 'wrk_quota_wall_suite')
         assert wall['reset_at'] == clock.now + DAY and wall['closed_by']['task_id'] == first
         assert wall['probes'] == 0 and wall['probe'] is None
         assert [w['model'] for w in walls.walls()] == [EXECUTOR_MODEL]
         (file,) = (kb.kanban_home() / 'kanban' / 'route_walls').glob('*.json')
-        assert file.name.startswith(f'{EXECUTOR_PROVIDER}--{EXECUTOR_MODEL}.'), 'a person finds the route by its name'
+        assert file.name.startswith(f'{PROFILE}--{EXECUTOR_PROVIDER}--{EXECUTOR_MODEL}.'), 'found by its name'
 
         # (5) one notice for the wall, in the management topic
         (*topic, message), = ops.notices()
         assert tuple(topic) == MANAGEMENT_TOPIC
         when = time.strftime('%d/%m %H:%M UTC', time.gmtime(clock.now + DAY))
-        assert f'Rota {EXECUTOR_PROVIDER}/{EXECUTOR_MODEL} fechada' in message and 'limite weekly' in message
+        assert f'Rota {EXECUTOR_PROVIDER}/{EXECUTOR_MODEL} fechada para o perfil {PROFILE}' in message
+        assert 'limite weekly (conta wrk_quota_wall_suite)' in message
         assert when in message and 'o provedor pediu 1 d de espera' in message
         assert 'esperam sem ocupar vaga' in message
 
@@ -201,7 +216,7 @@ def test_worker_on_a_weekly_window_leaves_on_the_first_refusal_and_the_route_clo
             assert_executor_route(launch_argv)
         for worker in (run, late):
             assert worker.agent._fallback_chain == [] and True not in worker.fallback and worker.reserve == []
-            assert (worker.agent.provider, worker.agent.model) == ROUTE
+            assert (worker.agent.provider, worker.agent.model) == ROUTE[1:]
 
 
 def test_a_card_of_another_route_is_launched_while_the_route_is_closed(quota_board, launcher, monkeypatch):
@@ -226,7 +241,7 @@ def test_a_card_of_another_route_is_launched_while_the_route_is_closed(quota_boa
         argv, env = launcher.launches[-1]
         launch = argv[:argv.index('chat')]
         assert (option(launch, '--provider'), option(launch, '-m')) == ('other-provider', 'other-model')
-        assert json.loads(env[walls.ROUTE_ENV]) == ['other-provider', 'other-model']
+        assert json.loads(env[walls.ROUTE_ENV]) == [PROFILE, 'other-provider', 'other-model']
         assert kb.get_task(conn, other).status == 'running'
         assert kb.get_task(conn, same).status == 'ready' and kb.get_task(conn, review).status == 'review'
         assert [w['status'] for w in quota_waits(conn, same)] == ['open']
@@ -235,7 +250,7 @@ def test_a_card_of_another_route_is_launched_while_the_route_is_closed(quota_boa
 def test_a_card_that_pins_no_route_takes_the_route_of_its_profile(quota_board, launcher, monkeypatch):
     """Not only NFOS cards: any card is held by the route its launch would use. With neither provider nor model
     pinned that is the profile's own; a card that pins only the model keeps the profile's provider."""
-    profile_route = ('openai-codex', 'gpt-6-astra')
+    profile_route = (PROFILE, 'openai-codex', 'gpt-6-astra')
     with kb.connect_closing() as conn:
         clock = Clock(monkeypatch)
         plain = kb.create_task(conn, title='No pin', assignee='default')
@@ -244,12 +259,13 @@ def test_a_card_that_pins_no_route_takes_the_route_of_its_profile(quota_board, l
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='ready' WHERE id IN (?,?)", (plain, model_only))
         assert walls.card_route(conn, kb.get_task(conn, plain)) == profile_route
-        assert walls.card_route(conn, kb.get_task(conn, model_only)) == ('openai-codex', 'gpt-5.6-luna')
+        assert walls.card_route(conn, kb.get_task(conn, model_only)) == (PROFILE, 'openai-codex', 'gpt-5.6-luna')
 
         walls.close(*profile_route, limit='usage_limit_reached', reset_at=clock.now + 3 * DAY)
         tick = kb.dispatch_once(conn)
-        assert spawned(tick) == [model_only] and tick.claim_held == [(plain, 'route_closed:openai-codex/gpt-6-astra')]
-        assert json.loads(launcher.launches[-1][1][walls.ROUTE_ENV]) == ['openai-codex', 'gpt-5.6-luna']
+        assert spawned(tick) == [model_only]
+        assert tick.claim_held == [(plain, f'route_closed:openai-codex/gpt-6-astra@{PROFILE}')]
+        assert json.loads(launcher.launches[-1][1][walls.ROUTE_ENV]) == [PROFILE, 'openai-codex', 'gpt-5.6-luna']
 
         clock.advance(3 * DAY)
         assert spawned(kb.dispatch_once(conn)) == [plain], 'the reset time came: this launch tries the route'
@@ -403,7 +419,7 @@ def test_the_notice_reaches_the_management_topic_when_the_card_follows_only_its_
         assert 'model_fallback' not in event_kinds(conn), 'the notice is not an event of the card that met the wall'
 
         (*topic, message), = ops.notices()
-        assert tuple(topic) == MANAGEMENT_TOPIC and f'Rota {EXECUTOR_PROVIDER}/{EXECUTOR_MODEL} fechada' in message
+        assert tuple(topic) == MANAGEMENT_TOPIC and f'Rota {EXECUTOR_PROVIDER}/{EXECUTOR_MODEL} fechada para' in message
         assert [sent[:2] for sent in ops.notices()] == [MANAGEMENT_TOPIC], 'the next tick sends nothing'
         # A gateway that restarts, or a second gateway of the host, finds the receipt beside the wall.
         assert Operations().notices() == []
@@ -480,7 +496,7 @@ def test_a_card_moved_to_another_route_is_launched_there_and_stops_waiting_for_t
         for argv, env in launcher.launches[-2:]:
             launch = argv[:argv.index('chat')]
             assert (option(launch, '--provider'), option(launch, '-m')) == ('other-provider', 'other-model')
-            assert json.loads(env[walls.ROUTE_ENV]) == ['other-provider', 'other-model']
+            assert json.loads(env[walls.ROUTE_ENV]) == [PROFILE, 'other-provider', 'other-model']
         assert walls.read(*ROUTE) is not None and walls.read(*ROUTE)['probe'] is None, 'the old wall stands, unprobed'
         for task_id in (first, second):
             (wait,) = quota_waits(conn, task_id)
@@ -515,6 +531,238 @@ def test_a_card_another_hold_keeps_is_not_said_to_wait_for_the_route(quota_board
         monkeypatch.setattr(delivery, 'task_support_approval_pending', lambda conn, task_id: False)
         clock.advance(60)
         assert_waiting(conn, kb.dispatch_once(conn), [first, second])
+
+
+# Two profiles of one host on the same provider and model, each with the credential of its own home: the owner's
+# case (one account for the factory, another for the rest). The provider counts usage per account.
+OTHER = 'pessoal'
+OTHER_ROUTE = (OTHER, EXECUTOR_PROVIDER, EXECUTOR_MODEL)
+HELD_OTHER = f'route_closed:{EXECUTOR_PROVIDER}/{EXECUTOR_MODEL}@{OTHER}'
+ACCOUNTS = {PROFILE: 'wrk_factory', OTHER: 'wrk_personal'}
+CLOSEOUT = 'Done: the total now reads the paid column. Evidence: the order screen shows 42,00 for order 7.'
+
+
+def second_profile(home):
+    """Another profile of the host, with its own home (config, sessions, credentials) under the same root. Its
+    own model is the executor's provider and model, which is not what the dispatcher's profile runs."""
+    profile = home / 'profiles' / OTHER
+    profile.mkdir(parents=True)
+    config = dict(copy.deepcopy(PROFILE_CONFIG), model={'default': EXECUTOR_MODEL, 'provider': EXECUTOR_PROVIDER})
+    (profile / 'config.yaml').write_text(yaml.safe_dump(config), encoding='utf-8')
+    from hermes_state import SessionDB
+    SessionDB(db_path=profile / 'state.db').close()
+    return profile
+
+
+def ready_card(conn, title, *, assignee, pinned=True):
+    """A card outside the NFOS, ready for the dispatcher, on the executor's provider and model: pinned on the card,
+    or left to the profile it is assigned to."""
+    pins = dict(model_override=EXECUTOR_MODEL, provider_override=EXECUTOR_PROVIDER) if pinned else {}
+    task_id = kb.create_task(conn, title=title, body='Correct the total of the order screen.', assignee=assignee,
+                             goal_mode=True, **pins)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (task_id,))
+    return task_id
+
+
+class Accounts:
+    """The provider. A worker calls it with the credential of the home it runs in, so the account is the one of
+    its profile. An account past its weekly window is refused by name, as opencode-go does. An account with quota
+    is answered: the model asks for the worker's own `kanban_complete`, which the agent runs, and then says so."""
+
+    def __init__(self):
+        self.walled, self.calls = set(), []
+
+    def __call__(self, seen):
+        from hermes_cli.profiles import get_active_profile_name
+        account = ACCOUNTS[get_active_profile_name()]
+        self.calls.append(account)
+        if account in self.walled:
+            body = copy.deepcopy(GoUsageLimit.body)
+            body['metadata']['workspace'] = account
+            raise type('GoUsageLimitOfAccount', (GoUsageLimit,), {'body': body})()
+        if seen.provider_calls > 1:
+            return metered_reply('The card is handed in.')
+        # The suite builds its agent with no tool at all; a card's worker always has the board's own.
+        seen.agent.valid_tool_names = {'kanban_complete'}
+        call = SimpleNamespace(id='call_hand_in', type='function', function=SimpleNamespace(
+            name='kanban_complete', arguments=json.dumps({'summary': CLOSEOUT})))
+        handing_in = metered_reply(None)
+        handing_in.choices[0].message.tool_calls, handing_in.choices[0].finish_reason = [call], 'tool_calls'
+        return handing_in
+
+
+def test_a_wall_holds_the_cards_of_its_profile_and_no_other_profile_of_the_host(
+        quota_board, launcher, monkeypatch, ops):
+    """The quota that ran out is of one credential. A wall kept by provider and model alone held, for days, the
+    cards of a profile whose own account had quota left."""
+    provider, profile_home = Accounts(), second_profile(quota_board)
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        first, second = two_cards(conn, launcher)
+        provider.walled.add(ACCOUNTS[PROFILE])
+        for task_id in (first, second):
+            refused = run_card(conn, launcher, monkeypatch, task_id, provider)
+            assert (refused.provider_calls, refused.waits.waited, refused.exit_code) == (1, 0, 75)
+        wall = walls.read(*ROUTE)
+        assert (wall['profile'], wall['account'], wall['closed_by']['task_id']) == (PROFILE, 'wrk_factory', first)
+        assert walls.read(*OTHER_ROUTE) is None and [walls._route(w) for w in walls.walls()] == [ROUTE]
+        assert_waiting(conn, kb.dispatch_once(conn), [first, second])
+
+        # The other profile's cards, on the same provider and model, are launched as that profile and delivered.
+        mine = [ready_card(conn, title, assignee=OTHER) for title in ('Order total', 'Order sorting')]
+        clock.advance(60)
+        tick = kb.dispatch_once(conn)
+        assert sorted(spawned(tick)) == sorted(mine), tick
+        assert sorted(tick.claim_held) == sorted([(first, HELD), (second, HELD)]), 'only the walled profile is held'
+        for task_id in mine:
+            argv, env = launch_of(launcher, task_id)
+            launch = argv[:argv.index('chat')]
+            assert (option(launch, '-p'), env['HERMES_HOME']) == (OTHER, str(profile_home))
+            assert (option(launch, '--provider'), option(launch, '-m')) == ROUTE[1:], 'the same provider and model'
+            assert json.loads(env[walls.ROUTE_ENV]) == list(OTHER_ROUTE)
+            run = run_card(conn, launcher, monkeypatch, task_id, provider)
+            assert (run.turns, run.provider_calls, run.refused, run.exit_code) == (1, 2, 0, 0), run.results
+            delivered = kb.get_task(conn, task_id)
+            assert (delivered.status, delivered.result) == ('done', CLOSEOUT) and quota_waits(conn, task_id) == []
+        assert provider.calls == ['wrk_factory'] * 2 + ['wrk_personal'] * 4, 'each worker on the account of its home'
+        assert walls.read(*ROUTE) == wall, 'an answer to another account does not reopen this one'
+        tick = kb.dispatch_once(conn)
+        assert not tick.crashed and not tick.auto_blocked and not tick.spawned, tick
+        assert sorted(tick.claim_held) == sorted([(first, HELD), (second, HELD)])
+
+        # One notice, of the profile whose route closed, with the account the provider named.
+        (*topic, message), = ops.notices()
+        assert tuple(topic) == MANAGEMENT_TOPIC
+        assert f'Rota {EXECUTOR_PROVIDER}/{EXECUTOR_MODEL} fechada para o perfil {PROFILE}' in message
+        assert 'limite weekly (conta wrk_factory)' in message and OTHER not in message
+
+        # Later the other account's own window ends: its own wall, its own notice, its own cards held.
+        provider.walled.add(ACCOUNTS[OTHER])
+        third = ready_card(conn, 'Order filter', assignee=OTHER)
+        clock.advance(600)
+        assert spawned(kb.dispatch_once(conn)) == [third]
+        refused = run_card(conn, launcher, monkeypatch, third, provider)
+        assert (refused.provider_calls, refused.waits.waited, refused.exit_code) == (1, 0, 75)
+        other_wall = walls.read(*OTHER_ROUTE)
+        assert (other_wall['profile'], other_wall['account']) == (OTHER, 'wrk_personal')
+        assert other_wall['closed_by']['task_id'] == third and other_wall['reset_at'] == clock.now + DAY
+        assert walls.read(*ROUTE) == wall, 'the first wall is as it was'
+        names = sorted(file.name for file in (kb.kanban_home() / 'kanban' / 'route_walls').glob('*.json'))
+        assert [name.split('--')[0] for name in names] == [PROFILE, OTHER]
+        first_notice, second_notice = (sent[2] for sent in ops.notices())
+        assert first_notice == message and f'fechada para o perfil {OTHER}' in second_notice
+        assert 'conta wrk_personal' in second_notice and 'wrk_factory' not in second_notice
+        tick = kb.dispatch_once(conn)
+        assert tick.rate_limited == [third] and not tick.spawned
+        assert sorted(tick.claim_held) == sorted([(first, HELD), (second, HELD), (third, HELD_OTHER)])
+        (wait,) = quota_waits(conn, third)
+        assert wait['predicate'] == {'kind': 'route_open', 'profile': OTHER, 'provider': EXECUTOR_PROVIDER,
+                                     'model': EXECUTOR_MODEL}
+
+        # Each route reopens on its own: the first profile's reset time comes while the other's is still ahead.
+        provider.walled.discard(ACCOUNTS[PROFILE])
+        clock.advance(wall['reset_at'] - clock.now)
+        tick = kb.dispatch_once(conn)
+        (probe,) = spawned(tick)
+        assert probe in (first, second) and (third, HELD_OTHER) in tick.claim_held
+        run_card(conn, launcher, monkeypatch, probe, answered_once, judge_reply=CONTINUE)
+        assert walls.read(*ROUTE) is None and walls.read(*OTHER_ROUTE) == other_wall
+        tick = kb.dispatch_once(conn)
+        assert spawned(tick) == [({first, second} - {probe}).pop()]
+        assert [held for held in tick.claim_held if held[1].startswith('route_closed')] == [(third, HELD_OTHER)]
+        assert len(ops.notices()) == 2
+
+
+def test_two_boards_of_one_profile_share_the_wall_of_their_route(quota_board, launcher, monkeypatch, ops):
+    """The wall is under the kanban root, which the boards of the host share: the same profile on the same provider
+    and model uses one credential on every board, so one wall, one notice and one probe serve them all."""
+    monkeypatch.delenv('HERMES_KANBAN_DB')  # each board at its own path under the shared root
+    kb.create_board('second')
+    with kb.connect_closing() as conn, kb.connect_closing(board='second') as other:
+        clock = Clock(monkeypatch)
+        task = enrol(conn, launcher)
+        run_card(conn, launcher, monkeypatch, task.id, refusing(GoUsageLimit))
+        wall = walls.read(*ROUTE)
+        assert wall['closed_by'] == {'task_id': task.id, 'board': 'default'}
+
+        card = ready_card(other, 'Same profile, another board', assignee=PROFILE)
+        tick = kb.dispatch_once(other, board='second')
+        assert tick.claim_held == [(card, HELD)] and not tick.spawned, tick
+        assert [wait['status'] for wait in quota_waits(other, card)] == ['open']
+        assert_waiting(conn, kb.dispatch_once(conn), [task.id])
+        assert walls.walls() == [wall] and len(ops.notices()) == 1
+
+        # At the reset time the first board to tick launches the route's one probe; the other board waits for it.
+        clock.advance(DAY)
+        assert spawned(kb.dispatch_once(other, board='second')) == [card]
+        assert walls.read(*ROUTE)['probe'] == {'task_id': card, 'board': 'second', 'at': clock.now}
+        tick = kb.dispatch_once(conn)
+        assert tick.claim_held == [(task.id, HELD)] and not tick.spawned, tick
+        assert len(walls.walls()) == 1 and len(ops.notices()) == 1
+
+
+def test_dispatcher_and_worker_name_the_same_route_when_the_card_is_of_another_profile(
+        quota_board, launcher, monkeypatch):
+    """The dispatcher runs as one profile and launches the card as another. The route is the card's: the profile
+    it is assigned to, in the spelling the launch gives ``-p``. The worker gets that spelling from the launch, and
+    reaches the same one from its own home when the launch does not say."""
+    profile_home = second_profile(quota_board)
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        pinned = ready_card(conn, 'Pinned on the card', assignee='Pessoal')
+        unpinned = ready_card(conn, 'Left to its profile', assignee=OTHER, pinned=False)
+        own = ready_card(conn, "Left to the dispatcher's profile", assignee=PROFILE, pinned=False)
+        assert walls.card_route(conn, kb.get_task(conn, own)) == (PROFILE, 'openai-codex', 'gpt-6-astra')
+        assert sorted(spawned(kb.dispatch_once(conn))) == sorted([pinned, unpinned, own])
+        for task_id in (pinned, unpinned):
+            route = walls.card_route(conn, kb.get_task(conn, task_id))
+            argv, env = launch_of(launcher, task_id)
+            assert route == OTHER_ROUTE and json.loads(env[walls.ROUTE_ENV]) == list(route)
+            assert (option(argv[:argv.index('chat')], '-p'), env['HERMES_PROFILE']) == (OTHER, OTHER)
+            assert env['HERMES_HOME'] == str(profile_home)
+
+            # The worker's side, in the home the launch gave it.
+            worker = _agent()
+            monkeypatch.setenv('HERMES_HOME', env['HERMES_HOME'])
+            monkeypatch.setenv('HERMES_KANBAN_TASK', task_id)
+            monkeypatch.setenv(walls.ROUTE_ENV, env[walls.ROUTE_ENV])
+            assert walls.worker_route(worker) == route
+            monkeypatch.delenv(walls.ROUTE_ENV)
+            assert walls.worker_route(worker) == route, 'from its own home, with no word from the launch'
+            switched = _agent()
+            switched.provider, switched.model, switched._fallback_activated = 'other-provider', 'other-model', True
+            assert walls.worker_route(switched) == (OTHER, 'other-provider', 'other-model')
+            assert walls.on_quota_error(worker, GoUsageLimit()) is True
+
+            # The dispatcher's side, in its own home: the wall the worker wrote is the one it asks for.
+            monkeypatch.setenv('HERMES_HOME', str(quota_board))
+            monkeypatch.delenv('HERMES_KANBAN_TASK')
+            assert walls.closed(*route)['closed_by']['task_id'] == task_id
+            assert walls.read(PROFILE, *route[1:]) is None, "not a wall of the dispatcher's own profile"
+            assert kb._route_wall_hold(conn, task_id, dry_run=True) == HELD_OTHER
+            assert kb._route_wall_hold(conn, own, dry_run=True) is None
+            assert walls.reopen(*route)
+            clock.advance(DAY)  # long open: the next card's refusal is a new wall, closed by that card
+
+
+ACCOUNT_NAMED = [
+    pytest.param(GoUsageLimit(), 'wrk_quota_wall_suite', id='opencode-go-body'),
+    pytest.param(GoUsageLimitFromSDK(), 'wrk_quota_wall_suite', id='only-in-the-http-answer'),
+    pytest.param(CodexUsageLimit(), None, id='codex-names-no-account'),
+    pytest.param(ProviderRateLimit(), None, id='plain-429'),
+]
+
+
+@pytest.mark.parametrize('error, account', ACCOUNT_NAMED)
+def test_the_account_the_provider_names_is_kept_and_decides_nothing(quota_board, monkeypatch, error, account):
+    assert walls.quota_account(error) == account
+    # The same route whatever account is named: the account is no part of it.
+    Clock(monkeypatch)
+    wall, opened = walls.close(*ROUTE, limit='weekly', account=account, task_id='t_a')
+    assert opened and wall['account'] == account and walls.read(*ROUTE) == wall
+    again, opened = walls.close(*ROUTE, limit='weekly', account='wrk_another_account', task_id='t_b')
+    assert not opened and again == wall, 'a second card on the wall changes nothing, whatever account it was refused on'
 
 
 # What the provider's answer says, read from its structured fields only.
@@ -581,7 +829,7 @@ def test_only_a_cards_own_worker_with_no_fallback_left_closes_a_route(quota_boar
     assert walls.on_quota_error(_agent(pending_fallback=True), GoUsageLimit()) is True and not walls.any_closed()
 
     # The dispatcher's spelling of the route wins over the agent's while the worker runs its primary model.
-    monkeypatch.setenv(walls.ROUTE_ENV, json.dumps(['OpenCode-Go', 'DeepSeek-V4.1-Flash']))
+    monkeypatch.setenv(walls.ROUTE_ENV, json.dumps(['Default', 'OpenCode-Go', 'DeepSeek-V4.1-Flash']))
     worker = _agent()
     worker.provider, worker.model = 'opencode', 'deepseek/deepseek-v4.1-flash'
     assert walls.on_quota_error(worker, GoUsageLimit()) is True
