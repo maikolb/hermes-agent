@@ -9,7 +9,8 @@ What these tests hold:
   five minutes to one hour, and each relaunch names the executor's own provider.
 * The executor's half. Every NFOS card is a goal-mode card. A turn that ends on the wall, the first one or a later
   one, stops the goal loop at once: no judge call, no further turn, no block, so no impediment is filed for the
-  Principal (who runs on Codex). The process leaves with 75 and only the growing wait holds the card.
+  Principal (who runs on Codex). The process leaves with 75. A throttle leaves the card to the growing wait; a usage
+  window (a named limit, or a reset beyond the client's 600 s wait) closes the route, which is what holds the card.
 * A 429 that clears on the client's own retry is not a wall: no turn fails, the goal loop runs its whole budget as
   before and the process does not leave with the quota code. The client's patience is its three attempts: with no
   Retry-After that is 6 to 9 s, and a 429 that outlasts it is a wall like any other (exit 75, five minutes of wait),
@@ -21,12 +22,13 @@ spent, then blocked, which on an NFOS card files an impediment. Read on the prod
 budget" in that same run. The two workers launched with no fallback provider on 2026-10-10 met the opencode-go
 weekly wall (`GoUsageLimit` below): three attempts 600 s apart per turn, twenty turns in 6 h 46 min, one impediment.
 
-Not changed here: inside one turn the client still waits for the provider's Retry-After (capped at 600 s) between
-its three attempts, so an executor launched onto the weekly wall leaves after about twenty minutes.
+Since ROUTE_WALL_20261012 the executor launched onto the weekly wall leaves on its first refused call (it used to
+sleep through two capped Retry-After waits, about twenty minutes holding a slot) and the dispatcher does not launch
+on that route again until it reopens. That is held in test_nfos_route_walls; here the walls keep their place in
+the table below.
 """
 import json
 import os
-import signal
 from types import SimpleNamespace
 
 import pytest
@@ -36,7 +38,7 @@ from hermes_cli.config import load_config
 from hermes_cli.fallback_config import get_fallback_chain
 from tests.hermes_cli.nfos_quota_wall import (  # noqa: F401
     EXECUTOR_MODEL, EXECUTOR_PROVIDER, WORKER_ENV, Clock, GoUsageLimit, GoUsageLimitNoReset, ProviderRateLimit,
-    agent_on_quota_wall, assert_executor_route, enrol, launcher, option, quota_board, reply,
+    assert_executor_route, enrol, launcher, quota_board, reply, run_executor,
 )
 
 pytestmark = pytest.mark.skipif(os.name != 'posix', reason='the dispatcher reaps a worker exit status only on POSIX')
@@ -47,76 +49,6 @@ FIRST_WAIT = 300
 # the sixth wait and it ends at 3001 s.
 WAITS = [300, 600, 1200, 2400, 3600, 3001]
 CONTINUE = json.dumps({'verdict': 'continue', 'reason': 'the total on the screen is not corrected yet'})
-
-
-class RateLimitError(Exception):
-    """The goal judge shares the executor's provider. Same class name as on the boards in September."""
-
-
-def run_executor(monkeypatch, argv, env, answer=None, judge_reply=None):
-    """The executor child, run in this process: the real quiet single-query path of `cli.main`, driving a real
-    AIAgent whose provider answers every call with 429 (or as `answer` scripts it). The goal judge fails like the
-    provider unless `judge_reply` gives its verdict. Returns what the process did and the code it left with."""
-    import cli as cli_mod
-    from agent import auxiliary_client
-
-    for key in WORKER_ENV:
-        if key in env:
-            monkeypatch.setenv(key, env[key])
-    agent, seen = agent_on_quota_wall(monkeypatch, provider=option(argv, '--provider'), model=option(argv, '-m'),
-                                      answer=answer)
-    seen.agent, seen.judge_calls = agent, 0
-
-    def judge(*args, **kwargs):
-        seen.judge_calls += 1
-        if judge_reply is None:
-            raise RateLimitError('Error code: 429 - Rate limit exceeded.')
-        return reply(judge_reply)
-
-    monkeypatch.setattr(auxiliary_client, 'call_llm', judge)
-
-    class WorkerCLI:
-        """HermesCLI reduced to what the quiet single-query path reads. The agent behind it is real."""
-
-        def __init__(self, **options):
-            self.provider = self.requested_provider = agent.provider
-            self.model = agent.model
-            self.session_id = agent.session_id
-            self.conversation_history = []
-            self._active_agent_route_signature = 'executor'
-            self.agent = agent
-
-        def _claim_active_session(self, surface, *, stderr=False):
-            return True
-
-        def _ensure_runtime_credentials(self):
-            return True
-
-        def _resolve_turn_agent_config(self, query):
-            return {'signature': 'executor', 'model': None, 'runtime': None, 'request_overrides': None}
-
-        def _init_agent(self, **kwargs):
-            return True
-
-    monkeypatch.setattr(cli_mod, 'HermesCLI', WorkerCLI)
-    monkeypatch.setattr(cli_mod.atexit, 'register', lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli_mod, '_finalize_single_query', lambda cli: None)
-    monkeypatch.setattr(cli_mod, '_single_query_finalize_attempted_session_ids', set())
-    monkeypatch.setattr(cli_mod, '_cleanup_done', False)
-    handlers = {number: signal.getsignal(number) for number in
-                (signal.SIGINT, signal.SIGTERM, getattr(signal, 'SIGHUP', None)) if number is not None}
-    try:
-        with pytest.raises(SystemExit) as left:
-            cli_mod.main(query=option(argv, '-q'), quiet='-Q' in argv, toolsets=option(argv, '--toolsets'),
-                         model=option(argv, '-m'), provider=option(argv, '--provider'),
-                         reasoning=option(argv, '--reasoning'))
-    finally:
-        for number, handler in handlers.items():
-            signal.signal(number, handler)
-        for key in WORKER_ENV:
-            monkeypatch.delenv(key, raising=False)
-    seen.exit_code = left.value.code
-    return seen
 
 
 def _decisions(conn, task_id):
@@ -133,11 +65,11 @@ def quota_wall(launcher, monkeypatch, answer=None, judge_reply=None):
     with kb.connect_closing() as conn:
         task = enrol(conn, launcher)
         argv, env = launcher.launches[-1]
+        clock = Clock(monkeypatch)
         run = run_executor(monkeypatch, argv, env, answer=answer, judge_reply=judge_reply)
         run.task_id = task.id
         run.decisions = _decisions(conn, task.id)
         launcher.exit(task.worker_pid, run.exit_code)
-        clock = Clock(monkeypatch)
         run.reaped = kb.dispatch_once(conn)
         run.card = kb.get_task(conn, task.id)
         run.outcomes = [row['outcome'] for row in conn.execute(
@@ -150,8 +82,13 @@ def quota_wall(launcher, monkeypatch, answer=None, judge_reply=None):
     return run
 
 
-def assert_left_on_the_wall(run, launcher):
-    """The executor left with the quota code and only the growing wait held its card."""
+ROUTE_CLOSED = f'route_closed:{EXECUTOR_PROVIDER}/{EXECUTOR_MODEL}'
+
+
+def assert_left_on_the_wall(run, launcher, route_closed_until_reset=False):
+    """The executor left with the quota code. After the first wait the card is launched again, on the executor's
+    own route: by the growing wait of a throttle, or as the one probe of a window that gave no reset time. A window
+    that gave its reset time keeps the route closed until then."""
     assert run.exit_code == kb.KANBAN_RATE_LIMIT_EXIT_CODE == 75
     assert run.decisions == [], 'no consult is filed for the Principal'
     assert not {'nfos_principal_requested', 'nfos_goal_yield', 'blocked'} & set(run.events), run.events
@@ -159,7 +96,10 @@ def assert_left_on_the_wall(run, launcher):
     assert run.outcomes == ['rate_limited'], 'the run is closed as a quota exit, not as a crash'
     assert run.card.status == 'ready' and run.card.consecutive_failures == 0
     assert run.guard_after_wait is None, 'the wait itself is over'
-    assert run.relaunched == [run.task_id] and not run.after_wait.claim_held, run.after_wait
+    if route_closed_until_reset:
+        assert run.relaunched == [] and run.after_wait.claim_held == [(run.task_id, ROUTE_CLOSED)], run.after_wait
+    else:
+        assert run.relaunched == [run.task_id] and not run.after_wait.claim_held, run.after_wait
     assert_executor_route(launcher.launches[-1][0])
     assert run.agent._fallback_chain == [] and True not in run.fallback and run.reserve == []
 
@@ -214,26 +154,28 @@ def test_quota_wall_turn_is_a_rate_limit_failure_and_the_executor_never_changes_
     assert run.card.status == 'ready' and run.card.consecutive_failures == 0
 
 
-# The wall, what the turn result calls it, provider calls in the one turn, seconds the client waited inside it.
+# The wall, what the turn result calls it, provider calls in the one turn, seconds the client waited inside it,
+# and whether the route stays closed past the first wait.
 # A 429 with no Retry-After is a wall once it outlasts the client's two jittered waits from a 2 s base, 6 to 9 s.
+# The weekly window is left on the first refusal: its reset is a day away and no wait of the client reaches it.
 WALLS = [
-    pytest.param(ProviderRateLimit, 'rate_limit', 3, 6, id='plain-429'),
-    pytest.param(GoUsageLimit, 'rate_limit', 3, 1200, id='opencode-go-weekly'),
-    pytest.param(GoUsageLimitNoReset, 'billing', 1, 0, id='usage-limit-with-no-reset'),
+    pytest.param(ProviderRateLimit, 'rate_limit', 3, 6, False, id='plain-429'),
+    pytest.param(GoUsageLimit, 'rate_limit', 1, 0, True, id='opencode-go-weekly'),
+    pytest.param(GoUsageLimitNoReset, 'billing', 1, 0, False, id='usage-limit-with-no-reset'),
 ]
 
 
-@pytest.mark.parametrize('wall, reason, calls, waited', WALLS)
-def test_executor_leaves_at_the_first_wall_and_only_the_growing_wait_holds_the_card(
-        quota_board, launcher, monkeypatch, wall, reason, calls, waited):
+@pytest.mark.parametrize('wall, reason, calls, waited, closed_until_reset', WALLS)
+def test_executor_leaves_at_the_first_wall_and_the_card_waits_with_no_failure(
+        quota_board, launcher, monkeypatch, wall, reason, calls, waited, closed_until_reset):
     def answer(seen):
         raise wall()
 
     run = quota_wall(launcher, monkeypatch, answer=answer)
     assert [(result['failed'], result['failure_reason']) for result in run.results] == [(True, reason)]
     assert (run.turns, run.provider_calls, run.judge_calls) == (1, calls, 0), 'one turn, the goal loop did not run'
-    assert waited <= run.waits.waited < waited + 10, 'the Retry-After capped at 600 s, or the short backoff with none'
-    assert_left_on_the_wall(run, launcher)
+    assert waited <= run.waits.waited < waited + 10, 'the short backoff of a throttle, no wait at all on a window'
+    assert_left_on_the_wall(run, launcher, route_closed_until_reset=closed_until_reset)
 
 
 def test_wall_met_on_a_later_goal_turn_leaves_the_loop_the_same_way(quota_board, launcher, monkeypatch):
@@ -247,8 +189,8 @@ def test_wall_met_on_a_later_goal_turn_leaves_the_loop_the_same_way(quota_board,
     assert [result.get('failure_reason') for result in run.results] == [None, 'rate_limit']
     assert not run.results[0].get('failed')
     assert (run.turns, run.judge_calls) == (2, 1), 'judged once, after the turn that answered'
-    assert run.refused == run.agent._api_max_retries == 3
-    assert_left_on_the_wall(run, launcher)
+    assert run.refused == 1 and run.waits.waited == 0, 'the weekly window is left on its first refusal'
+    assert_left_on_the_wall(run, launcher, route_closed_until_reset=True)
 
 
 def test_a_429_that_clears_on_the_clients_own_retry_is_not_a_quota_exit(quota_board, launcher, monkeypatch):

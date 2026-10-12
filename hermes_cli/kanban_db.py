@@ -11362,7 +11362,9 @@ class DispatchResult:
     """Ready tasks whose claim a hold refused this tick, as ``(task_id, reason)``:
     principal_suspension, support_approval_pending, maintenance_pause,
     execution_budget_exhausted, retained_workspace, previous_run_termination,
-    parents_not_done. The card waits for that resolution, not for the dispatcher."""
+    parents_not_done, open_decision, and ``route_closed:<provider>/<model>``
+    (ROUTE_WALL_20261012: the provider closed the card's route with a long usage
+    window). The card waits for that resolution, not for the dispatcher."""
     skipped_capacity: list[dict] = field(default_factory=list)
     """Patch 10/09/2026: por que este tick não gerou spawn quando o motivo foi capacidade.
     Cada item: {reason: max_spawn|max_in_progress|workers, running, limit, reserved?}. Não é falha:
@@ -13884,6 +13886,37 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
 _clear_spawn_failures = _clear_failure_counter
 
 
+def _route_wall_hold(
+    conn: sqlite3.Connection, task_id: str, *, dry_run: bool = False,
+) -> Optional[str]:
+    """``route_closed:<provider>/<model>`` when a provider's long usage window closes this card's route, else None.
+
+    ROUTE_WALL_20261012. Asked for each ready/review card before any claim. A held card is not launched, holds no
+    slot and counts no failure; it stands in the wait registry until the route reopens (``nfos_route_walls``).
+    Never a reason to stop dispatch: an unreadable wall lets the card through, as before this rule.
+    """
+    try:
+        from hermes_cli import nfos_route_walls as walls
+        if not walls.any_closed():
+            return None
+        task = get_task(conn, task_id)
+        wall = walls.hold(conn, task, dry_run=dry_run) if task is not None else None
+        return f"route_closed:{wall['provider']}/{wall['model']}" if wall else None
+    except Exception:  # noqa: BLE001
+        _log.warning("kanban dispatcher: route wall check failed for %s", task_id, exc_info=True)
+        return None
+
+
+def _route_wall_probe(conn: sqlite3.Connection, task: "Task", *, board: Optional[str] = None) -> None:
+    """A card was claimed on a route that is still closed: its launch is that route's probe (ROUTE_WALL_20261012)."""
+    try:
+        from hermes_cli import nfos_route_walls as walls
+        if walls.any_closed():
+            walls.probe_launched(conn, task, board=board)
+    except Exception:  # noqa: BLE001
+        _log.warning("kanban dispatcher: route probe mark failed for %s", task.id, exc_info=True)
+
+
 def _respawn_guard_backoff_remaining(
     conn: sqlite3.Connection, task_id: str
 ) -> float:
@@ -15162,6 +15195,14 @@ def _dispatch_once_locked(
         # vem respondendo a mesma coisa, o re-check segue agenda
         # exponencial (90s → 3min → ... → cap 1h) em vez de todo tick.
         # Qualquer evento não-guard zera a sequência naturalmente.
+        # ROUTE_WALL_20261012: a provider's long usage window closed this
+        # card's route. It waits without a slot and without a failure; the
+        # route's own schedule (reset time, or one spaced probe) decides the
+        # next launch, so the per-card guard below is not consulted for it.
+        route_hold = _route_wall_hold(conn, row["id"], dry_run=dry_run)
+        if route_hold is not None:
+            result.claim_held.append((row["id"], route_hold))
+            continue
         if _respawn_guard_backoff_remaining(conn, row["id"]) > 0:
             continue
         guard_reason = check_respawn_guard(conn, row["id"])
@@ -15254,6 +15295,7 @@ def _dispatch_once_locked(
             if refusal:  # a hold, not a lost race: the diagnosis names it instead of reading as a stuck dispatcher
                 result.claim_held.append((row["id"], refusal[0]))
             continue
+        _route_wall_probe(conn, claimed, board=board)
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         if claimed.workspace_kind == "worktree":
@@ -15370,6 +15412,10 @@ def _dispatch_once_locked(
                     (row["id"], review_assignee, current)
                 )
                 continue
+        route_hold = _route_wall_hold(conn, row["id"], dry_run=dry_run)  # ROUTE_WALL_20261012, as in the ready lane
+        if route_hold is not None:
+            result.claim_held.append((row["id"], route_hold))
+            continue
         guard_reason = check_respawn_guard(conn, row["id"], lane="review")
         if guard_reason is not None:
             result.respawn_guarded.append((row["id"], guard_reason))
@@ -15439,6 +15485,7 @@ def _dispatch_once_locked(
         if claimed is None:
             _release_workspace_lease(workspace_lease)
             continue
+        _route_wall_probe(conn, claimed, board=board)
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         if claimed.workspace_kind == "worktree":
@@ -15885,7 +15932,15 @@ def _default_spawn(
                 prompt += delivery.worker_context(delivery_conn, task.id)
             except Exception:
                 pass
+        try:  # ROUTE_WALL_20261012: the worker names its route as the dispatcher does when it closes or reopens it
+            from hermes_cli import nfos_route_walls
+            launch_route = nfos_route_walls.spawn_route(delivery_conn, task)
+        except Exception:
+            launch_route = None
     env = dict(os.environ)
+    env.pop("HERMES_KANBAN_ROUTE", None)
+    if launch_route:
+        env["HERMES_KANBAN_ROUTE"] = launch_route
     # The dispatcher is detached from every conversation. Its worker must never
     # inherit routing mirrored by a previous gateway turn, even before the first
     # session binds ContextVars in this process.

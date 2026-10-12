@@ -1,9 +1,11 @@
-"""Shared pieces of the two quota-wall suites (test_nfos_executor_quota_wall, test_nfos_principal_quota_wall).
+"""Shared pieces of the quota-wall suites (test_nfos_executor_quota_wall, test_nfos_principal_quota_wall,
+test_nfos_route_walls).
 
 Nothing here reaches a provider. The board is a real SQLite board in a temporary home, the dispatcher runs its real
 tick, and a worker is a real child process whose exit status the test decides, so the dispatcher reaps and classifies
 a real wait status. The clock is the only thing moved by hand.
 """
+import signal
 import subprocess
 import sys
 import time
@@ -35,7 +37,7 @@ PROFILE_CONFIG = {
 # Variables the dispatcher gives its worker; a test that runs the worker in this process sets them and nothing else.
 WORKER_ENV = ('HERMES_KANBAN_TASK', 'HERMES_KANBAN_WORKSPACE', 'HERMES_KANBAN_RUN_ID', 'HERMES_KANBAN_CLAIM_LOCK',
               'HERMES_KANBAN_GOAL_MODE', 'HERMES_KANBAN_GOAL_MAX_TURNS', 'HERMES_KANBAN_BOARD',
-              'HERMES_KANBAN_WORKSPACES_ROOT', 'HERMES_SESSION_SOURCE', 'HERMES_PROFILE')
+              'HERMES_KANBAN_WORKSPACES_ROOT', 'HERMES_SESSION_SOURCE', 'HERMES_PROFILE', 'HERMES_KANBAN_ROUTE')
 # Variables the single-query path writes into the process on its own.
 PROCESS_ENV = ('HERMES_INTERACTIVE', 'HERMES_SINGLE_QUERY_SESSION', 'HERMES_SESSION_ID')
 
@@ -62,8 +64,8 @@ class ProviderRateLimit(Exception):
 
 class GoUsageLimit(ProviderRateLimit):
     """The opencode-go weekly wall, as the profile's log has it on 2026-10-10: this body (the workspace id is not the
-    real one) and a Retry-After longer than the client's 600 s cap, so the client reads it as a throttle and waits
-    600 s before each new attempt."""
+    real one) and a Retry-After longer than the client's 600 s cap. The classifier reads it as a throttle; the name
+    of the limit and the distance of the reset say it is a usage window."""
     body = {'type': 'error', 'error': {'type': 'GoUsageLimitError', 'message': 'Go usage limit exceeded'},
             'metadata': {'workspace': 'wrk_quota_wall_suite', 'limitName': 'weekly'}}
     response = SimpleNamespace(status_code=429, headers={'retry-after': '86400'})
@@ -77,11 +79,47 @@ class GoUsageLimitNoReset(GoUsageLimit):
     response = SimpleNamespace(status_code=429, headers={})
 
 
-def reply(text):
+class GoUsageLimitFromSDK(ProviderRateLimit):
+    """The same wall as the OpenAI SDK hands it over: `.body` keeps only the inner `error` object, and the whole
+    answer, where `metadata.limitName` is, stays in the HTTP response. No Retry-After."""
+    body = GoUsageLimit.body['error']
+    response = SimpleNamespace(status_code=429, headers={}, json=lambda: GoUsageLimit.body)
+
+    def __str__(self):
+        return f'Error code: 429 - {GoUsageLimit.body}'
+
+
+class CodexUsageLimit(ProviderRateLimit):
+    """A Codex usage window: no limit name, the reset time in the body (the four weekly windows read in the
+    profile's log on 2026-10-12 reopen between the 15th and the 17th)."""
+    response = SimpleNamespace(status_code=429, headers={})
+
+    def __init__(self, resets_in=4 * 86400):
+        super().__init__()
+        self.body = {'error': {'type': 'usage_limit_reached', 'message': 'The usage limit has been reached',
+                               'plan_type': 'pro', 'resets_at': int(time.time()) + resets_in,
+                               'resets_in_seconds': resets_in}}
+
+    def __str__(self):
+        return f'Error code: 429 - {self.body}'
+
+
+class ShortThrottle(ProviderRateLimit):
+    """A request-rate throttle that resets inside the client's own wait."""
+    response = SimpleNamespace(status_code=429, headers={'retry-after': '30'})
+
+
+def reply(text, usage=None):
     """What a provider answers when it has quota: plain text, no tool call."""
     message = SimpleNamespace(content=text, tool_calls=None)
     return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason='stop')], model=EXECUTOR_MODEL,
-                           usage=None)
+                           usage=usage)
+
+
+def metered_reply(text):
+    """The same answer with the token count a real provider sends, which is what the runtime counts as a call the
+    provider answered."""
+    return reply(text, usage=SimpleNamespace(prompt_tokens=120, completion_tokens=12, total_tokens=132))
 
 
 class SkippedWaits:
@@ -281,3 +319,73 @@ def assert_executor_route(argv):
     assert option(launch, '-m') == EXECUTOR_MODEL
     assert option(launch, '--provider') == EXECUTOR_PROVIDER
     assert not [part for part in launch if 'codex' in part.lower() or part.lower().startswith('gpt-')]
+
+
+class RateLimitError(Exception):
+    """The goal judge shares the executor's provider. Same class name as on the boards in September."""
+
+
+def run_executor(monkeypatch, argv, env, answer=None, judge_reply=None):
+    """The executor child, run in this process: the real quiet single-query path of `cli.main`, driving a real
+    AIAgent whose provider answers every call with 429 (or as `answer` scripts it). The goal judge fails like the
+    provider unless `judge_reply` gives its verdict. Returns what the process did and the code it left with."""
+    import cli as cli_mod
+    from agent import auxiliary_client
+
+    for key in WORKER_ENV:
+        if key in env:
+            monkeypatch.setenv(key, env[key])
+    agent, seen = agent_on_quota_wall(monkeypatch, provider=option(argv, '--provider'), model=option(argv, '-m'),
+                                      answer=answer)
+    seen.agent, seen.judge_calls = agent, 0
+
+    def judge(*args, **kwargs):
+        seen.judge_calls += 1
+        if judge_reply is None:
+            raise RateLimitError('Error code: 429 - Rate limit exceeded.')
+        return reply(judge_reply)
+
+    monkeypatch.setattr(auxiliary_client, 'call_llm', judge)
+
+    class WorkerCLI:
+        """HermesCLI reduced to what the quiet single-query path reads. The agent behind it is real."""
+
+        def __init__(self, **options):
+            self.provider = self.requested_provider = agent.provider
+            self.model = agent.model
+            self.session_id = agent.session_id
+            self.conversation_history = []
+            self._active_agent_route_signature = 'executor'
+            self.agent = agent
+
+        def _claim_active_session(self, surface, *, stderr=False):
+            return True
+
+        def _ensure_runtime_credentials(self):
+            return True
+
+        def _resolve_turn_agent_config(self, query):
+            return {'signature': 'executor', 'model': None, 'runtime': None, 'request_overrides': None}
+
+        def _init_agent(self, **kwargs):
+            return True
+
+    monkeypatch.setattr(cli_mod, 'HermesCLI', WorkerCLI)
+    monkeypatch.setattr(cli_mod.atexit, 'register', lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_mod, '_finalize_single_query', lambda cli: None)
+    monkeypatch.setattr(cli_mod, '_single_query_finalize_attempted_session_ids', set())
+    monkeypatch.setattr(cli_mod, '_cleanup_done', False)
+    handlers = {number: signal.getsignal(number) for number in
+                (signal.SIGINT, signal.SIGTERM, getattr(signal, 'SIGHUP', None)) if number is not None}
+    try:
+        with pytest.raises(SystemExit) as left:
+            cli_mod.main(query=option(argv, '-q'), quiet='-Q' in argv, toolsets=option(argv, '--toolsets'),
+                         model=option(argv, '-m'), provider=option(argv, '--provider'),
+                         reasoning=option(argv, '--reasoning'))
+    finally:
+        for number, handler in handlers.items():
+            signal.signal(number, handler)
+        for key in WORKER_ENV:
+            monkeypatch.delenv(key, raising=False)
+    seen.exit_code = left.value.code
+    return seen
