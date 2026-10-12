@@ -19,8 +19,12 @@ What these tests hold:
 * the same request is offered again when the route reopens, at the reset time the provider gave or by one probe at
   spaced intervals when it gave none, the oldest request first and one at a time; it becomes one card, and a request
   the Principal had released before its turn died is not offered again;
-* a quota refusal with no usage window behind it (a throttle that outlasts the client's retries) returns the
-  request too, to be offered at the respawn guard's spacing, with no route closed;
+* a turn that ends on quota with no usage window named (a throttle that outlasts the client's retries) closes the
+  route too, with no reset time: the request waits on the wall, never on a clock of its own with nobody told;
+* a billing verdict the classifier holds unverified is not a quota wall; a delegated child inside the turn is not
+  the coordinating session; with several credentials the route reopens at the soonest reset the pool knows;
+* the two commands the intake hands the Principal are idempotent for the same request (`receive`, and `urgent`
+  by the request id), and a request that comes back says what its dead turn did;
 * nothing reaches the topic of who asked while the wall is up: not the reply of the dead turn, not its status;
 * a request that enters through the portal becomes a card as before, with the Principal on the wall;
 * the decision half is as it was: a stalled decision is charged again and the card resumes when quota returns.
@@ -46,6 +50,7 @@ from gateway.platforms.base import MessageEvent, MessageType, SendResult
 from gateway.turn_context import TurnContext
 from gateway.wake import current_notify_receipt
 from hermes_cli import kanban_db as kb, nfos_delivery as delivery, nfos_route_walls as walls
+from hermes_cli.nfos_runtime import resumed_intake_note
 from tests.gateway.test_42039_duplicate_user_message import _bootstrap
 from tests.gateway.test_kanban_notifier import _make_runner, _run_one_notifier_tick
 from tests.gateway.test_kanban_notifier_durable import RecordingAdapter
@@ -62,8 +67,10 @@ TICK = 300
 OUTAGE = 4 * 3600
 QUESTION = 'Which of the two sources satisfies criterion C1'
 SESSION_KEY = 'agent:main:telegram:group:-1000:8'
-# The Principal's route on the production profile (read on 2026-10-12), and the distance of the reset in the
-# refusal its log has on 2026-10-09: `usage_limit_reached`, `limit_window_minutes: 10080`, `resets_in_seconds: 522167`.
+# The Principal's provider and model on the production profile (read on 2026-10-12; there the profile is
+# `hermes-project-factory`, for the gateway process and for the intake alike, and here it is the suite's `default`),
+# and the distance of the reset in the refusal its log has on 2026-10-09: `usage_limit_reached`,
+# `limit_window_minutes: 10080`, `resets_in_seconds: 522167`.
 PRINCIPAL = ('default', PROFILE_CONFIG['model']['provider'], PROFILE_CONFIG['model']['default'])
 WEEKLY_RESET = 522167
 SECOND_REQUEST = '[Japa|1]\nCorrija a ordenação da tela de pedidos.'
@@ -404,7 +411,11 @@ async def test_the_same_request_is_resumed_once_when_the_route_reopens_at_the_re
     assert session.offered() == [request_id, request_id], 'the same request, by its id'
     first, again = (wake.metadata['nfos_coordinator_intake']['request'] for wake in session.wakes)
     assert first == again and again['source']['message_id'] == '123' and again['text'] == REQUEST
-    assert session.wakes[0].text == session.wakes[1].text
+    # The second offer is the first one plus what became of it: the provider answered no call of that turn.
+    told = resumed_intake_note(0)
+    assert 'nothing was decided or done for it' in told and told not in session.wakes[0].text
+    assert session.wakes[1].text.replace(told, '') == session.wakes[0].text
+    assert f'--task CARD_ID --input urgency.json --request {request_id}' in session.wakes[0].text
     assert (request['id'], request['status'], cards) == (request_id, 'attached', 1), 'it became its card'
     (card,) = _cards()
     assert request['task_id'] == card['id'] and REQUEST.split('\n', 1)[1] in card['body']
@@ -544,38 +555,57 @@ async def test_a_request_the_principal_released_before_its_turn_died_is_not_offe
 
 
 @pytest.mark.asyncio
-async def test_a_throttle_that_outlasts_the_clients_retries_returns_the_request_and_closes_no_route(
+async def test_a_turn_that_ends_on_quota_with_no_window_named_closes_the_route_with_no_reset_time(
         desk, monkeypatch, ops):
+    """A plain 429 with no limit named and no reset time, refused past the client's own retries: the turn ended on
+    quota all the same. The request is not left on a clock of its own with nobody told: the route closes with no
+    reset time, the management topic gets the wall's notice, and one probe at the route's spacing resumes it."""
     runner, event, adapter, session = desk
     clock = Clock(monkeypatch)
     start = clock.now
-    session.refusal = ProviderRateLimit  # a plain 429: no limit named, no reset time
+    session.refusal = ProviderRateLimit
 
     await runner._nfos_receive(event)
     await _settle(runner)
     request, payload, cards = _board()
-    entry = payload['coordination']
+    request_id, entry = request['id'], payload['coordination']
     assert session.results[0]['failure_reason'] == 'rate_limit' and session.seen.provider_calls == 3
     assert (request['status'], entry['wake_accepted'], cards) == ('coordinating', False, 0)
-    assert 'route' not in entry['quota'] and entry['next_attempt_at'] == start + 300
-    assert not walls.any_closed(), 'no usage window: the route stays open'
+    assert entry['quota']['route'] == list(PRINCIPAL) and entry['quota']['reset_at'] is None
+    assert entry['next_attempt_at'] == start, 'no clock on the request: the wall is what holds it'
+    wall = walls.read(*PRINCIPAL)
+    assert (wall['limit'], wall['reset_at'], wall['next_probe_at']) == ('rate_limit', None, start + 300)
+    assert wall['closed_by']['request_id'] == request_id
 
-    # Offered again at the respawn guard's spacing, counted on the request: 300 s, then 600 s after it.
-    await _through(runner, clock, 840, ops, step=60)
-    assert sorted({int(at - start) for at in session.calls}) == [0, 300] and session.seen.provider_calls == 6
-    assert session.said_in_the_topic() == [] and not adapter._send_with_retry.await_count
-    session.refusal = None
+    # A second request arrives: it waits behind the first, which is the one that probes. A probe the provider
+    # refuses leaves on that refusal: one call, not the client's three.
     await _through(runner, clock, 120, ops, step=60)
-    request, payload, cards = _board()
-    assert sorted({int(at - start) for at in session.calls}) == [0, 300, 900]
-    assert len(session.wakes) == 3 and (request['status'], cards) == ('attached', 1)
-    assert not ops.sent and not walls.any_closed()
-    assert len(session.said_in_the_topic()) == 1 and not session.status_sent
+    await runner._nfos_receive(_second(event))
+    await _settle(runner)
+    await _through(runner, clock, 720, ops, step=60)
+    first, second = _requests()
+    assert session.offered() == [first['id'], first['id']], 'the oldest probes; the newer one does not pass it'
+    assert [int(at - start) for at in session.calls] == [0, 0, 0, 300] and session.seen.provider_calls == 4
+    wall = walls.read(*PRINCIPAL)
+    assert (wall['probes'], wall['probe'], wall['next_probe_at']) == (1, None, start + 900)
+    (chat, topic, notice), = ops.sent
+    assert (chat, topic) == MANAGEMENT_TOPIC and 'sem hora de reinício informada' in notice
+    assert 'sessão coordenadora (Principal)' in notice
+    assert session.said_in_the_topic() == [] and not adapter._send_with_retry.await_count
+
+    session.refusal = None
+    await _through(runner, clock, 180, ops, step=60)
+    first, second = _requests()
+    assert [int(at - start) for at in session.calls][4:] == [900, 900 + 60]
+    assert session.offered() == [first['id']] * 3 + [second['id']], 'then the other one, in the order they arrived'
+    assert [r['status'] for r in (first, second)] == ['attached', 'attached'] and len(_cards()) == 2
+    assert walls.read(*PRINCIPAL) is None and len(ops.sent) == 1
+    assert len(session.said_in_the_topic()) == 2 and not session.status_sent
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('refusal,notices', [
-    (lambda: CodexUsageLimit(resets_in=WEEKLY_RESET), 1), (GoUsageLimitFromSDK, 1), (ProviderRateLimit, 0),
+    (lambda: CodexUsageLimit(resets_in=WEEKLY_RESET), 1), (GoUsageLimitFromSDK, 1), (ProviderRateLimit, 1),
 ], ids=['window-with-reset', 'named-window-no-reset', 'plain-throttle'])
 async def test_nothing_is_said_in_the_topic_of_who_asked_while_the_principal_is_on_the_wall(
         desk, monkeypatch, ops, refusal, notices):
@@ -609,11 +639,15 @@ async def test_a_turn_the_provider_had_answered_before_it_died_is_told_so_when_i
     await runner._nfos_receive(event)
     await _settle(runner)
     (wake,) = inbox.wakes
-    died = {'failed': True, 'failure_reason': 'rate_limit', 'api_calls': 3, 'model': PRINCIPAL[2]}
+    died = {'failed': True, 'failure_reason': 'rate_limit', 'api_calls': 3, 'model': PRINCIPAL[2],
+            'retry_not_before': clock.now + 3600}
     await runner._nfos_turn_ended(wake, event.source, died, clock.now)
     request, payload, cards = _board()
     entry = payload['coordination']
     assert (request['status'], entry['wake_accepted'], entry['quota']['answered_calls']) == ('coordinating', False, 2)
+    # The intake is what offers the request again: the gateway's own continuation of a rate-limited turn, which
+    # it schedules from this field, would run the same turn a second time.
+    assert 'retry_not_before' not in died
 
     await _tick(runner, clock, 300)
     first, again = inbox.wakes
@@ -694,6 +728,8 @@ def test_only_a_turn_nobody_typed_keeps_its_quota_refusal_out_of_the_chat(intake
     assert not withheld(turn('[Session was just handed off from CLI', True), on_quota)
     # A failure that is not quota, and a turn that did not fail, are untouched.
     assert not withheld(turn('', True, receipt), dict(on_quota, failure_reason='server_error'))
+    # Nor is a billing verdict the classifier itself holds unverified: it may be this message being rejected.
+    assert not withheld(turn('', True, receipt), dict(on_quota, failure_reason='billing', billing_unverified=True))
     assert not withheld(turn('', True, receipt), {'failed': False, 'final_response': 'Entregue'})
 
 
@@ -740,3 +776,141 @@ def test_quota_error_of_a_request_turn_is_withheld_from_the_topic(intake, monkey
     request, payload, cards = _board()
     assert request['status'] == 'coordinating' and payload['coordination']['wake_accepted'] is False
     assert payload['coordination']['quota']['reason'] == 'rate_limit', 'and the request is back in the inbox'
+
+
+def _received(runner, event, inbox):
+    """The request is in the inbox and its turn has started: the wake it was delivered with, and its receipt."""
+    async def receive():
+        await runner._nfos_receive(event)
+        await _settle(runner)
+
+    asyncio.run(receive())
+    (wake,) = inbox.wakes
+    return wake, wake.metadata['kanban_wake_delivery']
+
+
+def _session_agent(provider=PRINCIPAL[1], model=PRINCIPAL[2], **more):
+    """What `on_quota_error` reads of the agent a refusal reached."""
+    return SimpleNamespace(provider=provider, model=model, _fallback_activated=False,
+                           _has_pending_fallback=lambda: False, **more)
+
+
+def test_a_delegated_child_inside_the_turn_of_a_request_is_not_the_coordinating_session(intake, monkeypatch):
+    """A child the Principal delegates to runs inside the turn and inherits its context, the wake's receipt
+    included, on a provider and model of its own. A window it meets closes no route in the session's name and
+    writes nothing on the request."""
+    from agent.delegation_context import delegated_child_context
+    runner, event, adapter, inbox = intake
+    Clock(monkeypatch)
+    wake, receipt = _received(runner, event, inbox)
+    child = _session_agent(provider='opencode-go', model='deepseek-v4.1-flash')
+    token = current_notify_receipt.set(receipt)
+    try:
+        with delegated_child_context('child-session'):
+            assert walls.on_quota_error(child, CodexUsageLimit(resets_in=WEEKLY_RESET)) is True, 'its own turn leaves'
+            assert walls._route_owner() is None and not walls.wake_refused_on_quota(child)
+        assert not walls.any_closed() and 'quota' not in _board()[1]['coordination']
+        # The session's own agent on the same receipt is the coordinating session.
+        principal = _session_agent()
+        assert walls.on_quota_error(principal, CodexUsageLimit(resets_in=WEEKLY_RESET)) is True
+        assert walls.wake_refused_on_quota(principal)
+    finally:
+        current_notify_receipt.reset(token)
+    assert walls.read(*PRINCIPAL)['closed_by']['request_id'] == receipt['request_id']
+    assert [wall['model'] for wall in walls.walls()] == [PRINCIPAL[2]]
+    assert _board()[1]['coordination']['quota']['route'] == list(PRINCIPAL)
+
+
+def test_with_several_credentials_the_route_reopens_at_the_soonest_reset_the_pool_knows(intake, monkeypatch):
+    """The production profile has more than one Codex account. The refusal that ends the turn is of the last
+    credential the pool tried; the route answers again when the first of them is back."""
+    runner, event, adapter, inbox = intake
+    clock = Clock(monkeypatch)
+    start = clock.now
+    wake, receipt = _received(runner, event, inbox)
+    day = 86400
+    pool = SimpleNamespace(entries=lambda: [
+        SimpleNamespace(last_error_reset_at=start + 5 * day), SimpleNamespace(last_error_reset_at=start + 2 * day),
+        SimpleNamespace(last_error_reset_at=None), SimpleNamespace(last_error_reset_at=start - 60)])
+    token = current_notify_receipt.set(receipt)
+    try:
+        assert walls.on_quota_error(_session_agent(_credential_pool=pool), CodexUsageLimit(resets_in=5 * day)) is True
+    finally:
+        current_notify_receipt.reset(token)
+    wall = walls.read(*PRINCIPAL)
+    assert (wall['reset_at'], walls.open_at(wall)) == (start + 2 * day, start + 2 * day)
+    assert _board()[1]['coordination']['quota']['reset_at'] == start + 2 * day
+    # One credential, or a pool that knows nothing sooner: the refusal's own reset time.
+    walls.reopen(*PRINCIPAL)
+    clock.advance(3600)
+    token = current_notify_receipt.set(receipt)
+    try:
+        walls.on_quota_error(_session_agent(_credential_pool=None), CodexUsageLimit(resets_in=5 * day))
+    finally:
+        current_notify_receipt.reset(token)
+    assert walls.read(*PRINCIPAL)['reset_at'] == clock.now + 5 * day
+
+
+def test_a_turn_that_failed_for_another_reason_is_no_verdict_on_the_route(intake, monkeypatch):
+    """Not quota: a provider error of another kind, or a billing verdict the classifier itself holds unverified
+    (the body may be the provider rejecting this very message). No route closes for it and the request is as main
+    leaves it. When that turn was the probe of a closed route, the probing goes back at once."""
+    runner, event, adapter, inbox = intake
+    clock = Clock(monkeypatch)
+    wake, receipt = _received(runner, event, inbox)
+
+    def ended(**result):
+        asyncio.run(runner._nfos_turn_ended(wake, event.source, dict(result, failed=True, api_calls=1,
+                                                                    model=PRINCIPAL[2]), clock.now))
+
+    ended(failure_reason='billing', billing_unverified=True)
+    assert not walls.any_closed() and _board()[1]['coordination']['wake_accepted'] is True
+
+    walls.close(*PRINCIPAL, limit='usage_limit_reached', reset_at=None, request_id=receipt['request_id'])
+    clock.advance(300)
+    walls.take_probe(*PRINCIPAL, task_id=receipt['request_id'])
+    assert walls.closed(*PRINCIPAL) is not None, 'a probe in flight holds the route'
+    ended(failure_reason='server_error')
+    wall = walls.read(*PRINCIPAL)
+    assert (wall['probe'], wall['probes']) == (None, 0) and walls.closed(*PRINCIPAL) is None, 'the next entry probes'
+    assert _board()[1]['coordination']['wake_accepted'] is True, 'not returned: this front returns a turn dead on quota'
+
+
+def test_the_urgency_command_of_the_intake_is_recorded_once_for_the_same_request(intake, monkeypatch, tmp_path, capsys):
+    """The turn of a request can die on quota after the Principal ran the urgency command for it, and the request
+    is then offered again. The command the wake hands over names the request: run again for the same request it
+    adds no second comment and no second event to the card. `receive` already was idempotent for it."""
+    import sys
+    runner, event, adapter, inbox = intake
+    Clock(monkeypatch)
+    wake, receipt = _received(runner, event, inbox)
+    context = wake.metadata['nfos_coordinator_intake']
+    assert f"--task CARD_ID --input urgency.json --request {context['request_id']}" in wake.text
+    with kb.connect_closing() as conn:
+        delivery.receive_request(conn, source=dict(SOURCE, message_id='77'), text='[Japa|1]\nAjuste o relatório.',
+                                 project={'profile': 'default', 'delivery_type': 'report'})
+        reservation = delivery.reserve_request(conn, capacity=5)
+        card = delivery.bootstrap_card(conn, reservation['id'], reservation['claim_token'], pid=os.getpid()).id
+    reason = tmp_path / 'urgency.json'
+    reason.write_text(json.dumps({'reason': 'O cliente pode cancelar hoje'}), encoding='utf-8')
+
+    def urgent(*request):
+        monkeypatch.setattr(sys, 'argv', ['nfos_delivery', 'urgent', '--db', context['db_path'], '--task', card,
+                                          '--input', str(reason), *request])
+        capsys.readouterr()
+        delivery.main()
+        with kb.connect_closing() as conn:
+            comments = conn.execute("SELECT count(*) FROM task_comments WHERE task_id=? AND body LIKE '[urgente]%'",
+                                    (card,)).fetchone()[0]
+            return (json.loads(capsys.readouterr().out.strip().splitlines()[-1]),
+                    len(_events(conn, card, 'priority_escalated')), comments)
+
+    first, events, comments = urgent('--request', context['request_id'])
+    assert (first['priority'], events, comments) == (delivery.URGENT_PRIORITY, 1, 1) and 'already_recorded' not in first
+    again, events, comments = urgent('--request', context['request_id'])
+    assert (again['priority'], again['reason'], events, comments) == (first['priority'], first['reason'], 1, 1)
+    assert again['already_recorded'] is True, 'the same request: nothing is added to the card'
+    # Another request that makes the same card urgent is another judgment, and the command with no request is as
+    # it was.
+    assert urgent('--request', 'req_another')[1:] == (2, 2)
+    assert urgent()[1:] == (3, 3)

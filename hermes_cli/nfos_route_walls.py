@@ -40,7 +40,9 @@ the limit (``metadata.limitName``), the reset time (``resets_at`` / ``reset_at``
   allowed in.
 * The coordinating session's route closes the same way when it meets the window on the turn of a preserved
   request (PRINCIPAL_WALL_20261012, "The intake's side" below): the request goes back to the Principal's inbox and
-  is offered again when the route reopens, its turn being the probe of a route with no reset time.
+  is offered again when the route reopens, its turn being the probe of a route with no reset time. A turn of a
+  request that ends on quota with no window named closes the route as well, with no reset time: the wall is the
+  only clock a held request has, and its notice the only word about it.
 
 Nothing here selects another provider or model: a closed route makes its cards, and the requests whose decision
 is the Principal's, wait.
@@ -500,10 +502,15 @@ def _owns_card():
 def _wake_receipt():
     """The receipt of the wake this turn was started on, when the runtime woke a gateway session with one (a
     preserved request, a card's question): the gateway hands it to the agent's thread. ``None`` for a turn a
-    person's message started, and outside a gateway."""
+    person's message started, and outside a gateway.
+
+    ``None`` as well for an agent that only runs inside that turn (a ``delegate_task`` child, a cron job fired in
+    process): it inherits the receipt with the turn's context and is not the session the wake was for. Its
+    provider and model are its own, so a refusal it meets says nothing of the session's route."""
     try:
+        from agent.delegation_context import is_dispatcher_owned_worker_context
         from gateway.wake import current_notify_receipt
-        receipt = current_notify_receipt.get()
+        receipt = current_notify_receipt.get() if is_dispatcher_owned_worker_context() else None
     except Exception:  # noqa: BLE001 - no gateway in this process
         return None
     return receipt if isinstance(receipt, dict) and receipt else None
@@ -545,12 +552,28 @@ def _route_owner():
     return {'request_id': str(receipt['request_id'])} if receipt else None
 
 
-def _entry_met_wall(route, window):
-    receipt = _intake_receipt()
+def _entry_turn_refused(receipt, route, limit, reset_at):
+    """The inbox entry keeps the route its turn was last refused on, as the session ran it, and what the provider
+    said of the limit: the turn's end reads it there (``entry_refused``)."""
     from pathlib import Path
     from hermes_cli import kanban_db as kb, nfos_delivery as delivery
     with kb.connect_closing(Path(receipt['db_path'])) as conn:
-        delivery.coordinator_met_wall(conn, receipt, route=route, limit=window['limit'], reset_at=window['reset_at'])
+        delivery.coordinator_turn_refused(conn, receipt, route=route, limit=limit, reset_at=reset_at)
+
+
+def _soonest_reset(agent, reset_at, now):
+    """The reset time of the route when its profile has several credentials on the provider.
+
+    The refusal that reaches ``on_quota_error`` is of the last credential the pool tried, and the route answers
+    again when the first of them is back. The pool keeps the reset time each provider answer gave
+    (``last_error_reset_at``); the soonest one still ahead is the route's, when it is sooner than this refusal's."""
+    try:
+        known = [_absolute(getattr(entry, 'last_error_reset_at', None)) for entry in agent._credential_pool.entries()]
+        ahead = [at for at in known if at is not None and at > now]
+    except Exception:  # noqa: BLE001 - no pool on this agent, or one that cannot be read: the refusal's own time
+        return reset_at
+    soonest = min(ahead, default=None)
+    return soonest if soonest is not None and (reset_at is None or soonest < reset_at) else reset_at
 
 
 def _own_profile():
@@ -581,29 +604,39 @@ def on_quota_error(agent, error):
     When the caller is a card's own worker and no fallback provider is left to take the turn, the route is closed
     for the dispatcher. The same when the caller is the coordinating session on the turn of an inbox entry
     (PRINCIPAL_WALL_20261012): the route is closed for the intake, and the entry keeps the name of the route it
-    waits for. The notice of the wall is the gateway's to send (``unannounced``)."""
+    waits for. The notice of the wall is the gateway's to send (``unannounced``).
+
+    On the turn of an inbox entry a refusal with no window behind it is also the last attempt when the route is
+    already closed: that turn is the route's probe and this is its verdict, which the turn's end records
+    (``entry_refused``)."""
     _note_refused_wake(agent)
+    now = time.time()
     try:
-        window = quota_window(error)
+        window = quota_window(error, now=now)
     except Exception:  # noqa: BLE001 - an answer that cannot be read is retried as before this rule
         logger.warning('ROUTE_WALL_20261012 could not read a quota refusal', exc_info=True)
         return False
-    if window is None:
-        return False
+    probe_refused = False
     try:
         owner = None if agent._has_pending_fallback() else _route_owner()
-        if owner:
+        intake = _intake_receipt()
+        if owner or intake is not None:
             route = worker_route(agent)
-            wall, opened = close(*route, limit=window['limit'], reset_at=window['reset_at'],
-                                 account=quota_account(error), **owner)
-            if opened:
-                logger.warning('ROUTE_WALL_20261012 route %s closed by limit %s (reset_at=%s)',
-                               label(wall), wall['limit'], wall['reset_at'])
-            if wall and owner.get('request_id'):
-                _entry_met_wall(route, window)
+            reset_at = _soonest_reset(agent, window['reset_at'], now) if window else None
+            if window and owner:
+                wall, opened = close(*route, limit=window['limit'], reset_at=reset_at,
+                                     account=quota_account(error), **owner)
+                if opened:
+                    logger.warning('ROUTE_WALL_20261012 route %s closed by limit %s (reset_at=%s)',
+                                   label(wall), wall['limit'], wall['reset_at'])
+            elif owner and owner.get('request_id'):
+                probe_refused = read(*route) is not None
+            if intake is not None:
+                _entry_turn_refused(intake, route, window['limit'] if window else _error_kind(_payloads(error)),
+                                    reset_at)
     except Exception:  # noqa: BLE001 - the verdict stands; a route left unmarked is launched on as before this rule
         logger.warning('ROUTE_WALL_20261012 could not close the route', exc_info=True)
-    return True
+    return window is not None or probe_refused
 
 
 def answered(agent):
@@ -726,13 +759,23 @@ def spawn_route(conn, task):
 # the provider's quota the decision was not taken: the entry goes back to the inbox and is offered again once that
 # route is open, the oldest entry first, which makes its turn the probe of a route still closed. Nothing is said
 # in the topic of who asked, and no other route takes the decision.
+#
+# Not in the wait registry: a held entry has no card yet and ``nfos_waits`` is keyed by card (``task_id NOT NULL``),
+# so it is not a row there and has none of a row's deadline, attempt cap or expiry outcome. It keeps no clock of its
+# own either: the wall of its route, the same file the ``provider_quota`` rows of held cards check, is what says
+# when it is offered again, and the wall's notice is the only word about it. A request-keyed row is a change of the
+# registry's schema, which this module does not make.
 
 QUOTA_REASONS = ('rate_limit', 'billing')
 
 
 def quota_failure(result):
-    """The turn ended on its provider's quota, by the two reasons the executor leaves its card on."""
-    return bool(isinstance(result, dict) and result.get('failed') and result.get('failure_reason') in QUOTA_REASONS)
+    """The turn ended on its provider's quota, by the two reasons the executor leaves its card on.
+
+    Not a billing verdict the classifier itself holds unverified: that body may be the provider rejecting the
+    content of this very message, which no reopening of the route would change."""
+    return bool(isinstance(result, dict) and result.get('failed') and result.get('failure_reason') in QUOTA_REASONS
+                and not result.get('billing_unverified'))
 
 
 def session_route(profile):
@@ -774,28 +817,52 @@ def entry_turn(payload, profile, request_id):
 
 
 def entry_refused(conn, receipt, *, reason, profile, answered_calls=0):
-    """The Principal's turn on this inbox entry ended on quota: back to the inbox it goes.
+    """The Principal's turn on this inbox entry ended on quota: its route is closed and back to the inbox it goes.
 
-    On a route a wall holds, the wall says when it is offered again (the reset time the provider gave, or the next
-    probe). With no wall (a throttle that outlasted the client's retries, credit that ran out with no window named),
-    it waits the respawn guard's spacing, counted on the entry. ``answered_calls`` is what the provider had
-    answered of that turn before refusing it, kept on the entry for its next offer."""
+    A turn that ends on quota was refused past everything the client does about a refusal, whatever the provider
+    said of a window. When the provider named one, the route was closed during the turn (``on_quota_error``) and
+    nothing changes here. When it named none (a throttle that outlasted the client's retries, credit that ran out,
+    a usage limit with no reset time in the answer), the route is closed here with no reset time: one probe at the
+    route's spacing, the oldest entry first, and the one notice of a wall, so that an entry never waits on a clock
+    of its own with nobody told. On a route already closed whose probe this turn was, this is the probe's verdict.
+
+    The wall is then what says when the entry is offered again. Only an entry whose route cannot be told (no
+    refusal recorded and no route in the profile's config) waits the same spacing counted on itself.
+    ``answered_calls`` is what the provider had answered of that turn before refusing it, kept on the entry for
+    its next offer."""
     from hermes_cli import nfos_delivery as delivery
     row = delivery.get_request(conn, receipt['request_id'])
     if row is None:
         return None
     payload = json.loads(row['payload'])
+    quota = (payload.get('coordination') or {}).get('quota') or {}
     route = entry_route(payload, profile)
-    turns = int(((payload.get('coordination') or {}).get('quota') or {}).get('turns') or 0)
-    walled = bool(route and read(*route) is not None)
+    wall = None
+    if route:
+        wall, opened = close(*route, limit=quota.get('limit') or reason, reset_at=None,
+                             request_id=str(receipt['request_id']))
+        if opened:
+            logger.warning('ROUTE_WALL_20261012 route %s closed: a turn of the coordinating session ended on %s '
+                           'with no usage window named', label(wall), reason)
     returned = delivery.return_coordinator_input(
-        conn, receipt, reason=reason, retry_at=None if walled else time.time() + _probe_spacing(turns),
+        conn, receipt, reason=reason, route=route if wall else None,
+        retry_at=None if wall else time.time() + _probe_spacing(int(quota.get('turns') or 0)),
         answered_calls=answered_calls)
     if returned is not None:
         logger.warning('PRINCIPAL_WALL_20261012 request %s back in the Principal inbox: its turn ended on %s (%s)',
-                       receipt['request_id'], reason,
-                       f'route {route[1]}/{route[2]}@{route[0]} closed' if walled else 'no usage window named')
+                       receipt['request_id'], reason, f'route {label(wall)} closed' if wall else 'no route named')
     return returned
+
+
+def entry_gave_no_verdict(conn, receipt, *, profile):
+    """The turn of this inbox entry ended with nothing from the provider about quota (another failure, an
+    interruption, no call made). When that turn was the probe of a closed route it gave no verdict: the probing
+    goes back at once, to the next entry, instead of standing still for the probe's lease."""
+    from hermes_cli import nfos_delivery as delivery
+    row = delivery.get_request(conn, receipt['request_id'])
+    route = entry_route(json.loads(row['payload']), profile) if row is not None else session_route(profile)
+    if route:
+        release_probe(*route, task_id=receipt['request_id'])
 
 
 def session_answered(profile, model, *, started_at, conn=None, request_id=None):

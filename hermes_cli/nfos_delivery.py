@@ -218,6 +218,17 @@ def escalate_urgent(conn, task_id, *, reason, author='Principal', request_id=Non
         trow = conn.execute("SELECT status, priority, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if trow is None:
             raise WorkflowError('Unknown card for urgency')
+        if request_id and how == 'principal':
+            # PRINCIPAL_WALL_20261012: the Principal's urgency command names the inbox entry it is run for. The turn
+            # of an entry can die after this command ran (the provider's quota) and the entry is then offered again:
+            # the same entry makes the same card urgent once, with one comment and one event.
+            recorded = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id=? AND kind='priority_escalated' AND json_valid(payload) "
+                "AND json_extract(payload,'$.request_id')=? AND json_extract(payload,'$.how')='principal' "
+                "ORDER BY id LIMIT 1", (task_id, str(request_id))).fetchone()
+            if recorded is not None:
+                return {'task_id': task_id, 'priority': int(trow['priority'] or 0), 'status': trow['status'],
+                        'reason': json.loads(recorded['payload']).get('reason'), 'already_recorded': True}
         if trow['status'] in ('done', 'archived'):
             raise WorkflowError('A closed card does not take urgency; send the new work through receive with urgency')
         conn.execute("UPDATE tasks SET priority = MAX(COALESCE(priority,0), ?) WHERE id = ?", (URGENT_PRIORITY, task_id))
@@ -508,9 +519,10 @@ def retry_coordinator_input(conn, receipt, *, error=None):
         conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(payload),row['id']))
 
 
-def coordinator_met_wall(conn, receipt, *, route, limit=None, reset_at=None):
-    """PRINCIPAL_WALL_20261012: the Principal's turn on this inbox entry was refused by a long usage window of its
-    provider. The entry keeps the route the session ran on, which is the one whose reopening it waits for."""
+def coordinator_turn_refused(conn, receipt, *, route, limit=None, reset_at=None):
+    """PRINCIPAL_WALL_20261012: the Principal's turn on this inbox entry was refused by its provider on quota. The
+    entry keeps the route the session ran that call on, which is the one whose reopening it waits for if the turn
+    ends there, with what the provider said of the limit (its name and reset time, when it gave them)."""
     with _kb().write_txn(conn,allow_nested=True):
         row=get_request(conn,receipt['request_id'])
         if row is None or row['status']!='coordinating':
@@ -525,13 +537,14 @@ def coordinator_met_wall(conn, receipt, *, route, limit=None, reset_at=None):
         return True
 
 
-def return_coordinator_input(conn, receipt, *, reason, retry_at=None, answered_calls=0):
+def return_coordinator_input(conn, receipt, *, reason, route=None, retry_at=None, answered_calls=0):
     """PRINCIPAL_WALL_20261012: the Principal's turn that took this inbox entry ended failed on its provider's quota.
 
     `wake_accepted` only says that the turn started. The decision of the entry (new work, a correction, a question)
-    was not finished, so the entry goes back to the inbox, to be offered again: once the route the session ran on
-    reopens (`nfos_route_walls`), or at `retry_at` when no usage window closed it. An entry the Principal had already
-    released in that turn is no longer `coordinating` and stays as it is: its card is not created twice.
+    was not finished, so the entry goes back to the inbox, to be offered again once the route the session ran on
+    reopens (`nfos_route_walls`): `route` is that route when the turn's end closed it, and the wall is then the
+    entry's only clock. `retry_at` is for the entry whose route could not be told. An entry the Principal had
+    already released in that turn is no longer `coordinating` and stays as it is: its card is not created twice.
 
     `answered_calls` is how many model calls of that turn the provider answered before the one it refused. Zero
     means the Principal never spoke in that turn. Above zero it may have acted on the entry without releasing it
@@ -550,6 +563,8 @@ def return_coordinator_input(conn, receipt, *, reason, retry_at=None, answered_c
         quota=dict(coordination.get('quota') or {})
         quota.update(reason=str(reason),returned_claim=token,returned_at=now,turns=int(quota.get('turns',0))+1,
                      answered_calls=int(quota.get('answered_calls',0))+max(0,int(answered_calls or 0)))
+        if route:
+            quota['route']=[str(part) for part in route]
         # The checkpoint of the turn that died still names this claim: without these three the next claim would
         # find it there and take the entry for accepted again.
         for key in ('claim_token','checkpoint_root','session_id'):
@@ -6163,6 +6178,7 @@ def main():
     parser.add_argument('--next',dest='next_action',default='')
     parser.add_argument('--kind',choices=['review','spec_review','final_review','impediment','additional_tasks','homologation','preparation'])
     parser.add_argument('--decision')
+    parser.add_argument('--request',help='urgent: id of the inbox entry this urgency is recorded for, once')  # PRINCIPAL_WALL_20261012
     parser.add_argument('--full',action='store_true',help='show: every decision and native call of the card, whole')  # SHOW_DECISIONS_LIMIT_20261010
     parser.add_argument('--call',help='call: id of the native call to read whole')  # SHOW_CALLS_LIMIT_20261010
     parser.add_argument('--timeout',type=float,default=300,help='Maximum wait duration; pending is not failure')
@@ -6339,7 +6355,7 @@ def main():
                 raise WorkflowError('Urgency is the judgment of the Principal about the conversation; a worker records context in its card')
             if not args.task:
                 raise WorkflowError('urgent needs --task: the open card this message made urgent')
-            result=escalate_urgent(conn,args.task,reason=payload.get('reason'),how='principal')
+            result=escalate_urgent(conn,args.task,reason=payload.get('reason'),how='principal',request_id=args.request)
         print(_json(result))
 
 

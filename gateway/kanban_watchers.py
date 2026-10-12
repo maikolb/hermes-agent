@@ -1769,10 +1769,10 @@ class GatewayKanbanWatchersMixin:
         try:
             # The wake's user content is checkpointed before its ACK. A later
             # sidecar alone would lose the exact intake after a crash here.
-            # PRINCIPAL_WALL_20261012: an entry whose earlier turn died on quota after the Principal had spoken.
-            acted=int(((payload.get('coordination') or {}).get('quota') or {}).get('answered_calls') or 0)
+            # PRINCIPAL_WALL_20261012: an entry that came back from a turn that died on quota says what that turn did.
+            back=(payload.get('coordination') or {}).get('quota') or {}
             wake_text=('[NFOS: mensagem original preservada para coordenação; não é uma nova mensagem Telegram.]\n'
-                +payload['text']+'\n\n'+(resumed_intake_note(acted) if acted else '')
+                +payload['text']+'\n\n'+(resumed_intake_note(back.get('answered_calls')) if back.get('turns') else '')
                 +coordinator_intake_instructions(context,reply_to=context['reply_to_message_id']))
             accepted=await deliver_wake(adapter,source=source,
                 text=wake_text,
@@ -1791,7 +1791,9 @@ class GatewayKanbanWatchersMixin:
 
         The turn of a preserved request that ended failed on the provider's quota decided nothing: its inbox entry
         was marked accepted when the turn started, and is given back so the intake offers it again once the route
-        is open. A turn the provider answered is the proof that reopens a route a usage window had closed. Never
+        is open; the route is closed by then, by the window the provider named or, with none named, by this end of
+        the turn. A turn the provider answered is the proof that reopens a closed route. A turn of a request that
+        ended any other way says nothing of the route: if it was the route's probe, the probing is freed. Never
         raises: the turn's own result is handled by the caller whatever happens here.
         """
         try:
@@ -1811,12 +1813,21 @@ class GatewayKanbanWatchersMixin:
                 answered_calls=max(0,int(agent_result.get('api_calls') or 0)-1)
                 def refused():
                     with kb.connect_closing(Path(receipt['db_path'])) as conn:
-                        walls.entry_refused(conn,receipt,reason=agent_result.get('failure_reason'),profile=profile,
-                            answered_calls=answered_calls)
-                await _to_thread_process_service(refused)
+                        return walls.entry_refused(conn,receipt,reason=agent_result.get('failure_reason'),
+                            profile=profile,answered_calls=answered_calls)
+                if await _to_thread_process_service(refused) is not None:
+                    # The intake offers this entry again. The gateway's own continuation of a rate-limited turn
+                    # would run the same turn a second time: it is not scheduled for it.
+                    agent_result.pop('retry_not_before',None)
                 return
-            if (agent_result.get('failed') or agent_result.get('interrupted')
-                    or not agent_result.get('api_calls') or not walls.any_closed()):
+            if not walls.any_closed():return
+            if agent_result.get('failed') or agent_result.get('interrupted') or not agent_result.get('api_calls'):
+                if receipt is not None:
+                    # Not a word from the provider about quota: a probe that gave no verdict frees the probing.
+                    def no_verdict():
+                        with kb.connect_closing(Path(receipt['db_path'])) as conn:
+                            walls.entry_gave_no_verdict(conn,receipt,profile=profile)
+                    await _to_thread_process_service(no_verdict)
                 return
             def answered():
                 if receipt is None:

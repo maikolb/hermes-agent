@@ -7765,6 +7765,8 @@ class TurnRunner:
                 # persistence) lose the structured reason exactly when
                 # the run produced no text.
                 "failure_reason": result.get("failure_reason"),
+                # PRINCIPAL_WALL_20261012 (NFOS): an unverified billing verdict is not a quota wall.
+                "billing_unverified": result.get("billing_unverified", False),
                 "partial": result.get("partial", False),
                 "completed": result.get("completed"),
                 "turn_exit_reason": result.get("turn_exit_reason"),
@@ -7891,6 +7893,8 @@ class TurnRunner:
             "failure_reason": (
                 ctx.result_holder[0].get("failure_reason") if ctx.result_holder[0] else None
             ),
+            # PRINCIPAL_WALL_20261012 (NFOS): an unverified billing verdict is not a quota wall.
+            "billing_unverified": bool(ctx.result_holder[0] and ctx.result_holder[0].get("billing_unverified")),
             "completed": ctx.result_holder[0].get("completed") if ctx.result_holder[0] else None,
             "turn_exit_reason": (
                 ctx.result_holder[0].get("turn_exit_reason")
