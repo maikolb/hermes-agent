@@ -424,6 +424,10 @@ def record_coordinator_progress(conn, receipt, **progress):
         if row is None:
             return
         payload=json.loads(row['payload']);coordination=payload.setdefault('coordination',{})
+        if receipt.get('claim_token') and (coordination.get('quota') or {}).get('returned_claim')==receipt.get('claim_token'):
+            # PRINCIPAL_WALL_20261012: the turn of this claim ended on the provider's quota and the entry went back to
+            # the inbox. Its checkpoint still names the claim, and the session's next turn flushes it as accepted.
+            return
         if coordination.get('claim_token')!=receipt.get('claim_token'):
             raise OwnershipConflict('Principal input was claimed by another delivery attempt')
         for key in ('checkpoint_root','session_id','wake_accepted'):
@@ -502,6 +506,54 @@ def retry_coordinator_input(conn, receipt, *, error=None):
         coordination.update(claim_until=0,last_attempt_at=now,next_attempt_at=now+delay,
                             last_error=redact_sensitive_text(str(error),force=True,redact_url_credentials=True)[:500] if error else None)
         conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(payload),row['id']))
+
+
+def coordinator_met_wall(conn, receipt, *, route, limit=None, reset_at=None):
+    """PRINCIPAL_WALL_20261012: the Principal's turn on this inbox entry was refused by a long usage window of its
+    provider. The entry keeps the route the session ran on, which is the one whose reopening it waits for."""
+    with _kb().write_txn(conn,allow_nested=True):
+        row=get_request(conn,receipt['request_id'])
+        if row is None or row['status']!='coordinating':
+            return False
+        payload=json.loads(row['payload']);coordination=payload.get('coordination') or {}
+        if coordination.get('claim_token')!=receipt.get('claim_token'):
+            return False
+        quota=dict(coordination.get('quota') or {})
+        quota.update(route=[str(part) for part in route],limit=limit,reset_at=reset_at,met_at=time.time())
+        coordination['quota']=quota;payload['coordination']=coordination
+        conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(payload),row['id']))
+        return True
+
+
+def return_coordinator_input(conn, receipt, *, reason, retry_at=None):
+    """PRINCIPAL_WALL_20261012: the Principal's turn that took this inbox entry ended failed on its provider's quota.
+
+    `wake_accepted` only says that the turn started. The decision of the entry (new work, a correction, a question)
+    was not taken, so the entry goes back to the inbox, to be offered again: once the route the session ran on
+    reopens (`nfos_route_walls`), or at `retry_at` when no usage window closed it. An entry the Principal had already
+    released in that turn is no longer `coordinating` and stays as it is: its card is not created twice.
+
+    Returns the entry's quota record, or `None` when nothing was returned."""
+    with _kb().write_txn(conn,allow_nested=True):
+        row=get_request(conn,receipt['request_id'])
+        if row is None or row['status']!='coordinating':
+            return None
+        payload=json.loads(row['payload']);coordination=payload.get('coordination') or {}
+        token=receipt.get('claim_token')
+        if not token or coordination.get('claim_token')!=token:
+            return None
+        now=time.time()
+        quota=dict(coordination.get('quota') or {})
+        quota.update(reason=str(reason),returned_claim=token,returned_at=now,turns=int(quota.get('turns',0))+1)
+        # The checkpoint of the turn that died still names this claim: without these three the next claim would
+        # find it there and take the entry for accepted again.
+        for key in ('claim_token','checkpoint_root','session_id'):
+            coordination.pop(key,None)
+        coordination.update(wake_accepted=False,claim_until=0,last_attempt_at=now,
+                            next_attempt_at=float(retry_at) if retry_at else now,quota=quota)
+        payload['coordination']=coordination
+        conn.execute('UPDATE nfos_requests SET payload=? WHERE id=?',(_json(payload),row['id']))
+        return quota
 
 
 def support_approval_pending(payload):

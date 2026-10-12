@@ -1,32 +1,39 @@
-"""R3 (b): the Principal on its provider's quota wall for hours.
+"""R3 (b): the Principal on its provider's quota wall for hours or days (PRINCIPAL_WALL_20261012).
 
-The plan of record supposes: with the Principal answering 429 for hours, a new request still becomes a card, a
-decision marked `stalled_at` is charged again when quota returns, and no error leaks into the requester's topic.
+A Telegram request reaches the intake behind the adapter's attribution line, is persisted as `coordinating` and is
+handed to the Principal, which decides by intent whether it is new work. All 213 Telegram requests of the 30 days
+read on the production boards on 2026-10-12 entered that way. That decision is a turn on the Principal's own route.
 
-What these tests find on main:
+What main did when that turn died on the wall: the wake had been marked accepted when the turn started, so the
+intake never offered the request again, during the outage or after it (no card, no receipt), and the provider's
+refusal reached the topic of who asked twice, in English: as the turn's lifecycle status while it ran, and as its
+reply ("The model provider is rate-limiting requests. Please wait a moment and try again.").
 
-* The decision half holds. The executor is not relaunched and nothing closes during the outage, the decision is
-  marked `stalled_at` after three reminders, the card parks as `awaiting_principal`, the reminder keeps coming every
-  fifteen minutes, and the first one after quota returns is answered: the card goes back to its executor. In the
-  requester's topic the notifier posts no reminder and no question: only the bar of the request moves to paused.
-* The request half does not. A Telegram request reaches the intake behind the adapter's attribution line, so the
-  imperative-prefix rule never admits it: it is persisted as `coordinating` and handed to the Principal. The wake is
-  accepted when the Principal's turn starts, the turn dies on the wall, and the intake never offers the request
-  again, during the outage or after it. No card, and no receipt for whoever asked.
-* The failure of that request turn reaches the topic of who asked: the gateway rewrites it and hands the adapter
-  "The model provider is rate-limiting requests. Please wait a moment and try again." The same failure on a decision
-  wake is withheld.
+What these tests hold:
 
-Not exercised here: the gateway's own resume of a session interrupted by a provider rate limit
-(`mark_resume_pending(..., "provider_rate_limit")`), which needs a reset time in the 429 and stops after three
-automatic attempts. Short of a new message from a person, it is the only way the request turn can come back.
+* the request stays persisted and its decision stays owed: the inbox entry goes back to the inbox when the turn ends
+  failed on quota (`rate_limit` or `billing`), with the route the session ran on;
+* that route is closed like an executor's (`nfos_route_walls`), with one notice in the management topic; while it
+  is closed no request is offered to the Principal, the one that met the wall or one that arrives later, so nothing
+  is spent on a refused call;
+* the same request is offered again when the route reopens, at the reset time the provider gave or by one probe at
+  spaced intervals when it gave none, the oldest request first and one at a time; it becomes one card, and a request
+  the Principal had released before its turn died is not offered again;
+* a quota refusal with no usage window behind it (a throttle that outlasts the client's retries) returns the
+  request too, to be offered at the respawn guard's spacing, with no route closed;
+* nothing reaches the topic of who asked while the wall is up: not the reply of the dead turn, not its status;
+* a request that enters through the portal becomes a card as before, with the Principal on the wall;
+* the decision half is as it was: a stalled decision is charged again and the card resumes when quota returns.
 
-Read on the production boards on 2026-10-12 (read-only): all 213 Telegram requests of the last 30 days entered
-through the Principal's inbox, none was admitted by code.
+The Principal here is a real agent on the profile's route with the gateway's own handling of the turn it ran
+(`GatewayRunner._handle_message_with_agent`, the turn checkpoint, the status bridge). The provider, the clock and
+the Telegram adapter are stand-ins. With quota, the stand-in provider does what the Principal does for independent
+work: it runs the intake with the exact request of the wake.
 """
 import asyncio
 import json
 import os
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -34,15 +41,20 @@ import pytest
 import yaml
 
 from agent.turn_checkpoint import initialize_agent_turn_checkpoint
+from gateway import run as gateway_run
+from gateway.platforms.base import MessageEvent, MessageType, SendResult
+from gateway.turn_context import TurnContext
 from gateway.wake import current_notify_receipt
-from hermes_cli import kanban_db as kb, nfos_delivery as delivery
+from hermes_cli import kanban_db as kb, nfos_delivery as delivery, nfos_route_walls as walls
 from tests.gateway.test_42039_duplicate_user_message import _bootstrap
 from tests.gateway.test_kanban_notifier import _make_runner, _run_one_notifier_tick
 from tests.gateway.test_kanban_notifier_durable import RecordingAdapter
 from tests.gateway.test_nfos_intake import setup  # noqa: F401
 from tests.hermes_cli.nfos_quota_wall import (  # noqa: F401
-    PROFILE_CONFIG, REQUEST, SOURCE, WORKER_ENV, Clock, agent_on_quota_wall, enrol, launcher, quota_board,
+    PROFILE_CONFIG, REQUEST, SOURCE, WORKER_ENV, Clock, CodexUsageLimit, GoUsageLimitFromSDK, ProviderRateLimit,
+    agent_on_quota_wall, enrol, launcher, metered_reply, quota_board,
 )
+from tests.hermes_cli.test_nfos_route_walls import MANAGEMENT_TOPIC, Operations
 
 posix_only = pytest.mark.skipif(os.name != 'posix', reason='the dispatcher reaps a worker exit status only on POSIX')
 
@@ -50,6 +62,13 @@ TICK = 300
 OUTAGE = 4 * 3600
 QUESTION = 'Which of the two sources satisfies criterion C1'
 SESSION_KEY = 'agent:main:telegram:group:-1000:8'
+# The Principal's route on the production profile (read on 2026-10-12), and the distance of the reset in the
+# refusal its log has on 2026-10-09: `usage_limit_reached`, `limit_window_minutes: 10080`, `resets_in_seconds: 522167`.
+PRINCIPAL = ('default', PROFILE_CONFIG['model']['provider'], PROFILE_CONFIG['model']['default'])
+WEEKLY_RESET = 522167
+SECOND_REQUEST = '[Japa|1]\nCorrija a ordenação da tela de pedidos.'
+PORTAL = {'platform': 'portal', 'chat_id': 'dov', 'thread_id': 'suporte', 'message_id': 'DV-0031',
+          'chat_type': 'portal', 'user_id': 'portal:dov:lucas'}
 
 
 class Principal(RecordingAdapter):
@@ -74,12 +93,11 @@ class Principal(RecordingAdapter):
 
 
 class Inbox:
-    """The same session as the intake reaches it: a wake that carries the preserved request. With quota, the
-    Principal runs the intake command the wake names, which is what releases the request to a worker."""
+    """The same session as the intake reaches it, reduced to the start of its turn: the wake's content is
+    checkpointed, which accepts the wake, and nothing else happens."""
 
     def __init__(self, root):
         self.root = root
-        self.on_wall = True
         self.wakes = []
 
     async def handle_message(self, event):
@@ -91,10 +109,88 @@ class Inbox:
                                              messages=[])
         finally:
             current_notify_receipt.reset(token)
-        if self.on_wall:
-            return
-        with kb.connect_closing() as conn:
-            delivery.receive_request(conn, **event.metadata['nfos_coordinator_intake']['request'])
+
+
+class Session:
+    """The coordinating session behind the topic, whole: a wake starts a turn of a real agent on the Principal's
+    route, the turn writes its checkpoint (which is what accepts the wake), its status goes through the gateway's
+    status bridge and its result through the gateway's own handler. What that handler returns is what the adapter
+    sends to the topic the wake was delivered in, which is the topic of who asked.
+
+    `refusal` builds what the provider answers while the Principal is on the wall; `None` means it has quota, and
+    the Principal then releases the request of the wake as new work."""
+
+    def __init__(self, monkeypatch, tmp_path, root):
+        from hermes_state import SessionDB
+        self.refusal = None
+        self.releases_then_dies = False
+        self.request = None
+        self.wakes, self.calls, self.results, self.handed, self.status_sent = [], [], [], [], []
+        self.agent, self.seen = agent_on_quota_wall(monkeypatch, provider=PRINCIPAL[1], model=PRINCIPAL[2],
+                                                    answer=self._provider)
+        # The stand-in provider answers in the chat-completions shape, whatever transport the route would use.
+        self.agent.api_mode = 'chat_completions'
+        self.agent._session_db = SessionDB(db_path=root / 'state.db')
+        self.gateway = _bootstrap(monkeypatch, tmp_path)
+        self.turn = TurnContext(_run_still_current=lambda: True)
+        self.turn._status_adapter, self.turn._status_chat_id = self, SOURCE['chat_id']
+        self.turn._status_thread_metadata = {'thread_id': SOURCE['thread_id']}
+        self.turn.agent_holder[0] = self.agent
+        self.agent.status_callback = gateway_run.TurnRunner(self.gateway, self.turn)._status_callback_sync
+
+    def _provider(self, seen):
+        self.calls.append(time.time())
+        if self.request and (self.refusal is None or self.releases_then_dies):
+            with kb.connect_closing() as conn:
+                delivery.receive_request(conn, **self.request)
+        if self.refusal is not None:
+            raise self.refusal()
+        return metered_reply('Registered as new work.')
+
+    def other_turn(self, text):
+        """A turn of the same session that is not the turn of a request (a card's question, say). Only its effect
+        on the session's checkpoint matters here, so its own status goes nowhere."""
+        self.request, bridge, self.agent.status_callback = None, self.agent.status_callback, None
+        try:
+            return self.agent.run_conversation(text)
+        finally:
+            self.agent.status_callback = bridge
+
+    async def send(self, chat_id, content, metadata=None):
+        """The topic's adapter, for the status bridge."""
+        self.status_sent.append(content)
+        return SendResult(success=True, message_id=str(len(self.status_sent)))
+
+    async def handle_message(self, event):
+        self.wakes.append(event)
+        self.request = event.metadata['nfos_coordinator_intake']['request']
+        self.turn.source, self.turn._loop_for_step = event.source, asyncio.get_running_loop()
+        receipt = event.metadata['kanban_wake_delivery']
+        token = current_notify_receipt.set(receipt)
+        try:
+            result = self.agent.run_conversation(event.text)
+            self.results.append(result)
+            # The keys GatewayRunner._run_agent returns for a turn that ended with text.
+            self.gateway._run_agent = AsyncMock(return_value={
+                'final_response': result['final_response'], 'messages': [], 'api_calls': result['api_calls'],
+                'failed': bool(result.get('failed')), 'failure_reason': result.get('failure_reason'),
+                'completed': result['completed'], 'error': result.get('error'), 'tools': [], 'history_offset': 0,
+                'last_prompt_tokens': 0, 'model': self.agent.model})
+            handed = await self.gateway._handle_message_with_agent(event, event.source, SESSION_KEY, 1)
+        finally:
+            current_notify_receipt.reset(token)
+            self.gateway._release_turn_lease(SESSION_KEY, 1)  # as the handler's caller does when the turn is over
+        for _ in range(3):  # let the status bridge run what it scheduled on this loop
+            await asyncio.sleep(0)
+        self.handed.append(handed)
+
+    def said_in_the_topic(self):
+        """Everything the gateway handed to the topic of who asked: turn replies and status messages."""
+        return [text for text in self.handed if text] + list(self.status_sent)
+
+    def offered(self):
+        """The request each wake carried, in the order the wakes came."""
+        return [event.metadata['nfos_coordinator_intake']['request_id'] for event in self.wakes]
 
 
 def _events(conn, task_id, *kinds):
@@ -121,6 +217,8 @@ def intake(setup, monkeypatch):
     for key in WORKER_ENV:
         monkeypatch.delenv(key, raising=False)
     runner._adapter_profile_for_source = lambda source: 'default'
+    # The profile's own config: it names the route the Principal runs on.
+    (root / 'config.yaml').write_text(yaml.safe_dump(PROFILE_CONFIG), encoding='utf-8')
     with kb.connect_closing() as conn:
         delivery.init_schema(conn)
     inbox = Inbox(root)
@@ -129,26 +227,66 @@ def intake(setup, monkeypatch):
     return runner, event, adapter, inbox
 
 
+@pytest.fixture
+def desk(intake, monkeypatch, tmp_path):
+    """The intake with the whole coordinating session behind the topic, and a Telegram that confirms what it sends."""
+    runner, event, adapter, inbox = intake
+    session = Session(monkeypatch, tmp_path, inbox.root)
+    adapter.handle_message = session.handle_message
+    adapter._send_with_retry = AsyncMock(return_value=SimpleNamespace(success=True, message_id='900'))
+    return runner, event, adapter, session
+
+
+@pytest.fixture
+def ops():
+    return Operations()
+
+
 async def _settle(runner):
     await asyncio.wait_for(asyncio.gather(*list(getattr(runner, '_background_tasks', ()))), 10)
 
 
-async def _through_the_outage(runner, clock, seconds):
-    """The gateway keeps offering the Principal its unaccepted inbox; the dispatcher keeps looking for requests."""
-    for _ in range(seconds // TICK):
-        clock.advance(TICK)
-        await runner._nfos_retry_coordinator_inputs()
-        await _settle(runner)
-        with kb.connect_closing() as conn:
-            reservation = delivery.reserve_request(conn, capacity=2)
-            if reservation:
-                delivery.bootstrap_card(conn, reservation['id'], reservation['claim_token'], pid=os.getpid())
+async def _tick(runner, clock, seconds=TICK, ops=None):
+    """One round of the gateway: the Principal is offered its unaccepted inbox, receipts owed are sent, the wall's
+    notice goes out, and the dispatcher turns a released request into its card."""
+    clock.advance(seconds)
+    await runner._nfos_retry_coordinator_inputs()
+    await _settle(runner)
+    await runner._nfos_retry_receipts()
+    if ops is not None:
+        await ops.runner._kanban_route_wall_notices()
+    with kb.connect_closing() as conn:
+        reservation = delivery.reserve_request(conn, capacity=5)
+        if reservation:
+            delivery.bootstrap_card(conn, reservation['id'], reservation['claim_token'], pid=os.getpid())
+
+
+async def _through(runner, clock, seconds, ops=None, step=TICK):
+    for _ in range(seconds // step):
+        await _tick(runner, clock, step, ops)
+
+
+def _requests():
+    """Every request of the board in arrival order, each with its payload."""
+    with kb.connect_closing() as conn:
+        return [dict(row, payload=json.loads(row['payload']))
+                for row in map(dict, conn.execute('SELECT * FROM nfos_requests ORDER BY created_at,id'))]
+
+
+def _cards():
+    with kb.connect_closing() as conn:
+        return [dict(row) for row in conn.execute('SELECT id,title,body FROM tasks ORDER BY created_at,id')]
 
 
 def _board():
     with kb.connect_closing() as conn:
         request = dict(conn.execute('SELECT * FROM nfos_requests').fetchone())
         return request, json.loads(request['payload']), conn.execute('SELECT count(*) FROM tasks').fetchone()[0]
+
+
+def _second(event):
+    """Another message of the same person in the same topic."""
+    return MessageEvent(text=SECOND_REQUEST, message_id='124', message_type=MessageType.TEXT, source=event.source)
 
 
 @posix_only
@@ -201,55 +339,309 @@ def test_stalled_decision_is_charged_again_and_the_card_resumes_when_quota_retur
 
 @pytest.mark.asyncio
 async def test_a_bare_imperative_request_becomes_a_card_without_the_principal(intake, monkeypatch):
-    """The path the plan counts on exists: a message that starts with the verb is admitted by code."""
+    """A message that starts with the verb is admitted by code."""
     runner, event, adapter, inbox = intake
     clock = Clock(monkeypatch)
     event.text = REQUEST.split('\n', 1)[1]
     assert 'registrado' in (await runner._nfos_receive(event)).lower()
-    await _through_the_outage(runner, clock, TICK)
+    await _tick(runner, clock)
     request, payload, cards = _board()
     assert request['status'] == 'attached' and 'coordination' not in payload and cards == 1
     assert inbox.wakes == []
 
 
 @pytest.mark.asyncio
-async def test_today_a_telegram_request_waits_in_the_principal_inbox_through_the_outage_and_after(
-        intake, monkeypatch):
-    """What main does today. Delete with the xfail mark below when a request no longer depends on the Principal."""
-    runner, event, adapter, inbox = intake
+async def test_the_same_request_is_resumed_once_when_the_route_reopens_at_the_reset_the_provider_gave(
+        desk, monkeypatch, ops):
+    runner, event, adapter, session = desk
     clock = Clock(monkeypatch)
+    start = clock.now
+    session.refusal = lambda: CodexUsageLimit(resets_in=int(start + WEEKLY_RESET - clock.now))
+
     assert await runner._nfos_receive(event) == '', 'no receipt by code: the message went to the Principal'
     await _settle(runner)
-    assert len(inbox.wakes) == 1 and inbox.wakes[0].text.startswith('[NFOS: mensagem original preservada')
-    await _through_the_outage(runner, clock, OUTAGE)
     request, payload, cards = _board()
-    assert request['status'] == 'coordinating' and payload['coordination']['wake_accepted'] and cards == 0
-    assert len(inbox.wakes) == 1, 'accepted once when the turn started; the turn died on the wall'
+    request_id, entry = request['id'], payload['coordination']
 
-    inbox.on_wall = False
-    await _through_the_outage(runner, clock, 3600)
+    # The turn met the usage window on its first call and ended there, having decided nothing.
+    assert [(r['failed'], r['failure_reason']) for r in session.results] == [(True, 'rate_limit')]
+    assert (session.seen.provider_calls, session.seen.waits.waited) == (1, 0)
+    # The request is where it was, its decision owed: back in the inbox, with the route it waits for.
+    assert (request['status'], request['task_id'], cards) == ('coordinating', None, 0)
+    assert payload['text'] == REQUEST and payload['source']['message_id'] == '123'
+    assert entry['wake_accepted'] is False and 'claim_token' not in entry
+    assert entry['quota']['route'] == list(PRINCIPAL) and entry['quota']['reset_at'] == start + WEEKLY_RESET
+    assert (entry['quota']['reason'], entry['quota']['turns']) == ('rate_limit', 1)
+    # The Principal's route is closed, by that request, until the reset time the provider gave.
+    wall = walls.read(*PRINCIPAL)
+    assert (wall['limit'], wall['reset_at']) == ('usage_limit_reached', start + WEEKLY_RESET)
+    assert wall['closed_by']['request_id'] == request_id and walls.open_at(wall) == start + WEEKLY_RESET
+    assert session.said_in_the_topic() == [], 'neither the reply of the dead turn nor its status'
+
+    # Four hours on the wall. Another turn of the same session starts meanwhile (a card's question): it replaces
+    # the checkpoint of the dead turn, which flushes that turn's acceptance. The request stays owed.
+    await _through(runner, clock, OUTAGE // 2, ops)
+    assert session.other_turn('[kanban] a card asks')['failure_reason'] == 'rate_limit'
+    await _through(runner, clock, OUTAGE // 2, ops)
     request, payload, cards = _board()
-    assert len(inbox.wakes) == 1, 'quota is back and the intake still does not offer the request again'
-    assert request['status'] == 'coordinating' and cards == 0
+    assert session.offered() == [request_id], 'not offered again while the route is closed'
+    assert session.seen.provider_calls == 2, 'no call spent on the request during the outage'
+    assert (request['status'], cards, payload['coordination']['wake_accepted']) == ('coordinating', 0, False)
+    (chat, topic, notice), = ops.sent
+    assert (chat, topic) == MANAGEMENT_TOPIC, 'the one notice of the wall, in the management topic'
+    assert f'Rota {PRINCIPAL[1]}/{PRINCIPAL[2]} fechada para o perfil {PRINCIPAL[0]}' in notice
+    assert time.strftime('%d/%m %H:%M UTC', time.gmtime(start + WEEKLY_RESET)) in notice
+    assert 'sessão coordenadora (Principal)' in notice and 'retomada, na ordem de chegada' in notice
     adapter._send_with_retry.assert_not_called()
+    assert session.said_in_the_topic() == []
+
+    # One second before the reset: nothing. At the reset, with quota back: the same request, offered once.
+    await _tick(runner, clock, int(start + WEEKLY_RESET - 1 - clock.now), ops)
+    assert session.offered() == [request_id] and _board()[2] == 0
+    session.refusal = None
+    await _tick(runner, clock, 1, ops)
+    request, payload, cards = _board()
+    assert session.offered() == [request_id, request_id], 'the same request, by its id'
+    first, again = (wake.metadata['nfos_coordinator_intake']['request'] for wake in session.wakes)
+    assert first == again and again['source']['message_id'] == '123' and again['text'] == REQUEST
+    assert session.wakes[0].text == session.wakes[1].text
+    assert (request['id'], request['status'], cards) == (request_id, 'attached', 1), 'it became its card'
+    (card,) = _cards()
+    assert request['task_id'] == card['id'] and REQUEST.split('\n', 1)[1] in card['body']
+    assert walls.read(*PRINCIPAL) is None, 'the provider answered: the route is open'
+    # Whoever asked gets the intake's own receipt for the message they sent, now and only now.
+    (receipt,) = adapter._send_with_retry.await_args_list
+    assert receipt.kwargs['reply_to'] == '123' and receipt.kwargs['content'].startswith(f'Pedido registrado: {request_id}')
+
+    await _through(runner, clock, 3600, ops)
+    assert session.offered() == [request_id, request_id] and len(_cards()) == 1, 'once: no second offer, no second card'
+    assert adapter._send_with_retry.await_count == 1 and len(ops.sent) == 1
+    (said,) = session.said_in_the_topic()
+    assert said.startswith('Registered as new work.'), 'only what the Principal said with quota'
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'R3 (b): a Telegram request arrives behind the adapter line "[Sender|id]", so _classify_parallel_intake_message '
-    'never returns new_task and _nfos_receive persists it as coordinating, for the Principal. The wake is accepted '
-    'at the turn checkpoint, the turn dies on the 429, and _nfos_receipt_candidates skips wake_accepted for good: '
-    'no card during the outage and no new offer after it. Fix: an accepted coordinator input whose turn ended '
-    'failed is offered again (clear wake_accepted, honour retry_not_before), and one still coordinating past a '
-    'deadline becomes pending so the worker creates the card and the Principal classifies it on the card.'))
 @pytest.mark.asyncio
-async def test_new_request_becomes_a_card_while_the_principal_is_on_the_wall(intake, monkeypatch):
-    runner, event, adapter, inbox = intake
+async def test_with_no_reset_time_the_oldest_request_probes_the_route_at_spaced_intervals(desk, monkeypatch, ops):
+    runner, event, adapter, session = desk
     clock = Clock(monkeypatch)
+    start = clock.now
+    session.refusal = GoUsageLimitFromSDK  # a named limit and no reset time: the end of the window is unknown
+
     await runner._nfos_receive(event)
     await _settle(runner)
-    await _through_the_outage(runner, clock, OUTAGE)
+    request_id = _board()[0]['id']
+    wall = walls.read(*PRINCIPAL)
+    assert (wall['limit'], wall['reset_at'], wall['account']) == ('weekly', None, 'wrk_quota_wall_suite')
+    assert session.results[0]['failure_reason'] == 'billing' and session.seen.provider_calls == 1
+
+    # Probes at the respawn guard's spacing, kept for the route: 300 s, then 600 s after it, then 1200 s.
+    await _through(runner, clock, 2040, ops, step=60)
+    assert [int(at - start) for at in session.calls] == [0, 300, 900], 'one refused call per probe, nothing between'
     request, payload, cards = _board()
-    assert cards == 1, f'{OUTAGE // 3600} h later the request is {request["status"]} and the board has {cards} cards'
+    assert (request['status'], cards, payload['coordination']['quota']['turns']) == ('coordinating', 0, 3)
+    wall = walls.read(*PRINCIPAL)
+    assert (wall['probes'], wall['probe'], wall['next_probe_at']) == (2, None, start + 2100)
+    assert len(ops.sent) == 1 and 'sem hora de reinício informada' in ops.sent[0][2], 'a refused probe sends no notice'
+    assert session.said_in_the_topic() == [] and not adapter._send_with_retry.await_count
+
+    session.refusal = None
+    await _through(runner, clock, 120, ops, step=60)
+    request, payload, cards = _board()
+    assert [int(at - start) for at in session.calls] == [0, 300, 900, 2100], 'the probe the provider answers'
+    assert session.offered() == [request_id] * 4 and (request['status'], cards) == ('attached', 1)
+    assert walls.read(*PRINCIPAL) is None
+    await _through(runner, clock, 3600, ops)
+    assert len(session.calls) == 4 and len(_cards()) == 1 and len(ops.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_two_requests_held_by_the_wall_are_resumed_in_the_order_they_arrived(desk, monkeypatch, ops):
+    runner, event, adapter, session = desk
+    clock = Clock(monkeypatch)
+    start = clock.now
+    reset = start + 6 * 3600
+    session.refusal = lambda: CodexUsageLimit(resets_in=int(reset - clock.now))
+
+    await runner._nfos_receive(event)
+    await _settle(runner)
+    await _through(runner, clock, 600, ops)
+    # The second request arrives with the route closed: it is persisted, and not offered.
+    assert await runner._nfos_receive(_second(event)) == ''
+    await _settle(runner)
+    first, second = _requests()
+    assert [r['status'] for r in (first, second)] == ['coordinating', 'coordinating']
+    assert second['payload']['text'] == SECOND_REQUEST and 'quota' not in second['payload']['coordination']
+    assert session.offered() == [first['id']] and session.seen.provider_calls == 1, 'no call for the second one'
+
+    await _tick(runner, clock, int(reset - 1 - clock.now), ops)
+    assert session.offered() == [first['id']] and not _cards()
+    session.refusal = None
+    await _tick(runner, clock, 1, ops)
+    assert session.offered() == [first['id'], first['id']], 'the oldest first, alone: it is the probe of the route'
+    assert [r['status'] for r in _requests()] == ['attached', 'coordinating'] and len(_cards()) == 1
+    await _tick(runner, clock, 5, ops)
+    assert session.offered() == [first['id'], first['id'], second['id']]
+    first, second = _requests()
+    cards = _cards()
+    assert [r['status'] for r in (first, second)] == ['attached', 'attached']
+    assert [first['task_id'], second['task_id']] == [card['id'] for card in cards], 'one card each, in that order'
+    assert 'total' in cards[0]['body'] and 'ordenação' in cards[1]['body']
+    assert [call.kwargs['reply_to'] for call in adapter._send_with_retry.await_args_list] == ['123', '124']
+
+    await _through(runner, clock, 3600, ops)
+    assert len(session.wakes) == 3 and len(_cards()) == 2 and len(ops.sent) == 1
+    assert len(session.said_in_the_topic()) == 2 and not session.status_sent
+
+
+@pytest.mark.asyncio
+async def test_a_portal_request_becomes_a_card_as_before_with_the_principal_on_the_wall(desk, monkeypatch, ops):
+    """Holds on main as well: this path never went through the Principal, and the wall does not change it."""
+    runner, event, adapter, session = desk
+    clock = Clock(monkeypatch)
+    session.refusal = lambda: CodexUsageLimit(resets_in=WEEKLY_RESET)
+    await runner._nfos_receive(event)
+    await _settle(runner)
+    assert session.results[0]['failure_reason'] == 'rate_limit', 'the Principal is on the wall'
+
+    with kb.connect_closing() as conn:
+        ticket = delivery.receive_request(
+            conn, source=PORTAL, text='[Lucas (suporte)|portal:dov:lucas] Página de acompanhamento',
+            project={'profile': 'default', 'delivery_type': 'report'}, origin={'portal': {'chamado': 'DV-0031'}},
+            support_approval={'required': True, 'approved_at': int(clock.now), 'approved_by': 'Maikol',
+                              'decided_at': int(clock.now), 'decided_by': 'Maikol', 'decision': 'approved'})
+        assert delivery.get_request(conn, ticket)['status'] == 'pending', 'no Principal between a ticket and its card'
+    await _through(runner, clock, 600, ops)
+    telegram, portal = sorted(_requests(), key=lambda r: r['payload']['source']['platform'] == 'portal')
+    (card,) = _cards()
+    assert (portal['id'], portal['status'], portal['task_id']) == (ticket, 'attached', card['id'])
+    assert 'Página de acompanhamento' in card['body']
+    assert telegram['status'] == 'coordinating' and len(session.wakes) == 1, 'no turn of the Principal for the ticket'
+    assert session.seen.provider_calls == 1 and not adapter._send_with_retry.await_count
+
+
+@pytest.mark.asyncio
+async def test_a_request_the_principal_released_before_its_turn_died_is_not_offered_again(desk, monkeypatch, ops):
+    runner, event, adapter, session = desk
+    clock = Clock(monkeypatch)
+    start = clock.now
+    reset = start + 3600
+    session.refusal = lambda: CodexUsageLimit(resets_in=int(reset - clock.now))
+    session.releases_then_dies = True  # the intake command ran, and the call after it met the window
+
+    await runner._nfos_receive(event)
+    await _settle(runner)
+    request, payload, cards = _board()
+    assert session.results[0]['failure_reason'] == 'rate_limit'
+    assert request['status'] == 'pending' and 'quota' not in payload['coordination'], 'released: nothing to return'
+    await _tick(runner, clock, 60, ops)
+    assert len(_cards()) == 1
+
+    session.refusal, session.releases_then_dies = None, False
+    await _through(runner, clock, 2 * 3600, ops)
+    request, payload, cards = _board()
+    assert (request['status'], cards) == ('attached', 1) and len(session.wakes) == 1, 'one card, no second offer'
+    assert session.said_in_the_topic() == []
+
+
+@pytest.mark.asyncio
+async def test_a_throttle_that_outlasts_the_clients_retries_returns_the_request_and_closes_no_route(
+        desk, monkeypatch, ops):
+    runner, event, adapter, session = desk
+    clock = Clock(monkeypatch)
+    start = clock.now
+    session.refusal = ProviderRateLimit  # a plain 429: no limit named, no reset time
+
+    await runner._nfos_receive(event)
+    await _settle(runner)
+    request, payload, cards = _board()
+    entry = payload['coordination']
+    assert session.results[0]['failure_reason'] == 'rate_limit' and session.seen.provider_calls == 3
+    assert (request['status'], entry['wake_accepted'], cards) == ('coordinating', False, 0)
+    assert 'route' not in entry['quota'] and entry['next_attempt_at'] == start + 300
+    assert not walls.any_closed(), 'no usage window: the route stays open'
+
+    # Offered again at the respawn guard's spacing, counted on the request: 300 s, then 600 s after it.
+    await _through(runner, clock, 840, ops, step=60)
+    assert sorted({int(at - start) for at in session.calls}) == [0, 300] and session.seen.provider_calls == 6
+    assert session.said_in_the_topic() == [] and not adapter._send_with_retry.await_count
+    session.refusal = None
+    await _through(runner, clock, 120, ops, step=60)
+    request, payload, cards = _board()
+    assert sorted({int(at - start) for at in session.calls}) == [0, 300, 900]
+    assert len(session.wakes) == 3 and (request['status'], cards) == ('attached', 1)
+    assert not ops.sent and not walls.any_closed()
+    assert len(session.said_in_the_topic()) == 1 and not session.status_sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('refusal,notices', [
+    (lambda: CodexUsageLimit(resets_in=WEEKLY_RESET), 1), (GoUsageLimitFromSDK, 1), (ProviderRateLimit, 0),
+], ids=['window-with-reset', 'named-window-no-reset', 'plain-throttle'])
+async def test_nothing_is_said_in_the_topic_of_who_asked_while_the_principal_is_on_the_wall(
+        desk, monkeypatch, ops, refusal, notices):
+    runner, event, adapter, session = desk
+    clock = Clock(monkeypatch)
+    session.refusal = refusal
+    await runner._nfos_receive(event)
+    await _settle(runner)
+    await _through(runner, clock, 600, ops)
+    await runner._nfos_receive(_second(event))
+    await _settle(runner)
+    await _through(runner, clock, OUTAGE, ops)
+    assert all(result['failed'] for result in session.results) and session.results
+    assert [r['status'] for r in _requests()] == ['coordinating'] * 2 and not _cards()
+    assert session.handed and not any(session.handed), 'no reply of a turn that died on quota'
+    assert session.status_sent == [], 'no status of it either'
+    adapter._send_with_retry.assert_not_called()
+    # What the gateway did send went to the management topic, once per wall, and is the runtime's own text.
+    assert len(ops.sent) == notices
+    assert all((chat, topic) == MANAGEMENT_TOPIC and text.startswith('Rota ') for chat, topic, text in ops.sent)
+
+
+def test_a_turn_the_provider_answers_reopens_the_route_of_its_profile(intake, monkeypatch):
+    runner, event, adapter, inbox = intake
+    clock = Clock(monkeypatch)
+    answered = {'final_response': 'ok', 'failed': False, 'api_calls': 2, 'model': PRINCIPAL[2]}
+    person = MessageEvent(text='E o card da folha?', message_type=MessageType.TEXT, source=event.source)
+
+    def ended(result, started_at):
+        return asyncio.run(runner._nfos_turn_ended(person, event.source, result, started_at))
+
+    walls.close(*PRINCIPAL, limit='usage_limit_reached', reset_at=clock.now + WEEKLY_RESET, request_id='req_x')
+    clock.advance(60)
+    # A turn begun before the wall was met, a turn on another model, a turn that failed, a turn with no call.
+    ended(answered, clock.now - 120)
+    ended(dict(answered, model='gpt-5.6-luna'), clock.now - 1)
+    ended(dict(answered, failed=True, failure_reason='server_error'), clock.now - 1)
+    ended(dict(answered, api_calls=0), clock.now - 1)
+    assert walls.read(*PRINCIPAL) is not None
+    # A turn of the profile's own model, begun after the wall and answered: the window is over, whatever reset
+    # time the provider had given.
+    ended(answered, clock.now - 1)
+    assert walls.read(*PRINCIPAL) is None
+
+
+def test_only_a_turn_nobody_typed_keeps_its_quota_refusal_out_of_the_chat(intake):
+    runner, event, adapter, inbox = intake
+    on_quota = {'failed': True, 'failure_reason': 'rate_limit', 'final_response': 'API call failed after 1 retries'}
+    receipt = {'kanban_wake_delivery': {'delivery_id': 'nfos-input:req_x'}}
+
+    def turn(text, internal, metadata=None):
+        return MessageEvent(text=text, message_type=MessageType.TEXT, source=event.source, internal=internal,
+                            metadata=metadata)
+
+    withheld = gateway_run._runtime_turn_ended_on_quota
+    # A wake the runtime delivered with its receipt, and the gateway's own continuation of an interrupted turn.
+    assert withheld(turn('[NFOS: mensagem original preservada', True, receipt), on_quota)
+    assert withheld(turn('[kanban] Task t_1 asks', True, receipt), dict(on_quota, failure_reason='billing'))
+    assert withheld(turn('', True), on_quota)
+    # A person's message keeps the gateway's answer about the provider, as before.
+    assert not withheld(turn('E o card da folha?', False), on_quota)
+    # Other synthetic turns a person set off (a loop tick, a handoff) are not the runtime's wakes.
+    assert not withheld(turn('[Session was just handed off from CLI', True), on_quota)
+    # A failure that is not quota, and a turn that did not fail, are untouched.
+    assert not withheld(turn('', True, receipt), dict(on_quota, failure_reason='server_error'))
+    assert not withheld(turn('', True, receipt), {'failed': False, 'final_response': 'Entregue'})
 
 
 def _handed_to_the_topic(monkeypatch, tmp_path, event):
@@ -281,12 +673,6 @@ def test_quota_error_of_a_decision_turn_is_withheld_from_the_topic(client_projec
     assert not handed, handed
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'R3 (b): _wake_narration_to_suppress only withholds the reply of a wake whose text starts with "[kanban]". The '
-    'intake wake starts with "[NFOS: mensagem original preservada", so the failed turn is rewritten by '
-    '_sanitize_gateway_final_response and "The model provider is rate-limiting requests. Please wait a moment and '
-    'try again." is handed to the adapter, for the topic of who asked. Fix: a turn that ended failed on a provider '
-    'quota wall (failure_reason rate_limit or billing) delivers nothing on an internal wake.'))
 def test_quota_error_of_a_request_turn_is_withheld_from_the_topic(intake, monkeypatch, tmp_path):
     runner, event, adapter, inbox = intake
 
@@ -295,5 +681,9 @@ def test_quota_error_of_a_request_turn_is_withheld_from_the_topic(intake, monkey
         await _settle(runner)
 
     asyncio.run(receive())
+    assert _board()[1]['coordination']['wake_accepted'] is True, 'accepted when the turn started'
     handed, result = _handed_to_the_topic(monkeypatch, tmp_path, inbox.wakes[0])
     assert not handed, f'handed to the adapter for the topic of who asked: {handed}'
+    request, payload, cards = _board()
+    assert request['status'] == 'coordinating' and payload['coordination']['wake_accepted'] is False
+    assert payload['coordination']['quota']['reason'] == 'rate_limit', 'and the request is back in the inbox'

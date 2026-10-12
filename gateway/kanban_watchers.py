@@ -1476,10 +1476,12 @@ class GatewayKanbanWatchersMixin:
 
     def _nfos_receipt_candidates(self, profiles, board=None, request_id=None, limit=20, *, coordination=False):
         """Read pending obligations even when their worker has no card yet."""
-        from hermes_cli import kanban_db as kb
+        from hermes_cli import kanban_db as kb,nfos_route_walls as walls
         from hermes_cli.nfos_delivery import coordinator_retry_at
         boards=[{'slug':board}] if board else kb.list_boards(include_archived=False)
         seen=set();pending=[]
+        # PRINCIPAL_WALL_20261012: an entry whose Principal route a usage window closed is not offered.
+        walled=coordination and walls.any_closed()
         for meta in boards:
             slug=meta.get('slug') or kb.DEFAULT_BOARD
             path=Path(meta.get('db_path') or kb.kanban_db_path(board=slug)).resolve()
@@ -1504,6 +1506,9 @@ class GatewayKanbanWatchersMixin:
                     if coordination and receipt.get('wake_accepted'):continue
                     retry_at=coordinator_retry_at(receipt) if coordination else max(receipt.get('claim_until',0),receipt.get('next_attempt_at',0))
                     if retry_at>now:continue
+                    if walled:
+                        route=walls.entry_route(payload,self._nfos_receipt_owner(payload))
+                        if route and walls.closed(*route) is not None:continue
                     if coordination:payload['_request_part']=json.loads(row['source_key'])[-1]
                     pending.append((path,row['id'],payload))
                     if len(pending)>=limit:return pending
@@ -1742,8 +1747,15 @@ class GatewayKanbanWatchersMixin:
                 profile=adapter._session_key_profile(source))
             adapter._heal_stale_session_lock(key)
             if key in adapter._active_sessions:return
+        # PRINCIPAL_WALL_20261012: not offered while a usage window holds the Principal's route. When the reopening
+        # of that route is due, this offer is its probe, taken here with no await in between: one entry at a time.
+        from hermes_cli import nfos_route_walls as walls
+        turn=walls.entry_turn(payload,owner,request_id)
+        if turn is False:return
         receipt=await _to_thread_process_service(claim)
-        if receipt is None:return
+        if receipt is None:
+            if turn is not True:walls.release_probe(*turn,task_id=request_id)
+            return
         context={'db_path':str(path),'request_id':request_id,
             'reply_to_message_id':(payload.get('coordination') or {}).get('reply_to_message_id'),
             'request':{key:payload[key] for key in ('source','text','project','attachments')}}
@@ -1761,10 +1773,51 @@ class GatewayKanbanWatchersMixin:
             if accepted:return
         except Exception as exc:
             error=str(exc)
+            if turn is not True:walls.release_probe(*turn,task_id=request_id)
         def retry():
             with kb.connect_closing(path) as conn:
                 delivery.retry_coordinator_input(conn,receipt,error=error)
         await _to_thread_process_service(retry)
+
+    async def _nfos_turn_ended(self, event, source, agent_result, started_at):
+        """What a finished turn says about the Principal's route (PRINCIPAL_WALL_20261012).
+
+        The turn of a preserved request that ended failed on the provider's quota decided nothing: its inbox entry
+        was marked accepted when the turn started, and is given back so the intake offers it again once the route
+        is open. A turn the provider answered is the proof that reopens a route a usage window had closed. Never
+        raises: the turn's own result is handled by the caller whatever happens here.
+        """
+        try:
+            from hermes_cli import kanban_db as kb,nfos_route_walls as walls
+            if not isinstance(agent_result,dict):return
+            metadata=getattr(event,'metadata',None) or {}
+            receipt=metadata.get('kanban_wake_delivery') if getattr(event,'internal',False) else None
+            if not (isinstance(receipt,dict) and receipt.get('kind')=='nfos_coordinator_input'
+                    and isinstance(metadata.get('nfos_coordinator_intake'),dict)):
+                receipt=None
+            # The profile the session runs as: the entry's owner, as the intake names it, else the source's.
+            profile=(self._nfos_receipt_owner(metadata['nfos_coordinator_intake'].get('request') or {}) if receipt
+                     else str(getattr(source,'profile','') or self._active_profile_name() or 'default'))
+            if walls.quota_failure(agent_result):
+                if receipt is None:return
+                def refused():
+                    with kb.connect_closing(Path(receipt['db_path'])) as conn:
+                        walls.entry_refused(conn,receipt,reason=agent_result.get('failure_reason'),profile=profile)
+                await _to_thread_process_service(refused)
+                return
+            if (agent_result.get('failed') or agent_result.get('interrupted')
+                    or not agent_result.get('api_calls') or not walls.any_closed()):
+                return
+            def answered():
+                if receipt is None:
+                    walls.session_answered(profile,agent_result.get('model'),started_at=started_at)
+                    return
+                with kb.connect_closing(Path(receipt['db_path'])) as conn:
+                    walls.session_answered(profile,agent_result.get('model'),started_at=started_at,
+                        conn=conn,request_id=receipt['request_id'])
+            await _to_thread_process_service(answered)
+        except Exception:
+            logger.warning('NFOS could not record what a finished turn says about the Principal route',exc_info=True)
 
     @staticmethod
     def _nfos_coordinator_intake_note(event):

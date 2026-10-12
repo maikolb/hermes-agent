@@ -128,5 +128,19 @@
   {"pr": 327, "file": "hermes_cli/nfos_route_walls.py", "text": "def _key(profile, provider, model):"},
   {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "return f\"route_closed:{walls.label(wall)}\" if wall else None"},
   {"pr": 327, "file": "gateway/kanban_watchers.py", "text": "route = _walls.label(wall)"},
-  {"pr": 327, "file": "hermes_cli/nfos_waits.py", "text": "route_open needs the profile, the provider and the model of the route"}
+  {"pr": 327, "file": "hermes_cli/nfos_waits.py", "text": "route_open needs the profile, the provider and the model of the route"},
+  {"pr": 328, "file": "hermes_cli/nfos_delivery.py", "text": "def return_coordinator_input("},
+  {"pr": 328, "file": "hermes_cli/nfos_delivery.py", "text": "def coordinator_met_wall("},
+  {"pr": 328, "file": "hermes_cli/nfos_delivery.py", "text": "(coordination.get('quota') or {}).get('returned_claim')==receipt.get('claim_token')"},
+  {"pr": 328, "file": "hermes_cli/nfos_route_walls.py", "text": "def entry_turn("},
+  {"pr": 328, "file": "hermes_cli/nfos_route_walls.py", "text": "def entry_refused("},
+  {"pr": 328, "file": "hermes_cli/nfos_route_walls.py", "text": "def session_answered("},
+  {"pr": 328, "file": "hermes_cli/nfos_route_walls.py", "text": "def wake_refused_on_quota("},
+  {"pr": 328, "file": "hermes_cli/nfos_route_walls.py", "text": "owner = None if agent._has_pending_fallback() else _route_owner()"},
+  {"pr": 328, "file": "gateway/kanban_watchers.py", "text": "async def _nfos_turn_ended("},
+  {"pr": 328, "file": "gateway/kanban_watchers.py", "text": "turn=walls.entry_turn(payload,owner,request_id)"},
+  {"pr": 328, "file": "gateway/kanban_watchers.py", "text": "if route and walls.closed(*route) is not None:continue"},
+  {"pr": 328, "file": "gateway/run.py", "text": "await self._nfos_turn_ended("},
+  {"pr": 328, "file": "gateway/run.py", "text": "_runtime_turn_ended_on_quota(event, agent_result):  # PRINCIPAL_WALL_20261012"},
+  {"pr": 328, "file": "gateway/run.py", "text": "if _runtime_wake_refused_on_quota(ctx.agent_holder[0]):  # PRINCIPAL_WALL_20261012"}
 ]
