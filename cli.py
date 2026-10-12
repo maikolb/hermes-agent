@@ -20956,6 +20956,73 @@ def _kanban_quota_wall(result) -> bool:
     )
 
 
+class _RecordedQuotaRefusal(Exception):
+    """A refusal the credential pool keeps from the provider, as the provider
+    answered it: the kind of limit and the reset time of the usage window."""
+
+    status_code = 429
+
+    def __init__(self, kind, reset_at):
+        super().__init__(f"{kind}: every credential of the route is inside a usage window")
+        self.body = {"type": kind, "resets_at": reset_at}
+
+
+def _kanban_route_unresolved_on_quota(cli) -> bool:
+    """True when a card's worker could not resolve its route because every
+    credential of the provider's pool is inside a usage window
+    (POOL_WALL_20261012).
+
+    That launch met the quota wall before its first call, so it leaves by the
+    same door as a turn the provider refused (see ``_kanban_quota_wall``): the
+    quota exit code, and the route closed with the soonest reset time the pool
+    keeps. The wall is asked the question the conversation loop asks of a
+    refused call (``nfos_route_walls.on_quota_error``), about the refusal the
+    pool recorded. Without this the launch left with the generic 1: a failure
+    counted against the card, and the probe of a closed route giving no verdict.
+    """
+    from hermes_cli.auth import is_rate_limited_auth_error
+
+    error = getattr(cli, "_runtime_credentials_error", None)
+    if not os.environ.get("HERMES_KANBAN_TASK") or not is_rate_limited_auth_error(error):
+        return False
+    try:
+        from types import SimpleNamespace
+
+        from agent.credential_pool import STATUS_EXHAUSTED, load_pool
+        from hermes_cli import nfos_route_walls
+
+        provider = getattr(error, "provider", "") or getattr(cli, "requested_provider", "")
+        pool = load_pool(provider)
+        now = time.time()
+        refused = [entry for entry in pool.entries() if entry.last_status == STATUS_EXHAUSTED]
+        if refused and not pool.has_available():
+            def reset_of(entry):
+                try:
+                    return float(entry.last_error_reset_at or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            # The refusal replayed is the one whose window ends first; one with
+            # no reset time on record names no window and closes nothing.
+            ahead = [entry for entry in refused if reset_of(entry) > now]
+            soonest = min(ahead, key=reset_of) if ahead else refused[0]
+            worker = SimpleNamespace(
+                provider=provider, model=getattr(cli, "model", ""), _credential_pool=pool,
+                _fallback_activated=False, _has_pending_fallback=lambda: False,
+            )
+            nfos_route_walls.on_quota_error(worker, _RecordedQuotaRefusal(
+                soonest.last_error_reason or error.code, reset_of(soonest) or None,
+            ))
+            logger.warning(
+                "POOL_WALL_20261012 the worker of card %s resolved no credential on %s: all %d of the pool "
+                "are inside a usage window",
+                os.environ.get("HERMES_KANBAN_TASK"), provider, len(refused),
+            )
+    except Exception:
+        logger.warning("POOL_WALL_20261012 could not close the route of an unresolved launch", exc_info=True)
+    return True
+
+
 def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, first_result=None) -> "dict | None":
     """Drive a kanban goal_mode worker through the Ralph-style goal loop.
 
@@ -21708,7 +21775,13 @@ def main(
                                     _exit_code = 1
                         sys.exit(_exit_code)
 
-                # Exit with error code if credentials or agent init fails
+                # Exit with error code if credentials or agent init fails.
+                # A kanban worker whose route resolved no credential because
+                # the whole pool is inside a usage window leaves by the quota
+                # door, like the turn above that the provider refused.
+                if _kanban_route_unresolved_on_quota(cli):
+                    from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+                    sys.exit(KANBAN_RATE_LIMIT_EXIT_CODE)
                 sys.exit(1)
             else:
                 # Single-query mode (`hermes chat -q "…"`): skip the welcome
