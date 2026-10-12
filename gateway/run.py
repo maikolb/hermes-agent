@@ -5017,6 +5017,32 @@ def _wake_narration_to_suppress(inbound_text, response):
         return False
 
 
+def _runtime_turn_ended_on_quota(event, agent_result):
+    """PRINCIPAL_WALL_20261012: a turn nobody typed (a wake the runtime delivered with its receipt, or the gateway's own
+    continuation of an interrupted turn, which is the internal event with no text) that ended failed on the
+    provider's quota. Nobody in that chat asked this turn anything, so the provider's refusal is not an answer to
+    them: it stays in the log and, for a usage window, in the notice of the closed route."""
+    try:
+        if not getattr(event, "internal", False):
+            return False
+        from hermes_cli.nfos_route_walls import quota_failure
+        if not quota_failure(agent_result):
+            return False
+        metadata = getattr(event, "metadata", None) or {}
+        return bool(metadata.get("kanban_wake_delivery")) or not str(getattr(event, "text", "") or "").strip()
+    except Exception:
+        return False
+
+
+def _runtime_wake_refused_on_quota(agent):
+    """PRINCIPAL_WALL_20261012: the lifecycle status of that same refusal, while the turn is still running."""
+    try:
+        from hermes_cli.nfos_route_walls import wake_refused_on_quota
+        return agent is not None and wake_refused_on_quota(agent)
+    except Exception:
+        return False
+
+
 _QUESTION_LINE_RX = re.compile(r"^pergunta\s+(?:para|pro|pra|ao|à|a)\s+([^\s:,?]+)", re.I)  # HUMAN_LAST_RESORT_20260914
 _INTERNAL_ADDRESSEE_RX = re.compile(r"^(maikol|mantenedor|maintainer|nfos|runtime|operador|opera[cç][aã]o|principal|equipe)$", re.I)
 
@@ -6359,6 +6385,12 @@ class TurnRunner:
     def _status_callback_sync(self, event_type: str, message: str) -> None:
         ctx = self._ctx
         if not ctx._status_adapter or not ctx._run_still_current():
+            return
+        if _runtime_wake_refused_on_quota(ctx.agent_holder[0]):  # PRINCIPAL_WALL_20261012
+            logger.info(
+                "runtime wake: status of a turn the provider refused on quota kept out of the chat (%s)",
+                event_type,
+            )
             return
         prepared_message = _prepare_gateway_status_message(
             ctx.source.platform,
@@ -7733,6 +7765,8 @@ class TurnRunner:
                 # persistence) lose the structured reason exactly when
                 # the run produced no text.
                 "failure_reason": result.get("failure_reason"),
+                # PRINCIPAL_WALL_20261012 (NFOS): an unverified billing verdict is not a quota wall.
+                "billing_unverified": result.get("billing_unverified", False),
                 "partial": result.get("partial", False),
                 "completed": result.get("completed"),
                 "turn_exit_reason": result.get("turn_exit_reason"),
@@ -7859,6 +7893,8 @@ class TurnRunner:
             "failure_reason": (
                 ctx.result_holder[0].get("failure_reason") if ctx.result_holder[0] else None
             ),
+            # PRINCIPAL_WALL_20261012 (NFOS): an unverified billing verdict is not a quota wall.
+            "billing_unverified": bool(ctx.result_holder[0] and ctx.result_holder[0].get("billing_unverified")),
             "completed": ctx.result_holder[0].get("completed") if ctx.result_holder[0] else None,
             "turn_exit_reason": (
                 ctx.result_holder[0].get("turn_exit_reason")
@@ -22476,6 +22512,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 message_type=event.message_type,
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
+            # PRINCIPAL_WALL_20261012 (NFOS): a request whose Principal turn ended
+            # on the provider's quota goes back to the inbox; an answered turn
+            # reopens a route a usage window had closed.
+            await self._nfos_turn_ended(
+                event, source, agent_result, time.time() - _turn_seconds
+            )
 
             if (
                 session_key
@@ -22561,6 +22603,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.info(
                     "kanban wake: narração suprimida (%d chars) em %s/%s",
                     len(response or ""), getattr(source, "chat_id", "?"), getattr(source, "thread_id", "?"),
+                )
+                _intentional_silence = True
+            if not _intentional_silence and _runtime_turn_ended_on_quota(event, agent_result):  # PRINCIPAL_WALL_20261012
+                logger.info(
+                    "runtime wake: turn ended on the provider's quota (%s); nothing is handed to %s/%s",
+                    agent_result.get("failure_reason"), getattr(source, "chat_id", "?"), getattr(source, "thread_id", "?"),
                 )
                 _intentional_silence = True
             if not _intentional_silence and _wake_owner_question_in_client_chat(getattr(event, "text", None), response, source):  # HUMAN_LAST_RESORT_20260914
