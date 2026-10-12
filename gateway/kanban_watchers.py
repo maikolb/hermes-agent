@@ -467,6 +467,77 @@ def _admission_order(deliveries, now=None):
     return sorted(deliveries, key=key)
 
 
+# WAKE_ONCE_PER_SESSION_20261012: the wake of a decision request is owed to the session it lands in, not to each
+# subscription. A card has the portal subscription (re-routed to the Principal route of its project) and the chat
+# one, and both land in the same Principal session: every request woke that session twice, the second time mostly
+# after the answer was recorded (2026-10-10: 299 wakes for 114 decisions on three cards, 120 after the answer).
+# Among the subscriptions of one card that lead to the same session, the wake of a request is owed by the first,
+# in this order, that already followed the card when the request was made. The others keep the notice of their
+# own channel and nothing else.
+def _wake_owner_rank(sub):
+    """Order of a card's subscriptions before one session: its own chat before a re-routed one, then the oldest."""
+    return (1 if sub.get("_principal_target") else 0, float(sub.get("created_at") or 0.0),
+            str(sub.get("platform") or ""), str(sub.get("chat_id") or ""), str(sub.get("thread_id") or ""))
+
+
+def _subscribed_when(sub, event):
+    """Whether this subscription takes the event: it already existed when the event was written.
+
+    The same rule as the cut of events older than the subscription. Within the second the subscription was
+    born only its cursor tells before from after, and the cursor proves only an event still ahead of it.
+    """
+    born = float(sub.get("created_at") or 0.0)
+    at = float(getattr(event, "created_at", 0) or 0.0)
+    if at != born:
+        return at > born
+    return int(getattr(event, "id", 0) or 0) > int(sub.get("last_event_id") or 0)
+
+
+def _wake_source(plat, platform_str, route, profile, adapter):
+    """The synthetic source of a subscription's wake: it decides which session the turn opens in."""
+    from gateway.session import SessionSource
+    return SessionSource(
+        platform=plat,
+        chat_id=route["chat_id"],
+        chat_type=_sub_chat_type(route, platform_str),  # DM_NEG_CHAT_20260910
+        thread_id=route.get("thread_id") or None,
+        user_id=route.get("user_id"),
+        user_id_alt=route.get("user_id_alt"),
+        profile=profile or None,
+        scope_id=_wake_scope_id(adapter, route),
+    )
+
+
+def _requests_still_asked(board, task_id, events):
+    """WAKE_STILL_ASKED_20261012: of these decision requests, the ones still waiting for what the event asked.
+
+    Checked at delivery: between the request being written and the session being free to take it, the answer
+    may already be on the card. The reminder of a wait on a person (``awaiting: human_reply``) holds while the
+    decision is with that person; every other request, while it is pending. An event with no decision, a
+    decision the board does not know and a read that fails still wake: a lost wake costs more than a repeated one.
+    """
+    asked = [ev for ev in events if (getattr(ev, "payload", None) or {}).get("decision_id")]
+    if not asked:
+        return list(events)
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.connect_closing(board=board) as conn:
+            marks = ",".join("?" * len(asked))
+            status = {row["id"]: row["status"] for row in conn.execute(
+                f"SELECT id, status FROM nfos_decisions WHERE task_id=? AND id IN ({marks})",
+                (task_id, *[ev.payload["decision_id"] for ev in asked]))}
+    except Exception:
+        logger.debug("kanban notifier: decision state unreadable for %s; waking as asked", task_id, exc_info=True)
+        return list(events)
+
+    def still(ev):
+        payload = getattr(ev, "payload", None) or {}
+        state = status.get(payload.get("decision_id"))
+        return state is None or state == ("human" if payload.get("awaiting") == "human_reply" else "pending")
+
+    return [ev for ev in events if still(ev)]
+
+
 WAKE_GROUP_RULE = (  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913: instrução e filtro alinhados
     "Regra do grupo: este turno foi acordado por notificação de kanban. "
     "Resolva pelas ferramentas (decide, kanban_comment, kanban_block). "
@@ -3051,6 +3122,71 @@ class GatewayKanbanWatchersMixin:
             if lane not in all_active_lanes and lane not in states:
                 scopes.pop(lane, None)
 
+    def _kanban_wake_session(self, sub: dict) -> str:
+        """WAKE_ONCE_PER_SESSION_20261012: the session a wake of this subscription lands in.
+
+        Empty when the subscription wakes nobody from this gateway: it only notifies, its platform is unknown
+        or has no adapter here, or its session cannot be named. Such a subscription is never counted with another.
+        """
+        from gateway.config import Platform as _Platform
+        from gateway.wake import adapter_supports_push
+
+        route = sub.get("_principal_target") or sub
+        mode = "wake" if sub.get("_principal_target") else sub.get("delivery_mode") or "notify"
+        if mode not in ("notify+wake", "wake"):
+            return ""
+        platform_str = str(route.get("platform") or "").lower()
+        try:
+            plat = _Platform(platform_str)
+        except ValueError:
+            return ""
+        profile = sub.get("notifier_profile") or ""
+        try:
+            adapter = self._authorization_adapter(plat, profile or None)
+            if adapter is None:
+                return ""
+            if not adapter_supports_push(adapter):
+                # The wake is a self-post to the raw session id the subscriber registered with.
+                raw = str(sub.get("chat_id") or "")
+                return f"{platform_str}:{profile}:{raw}" if raw else ""
+            return str(self._session_key_for_source(
+                _wake_source(plat, platform_str, route, profile, adapter)) or "")
+        except Exception:
+            logger.debug("kanban notifier: wake session of a subscription for %s could not be named",
+                         sub.get("task_id"), exc_info=True)
+            return ""
+
+    async def _kanban_wake_owed(self, delivery: dict, wake_kinds: tuple) -> tuple[set, bool]:
+        """The wake kinds this delivery still owes its session, and whether the wake also speaks for the portal.
+
+        WAKE_ONCE_PER_SESSION_20261012: a decision request that another subscription of the same card owes to the
+        same session is not woken for again. WAKE_STILL_ASKED_20261012: nor is one whose decision no longer waits.
+        Only decision requests are counted together: of every wake kind, they are the one a claim never coalesces
+        away (``_coalesce_notify_events``), so the subscription that owes the wake is sure to carry it.
+        """
+        sub = delivery["sub"]
+        events = [ev for ev in delivery["events"] if ev.kind in wake_kinds]
+        requests = [ev for ev in events if ev.kind == "nfos_principal_requested"]
+        if not requests:
+            return {ev.kind for ev in events}, False
+        others = delivery.get("card_subs") or ()
+        session = self._kanban_wake_session(sub) if others else ""
+        peers = [peer for peer in others if session and self._kanban_wake_session(peer) == session]
+        mine = _wake_owner_rank(sub)
+        ahead = [peer for peer in peers if _wake_owner_rank(peer) < mine]
+        owed = [ev for ev in requests if not any(_subscribed_when(peer, ev) for peer in ahead)]
+        asked = await asyncio.to_thread(_requests_still_asked, delivery.get("board"), sub["task_id"], owed)
+        if len(asked) < len(requests):
+            logger.info(
+                "kanban notifier: %d of %d decision request(s) of %s do not wake from %s/%s: "
+                "%d owed by another subscription of the same session, %d no longer waiting",
+                len(requests) - len(asked), len(requests), sub["task_id"], sub.get("platform"),
+                sub.get("chat_id"), len(requests) - len(owed), len(owed) - len(asked),
+            )
+        kept = {id(ev) for ev in asked}
+        kinds = {ev.kind for ev in events if ev.kind != "nfos_principal_requested" or id(ev) in kept}
+        return kinds, bool(asked) and any(peer.get("_principal_target") for peer in peers)
+
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver material lifecycle events.
 
@@ -3411,6 +3547,7 @@ class GatewayKanbanWatchersMixin:
                             )
                             if not subs:
                                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
+                            board_first = len(deliveries)
                             for sub in subs:
                                 try:
                                     owner_profile = sub.get("notifier_profile") or None
@@ -3574,6 +3711,13 @@ class GatewayKanbanWatchersMixin:
                                         "kanban notifier: subscription for %s on board %s failed: %s",
                                         sub.get("task_id"), slug, sub_exc,
                                     )
+                            # WAKE_ONCE_PER_SESSION_20261012: a delivery knows the other subscriptions of its card.
+                            for delivery in deliveries[board_first:]:
+                                delivery["card_subs"] = [
+                                    other for other in subs
+                                    if other is not delivery["sub"]
+                                    and other.get("task_id") == delivery["sub"]["task_id"]
+                                ]
                         finally:
                             conn.close()
                     return deliveries, focus_rows, rehydrate_complete
@@ -4003,6 +4147,11 @@ class GatewayKanbanWatchersMixin:
                             if wake_agent and agent_wake_on_events
                             else set()
                         )
+                        _wake_for_portal = False
+                        if _wake_kinds:
+                            # WAKE_ONCE_PER_SESSION_20261012, WAKE_STILL_ASKED_20261012: what is still owed
+                            # to the session, read now, at delivery.
+                            _wake_kinds, _wake_for_portal = await self._kanban_wake_owed(d, _WAKE_KINDS)
                         from gateway.wake import adapter_supports_push as _adapter_push_ok
 
                         _is_push_adapter = _adapter_push_ok(adapter)
@@ -4060,7 +4209,7 @@ class GatewayKanbanWatchersMixin:
                             )
                             # WAKE_SILENCE_20260910 (ordem do Maikol): a regra de silêncio vai no próprio wake
                             _synth += "\n\n" + WAKE_GROUP_RULE  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913
-                            if principal_target:
+                            if principal_target or _wake_for_portal:
                                 _synth += ("\nOrigem: card do portal/Vigília. Registre a resposta no próprio card por `decide`; "
                                            "não publique mensagem no chat. A rota do projeto serve apenas para acordar o Principal.")
                             if "nfos_principal_requested" in _wake_kinds:
@@ -4119,7 +4268,6 @@ class GatewayKanbanWatchersMixin:
 
                         async def _push_wake() -> bool:
                             """Request a handoff; True means its checkpoint is durable."""
-                            from gateway.session import SessionSource
                             from gateway.wake import deliver_wake
                             # Rebuild the creator's real session scope from
                             # the chat_type persisted on the subscription
@@ -4135,17 +4283,8 @@ class GatewayKanbanWatchersMixin:
                             # handle_message() get_or_create_session's the
                             # target, so a mismatch only ever degrades to a
                             # fresh session, never an exception.
-                            _chat_type = _sub_chat_type(route, platform_str)  # DM_NEG_CHAT_20260910
-                            _source = SessionSource(
-                                platform=plat,
-                                chat_id=route["chat_id"],
-                                chat_type=_chat_type,
-                                thread_id=route.get("thread_id") or None,
-                                user_id=route.get("user_id"),
-                                user_id_alt=route.get("user_id_alt"),
-                                profile=sub_profile or None,
-                                scope_id=_wake_scope_id(adapter, route),
-                            )
+                            # WAKE_ONCE_PER_SESSION_20261012: built where the session of a wake is named.
+                            _source = _wake_source(plat, platform_str, route, sub_profile, adapter)
                             # deliver_wake preserves the synthetic
                             # MessageEvent/handle_message path for
                             # push-capable adapters (the non-push /

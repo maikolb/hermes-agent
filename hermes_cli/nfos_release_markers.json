@@ -172,5 +172,15 @@
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "if standing is None or standing.get('closed_at') != wall.get('closed_at'):"},
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)"},
   {"pr": 329, "file": "hermes_cli/nfos_principal_review.py", "text": "if r['outcome'] == 'rate_limited' and usage.get('turn_calls') == 1:"},
-  {"pr": 329, "file": "hermes_cli/nfos_principal_review.py", "text": "usage['turn_calls'] = turn_calls"}
+  {"pr": 329, "file": "hermes_cli/nfos_principal_review.py", "text": "usage['turn_calls'] = turn_calls"},
+  {"pr": 330, "file": "gateway/kanban_watchers.py", "text": "def _kanban_wake_session(self, sub: dict) -> str:"},
+  {"pr": 330, "file": "gateway/kanban_watchers.py", "text": "async def _kanban_wake_owed(self, delivery: dict, wake_kinds: tuple) -> tuple[set, bool]:"},
+  {"pr": 330, "file": "gateway/kanban_watchers.py", "text": "owed = [ev for ev in requests if not any(_subscribed_when(peer, ev) for peer in ahead)]"},
+  {"pr": 330, "file": "gateway/kanban_watchers.py", "text": "asked = await asyncio.to_thread(_requests_still_asked, delivery.get(\"board\"), sub[\"task_id\"], owed)"},
+  {"pr": 330, "file": "gateway/kanban_watchers.py", "text": "def _requests_still_asked(board, task_id, events):"},
+  {"pr": 330, "file": "gateway/kanban_watchers.py", "text": "return state is None or state == (\"human\" if payload.get(\"awaiting\") == \"human_reply\" else \"pending\")"},
+  {"pr": 330, "file": "gateway/kanban_watchers.py", "text": "def _subscribed_when(sub, event):"},
+  {"pr": 330, "file": "gateway/kanban_watchers.py", "text": "_wake_kinds, _wake_for_portal = await self._kanban_wake_owed(d, _WAKE_KINDS)"},
+  {"pr": 330, "file": "gateway/kanban_watchers.py", "text": "if principal_target or _wake_for_portal:"},
+  {"pr": 330, "file": "gateway/kanban_watchers.py", "text": "delivery[\"card_subs\"] = ["}
 ]
