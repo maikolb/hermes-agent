@@ -2279,6 +2279,9 @@ def run_kanban_goal_loop(
         # another turn meets the same wall: repeating it burns the turn budget and
         # ends in a block, which on an NFOS card is a consult to the Principal for
         # something only the quota window can answer. Leave without a block.
+        # Upstream 242244bf68 (#91264) stops this loop on every failed turn, through what
+        # ``run_turn`` returns; it is not in this fork. When it lands this check is its
+        # quota case: drop the hook and keep the caller's exit code from the failed turn.
         if quota_wall_fn is not None and quota_wall_fn():
             _log(f"kanban goal loop: task {task_id} on the provider quota wall after {turns_used} turn(s); stopping without a block")
             return {"outcome": "quota_wall", "turns_used": turns_used, "reason": "provider quota wall"}

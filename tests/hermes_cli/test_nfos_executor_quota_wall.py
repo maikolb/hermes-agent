@@ -11,7 +11,9 @@ What these tests hold:
   one, stops the goal loop at once: no judge call, no further turn, no block, so no impediment is filed for the
   Principal (who runs on Codex). The process leaves with 75 and only the growing wait holds the card.
 * A 429 that clears on the client's own retry is not a wall: no turn fails, the goal loop runs its whole budget as
-  before and the process does not leave with the quota code.
+  before and the process does not leave with the quota code. The client's patience is its three attempts: with no
+  Retry-After that is 6 to 9 s, and a 429 that outlasts it is a wall like any other (exit 75, five minutes of wait),
+  where before the fix the executor stayed in its goal loop.
 
 Before the fix the goal loop ran after the turn that died on the wall and repeated it until the goal budget was
 spent, then blocked, which on an NFOS card files an impediment. Read on the production boards on 2026-10-12
@@ -213,8 +215,9 @@ def test_quota_wall_turn_is_a_rate_limit_failure_and_the_executor_never_changes_
 
 
 # The wall, what the turn result calls it, provider calls in the one turn, seconds the client waited inside it.
+# A 429 with no Retry-After is a wall once it outlasts the client's two jittered waits from a 2 s base, 6 to 9 s.
 WALLS = [
-    pytest.param(ProviderRateLimit, 'rate_limit', 3, None, id='plain-429'),
+    pytest.param(ProviderRateLimit, 'rate_limit', 3, 6, id='plain-429'),
     pytest.param(GoUsageLimit, 'rate_limit', 3, 1200, id='opencode-go-weekly'),
     pytest.param(GoUsageLimitNoReset, 'billing', 1, 0, id='usage-limit-with-no-reset'),
 ]
@@ -229,8 +232,7 @@ def test_executor_leaves_at_the_first_wall_and_only_the_growing_wait_holds_the_c
     run = quota_wall(launcher, monkeypatch, answer=answer)
     assert [(result['failed'], result['failure_reason']) for result in run.results] == [(True, reason)]
     assert (run.turns, run.provider_calls, run.judge_calls) == (1, calls, 0), 'one turn, the goal loop did not run'
-    if waited is not None:
-        assert waited <= run.waits.waited < waited + 10, 'the client waits for the Retry-After, capped at 600 s'
+    assert waited <= run.waits.waited < waited + 10, 'the Retry-After capped at 600 s, or the short backoff with none'
     assert_left_on_the_wall(run, launcher)
 
 

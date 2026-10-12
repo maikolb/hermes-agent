@@ -13353,6 +13353,12 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         (error_text[:500], row["id"]),
                     )
                     rate_limited.append(row["id"])
+                    # A 'human' answer given while this worker was alive waits for the worker's exit
+                    # to block the card (HUMAN_BLOCK_NOW2). The quota exit is that exit too: without
+                    # this the card stays ready, held by a question nobody was handed.
+                    quota_exit_decision = _nfos_open_decision(conn, row["id"])
+                    if quota_exit_decision and quota_exit_decision["status"] == "human":
+                        human_blocks.append((row["id"], str(quota_exit_decision["answer"] or quota_exit_decision["question"] or "")))
                 elif interrupted or refused_exit:  # INTERRUPTED_20260910, CLOSURE_RECOVERY_20260911: sem falha, sem breaker, sem wake
                     interrupted_ids.append(row["id"])
                 else:
