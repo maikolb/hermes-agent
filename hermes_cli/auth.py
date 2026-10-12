@@ -4447,16 +4447,28 @@ def _probe_codex_quota_restored(
     selection path can fire this freely.
 
     *not_before* is the epoch time of the refusal that benched the credential
-    (the pool entry's ``last_status_at``).  A cached verdict taken before it
-    is not served: the provider refused the account after that verdict, so it
-    describes a window that has closed since, and serving it lifted the
-    cooldown the refusal had just written (the "rotation" then handed the
-    same account back on every 429 until the cache expired).  The endpoint is
-    asked again instead, once per refusal.
+    (the pool entry's ``last_status_at``, which every refusal rewrites and
+    auth.json keeps).  A refusal younger than the probe's own interval
+    stands: the provider has just refused the account, whatever this endpoint
+    reports of it (a verdict cached from before the refusal, purchased
+    credits, a limit the endpoint does not list), so the answer is ``None``
+    and nothing is asked.  Lifting the cooldown inside that interval handed
+    the refused account back on every 429.  Past it the endpoint is asked as
+    before, which is how a window that reopened early is seen, by a process
+    that has just started and by one that has held its pool for hours alike.
     """
     token = str(access_token or "").strip()
     if not token:
         return None
+    if not_before is not None:
+        try:
+            refused_for = time.time() - float(not_before)
+        except (TypeError, ValueError):
+            refused_for = None
+        # A mark ahead of the clock (the host's time was set back) is no
+        # fresh refusal: it is asked about as any other.
+        if refused_for is not None and 0 <= refused_for < min_interval_seconds:
+            return None
     # Real Codex access tokens are JWTs. Refusing to probe non-JWT tokens
     # avoids pointless network calls for corrupt/placeholder entries (and
     # keeps hermetic test fixtures with dummy tokens offline).
@@ -4468,9 +4480,7 @@ def _probe_codex_quota_restored(
     with _codex_quota_probe_lock:
         cached = _codex_quota_probe_cache.get(cache_key)
         if cached is not None and (now - cached[0]) < min_interval_seconds:
-            # Both ages are measured from now, one on each clock.
-            if not_before is None or (now - cached[0]) < (time.time() - float(not_before)):
-                return cached[1]
+            return cached[1]
         # Reserve the slot immediately so concurrent selectors don't stampede
         # the endpoint while this probe is in flight.
         _codex_quota_probe_cache[cache_key] = (now, None)

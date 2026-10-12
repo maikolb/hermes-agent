@@ -15,8 +15,11 @@ token is a fake written here):
 * the rotation that follows a refusal never hands back the refused account, whatever the usage probe says: a
   verdict it kept from before the refusal, or purchased credits (the no-recovery contract of 8530d81b55, by
   exclusion); with three accounts the rotation goes A, B, C and then reports that nothing is left;
-* only a usage verdict taken after the refusal lifts its cooldown, and an early reopening is still seen;
-* a refusal met on the auxiliary path leaves the same reason and reset time on the entry as one met by the main loop.
+* a refusal stands for one interval of the usage probe (five minutes) and no longer: past it an early reopening is
+  seen by a pool that has just been loaded and by one an agent has held for hours without selecting again (a cached
+  gateway session, a long card worker), and with credits authorized a new process starts on the next account;
+* a refusal met on the auxiliary path leaves the same reason and reset time on the entry as one met by the main
+  loop, and nothing else of that path changes: a 401 is marked as before, an answer that cannot be read too.
 """
 import time
 from dataclasses import replace
@@ -32,6 +35,26 @@ from tests.hermes_cli.nfos_codex_pool import DAY, Provider, account_of, entry, j
 
 RESET_IN = 5 * DAY
 REFUSAL = {'reason': 'usage_limit_reached', 'message': 'The usage limit has been reached'}
+PROBE_INTERVAL = auth_mod.CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS
+
+
+class Clocks:
+    """The two clocks of the process (the pool's marks are on one, the probe's kept verdicts on the other), moved
+    together and only forward by the test."""
+
+    def __init__(self, monkeypatch):
+        self.ahead = 0.0
+        wall, steady = time.time, time.monotonic
+        monkeypatch.setattr(time, 'time', lambda: wall() + self.ahead)
+        monkeypatch.setattr(time, 'monotonic', lambda: steady() + self.ahead)
+
+    def go(self, seconds):
+        self.ahead += seconds
+
+
+@pytest.fixture
+def clocks(monkeypatch):
+    return Clocks(monkeypatch)
 
 
 @pytest.fixture
@@ -68,6 +91,12 @@ def refuse(pool, ident, key, reset_in=RESET_IN):
     nxt = pool.mark_exhausted_and_rotate(status_code=429, error_context=dict(REFUSAL, reset_at=time.time() + reset_in),
                                          credential_id=ident, api_key_hint=key)
     return nxt.id if nxt else None
+
+
+def new_process():
+    """A process that starts now: its own pool over the same ``auth.json``, and no usage verdict kept."""
+    auth_mod._codex_quota_probe_cache.clear()
+    return cp.load_pool('openai-codex')
 
 
 # ── One login per account stays one login per account ───────────────────
@@ -139,12 +168,12 @@ def test_a_singleton_older_than_the_entrys_own_rotation_is_not_adopted_again(sto
 
 # ── The rotation leaves the account the provider refused ────────────────
 
-def test_the_rotation_leaves_an_account_the_usage_probe_had_seen_restored(store, provider):
+def test_the_rotation_leaves_an_account_the_usage_probe_had_seen_restored(store, provider, clocks):
     """Account A was in its cooldown, the usage endpoint showed its window open again and the pool went back to
     it. Then the provider refuses A. Before the fix the verdict kept from before the refusal lifted the mark the
     refusal had just written, and the "rotation" handed A back on every 429 for up to five minutes."""
-    (a, b, c), entries = three_accounts(last_status='exhausted', last_status_at=time.time() - 30, last_error_code=429,
-                                        last_error_reason='usage_limit_reached',
+    (a, b, c), entries = three_accounts(last_status='exhausted', last_status_at=time.time() - 3600,
+                                        last_error_code=429, last_error_reason='usage_limit_reached',
                                         last_error_reset_at=time.time() + RESET_IN)
     pool = store(entries)
     provider.used['A'] = 99.0
@@ -155,44 +184,84 @@ def test_the_rotation_leaves_an_account_the_usage_probe_had_seen_restored(store,
     assert store.disk()['e-A']['last_status'] == 'exhausted'
     assert refuse(pool, 'e-B', b) == 'e-C'
     assert refuse(pool, 'e-C', c) is None, 'every account refused: nothing is left to rotate to'
-    assert provider.usage_asked == ['A'], 'no verdict was asked for inside the lap'
     assert not pool.has_available()
     assert abs(pool.next_available_at() - (time.time() + RESET_IN)) < 5
+    assert pool.select() is None
+    assert provider.usage_asked == ['A'], 'the three refusals stand: nothing was asked of the usage endpoint'
 
-    # A fresh selection asks again, once per refused account, and the answer is of after the refusal.
+    # Past the probe's interval a selection asks again, once per refused account, and keeps the answer.
+    clocks.go(PROBE_INTERVAL + 1)
     assert pool.select() is None
     assert sorted(provider.usage_asked[1:]) == ['A', 'B', 'C']
     assert pool.select() is None and len(provider.usage_asked) == 4, 'that answer is kept for its five minutes'
 
 
-def test_an_early_reopening_is_still_seen_after_a_refusal(store, provider):
+def test_an_early_reopening_is_seen_once_the_refusal_is_older_than_the_probes_interval(store, provider, clocks):
     (a, b, c), entries = three_accounts()
     pool = store(entries)
     assert pool.select().id == 'e-A'
     assert refuse(pool, 'e-A', a) == 'e-B'
     provider.used['A'] = 12.0  # the owner redeemed a reset of A's window
+    assert pool.select().id == 'e-B' and provider.usage_asked == [], 'the refusal stands for the interval'
+    clocks.go(PROBE_INTERVAL + 1)
     assert pool.select().id == 'e-A' and provider.usage_asked == ['A']
     assert next(e for e in pool.entries() if e.id == 'e-A').last_status == 'ok'
 
 
-def test_a_verdict_older_than_the_refusal_is_not_served(provider):
+def test_an_agent_that_never_selects_again_goes_back_to_an_account_that_reopened(store, provider, clocks):
+    """One pool object for the life of an agent: `select()` ran once, when the agent was built (a cached gateway
+    session, a card worker that runs for hours). The first account refuses and the second serves. The owner
+    redeems a reset of the first; an hour later the second runs out. The rotation asks the usage endpoint about
+    the first and goes back to it, as a process that starts at that moment does."""
+    (a, b, c), entries = three_accounts()
+    pool = store(entries)
+    assert pool.select().id == 'e-A'
+    assert refuse(pool, 'e-A', a) == 'e-B'
+    provider.used['A'] = 12.0
+    del provider.closed_until['A']
+    clocks.go(3600)
+    assert refuse(pool, 'e-B', b) == 'e-A'
+    assert provider.usage_asked == ['A']
+    assert pool.has_available() and pool.next_available_at() is None
+    assert new_process().select().id == 'e-A'
+
+
+def test_after_the_three_refused_the_same_agent_goes_back_to_the_one_that_reopened(store, provider, clocks):
+    """The three refused in one lap (the route closed). The first account reopens early. The same agent, still
+    holding the third account's key, makes the next call (the route's probe): refused, and the rotation goes to
+    the first instead of confirming a wall while an account is open."""
+    (a, b, c), entries = three_accounts()
+    pool = store(entries)
+    pool.select()
+    assert [refuse(pool, 'e-A', a), refuse(pool, 'e-B', b), refuse(pool, 'e-C', c)] == ['e-B', 'e-C', None]
+    provider.used['A'] = 12.0
+    del provider.closed_until['A']
+    assert refuse(pool, 'e-C', c) is None and provider.usage_asked == [], 'inside the interval the refusals stand'
+    clocks.go(3600)
+    assert refuse(pool, 'e-C', c) == 'e-A'
+    assert sorted(provider.usage_asked) == ['A', 'B'], 'the two that had not just refused were asked about'
+
+
+def test_a_refusal_younger_than_the_probes_interval_stands(provider, clocks):
     token = jwt('A')
     provider.used['A'] = 50.0
     assert auth_mod._probe_codex_quota_restored(token) is True
     provider.used['A'] = 100.0
     assert auth_mod._probe_codex_quota_restored(token) is True, 'inside the throttle the kept verdict is served'
-    assert auth_mod._probe_codex_quota_restored(token, not_before=time.time() - 3600) is True, 'taken after that'
-    assert len(provider.usage_asked) == 1
-    time.sleep(0.05)
+    # The provider refuses the account now: the verdict kept from before the refusal is no answer about it.
     refused_at = time.time()
-    time.sleep(0.05)
+    assert auth_mod._probe_codex_quota_restored(token, not_before=refused_at) is None
+    assert auth_mod._probe_codex_quota_restored(token, not_before=str(refused_at)) is None
+    assert len(provider.usage_asked) == 1, 'and the endpoint is not asked either'
+    # A mark the clock has not reached (the host's time was set back) and one that cannot be read hold nothing.
+    assert auth_mod._probe_codex_quota_restored(token, not_before=refused_at + 3600) is True
+    assert auth_mod._probe_codex_quota_restored(token, not_before='not a time') is True
+    clocks.go(PROBE_INTERVAL + 1)
     assert auth_mod._probe_codex_quota_restored(token, not_before=refused_at) is False
-    assert len(provider.usage_asked) == 2
-    assert auth_mod._probe_codex_quota_restored(token, not_before=refused_at) is False
-    assert len(provider.usage_asked) == 2, 'the verdict taken after the refusal is kept'
+    assert len(provider.usage_asked) == 2, 'past the interval the endpoint is asked, and says the window is closed'
 
 
-def test_with_credits_authorized_the_rotation_still_leaves_an_account_that_refuses(store, provider):
+def test_with_credits_authorized_the_rotation_still_leaves_an_account_that_refuses(store, provider, clocks):
     """``codex.use_credits`` is on and every account has purchased credits, so the usage probe answers "usable"
     for a window at 100%. The provider refuses all the same. Before the fix the rotation handed account A back on
     every 429 without end; now each account is tried once and the pool reports that nothing is left."""
@@ -207,7 +276,28 @@ def test_with_credits_authorized_the_rotation_still_leaves_an_account_that_refus
             assert len(tried) <= 3, tried
             current = refuse(pool, current, keys[current])
         assert tried == ['e-A', 'e-B', 'e-C'], (lap, tried)
-        assert not pool.has_available()
+        assert not pool.has_available() and pool.select() is None
+        clocks.go(PROBE_INTERVAL + 1)  # the probe is believed again: one more refused call for each account
+
+
+def test_with_credits_authorized_a_new_process_starts_on_the_next_account(store, provider, clocks):
+    """The first account has purchased credits and refuses all the same. The refusal is on disk with its time, so
+    a process that starts inside the probe's interval (a new card worker, an auxiliary call, the gateway resolving
+    its next turn) starts on the second account without asking anything. Before, each of them asked the usage
+    endpoint, was told "usable" and spent a refused call on the first account."""
+    (a, b, c), entries = three_accounts()
+    pool = store(entries, use_credits=True)
+    provider.credits = {'A'}
+    del provider.closed_until['B'], provider.closed_until['C']
+    assert pool.select().id == 'e-A' and refuse(pool, 'e-A', a) == 'e-B'
+    assert [new_process().select().id for _ in range(3)] == ['e-B', 'e-B', 'e-B'] and provider.usage_asked == []
+    # Past the interval the probe is believed again: one process tries the first account, is refused, and the
+    # mark it writes sends the next ones to the second for another interval.
+    clocks.go(PROBE_INTERVAL + 1)
+    later = new_process()
+    assert later.select().id == 'e-A' and provider.usage_asked == ['A']
+    assert refuse(later, 'e-A', a) == 'e-B'
+    assert [new_process().select().id for _ in range(2)] == ['e-B', 'e-B'] and provider.usage_asked == ['A']
 
 
 def test_entries_sharing_the_refused_key_are_marked_and_left_together(store, provider):
@@ -256,23 +346,35 @@ class UsageLimit(Exception):
                                'plan_type': 'pro', 'resets_at': resets_at}}
 
 
-def test_a_refusal_on_the_auxiliary_path_keeps_the_reset_time(store, provider, monkeypatch):
+class Revoked(Exception):
+    """A login the provider revoked: the terminal 401 the main loop writes an entry off for."""
+    status_code = 401
+    response = SimpleNamespace(status_code=401, headers={})
+    body = {'error': {'code': 'token_revoked', 'message': 'Encountered invalidated oauth token for user'}}
+
+
+@pytest.fixture
+def auxiliary(monkeypatch):
+    monkeypatch.setattr(auxiliary_client, '_evict_cached_clients', lambda provider: None)
+    return auxiliary_client
+
+
+def test_a_refusal_on_the_auxiliary_path_keeps_the_reset_time(store, provider, auxiliary):
     """A goal judge or a title call meets the weekly window. Before the fix the mark it wrote carried neither the
     reason nor the reset time, so the account was offered again one hour later, and a mark of the main loop that
     did carry them was overwritten."""
     (a, b, c), entries = three_accounts()
     store(entries)
-    monkeypatch.setattr(auxiliary_client, '_evict_cached_clients', lambda provider: None)
     resets_at = int(time.time()) + RESET_IN
     refusal = UsageLimit(resets_at)
 
     from agent.agent_runtime_helpers import extract_api_error_context
-    told = auxiliary_client._pool_error_context(refusal)
+    told = auxiliary._pool_quota_error_context(refusal)
     main_loop = extract_api_error_context(refusal)
     assert (told['reason'], told['reset_at']) == (main_loop['reason'], main_loop['reset_at'])
     assert (told['reason'], told['reset_at'], told['status_code']) == ('usage_limit_reached', resets_at, 429)
 
-    assert auxiliary_client._recover_provider_pool('openai-codex', refusal, failed_api_key=a) is True
+    assert auxiliary._recover_provider_pool('openai-codex', refusal, failed_api_key=a) is True
     marked = store.disk()['e-A']
     assert (marked['last_status'], marked['last_error_code'], marked['last_error_reason']) == (
         'exhausted', 429, 'usage_limit_reached')
@@ -281,3 +383,30 @@ def test_a_refusal_on_the_auxiliary_path_keeps_the_reset_time(store, provider, m
     waits_until = cp._exhausted_until(next(e for e in again.entries() if e.id == 'e-A'))
     assert waits_until == resets_at, 'the window, not the one-hour default'
     assert again.select().id == 'e-B'
+
+
+def test_a_401_on_the_auxiliary_path_is_marked_as_before(store, provider, auxiliary):
+    """What the pool is told of a quota refusal changed, and only that. An auxiliary call answered 401 with a
+    terminal reason still leaves the one-hour mark with no reason, where the main loop writes the entry off.
+    Making the two agree is another change, with a decision of its own: a manual entry written off is pruned a
+    day later."""
+    (a, b, c), entries = three_accounts()
+    store(entries)
+    assert auxiliary._pool_error_context(Revoked('Error code: 401')) == {
+        'message': 'Error code: 401', 'status_code': 401}
+    assert auxiliary._recover_provider_pool('openai-codex', Revoked('Error code: 401'), failed_api_key=a) is True
+    marked = store.disk()['e-A']
+    assert (marked['last_status'], marked['last_error_code'], marked.get('last_error_reason')) == (
+        'exhausted', 401, None)
+
+
+def test_a_quota_refusal_that_cannot_be_read_is_marked_as_before(store, provider, auxiliary):
+    (a, b, c), entries = three_accounts()
+    store(entries)
+    refusal = UsageLimit(resets_at=['not', 'a', 'time'])  # the reader of the main loop raises on a value like this
+    assert auxiliary._pool_quota_error_context(refusal) == {'message': str(refusal), 'status_code': 429}
+    assert auxiliary._recover_provider_pool('openai-codex', refusal, failed_api_key=a) is True
+    marked = store.disk()['e-A']
+    assert (marked['last_status'], marked['last_error_code'], marked.get('last_error_reset_at')) == (
+        'exhausted', 429, None)
+    assert cp.load_pool('openai-codex').select().id == 'e-B'

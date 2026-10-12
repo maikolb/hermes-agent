@@ -17,8 +17,10 @@ are stand-ins, and every token is a fake):
 
 Scenarios 1 and 2 also run under the two conditions in which the rotation used to hand back the account it had
 just marked: the usage endpoint had shown that account's window open just before the refusal, and purchased
-credits authorized by ``codex.use_credits`` (on in production). And a launch that resolves no credential at all,
-because the whole pool is inside a usage window, leaves by the quota door instead of failing.
+credits authorized by ``codex.use_credits`` (on in production). And work that resolves no credential at all,
+because the whole pool is inside a usage window on record, leaves by the quota door instead of failing: a card's
+launch (the quota exit code) and a request turn of the coordinating session, through the gateway's own route
+resolution (the request goes back to the inbox and nothing is said in the topic of who asked).
 
 No notice or log line asserted here names an account: the pool's labels are positions ("login 1").
 """
@@ -32,6 +34,8 @@ import pytest
 import yaml
 
 from agent.credential_pool import load_pool
+from gateway import run as gateway_run
+from gateway.wake import current_notify_receipt
 from hermes_cli import kanban_db as kb, nfos_delivery as delivery, nfos_route_walls as walls
 from hermes_cli.auth import CODEX_RATE_LIMITED_CODE, AuthError
 from tests.gateway.test_nfos_intake import setup  # noqa: F401
@@ -43,7 +47,7 @@ from tests.hermes_cli.nfos_quota_wall import (  # noqa: F401
     PROFILE_CONFIG, WORKER_ENV, Clock, enrol, launcher, quota_board,
 )
 from tests.hermes_cli.test_nfos_principal_quota_wall import (  # noqa: F401
-    Session, _board, _settle, _tick, intake,
+    SESSION_KEY, Session, _board, _settle, _tick, intake,
 )
 from tests.hermes_cli.test_nfos_route_walls import MANAGEMENT_TOPIC, Operations, launch_of, ops  # noqa: F401
 
@@ -56,6 +60,8 @@ GOAL_TURNS = 20
 # When the window of each account reopens, counted from the start of a scenario: the second login is the soonest.
 WINDOWS = {'A': 5 * DAY, 'B': 2 * DAY, 'C': 4 * DAY}
 CONDITIONS = ('plain', 'usage endpoint had shown the window open', 'credits authorized')
+# A refusal on record this long ago is older than the usage probe's interval: the usage endpoint is asked about it.
+LONG_AGO = 600
 
 
 def profile_config(use_credits=False):
@@ -80,7 +86,7 @@ def arrange(home, monkeypatch, clock, closed, condition='plain'):
     if condition == CONDITIONS[1]:
         # The first account sits in an earlier cooldown and the usage endpoint shows 99%: the pool goes back to
         # it. Its next model call is refused all the same.
-        first = {'last_status': 'exhausted', 'last_status_at': clock.now - 30, 'last_error_code': 429,
+        first = {'last_status': 'exhausted', 'last_status_at': clock.now - LONG_AGO, 'last_error_code': 429,
                  'last_error_reason': 'usage_limit_reached', 'last_error_reset_at': clock.now + WINDOWS['A']}
     three_logins(home, **first)
     provider = Provider(monkeypatch, {name: clock.now + WINDOWS[name] for name in closed})
@@ -166,18 +172,27 @@ def an_account_comes_back_before_its_time(conn, launcher, monkeypatch, ops, home
     return out
 
 
-def launch_that_resolves_no_credential(conn, launcher, monkeypatch, ops, home):
-    """The whole pool is inside a usage window on record (the coordinating session, or an auxiliary call, met the
-    three walls) and no wall stands yet: the dispatcher launches a card on that route."""
-    clock = Clock(monkeypatch)
-    provider = arrange(home, monkeypatch, clock, closed='ABC')
+def three_walls_on_record(clock, provider):
+    """Each account refused a call of some other consumer of the profile (an auxiliary call, another session) a
+    while ago: the three refusals are in ``auth.json`` with their reset times, counted from now, and no route was
+    closed for them."""
     pool = load_pool(CODEX_PROVIDER)
     for name in 'ABC':
         entry = next(e for e in pool.entries() if e.id == f'e-{name}')
         pool.mark_exhausted_and_rotate(
             status_code=429, credential_id=entry.id, api_key_hint=entry.access_token,
             error_context={'reason': 'usage_limit_reached', 'message': 'The usage limit has been reached',
-                           'reset_at': clock.now + WINDOWS[name]})
+                           'reset_at': clock.now + LONG_AGO + WINDOWS[name]})
+    clock.advance(LONG_AGO)
+    provider.closed_until.update({name: clock.now + WINDOWS[name] for name in 'ABC'})
+
+
+def launch_that_resolves_no_credential(conn, launcher, monkeypatch, ops, home):
+    """The whole pool is inside a usage window on record and no wall stands yet: the dispatcher launches a card
+    on that route."""
+    clock = Clock(monkeypatch)
+    provider = arrange(home, monkeypatch, clock, closed='ABC')
+    three_walls_on_record(clock, provider)
     task = enrol(conn, launcher)
     run = run_card(conn, launcher, monkeypatch, provider, task.id)
     out = measured(conn, run, ops, task.id, clock.now, home)
@@ -381,3 +396,86 @@ async def test_a_request_goes_back_to_the_inbox_only_when_the_three_accounts_ref
     assert (got['walls'], got['wall_closed_by_the_request'], got['wall_reset_in']) == (1, True, WINDOWS['B'])
     assert got['notice_topics'] == [MANAGEMENT_TOPIC] and '(conta' not in got['notice_texts'][0]
     assert got['said_in_the_topic_of_who_asked'] == []
+
+
+# ── The coordinating session: a turn that resolves no credential ends on quota ──
+
+class GatewayResolvedSession(Session):
+    """The coordinating session as the gateway runs its turn: the turn's result is what ``TurnRunner.run_sync``
+    returns, and ``run_sync`` resolves the route of the session itself, over the profile's real ``auth.json``.
+    With the whole pool inside a usage window on record that resolution finds no credential, and no agent is
+    built: the result is the one the gateway hands on for a turn that never started."""
+
+    def __init__(self, monkeypatch, tmp_path, root):
+        resolve = gateway_run._resolve_runtime_agent_kwargs  # the gateway's own, before the bootstrap's stand-in
+        assert resolve.__name__ == '_resolve_runtime_agent_kwargs'
+        super().__init__(monkeypatch, tmp_path, root)
+        monkeypatch.setattr(gateway_run, '_resolve_runtime_agent_kwargs', resolve)
+        self.turn.user_config = yaml.safe_load((root / 'config.yaml').read_text(encoding='utf-8'))
+
+    async def handle_message(self, event):
+        self.wakes.append(event)
+        self.turn.source, self.turn._loop_for_step = event.source, asyncio.get_running_loop()
+        token = current_notify_receipt.set(event.metadata['kanban_wake_delivery'])
+        try:
+            result = gateway_run.TurnRunner(self.gateway, self.turn).run_sync()
+            self.results.append(result)
+            self.gateway._run_agent = AsyncMock(return_value=result)
+            handed = await self.gateway._handle_message_with_agent(event, event.source, SESSION_KEY, 1)
+        finally:
+            current_notify_receipt.reset(token)
+            self.gateway._release_turn_lease(SESSION_KEY, 1)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        self.handed.append(handed)
+
+
+@pytest.fixture
+def unresolved_principal(intake, monkeypatch, tmp_path):
+    runner, event, adapter, inbox = intake
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'no-codex-cli'))
+    clock = Clock(monkeypatch)
+    provider = Provider(monkeypatch, {name: clock.now + WINDOWS[name] for name in 'ABC'})
+    three_logins(inbox.root)
+    three_walls_on_record(clock, provider)
+    session = GatewayResolvedSession(monkeypatch, tmp_path, inbox.root)
+    adapter.handle_message = session.handle_message
+    adapter._send_with_retry = AsyncMock(return_value=SimpleNamespace(success=True, message_id='900'))
+    return runner, event, session, provider, clock
+
+
+async def unresolved_request_turn(runner, event, session, provider, clock, ops):
+    """A Telegram request reaches the Principal while its three accounts are inside a usage window on record."""
+    got = await request_turn(runner, event, session, provider, clock, ops, closed='ABC')
+    got['usage_asked'] = ''.join(sorted(set(provider.usage_asked)))
+    got['turn_result'] = [{key: result.get(key) for key in ('failed', 'failure_reason', 'api_calls')}
+                          for result in session.results]
+    got['handed_to_the_topic'] = [text for text in session.handed if text]
+    return got
+
+
+@pytest.mark.asyncio
+async def test_a_request_turn_that_resolves_no_credential_goes_back_to_the_inbox_and_closes_the_route(
+        unresolved_principal, ops):
+    """Before the fix the gateway handed "Provider authentication failed: Codex provider quota exhausted (429)"
+    to the topic of who asked as the answer of the turn, closed no route and left the request where it was."""
+    runner, event, session, provider, clock = unresolved_principal
+    got = await unresolved_request_turn(runner, event, session, provider, clock, ops)
+    assert (got['calls'], got['turns'], got['usage_asked']) == ('', 1, 'ABC'), 'no call: each window was asked about'
+    assert got['turn_result'] == [{'failed': True, 'failure_reason': 'rate_limit', 'api_calls': 0}]
+    assert (got['request_status'], got['cards'], got['back_in_the_inbox']) == ('coordinating', 0, True)
+    assert (got['walls'], got['wall_closed_by_the_request'], got['wall_reset_in']) == (1, True, WINDOWS['B'])
+    assert got['notice_topics'] == [MANAGEMENT_TOPIC] and '(conta' not in got['notice_texts'][0]
+    assert not [word for word in ('user-', 'acct-', '@', 'login') if word in got['notice_texts'][0]]
+    assert got['said_in_the_topic_of_who_asked'] == []
+
+
+def test_a_route_that_fails_to_resolve_for_another_reason_is_no_quota_failure():
+    """A login that is missing or revoked, a broken setup: the gateway's result for that turn is what it was."""
+    missing = AuthError('No Codex credentials stored.', provider=CODEX_PROVIDER, code='codex_auth_missing',
+                        relogin_required=True)
+    wrapped = RuntimeError('No Codex credentials stored. Run `hermes model` to re-authenticate.')
+    wrapped.__cause__ = missing
+    for error in (missing, wrapped, RuntimeError('no route'), None):
+        assert gateway_run._route_unresolved_on_quota(error, {'model': {'default': CODEX_MODEL}}) == {}
+    assert not walls.any_closed()

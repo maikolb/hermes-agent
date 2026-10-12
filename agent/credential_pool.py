@@ -789,15 +789,6 @@ class CredentialPool:
         # loop runs unbounded and non-interruptible.  Reset whenever a real
         # entry is identified or an escape path returns None.
         self._unmatched_rotation_streak: int = 0
-        # Ids the provider refused since the last fresh ``select()``: one lap
-        # of ``mark_exhausted_and_rotate()`` calls.  Inside a lap the usage
-        # probe lifts none of their cooldowns, so a probe that answers
-        # "usable" for an account the provider has just refused (purchased
-        # credits, a limit the usage endpoint does not report) cannot hand
-        # that account back while another one has not been tried: the lap
-        # ends at "no available entries" once every account refused, never
-        # in A -> B -> A.
-        self._refused_since_select: Set[str] = set()
 
     def has_credentials(self) -> bool:
         with self._lock:
@@ -1895,9 +1886,10 @@ class CredentialPool:
                 auth_mod._probe_codex_quota_restored(
                     token,
                     base_url=entry.base_url,
-                    # Only a verdict taken after the refusal that benched this
-                    # entry may lift it: one kept from before says nothing
-                    # about a window the provider closed since.
+                    # The refusal that benched this entry stands for one
+                    # probe interval, whatever the usage endpoint reports:
+                    # with several accounts the rotation goes A, B, C and
+                    # ends at "no available entries", never A, B, A.
                     not_before=entry.last_status_at,
                 )
             )
@@ -1930,9 +1922,6 @@ class CredentialPool:
         return False
 
     def select(self) -> Optional[PooledCredential]:
-        with self._lock:
-            # A fresh selection starts a new rotation lap.
-            self._refused_since_select.clear()
         entry, pending_refresh = self._select_under_lock()
         if pending_refresh:
             self._refresh_pending_entries(pending_refresh)
@@ -2092,11 +2081,8 @@ class CredentialPool:
                     # while the account is already usable again — a throttled
                     # live probe of the Codex usage endpoint detects that and
                     # lifts the stale cooldown (issue #43747).
-                    # Not for a cooldown the provider imposed in this same
-                    # rotation lap: its refusal outranks the probe.
                     if not (
                         clear_expired
-                        and entry.id not in self._refused_since_select
                         and self._codex_quota_restored_upstream(entry)
                     ):
                         continue
@@ -2357,7 +2343,6 @@ class CredentialPool:
                         refused_ids.add(sibling.id)
                 if siblings_marked:
                     self._persist()
-            self._refused_since_select.update(refused_ids)
             # Re-read the updated entry to log the correct terminal state.
             updated_entry = next(
                 (e for e in self._entries if e.id == entry.id), entry,
