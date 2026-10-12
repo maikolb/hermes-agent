@@ -2174,6 +2174,8 @@ def run_conversation(
         if os.environ.get('HERMES_KANBAN_TASK'):
             from hermes_cli.nfos_principal_review import record_worker_iteration
             record_worker_iteration(agent)
+            from hermes_cli.nfos_route_walls import answered  # ROUTE_WALL_20261012
+            answered(agent)
 
         # Fire step_callback for gateway hooks (agent:step event)
         if agent.step_callback is not None:
@@ -5742,6 +5744,19 @@ def run_conversation(
                     # Upstream capacity 429: fall through to normal
                     # retry logic.  A different model (or the same
                     # model a moment later) will typically succeed.
+
+                # ROUTE_WALL_20261012 (NFOS): the provider tied this refusal to
+                # a usage window (a named limit, or a reset beyond the 600s one
+                # wait below is capped at). No wait in this loop outlasts it,
+                # so this attempt is the last one: the terminal path below runs
+                # now instead of after two capped sleeps. A limit that resets
+                # within the cap is retried as before.
+                if is_rate_limited and not _ra()._pool_may_recover_from_rate_limit(
+                    agent._credential_pool,
+                ):
+                    from hermes_cli.nfos_route_walls import on_quota_error
+                    if on_quota_error(agent, api_error):
+                        max_retries = retry_count
 
                 is_payload_too_large = (
                     classified.reason == FailoverReason.payload_too_large

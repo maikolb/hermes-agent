@@ -35,7 +35,7 @@ CREATE INDEX IF NOT EXISTS nfos_waits_task ON nfos_waits(task_id,status);
 OPEN, SATISFIED, EXPIRED, WITHDRAWN = 'open', 'satisfied', 'expired', 'withdrawn'
 # Quem pode tornar o predicado verdadeiro. requester, operator e external são pessoas ou terceiros; os demais são internos.
 EXECUTOR_KINDS = ('requester', 'operator', 'external', 'lab', 'card', 'runtime', 'principal')
-REASONS = ('lab_queue', 'principal_decision')
+REASONS = ('lab_queue', 'principal_decision', 'provider_quota')
 PRINCIPAL = {'kind': 'principal', 'name': 'Principal (sessão coordenadora)'}
 _JSON_FIELDS = ('executor', 'predicate', 'evidence', 'origin')
 
@@ -51,7 +51,9 @@ def policy(reason):
     first_check e recheck: segundos até a primeira conferência e entre as seguintes. deadline: segundos até o prazo final.
     max_attempts: conferências falsas que a espera aguenta. holds_decision: a espera segura uma decisão pendente e perde o
     objeto quando outra rota a responde. on_expire: 'principal' entrega a decisão ao Principal uma vez, com lembretes
-    contados (o reparo interno limitado); 'worker' responde a decisão e devolve o card ao executor sem a dependência."""
+    contados (o reparo interno limitado); 'worker' responde a decisão e devolve o card ao executor sem a dependência;
+    'still_closed' só grava o desfecho (ROUTE_WALL_20261012: a rota do provedor não é dependência que o card dispense, o
+    despacho segue segurando o card e ele deixa de contar como espera saudável)."""
     d = _delivery()
     if reason == 'lab_queue':
         return dict(executors=('lab',), predicate='lab_receipt', network=True, holds_decision=True, on_expire='principal',
@@ -66,6 +68,13 @@ def policy(reason):
                     deadline=d.DECISION_REMINDER_AFTER + (d.DECISION_MAX_REMINDERS + 1) * d.DECISION_REMINDER_GAP,
                     max_attempts=d.DECISION_MAX_REMINDERS,
                     check=_decision_resolved, retry=_remind_principal, expired=_return_to_worker)
+    if reason == 'provider_quota':
+        from hermes_cli import nfos_route_walls as walls
+        return dict(executors=('external',), predicate='route_open', network=False, holds_decision=False,
+                    on_expire='still_closed', first_check=walls.WAIT_RECHECK_SECONDS, recheck=walls.WAIT_RECHECK_SECONDS,
+                    deadline=walls.WAIT_DEADLINE_SECONDS,
+                    max_attempts=max(1, walls.WAIT_DEADLINE_SECONDS // walls.WAIT_RECHECK_SECONDS),
+                    check=walls.wait_check, withdrawn=walls.wait_withdrawn, expired=walls.wait_expired)
     raise _delivery().WorkflowError('Unknown wait reason; use one of: ' + ', '.join(REASONS))
 
 
@@ -150,6 +159,11 @@ def _predicate(reason, spec, value):
         if not isinstance(receipt, str) or not d._LAB_RECEIPT_RX.fullmatch(receipt):
             raise d.WorkflowError('lab_receipt needs the id of the laboratory request')
         return {'kind': 'lab_receipt', 'receipt': receipt}
+    if value['kind'] == 'route_open':
+        route = {part: value.get(part) for part in ('profile', 'provider', 'model')}
+        if not all(isinstance(part, str) and part for part in route.values()):
+            raise d.WorkflowError('route_open needs the profile, the provider and the model of the route')
+        return {'kind': 'route_open', **route}
     decision_id = value.get('decision_id')
     if not isinstance(decision_id, str) or not decision_id:
         raise d.WorkflowError('decision_resolved needs the decision id')
@@ -254,6 +268,8 @@ def _withdrawn_because(conn, wait, spec):
         decision = d.get_decision(conn, wait['decision_id']) if wait['decision_id'] else None
         if not decision or decision['status'] != 'pending':
             return 'decision_closed'
+    if spec.get('withdrawn'):  # ROUTE_WALL_20261012: a espera deixou de ser verdade para este card
+        return spec['withdrawn'](conn, wait)
     return None
 
 
@@ -302,7 +318,7 @@ def step(conn, wait_id, *, now=None, budget=None):
             if spec.get('retry'):
                 spec['retry'](conn, dict(wait, attempts=wait['attempts'] + 1), now)
             return 'wait' if state is False else 'unreadable'
-        outcome = 'principal_handoff' if spec['on_expire'] == 'principal' else 'returned_to_worker'
+        outcome = {'principal': 'principal_handoff', 'worker': 'returned_to_worker'}.get(spec['on_expire'], spec['on_expire'])
         if not _move(conn, wait, status=EXPIRED, outcome=outcome, evidence=dict(evidence, expired_because=why),
                      closed_at=now, updated_at=now):
             return None

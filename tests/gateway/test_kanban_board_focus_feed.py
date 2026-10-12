@@ -97,6 +97,29 @@ def test_display_targets_come_from_router_bindings(tmp_path, monkeypatch):
     ]
 
 
+def test_management_targets_are_the_management_bindings_only(tmp_path, monkeypatch):
+    """ROUTE_WALL_20261012: a notice about the host goes to the management topic, never to a project's."""
+    _make_router_db(tmp_path / "project_router.db")
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_profile_dir", lambda name: tmp_path
+    )
+
+    targets = GatewayKanbanWatchersMixin._kanban_board_display_targets(
+        _fake_runner(), {"factory"}, management=True
+    )
+
+    assert targets == {
+        "mgmt-board": [
+            {
+                "platform": "telegram",
+                "chat_id": "-1001",
+                "thread_id": "99",
+                "notifier_profile": "factory",
+            }
+        ]
+    }
+
+
 def test_display_targets_empty_when_router_disabled(tmp_path, monkeypatch):
     _make_router_db(tmp_path / "project_router.db")
     monkeypatch.setattr(
