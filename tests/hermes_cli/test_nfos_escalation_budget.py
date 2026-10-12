@@ -312,3 +312,54 @@ def test_runtime_grant_replay_conflict_and_legacy_receipt(exhausted_idle):
         conn.execute('UPDATE task_events SET payload=? WHERE id=?', (json.dumps(saved), row['id']))
     legacy.pop('runtime_seconds')
     assert review.grant_iteration_budget(conn, task.id, **legacy) == saved
+
+
+# PROBE_BALANCE_20261012. The first run of the fixture lasted 60 s. What it counts for depends on how the worker
+# left it and on which call of its turn the provider was about to be asked when it did.
+LEFT_ON_QUOTA = [
+    pytest.param('rate_limited', {'iterations': 1, 'turns': 1, 'turn_calls': 1},
+                 {'seconds': 0, 'iterations': 0, 'turns': 0}, id='its-only-call-refused'),
+    pytest.param('rate_limited', {'iterations': 1, 'turns': 3, 'turn_calls': 1},
+                 {'seconds': 60, 'iterations': 0, 'turns': 2}, id='answered-turns-then-a-turn-refused-on-its-only-call'),
+    pytest.param('rate_limited', {'iterations': 4, 'turns': 1, 'turn_calls': 4},
+                 {'seconds': 60, 'iterations': 4, 'turns': 1}, id='refused-after-three-answered-calls'),
+    pytest.param('rate_limited', {'iterations': 1, 'turns': 1},
+                 {'seconds': 60, 'iterations': 1, 'turns': 1}, id='a-record-that-does-not-say-which-call'),
+    pytest.param('completed', {'iterations': 1, 'turns': 1, 'turn_calls': 1},
+                 {'seconds': 60, 'iterations': 1, 'turns': 1}, id='its-only-call-answered'),
+    pytest.param('crashed', {'iterations': 1, 'turns': 1, 'turn_calls': 1},
+                 {'seconds': 60, 'iterations': 1, 'turns': 1}, id='not-a-quota-exit'),
+]
+
+
+@pytest.mark.parametrize('outcome, usage, spent', LEFT_ON_QUOTA)
+def test_a_turn_the_provider_refused_on_its_only_call_spends_nothing_of_the_lineage(resumed, outcome, usage, spent):
+    conn, task, first = resumed
+    with kb.write_txn(conn):
+        conn.execute('UPDATE task_runs SET outcome=?,metadata=? WHERE id=?',
+                     (outcome, json.dumps({'escalation_usage': usage}), first))
+    assert review.escalation_usage(conn, task.id, task.current_run_id) == spent
+
+
+def test_the_run_records_which_call_of_its_turn_the_worker_is_about_to_make(resumed):
+    conn, task, first = resumed
+    agent = SimpleNamespace(model='gpt-5.6-luna', reasoning_config={'effort': 'max'},
+                            iteration_budget=IterationBudget(10), _api_call_count=1)
+
+    def recorded():
+        return json.loads(conn.execute('SELECT metadata FROM task_runs WHERE id=?',
+                                       (task.current_run_id,)).fetchone()[0])['escalation_usage']
+
+    assert review.worker_checkpoint(agent, 'turn-1') is False
+    assert agent.iteration_budget.consume()
+    review.record_worker_iteration(agent)
+    assert (recorded()['turns'], recorded()['iterations'], recorded()['turn_calls']) == (1, 1, 1)
+    agent._api_call_count = 2
+    assert review.worker_checkpoint(agent, 'turn-1') is False
+    assert agent.iteration_budget.consume()
+    review.record_worker_iteration(agent)
+    assert (recorded()['turns'], recorded()['iterations'], recorded()['turn_calls']) == (1, 2, 2)
+    # An agent that does not say which call it is at leaves the record as it was.
+    del agent._api_call_count
+    review.record_worker_iteration(agent)
+    assert recorded()['turn_calls'] == 2

@@ -158,7 +158,7 @@
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "def _next_probe(now, probes, reset_at):"},
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "return min(probe_at, reset_at) if reset_at else probe_at"},
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "def _locked(profile, provider, model):"},
-  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "if (wall.get('probe') or {}).get('task_id') != task_id and _holds(wall, now):"},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "if _holds(wall, now):"},
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "def probe_not_launched("},
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "NOTICE_REPEAT_SECONDS = 86400"},
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "def still_closed("},
@@ -166,5 +166,11 @@
   {"pr": 329, "file": "hermes_cli/kanban_db.py", "text": "probe_hold = _route_wall_probe(conn, candidate, board=board)"},
   {"pr": 329, "file": "hermes_cli/kanban_db.py", "text": "_route_wall_probe_back(conn, candidate)"},
   {"pr": 329, "file": "gateway/kanban_watchers.py", "text": "text = _walls.still_closed(wall, count)"},
-  {"pr": 329, "file": "gateway/kanban_watchers.py", "text": "_walls.waiting, wall, owner_of=self._nfos_receipt_owner"}
+  {"pr": 329, "file": "gateway/kanban_watchers.py", "text": "_walls.waiting, wall, owner_of=self._nfos_receipt_owner"},
+  {"pr": 329, "file": "gateway/kanban_watchers.py", "text": "if text is None:  # nothing waits for this route: no day's notice of a wall nobody waits behind"},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "if not waits and not count.get('unread'):"},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "if standing is None or standing.get('closed_at') != wall.get('closed_at'):"},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)"},
+  {"pr": 329, "file": "hermes_cli/nfos_principal_review.py", "text": "if r['outcome'] == 'rate_limited' and usage.get('turn_calls') == 1:"},
+  {"pr": 329, "file": "hermes_cli/nfos_principal_review.py", "text": "usage['turn_calls'] = turn_calls"}
 ]

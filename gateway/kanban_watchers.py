@@ -4728,10 +4728,11 @@ class GatewayKanbanWatchersMixin:
         claim and the receipt live beside the wall (``nfos_route_walls``), so
         neither a restart nor a second gateway sends it again.
 
-        While the wall stands the notice is repeated once a day, in the same
-        topic and in no other (WALL_DAILY_NOTICE_20261012): how long the route
-        has been closed and how many cards and inbox entries wait for it. It
-        stops when the route reopens, and its receipt is the same one.
+        While the wall stands and a card or an inbox entry waits for its route
+        the notice is repeated once a day, in the same topic and in no other
+        (WALL_DAILY_NOTICE_20261012): how long the route has been closed and
+        how many of each wait for it. It stops when the route reopens or
+        nothing waits for it any more, and its receipt is the same one.
         """
         from gateway.config import Platform as _Platform
         from hermes_cli import nfos_route_walls as _walls
@@ -4795,6 +4796,8 @@ class GatewayKanbanWatchersMixin:
                     _walls.waiting, wall, owner_of=self._nfos_receipt_owner
                 )
                 text = _walls.still_closed(wall, count)
+                if text is None:  # nothing waits for this route: no day's notice of a wall nobody waits behind
+                    continue
             else:
                 text = _walls.notice(wall)
             deliveries: list = []
