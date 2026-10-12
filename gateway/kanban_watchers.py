@@ -2330,9 +2330,12 @@ class GatewayKanbanWatchersMixin:
         return len(counted)
 
     def _kanban_board_display_targets(
-        self, notifier_profiles: set
+        self, notifier_profiles: set, management: bool = False
     ) -> dict[str, list[dict]]:
         """``board_slug → display targets`` from persisted topic bindings.
+
+        ``management=True`` answers with the management topics instead of the
+        project ones (ROUTE_WALL_20261012: where a notice about the host goes).
 
         Worker-rotation focus used to be fed exclusively by task-level notify
         subscriptions, so a board whose cards were created outside the
@@ -2381,9 +2384,9 @@ class GatewayKanbanWatchersMixin:
                             "JOIN projects AS p "
                             "  ON p.profile = b.profile "
                             " AND p.project_id = b.project_id "
-                            "WHERE b.profile = ? AND b.is_management = 0 "
+                            "WHERE b.profile = ? AND b.is_management = ? "
                             "  AND b.is_closed = 0",
-                            (profile,),
+                            (profile, int(bool(management))),
                         ).fetchall()
                     finally:
                         conn.close()
@@ -4157,6 +4160,7 @@ class GatewayKanbanWatchersMixin:
                 await self._kanban_refresh_worker_focus()
                 await self._kanban_claim_reaper()
                 await self._kanban_ready_watchdog()
+                await self._kanban_route_wall_notices()
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
             # Sleep with cancellation checks.
@@ -4634,6 +4638,104 @@ class GatewayKanbanWatchersMixin:
                             "ready watchdog: mark failed for %s/%s",
                             board, task_id, exc_info=True,
                         )
+
+    async def _kanban_route_wall_notices(self) -> None:
+        """One notice per provider route a long usage window closed (ROUTE_WALL_20261012).
+
+        A closed route is a fact of the host, not of the card whose worker met
+        the wall. As a ``model_fallback`` event on that card the notice only
+        reached a chat through the card's subscription, and a card born in its
+        project's topic has no other: there the notifier publishes nothing
+        passive (CLIENT_CHAT_20260913), so every route would close in silence
+        (read on the production profile on 2026-10-12: the source of each of
+        its projects is the project's own topic). The notice goes to the
+        management topic of the profiles on this host, once per wall: the
+        claim and the receipt live beside the wall (``nfos_route_walls``), so
+        neither a restart nor a second gateway sends it again.
+        """
+        from gateway.config import Platform as _Platform
+        from hermes_cli import nfos_route_walls as _walls
+
+        try:
+            pending = await asyncio.to_thread(_walls.unannounced)
+        except Exception:  # noqa: BLE001
+            logger.warning("route wall notice: walls unreadable", exc_info=True)
+            return
+        if not pending:
+            return
+        # Same profile discovery as the ready watchdog: the bindings live under
+        # the profiles on disk, whatever _active_profile_name() answers here.
+        profiles: set = set()
+        try:
+            profiles.add(str(self._active_profile_name() or "").strip())
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from hermes_cli.profiles import list_profiles
+
+            profiles.update(
+                str(getattr(info, "name", "") or "").strip() for info in list_profiles()
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        profiles.discard("")
+        senders: list = []
+        try:
+            by_board = self._kanban_board_display_targets(profiles, management=True)
+        except Exception:  # noqa: BLE001
+            by_board = {}
+        for targets in by_board.values():
+            for target in targets:
+                try:
+                    platform = _Platform(str(target.get("platform") or "").lower())
+                except ValueError:
+                    continue
+                profile = str(target.get("notifier_profile") or "").strip() or None
+                adapter = self._authorization_adapter(platform, profile)
+                if adapter is not None:
+                    senders.append((adapter, platform, profile, target))
+        warned: set = getattr(self, "_kanban_route_wall_unsent", set())
+        self._kanban_route_wall_unsent = warned
+        for wall in pending:
+            route = f"{wall.get('provider')}/{wall.get('model')}"
+            key = (route, wall.get("closed_at"))
+            if not senders:
+                if key not in warned:
+                    warned.add(key)
+                    logger.warning(
+                        "route wall notice: route %s is closed and this gateway has no "
+                        "connected management topic to say so", route,
+                    )
+                continue
+            if not await asyncio.to_thread(_walls.claim_notice, wall):
+                continue
+            text = _walls.notice(wall)
+            deliveries: list = []
+            for adapter, platform, profile, target in senders:
+                metadata = (
+                    {"thread_id": target["thread_id"]} if target.get("thread_id") else None
+                )
+                try:
+                    result = await adapter.send(target["chat_id"], text, metadata=metadata)
+                except Exception:  # noqa: BLE001
+                    logger.warning("route wall notice: send failed for %s", route, exc_info=True)
+                    continue
+                if bool(getattr(result, "success", True)):
+                    deliveries.append({
+                        "platform": platform.value,
+                        "profile": profile or "",
+                        "chat_id": str(target["chat_id"]),
+                        "thread_id": str(target.get("thread_id") or ""),
+                        "message_id": str(getattr(result, "message_id", "") or ""),
+                    })
+            if deliveries:
+                await asyncio.to_thread(_walls.notice_sent, wall, deliveries)
+                logger.info("route wall notice: route %s announced to %d topic(s)", route, len(deliveries))
+            else:  # the claim lapses on its own and a later tick tries again
+                logger.warning(
+                    "route wall notice: no topic took the notice of %s; next try in %d min",
+                    route, _walls.PROBE_LEASE_SECONDS // 60,
+                )
 
     def _ready_watchdog_collect(
         self, board: str, now: float, settings: dict,

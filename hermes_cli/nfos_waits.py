@@ -74,7 +74,7 @@ def policy(reason):
                     on_expire='still_closed', first_check=walls.WAIT_RECHECK_SECONDS, recheck=walls.WAIT_RECHECK_SECONDS,
                     deadline=walls.WAIT_DEADLINE_SECONDS,
                     max_attempts=max(1, walls.WAIT_DEADLINE_SECONDS // walls.WAIT_RECHECK_SECONDS),
-                    check=walls.wait_check, expired=walls.wait_expired)
+                    check=walls.wait_check, withdrawn=walls.wait_withdrawn, expired=walls.wait_expired)
     raise _delivery().WorkflowError('Unknown wait reason; use one of: ' + ', '.join(REASONS))
 
 
@@ -268,6 +268,8 @@ def _withdrawn_because(conn, wait, spec):
         decision = d.get_decision(conn, wait['decision_id']) if wait['decision_id'] else None
         if not decision or decision['status'] != 'pending':
             return 'decision_closed'
+    if spec.get('withdrawn'):  # ROUTE_WALL_20261012: a espera deixou de ser verdade para este card
+        return spec['withdrawn'](conn, wait)
     return None
 
 
