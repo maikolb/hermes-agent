@@ -525,13 +525,17 @@ def coordinator_met_wall(conn, receipt, *, route, limit=None, reset_at=None):
         return True
 
 
-def return_coordinator_input(conn, receipt, *, reason, retry_at=None):
+def return_coordinator_input(conn, receipt, *, reason, retry_at=None, answered_calls=0):
     """PRINCIPAL_WALL_20261012: the Principal's turn that took this inbox entry ended failed on its provider's quota.
 
     `wake_accepted` only says that the turn started. The decision of the entry (new work, a correction, a question)
-    was not taken, so the entry goes back to the inbox, to be offered again: once the route the session ran on
+    was not finished, so the entry goes back to the inbox, to be offered again: once the route the session ran on
     reopens (`nfos_route_walls`), or at `retry_at` when no usage window closed it. An entry the Principal had already
     released in that turn is no longer `coordinating` and stays as it is: its card is not created twice.
+
+    `answered_calls` is how many model calls of that turn the provider answered before the one it refused. Zero
+    means the Principal never spoke in that turn. Above zero it may have acted on the entry without releasing it
+    (a correction on an existing card, an urgency), and the next offer says so (`nfos_runtime.resumed_intake_note`).
 
     Returns the entry's quota record, or `None` when nothing was returned."""
     with _kb().write_txn(conn,allow_nested=True):
@@ -544,7 +548,8 @@ def return_coordinator_input(conn, receipt, *, reason, retry_at=None):
             return None
         now=time.time()
         quota=dict(coordination.get('quota') or {})
-        quota.update(reason=str(reason),returned_claim=token,returned_at=now,turns=int(quota.get('turns',0))+1)
+        quota.update(reason=str(reason),returned_claim=token,returned_at=now,turns=int(quota.get('turns',0))+1,
+                     answered_calls=int(quota.get('answered_calls',0))+max(0,int(answered_calls or 0)))
         # The checkpoint of the turn that died still names this claim: without these three the next claim would
         # find it there and take the entry for accepted again.
         for key in ('claim_token','checkpoint_root','session_id'):

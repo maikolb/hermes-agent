@@ -598,6 +598,59 @@ async def test_nothing_is_said_in_the_topic_of_who_asked_while_the_principal_is_
     assert all((chat, topic) == MANAGEMENT_TOPIC and text.startswith('Rota ') for chat, topic, text in ops.sent)
 
 
+@pytest.mark.asyncio
+async def test_a_turn_the_provider_had_answered_before_it_died_is_told_so_when_its_request_comes_back(
+        intake, monkeypatch):
+    """The window can close between two calls of one turn. By then the Principal may have acted on the message
+    without releasing it (a correction on an existing card, an urgency): the request comes back all the same,
+    because nothing says the decision was finished, and the next offer tells the Principal what happened."""
+    runner, event, adapter, inbox = intake
+    clock = Clock(monkeypatch)
+    await runner._nfos_receive(event)
+    await _settle(runner)
+    (wake,) = inbox.wakes
+    died = {'failed': True, 'failure_reason': 'rate_limit', 'api_calls': 3, 'model': PRINCIPAL[2]}
+    await runner._nfos_turn_ended(wake, event.source, died, clock.now)
+    request, payload, cards = _board()
+    entry = payload['coordination']
+    assert (request['status'], entry['wake_accepted'], entry['quota']['answered_calls']) == ('coordinating', False, 2)
+
+    await _tick(runner, clock, 300)
+    first, again = inbox.wakes
+    assert again.metadata['nfos_coordinator_intake']['request'] == first.metadata['nfos_coordinator_intake']['request']
+    assert again.text.startswith('[NFOS: mensagem original preservada') and REQUEST in again.text
+    assert 'NFOS resumed coordination' not in first.text
+    assert 'after 2 answered model call(s)' in again.text and 'must not run again' in again.text
+
+
+def test_with_a_route_closed_the_oldest_request_of_any_board_is_offered_first(intake, monkeypatch, tmp_path):
+    runner, event, adapter, inbox = intake
+    clock = Clock(monkeypatch)
+    boards, ids = [], {}
+    # The board the scan reads first holds the newer request.
+    for slug, message_id, later in (('alpha', '201', 600), ('beta', '202', 0)):
+        path = tmp_path / f'{slug}.db'
+        monkeypatch.setattr(time, 'time', lambda later=later: clock.now + later)
+        with kb.connect_closing(path) as conn:
+            delivery.init_schema(conn)
+            ids[slug] = delivery.receive_request(
+                conn, source=dict(SOURCE, message_id=message_id), text=REQUEST,
+                project={'profile': 'default', 'delivery_type': 'report'}, defer_to_principal=True)
+        boards.append({'slug': slug, 'db_path': str(path)})
+    monkeypatch.setattr(time, 'time', lambda: clock.now)
+    monkeypatch.setattr(kb, 'list_boards', lambda include_archived=False: boards)
+
+    def offered():
+        return [rid for path, rid, payload in runner._nfos_receipt_candidates({'default'}, coordination=True)]
+
+    clock.advance(900)
+    assert offered() == [ids['alpha'], ids['beta']], 'no route closed: every board is offered at once, as before'
+    walls.close(*PRINCIPAL, limit='usage_limit_reached', reset_at=clock.now + 3600, request_id=ids['beta'])
+    assert offered() == [], 'the route of both is closed'
+    clock.advance(3600)
+    assert offered() == [ids['beta'], ids['alpha']], 'the oldest first: its turn is the probe of the route'
+
+
 def test_a_turn_the_provider_answers_reopens_the_route_of_its_profile(intake, monkeypatch):
     runner, event, adapter, inbox = intake
     clock = Clock(monkeypatch)

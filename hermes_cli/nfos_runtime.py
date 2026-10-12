@@ -877,6 +877,15 @@ def coordinator_intake_instructions(context, *, reply_to=None):
         "Command: "+command+"\nUrgency command: "+urgent_command+"\nRequest JSON:\n"+json.dumps(context['request'],ensure_ascii=False))
 
 
+def resumed_intake_note(answered_calls):
+    """PRINCIPAL_WALL_20261012: said before the intake context when this same message was offered before and that
+    turn ended on the provider's quota after the Principal had already been answered, so it may have acted."""
+    return ("NFOS resumed coordination. This same message was offered to you before, and that turn ended on the "
+        "provider's usage limit after "+str(int(answered_calls))+" answered model call(s). Whatever you did for it "
+        "then (a command, a card update, an urgency) is in this conversation and stands. Read it first: a command "
+        "that already ran must not run again. Finish only what is missing, then answer as usual.\n\n")
+
+
 def principal_instructions():
     return 'Exact workflow CLI prefix: '+workflow_command()+'\n\n'+NFOS_KNOWLEDGE+'\n'+OUTCOME_CLOSURE_POLICY+'\n'+AUXILIARY_CLOSURE_POLICY+'\n'+"""NFOS project coordinator, the owner's active instructions:
 You are the Principal, responsible for intake, dispatch, board visibility,

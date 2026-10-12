@@ -773,12 +773,13 @@ def entry_turn(payload, profile, request_id):
         return True
 
 
-def entry_refused(conn, receipt, *, reason, profile):
+def entry_refused(conn, receipt, *, reason, profile, answered_calls=0):
     """The Principal's turn on this inbox entry ended on quota: back to the inbox it goes.
 
     On a route a wall holds, the wall says when it is offered again (the reset time the provider gave, or the next
     probe). With no wall (a throttle that outlasted the client's retries, credit that ran out with no window named),
-    it waits the respawn guard's spacing, counted on the entry."""
+    it waits the respawn guard's spacing, counted on the entry. ``answered_calls`` is what the provider had
+    answered of that turn before refusing it, kept on the entry for its next offer."""
     from hermes_cli import nfos_delivery as delivery
     row = delivery.get_request(conn, receipt['request_id'])
     if row is None:
@@ -788,7 +789,8 @@ def entry_refused(conn, receipt, *, reason, profile):
     turns = int(((payload.get('coordination') or {}).get('quota') or {}).get('turns') or 0)
     walled = bool(route and read(*route) is not None)
     returned = delivery.return_coordinator_input(
-        conn, receipt, reason=reason, retry_at=None if walled else time.time() + _probe_spacing(turns))
+        conn, receipt, reason=reason, retry_at=None if walled else time.time() + _probe_spacing(turns),
+        answered_calls=answered_calls)
     if returned is not None:
         logger.warning('PRINCIPAL_WALL_20261012 request %s back in the Principal inbox: its turn ended on %s (%s)',
                        receipt['request_id'], reason,

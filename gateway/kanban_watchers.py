@@ -1480,8 +1480,9 @@ class GatewayKanbanWatchersMixin:
         from hermes_cli.nfos_delivery import coordinator_retry_at
         boards=[{'slug':board}] if board else kb.list_boards(include_archived=False)
         seen=set();pending=[]
-        # PRINCIPAL_WALL_20261012: an entry whose Principal route a usage window closed is not offered.
-        walled=coordination and walls.any_closed()
+        # PRINCIPAL_WALL_20261012: an entry whose Principal route a usage window closed is not offered. With a
+        # route closed, the entries of every board are put in arrival order: the oldest is the route's probe.
+        walled=coordination and walls.any_closed();arrived={}
         for meta in boards:
             slug=meta.get('slug') or kb.DEFAULT_BOARD
             path=Path(meta.get('db_path') or kb.kanban_db_path(board=slug)).resolve()
@@ -1492,7 +1493,7 @@ class GatewayKanbanWatchersMixin:
                     conn.row_factory=sqlite3.Row
                     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_requests'").fetchone():continue
                     condition="status='coordinating'" if coordination else "status<>'coordinating' AND acknowledged_at IS NULL"
-                    sql='SELECT id,payload,source_key FROM nfos_requests WHERE '+condition
+                    sql='SELECT id,payload,source_key,created_at FROM nfos_requests WHERE '+condition
                     rows=conn.execute(sql+(' AND id=?' if request_id else '')+' ORDER BY created_at,id',
                                       (request_id,) if request_id else ()).fetchall()
                 for row in rows:
@@ -1511,9 +1512,13 @@ class GatewayKanbanWatchersMixin:
                         if route and walls.closed(*route) is not None:continue
                     if coordination:payload['_request_part']=json.loads(row['source_key'])[-1]
                     pending.append((path,row['id'],payload))
-                    if len(pending)>=limit:return pending
+                    if walled:arrived[(path,row['id'])]=row['created_at']
+                    elif len(pending)>=limit:return pending
             except (sqlite3.Error,OSError,ValueError,TypeError):
                 logger.warning('NFOS receipt scan failed for board %s',slug,exc_info=True)
+        if walled:
+            pending.sort(key=lambda item:(arrived[item[:2]],item[1]))
+            del pending[limit:]
         return pending
 
     def _nfos_claim_receipt(self,path,request_id,profiles):
@@ -1724,7 +1729,7 @@ class GatewayKanbanWatchersMixin:
 
     async def _nfos_deliver_coordinator_input(self, path, request_id, payload):
         from hermes_cli import kanban_db as kb,nfos_delivery as delivery
-        from hermes_cli.nfos_runtime import coordinator_intake_instructions
+        from hermes_cli.nfos_runtime import coordinator_intake_instructions,resumed_intake_note
         from gateway.platforms.base import BasePlatformAdapter,Platform,SessionSource
         from gateway.session import build_session_key
         from gateway.wake import deliver_wake
@@ -1764,9 +1769,11 @@ class GatewayKanbanWatchersMixin:
         try:
             # The wake's user content is checkpointed before its ACK. A later
             # sidecar alone would lose the exact intake after a crash here.
+            # PRINCIPAL_WALL_20261012: an entry whose earlier turn died on quota after the Principal had spoken.
+            acted=int(((payload.get('coordination') or {}).get('quota') or {}).get('answered_calls') or 0)
             wake_text=('[NFOS: mensagem original preservada para coordenação; não é uma nova mensagem Telegram.]\n'
-                +payload['text']+'\n\n'+coordinator_intake_instructions(context,
-                    reply_to=context['reply_to_message_id']))
+                +payload['text']+'\n\n'+(resumed_intake_note(acted) if acted else '')
+                +coordinator_intake_instructions(context,reply_to=context['reply_to_message_id']))
             accepted=await deliver_wake(adapter,source=source,
                 text=wake_text,
                 receipt=receipt,metadata={'nfos_coordinator_intake':context})
@@ -1800,9 +1807,12 @@ class GatewayKanbanWatchersMixin:
                      else str(getattr(source,'profile','') or self._active_profile_name() or 'default'))
             if walls.quota_failure(agent_result):
                 if receipt is None:return
+                # The refused call is the last one counted: the ones before it the provider answered.
+                answered_calls=max(0,int(agent_result.get('api_calls') or 0)-1)
                 def refused():
                     with kb.connect_closing(Path(receipt['db_path'])) as conn:
-                        walls.entry_refused(conn,receipt,reason=agent_result.get('failure_reason'),profile=profile)
+                        walls.entry_refused(conn,receipt,reason=agent_result.get('failure_reason'),profile=profile,
+                            answered_calls=answered_calls)
                 await _to_thread_process_service(refused)
                 return
             if (agent_result.get('failed') or agent_result.get('interrupted')
