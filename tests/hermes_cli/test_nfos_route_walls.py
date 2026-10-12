@@ -671,7 +671,16 @@ def test_a_wall_holds_the_cards_of_its_profile_and_no_other_profile_of_the_host(
         tick = kb.dispatch_once(conn)
         assert spawned(tick) == [({first, second} - {probe}).pop()]
         assert [held for held in tick.claim_held if held[1].startswith('route_closed')] == [(third, HELD_OTHER)]
-        assert len(ops.notices()) == 2
+
+        # The other profile's reset time comes: this dispatcher launches its card as that route's probe, and the
+        # answer its own account gives reopens its route.
+        provider.walled.discard(ACCOUNTS[OTHER])
+        clock.advance(other_wall['reset_at'] - clock.now)
+        assert third in spawned(kb.dispatch_once(conn))
+        assert walls.read(*OTHER_ROUTE)['probe']['task_id'] == third
+        run = run_card(conn, launcher, monkeypatch, third, provider)
+        assert (run.provider_calls, run.exit_code, kb.get_task(conn, third).status) == (2, 0, 'done')
+        assert not walls.any_closed() and len(ops.notices()) == 2
 
 
 def test_two_boards_of_one_profile_share_the_wall_of_their_route(quota_board, launcher, monkeypatch, ops):
@@ -742,6 +751,8 @@ def test_dispatcher_and_worker_name_the_same_route_when_the_card_is_of_another_p
             assert walls.read(PROFILE, *route[1:]) is None, "not a wall of the dispatcher's own profile"
             assert kb._route_wall_hold(conn, task_id, dry_run=True) == HELD_OTHER
             assert kb._route_wall_hold(conn, own, dry_run=True) is None
+            kb._route_wall_probe(conn, kb.get_task(conn, task_id))
+            assert walls.read(*route)['probe']['task_id'] == task_id, 'the probe is marked on the wall the worker wrote'
             assert walls.reopen(*route)
             clock.advance(DAY)  # long open: the next card's refusal is a new wall, closed by that card
 
