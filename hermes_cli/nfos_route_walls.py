@@ -226,7 +226,7 @@ def walls():
         files = sorted(_dir().glob('*.json'))
     except OSError:
         return []
-    return [record for record in map(_load, files) if record]
+    return [record for record in map(_load, files) if record and record.get('provider') and record.get('model')]
 
 
 def any_closed():

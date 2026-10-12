@@ -387,9 +387,9 @@ def test_a_wait_that_outlives_its_deadline_is_closed_as_still_closed_and_the_car
 
 def test_the_notice_reaches_the_management_topic_when_the_card_follows_only_its_clients_chat(
         quota_board, launcher, monkeypatch, ops):
-    """Read on the production profile on 2026-10-12: the source of every project is the project's own topic, and a
-    card follows that topic and no other. Nothing passive is published there (CLIENT_CHAT_20260913), so a notice
-    that hung on the card's subscription reached nobody."""
+    """Read on the production profile on 2026-10-12: 11 of its 12 project topics are the source of an enabled
+    delivery project, and a card follows the topic its request came from and no other. Nothing passive is
+    published there (CLIENT_CHAT_20260913), so a notice that hung on the card's subscription reached nobody."""
     with kb.connect_closing() as conn:
         Clock(monkeypatch)
         first, second, _, _ = close_route_with_two_cards(conn, launcher, monkeypatch, GoUsageLimit)

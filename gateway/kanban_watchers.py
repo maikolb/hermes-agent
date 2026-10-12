@@ -4646,9 +4646,9 @@ class GatewayKanbanWatchersMixin:
         the wall. As a ``model_fallback`` event on that card the notice only
         reached a chat through the card's subscription, and a card born in its
         project's topic has no other: there the notifier publishes nothing
-        passive (CLIENT_CHAT_20260913), so every route would close in silence
-        (read on the production profile on 2026-10-12: the source of each of
-        its projects is the project's own topic). The notice goes to the
+        passive (CLIENT_CHAT_20260913), so the route would close in silence
+        (read on the production profile on 2026-10-12: 11 of its 12 project
+        topics are the source of an enabled delivery project). The notice goes to the
         management topic of the profiles on this host, once per wall: the
         claim and the receipt live beside the wall (``nfos_route_walls``), so
         neither a restart nor a second gateway sends it again.
