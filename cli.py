@@ -20941,7 +20941,22 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 # Main Entry Point
 # ============================================================================
 
-def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
+def _kanban_quota_wall(result) -> bool:
+    """True when a worker turn ended on a provider quota wall, not on a task error.
+
+    ``run_conversation`` only returns ``failed`` with ``failure_reason``
+    ``rate_limit`` / ``billing`` after its own retries, credential rotation and
+    the fallback chain are spent, so a throttle that clears on the client's
+    retry never shows up here.
+    """
+    return (
+        isinstance(result, dict)
+        and bool(result.get("failed"))
+        and result.get("failure_reason") in ("rate_limit", "billing")
+    )
+
+
+def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, first_result=None) -> "dict | None":
     """Drive a kanban goal_mode worker through the Ralph-style goal loop.
 
     Called from the quiet single-query path AFTER the worker's first turn,
@@ -20950,6 +20965,11 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     DB into ``goals.run_kanban_goal_loop``. All errors are swallowed by the
     caller — a broken goal loop must never wedge a worker, the dispatcher's
     claim TTL / crash detection is the backstop.
+
+    ``first_result`` is the first turn's result dict. Returns the result of
+    the turn that ended on a provider quota wall (see ``_kanban_quota_wall``)
+    when the loop stopped for that, else ``None``; the caller derives the
+    worker's exit code from it.
     """
     import os as _os
 
@@ -20992,11 +21012,15 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     with _kb.connect_closing() as budget_conn:
         max_turns = max(1, max_turns - escalation_usage(budget_conn, task_id, worker_run_id)['turns'])
 
+    # Result of the turn just run; the loop asks about it before it judges.
+    last_result = [first_result]
+
     def _run_turn(prompt: str) -> str:
         result = cli.agent.run_conversation(
             user_message=prompt,
             conversation_history=cli.conversation_history,
         )
+        last_result[0] = result
         # Keep session_id in sync if mid-run compression rotated it.
         if (
             getattr(cli.agent, "session_id", None)
@@ -21065,6 +21089,7 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         block_fn=_block,
         pending_decision_fn=_pending_decision,
         resolved_decision_fn=_resolved_decision,
+        quota_wall_fn=lambda: _kanban_quota_wall(last_result[0]),
         max_turns=max_turns,
         first_response=first_response or "",
         log=lambda m: logger.info("%s", m),
@@ -21074,6 +21099,9 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
             current = _kb.get_task(c, task_id)
             if current and current.current_run_id == worker_run_id:
                 _kb._append_event(c, task_id, 'nfos_goal_yield', outcome, run_id=worker_run_id)
+    if outcome['outcome'] == 'quota_wall':
+        return last_result[0]
+    return None
 
 
 def main(
@@ -21639,10 +21667,16 @@ def main(
                         # out (→ sticky block). Gated on the env vars the
                         # dispatcher sets in `_default_spawn`; a no-op for every
                         # normal worker and every non-kanban `-q` run.
+                        #
+                        # A turn that ended on a provider quota wall (this one
+                        # or a later one) stops the loop at once: it comes back
+                        # as ``result`` so the exit code below is the quota
+                        # sentinel, instead of the loop repeating the turn
+                        # until its budget is spent and blocking the card.
                         if (os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1"
                                 and not getattr(cli.agent, '_nfos_escalation_yield', False)):
                             try:
-                                _run_kanban_goal_loop_q(cli, response)
+                                result = _run_kanban_goal_loop_q(cli, response, result) or result
                             except Exception as _goal_exc:
                                 logger.debug("kanban goal loop failed: %s", _goal_exc)
 
@@ -21664,9 +21698,7 @@ def main(
                         _exit_code = 0
                         if isinstance(result, dict) and result.get("failed"):
                             _exit_code = 1
-                            if os.environ.get("HERMES_KANBAN_TASK") and result.get(
-                                "failure_reason"
-                            ) in ("rate_limit", "billing"):
+                            if os.environ.get("HERMES_KANBAN_TASK") and _kanban_quota_wall(result):
                                 try:
                                     from hermes_cli.kanban_db import (
                                         KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,

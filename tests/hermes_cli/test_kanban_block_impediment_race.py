@@ -193,6 +193,56 @@ def test_clean_exit_after_a_human_answer_blocks_with_the_question(board, monkeyp
         assert kind == "blocked" and "Maikol" in payload["reason"]
 
 
+def _worker_gone_on_the_quota_wall(monkeypatch):
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(kb, "_classify_worker_exit", lambda pid: ("rate_limited", kb.KANBAN_RATE_LIMIT_EXIT_CODE))
+    monkeypatch.setattr(kb, "_resolve_crash_grace_seconds", lambda: 0)
+
+
+def test_quota_exit_after_a_human_answer_blocks_with_the_question(board, monkeypatch):
+    # The answer came while the worker was alive, so the block waited for its exit. The worker then met the
+    # provider's quota wall and left with the quota code, not with a clean exit.
+    with kb.connect_closing() as conn:
+        task = _running_card(conn)
+        run_id = task.current_run_id
+        kb.block_task(conn, task.id, reason=QUESTION, kind="needs_input", expected_run_id=run_id)
+        decision = kb._nfos_pending_decision(conn, task.id, run_id)
+        delivery.resolve_decision(conn, decision, action="human", answer=QUESTION, author="Principal")
+        assert kb.get_task(conn, task.id).status == "running", "the block waits for the live worker's exit"
+        _worker_gone_on_the_quota_wall(monkeypatch)
+
+        assert kb.detect_crashed_workers(conn) == []
+
+        assert kb.detect_crashed_workers._last_rate_limited == [task.id]
+        run = conn.execute("SELECT outcome FROM task_runs WHERE id=?", (run_id,)).fetchone()
+        assert run["outcome"] == "rate_limited"
+        current = kb.get_task(conn, task.id)
+        assert current.status == "blocked"
+        assert current.block_kind == "needs_input"
+        assert current.consecutive_failures == 0
+        kind, payload = _last_event(conn, task.id, "blocked")
+        assert kind == "blocked" and "Maikol" in payload["reason"]
+
+
+def test_quota_exit_with_a_pending_question_is_held_for_the_answer_and_not_blocked(board, monkeypatch):
+    with kb.connect_closing() as conn:
+        task = _running_card(conn)
+        run_id = task.current_run_id
+        kb.block_task(conn, task.id, reason=QUESTION, kind="needs_input", expected_run_id=run_id)
+        decision = kb._nfos_pending_decision(conn, task.id, run_id)
+        _worker_gone_on_the_quota_wall(monkeypatch)
+
+        assert kb.detect_crashed_workers(conn) == []
+
+        assert kb.detect_crashed_workers._last_rate_limited == [task.id]
+        run = conn.execute("SELECT outcome FROM task_runs WHERE id=?", (run_id,)).fetchone()
+        assert run["outcome"] == "rate_limited"
+        current = kb.get_task(conn, task.id)
+        assert current.status == "ready" and current.consecutive_failures == 0
+        assert kb._nfos_pending_decision(conn, task.id, run_id) == decision
+        assert kb._nfos_decision_open(conn, task.id) is True
+
+
 def test_clean_exit_without_a_question_is_still_a_protocol_violation(board, monkeypatch):
     with kb.connect_closing() as conn:
         task = _running_card(conn)

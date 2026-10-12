@@ -103,5 +103,10 @@
   {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "def _run_marked_processes("},
   {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "def end_closed_run_processes("},
   {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "_register_run_processes(conn, task_id, run_id)"},
-  {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "return with_processes_ended()"}
+  {"pr": 320, "file": "hermes_cli/kanban_db.py", "text": "return with_processes_ended()"},
+  {"pr": 326, "file": "hermes_cli/goals.py", "text": "if quota_wall_fn is not None and quota_wall_fn():"},
+  {"pr": 326, "file": "cli.py", "text": "def _kanban_quota_wall("},
+  {"pr": 326, "file": "cli.py", "text": "quota_wall_fn=lambda: _kanban_quota_wall(last_result[0])"},
+  {"pr": 326, "file": "cli.py", "text": "result = _run_kanban_goal_loop_q(cli, response, result) or result"},
+  {"pr": 326, "file": "hermes_cli/kanban_db.py", "text": "quota_exit_decision = _nfos_open_decision(conn, row[\"id\"])"}
 ]
