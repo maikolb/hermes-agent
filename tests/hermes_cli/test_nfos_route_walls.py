@@ -189,6 +189,31 @@ def test_a_card_of_another_route_is_launched_while_the_route_is_closed(quota_boa
         assert [w['status'] for w in quota_waits(conn, same)] == ['open']
 
 
+def test_a_card_that_pins_no_route_takes_the_route_of_its_profile(quota_board, launcher, monkeypatch):
+    """Not only NFOS cards: any card is held by the route its launch would use. With neither provider nor model
+    pinned that is the profile's own; a card that pins only the model keeps the profile's provider."""
+    profile_route = ('openai-codex', 'gpt-6-astra')
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        plain = kb.create_task(conn, title='No pin', assignee='default')
+        model_only = kb.create_task(conn, title='Model pinned, provider from the profile', assignee='default',
+                                    model_override='gpt-5.6-luna')
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id IN (?,?)", (plain, model_only))
+        assert walls.card_route(conn, kb.get_task(conn, plain)) == profile_route
+        assert walls.card_route(conn, kb.get_task(conn, model_only)) == ('openai-codex', 'gpt-5.6-luna')
+
+        walls.close(*profile_route, limit='usage_limit_reached', reset_at=clock.now + 3 * DAY)
+        tick = kb.dispatch_once(conn)
+        assert spawned(tick) == [model_only] and tick.claim_held == [(plain, 'route_closed:openai-codex/gpt-6-astra')]
+        assert json.loads(launcher.launches[-1][1][walls.ROUTE_ENV]) == ['openai-codex', 'gpt-5.6-luna']
+
+        clock.advance(3 * DAY)
+        assert spawned(kb.dispatch_once(conn)) == [plain], 'the reset time came: this launch tries the route'
+        assert json.loads(launcher.launches[-1][1][walls.ROUTE_ENV]) == list(profile_route)
+        assert walls.read(*profile_route)['probe']['task_id'] == plain
+
+
 def test_a_card_with_an_open_decision_stays_with_that_hold(quota_board, launcher, monkeypatch):
     """A question to the Principal or to a person already holds the card and has its own wait and reminders. The
     closed route does not take the card over: it waits for one thing at a time."""
