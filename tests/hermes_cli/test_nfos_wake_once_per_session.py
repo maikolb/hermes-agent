@@ -18,6 +18,11 @@ What these tests hold:
   chat post and its cursor is kept;
 * a gateway restart does not wake again for what was delivered;
 * a subscription that starts to follow the card later does not take away the wake of an older request;
+* a wake is yielded only to a subscription that has the request in hand in the same pass: with the topic's text
+  failing (its claim held on older events) the next request of the card still reaches the session, through the
+  portal subscription, and so does a request the topic only notified of before it was raised to `notify+wake`;
+* a subscription row the notifier cannot read does not end the pass for the cards that come after it;
+* a wake that carries a block or a completion besides the request has the text the chat subscription always had;
 * the reminder of an open decision (`nudge_open_decisions`) keeps its schedule and its stall, and each charge
   reaches the session once; the one wake still binds the Principal's turn to the card's open decisions
   (`agent/kanban_stop.py`).
@@ -38,6 +43,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent.i18n import t as wake_words
 from agent.kanban_stop import build_kanban_stop_nudge
 from agent.turn_checkpoint import initialize_agent_turn_checkpoint
 from gateway.config import Platform, PlatformConfig
@@ -127,6 +133,7 @@ class Topic(BasePlatformAdapter):
         super().__init__(PlatformConfig(), Platform.TELEGRAM)
         self.config.typing_indicator = False
         self.said = []
+        self.down = None  # the platform's refusal of a text, while it lasts
         sessions.bind(self)
 
     async def connect(self):
@@ -139,6 +146,8 @@ class Topic(BasePlatformAdapter):
         return {}
 
     async def send(self, chat_id, content, **kwargs):
+        if self.down:
+            return SendResult(success=False, error=self.down)
         thread = str((kwargs.get('metadata') or {}).get('thread_id') or '')
         self.said.append((str(chat_id), thread, content))
         return SendResult(success=True, message_id=str(len(self.said)))
@@ -462,8 +471,8 @@ async def test_a_gateway_restart_does_not_wake_again_for_what_was_delivered(boar
 @pytest.mark.asyncio
 async def test_a_subscription_that_comes_later_does_not_take_away_the_wake_of_an_older_request(
         board, launcher, monkeypatch):
-    """The topic's subscription starts after the request: its cursor is already past it, so it will never wake for
-    it. The portal subscription, which was following the card when the request was made, still owes that wake."""
+    """The topic's subscription starts after the request: its cursor is already past it, so it never has the
+    request in hand. The portal subscription, which has, still owes that wake."""
     gateway, sessions, clock = board.gateway, board.sessions, Clock(monkeypatch)
     with kb.connect_closing() as conn:
         busy = portal_card(conn, launcher, 80, topic=None)
@@ -493,6 +502,130 @@ async def test_a_subscription_that_comes_later_does_not_take_away_the_wake_of_an
         await gateway.quiet(clock)
         assert len([t for t in sessions.turns if t.card == card.id]) == 2, 'and the free session is not woken again'
         assert len([text for text in gateway.adapter.notices() if card.id in text]) == 1, 'the notice of the later one'
+
+
+@pytest.mark.asyncio
+async def test_a_topic_held_behind_its_failing_text_does_not_keep_the_next_request_from_the_session(
+        board, launcher, monkeypatch):
+    """A delivery whose text failed is never dropped: the topic's claim stays on the events it could not post and
+    does not reach what the card asks next. The portal subscription yields its wake only to a subscription that
+    has the request in hand, so the next request still wakes the session, once."""
+    gateway, sessions, clock = board.gateway, board.sessions, Clock(monkeypatch)
+    gateway.adapter.down = 'Bad Request: message thread not found'
+    with kb.connect_closing() as conn:
+        card = portal_card(conn, launcher, 33)
+        topic = ('telegram', *PROJECT_TOPIC)
+        first = ask(conn, card, 1)
+        await gateway.quiet(clock)
+        (turn,) = sessions.turns
+        assert turn.waiting == [first], 'the text failing does not keep the wake back, and it is still one wake'
+        await sessions.end(turn)
+        await gateway.quiet(clock)
+        held = subscriptions(conn, card)[topic]
+        assert len(sessions.turns) == 1 and held.claim['wake_accepted'] == 1 and not held.claim['notified']
+
+        second = ask(conn, card, 2)
+        await gateway.quiet(clock, passes=8)
+        assert [t.waiting for t in sessions.turns] == [[first], [second]], 'the next request reaches the session'
+        assert sessions.turns[-1].topic == PROJECT_TOPIC and PORTAL_ORIGIN in sessions.turns[-1].text
+        held = subscriptions(conn, card)[topic]
+        assert held.claim['cursor'] < held.owed[-1], 'through the portal: the topic is still on the first request'
+
+        # The text comes back while that turn runs: the topic posts what it owed and reaches the second request.
+        gateway.adapter.down = None
+        await gateway.quiet(clock)
+        assert len(sessions.turns) == 2, 'the session is in the turn of that request: nothing else opens'
+        await sessions.end(sessions.turns[-1])
+        await gateway.quiet(clock, passes=6)
+        assert len(sessions.turns) == 2, 'and the answer is on the card when the topic gets there'
+        assert settled(conn, card) and len(gateway.adapter.notices()) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_topic_raised_to_wake_after_it_notified_does_not_take_the_wake_the_portal_owes(
+        board, launcher, monkeypatch):
+    """The topic only notifies when the request is written (22 of the 26 cards read on 2026-10-12): it posts its
+    notice and moves past the request. Raised to `notify+wake` before the busy session takes the portal's wake,
+    it is ahead of the portal subscription but does not have the request in hand."""
+    gateway, sessions, clock = board.gateway, board.sessions, Clock(monkeypatch)
+    with kb.connect_closing() as conn:
+        busy = portal_card(conn, launcher, 82, topic=None)
+        ask(conn, busy, 1)
+        await gateway.quiet(clock)
+        (holding,) = sessions.turns
+
+        card = portal_card(conn, launcher, 83, topic='notify')
+        clock.advance(30)
+        decision = ask(conn, card, 1)
+        await gateway.quiet(clock)
+        followers = subscriptions(conn, card)
+        assert not followers[('telegram', *PROJECT_TOPIC)].owed, 'the topic posted its notice and moved on'
+        assert len(sessions.turns) == 1 and not settled(conn, card), 'the portal still owes the wake'
+
+        follow(conn, card, mode='notify+wake')
+        await gateway.quiet(clock)
+        await sessions.end(holding)
+        await gateway.quiet(clock, passes=6)
+        mine = [t for t in sessions.turns if t.card == card.id]
+        assert len(mine) == 1 and mine[0].waiting == [decision], 'the request reached the session, once'
+        await sessions.end(mine[0])
+        await gateway.quiet(clock)
+        assert len([t for t in sessions.turns if t.card == card.id]) == 1 and settled(conn, card)
+
+
+@pytest.mark.asyncio
+async def test_a_subscription_row_that_cannot_be_read_does_not_end_the_pass_for_the_other_cards(
+        board, launcher, monkeypatch):
+    """Working out who owes a wake reads the card's other subscriptions. A row it cannot read makes the delivery
+    wake as it always did; it does not stop the deliveries that come after it in the same pass."""
+    gateway, sessions, clock = board.gateway, board.sessions, Clock(monkeypatch)
+    with kb.connect_closing() as conn:
+        broken = portal_card(conn, launcher, 84)
+        conn.execute("UPDATE kanban_notify_subs SET created_at='not a time' WHERE task_id=? AND platform='telegram'",
+                     (broken.id,))
+        conn.commit()
+        other = portal_card(conn, launcher, 85)
+        asked = ask(conn, broken, 1)
+        clock.advance(30)  # the broken card's request is the older one: it is offered first in every pass
+        later = ask(conn, other, 1)
+        await gateway.quiet(clock)
+        (turn,) = sessions.turns
+        assert turn.card == broken.id and turn.waiting == [asked], 'its portal subscription wakes on its own'
+        await sessions.end(turn)
+        await gateway.quiet(clock, passes=6)
+        assert [(t.card, t.waiting) for t in sessions.turns] == [(broken.id, [asked]), (other.id, [later])]
+        await sessions.end(sessions.turns[-1])
+        await gateway.quiet(clock)
+        assert len(sessions.turns) == 2 and settled(conn, other)
+
+
+@pytest.mark.asyncio
+async def test_a_wake_that_also_carries_a_block_keeps_the_text_the_chat_subscription_always_had(
+        board, launcher, monkeypatch):
+    """The line about the portal stands for the portal's wake of the request, which is no longer sent. A wake of
+    the chat subscription that also reports a block or a completion never had that line, and still has not. The
+    block is written straight on the board: what is held here is what the notifier does with a claim of both."""
+    gateway, sessions, clock = board.gateway, board.sessions, Clock(monkeypatch)
+    with kb.connect_closing() as conn:
+        busy = portal_card(conn, launcher, 86, topic=None)
+        ask(conn, busy, 1)
+        await gateway.quiet(clock)
+        (holding,) = sessions.turns
+
+        card = portal_card(conn, launcher, 87)
+        decision = ask(conn, card, 1)
+        with kb.write_txn(conn):
+            kb._append_event(conn, card.id, 'blocked', {'reason': 'Waiting for the Principal.'})
+        await gateway.quiet(clock)
+        await sessions.end(holding)
+        await gateway.quiet(clock, passes=6)
+        (turn,) = [t for t in sessions.turns if t.card == card.id]
+        assert turn.waiting == [decision] and 'worker aguardando sua decisão' in turn.text
+        assert wake_words('gateway.kanban.wake.blocked') in turn.text, 'the one wake carries the request and the block'
+        assert PORTAL_ORIGIN not in turn.text
+        await sessions.end(turn)
+        await gateway.quiet(clock)
+        assert len([t for t in sessions.turns if t.card == card.id]) == 1 and settled(conn, card)
 
 
 @posix_only

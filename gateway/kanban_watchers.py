@@ -472,25 +472,14 @@ def _admission_order(deliveries, now=None):
 # one, and both land in the same Principal session: every request woke that session twice, the second time mostly
 # after the answer was recorded (2026-10-10: 299 wakes for 114 decisions on three cards, 120 after the answer).
 # Among the subscriptions of one card that lead to the same session, the wake of a request is owed by the first,
-# in this order, that already followed the card when the request was made. The others keep the notice of their
-# own channel and nothing else.
+# in this order, that has the request in hand in this pass of the notifier. The others keep the notice of their
+# own channel and nothing else. A subscription yields a wake only to one that carries the request now: one held
+# behind an unfinished delivery (its text failing, so its claim stays on older events) or already past the request
+# (it only notified when the request was written) is not going to wake for it, and nothing is yielded to it.
 def _wake_owner_rank(sub):
     """Order of a card's subscriptions before one session: its own chat before a re-routed one, then the oldest."""
     return (1 if sub.get("_principal_target") else 0, float(sub.get("created_at") or 0.0),
             str(sub.get("platform") or ""), str(sub.get("chat_id") or ""), str(sub.get("thread_id") or ""))
-
-
-def _subscribed_when(sub, event):
-    """Whether this subscription takes the event: it already existed when the event was written.
-
-    The same rule as the cut of events older than the subscription. Within the second the subscription was
-    born only its cursor tells before from after, and the cursor proves only an event still ahead of it.
-    """
-    born = float(sub.get("created_at") or 0.0)
-    at = float(getattr(event, "created_at", 0) or 0.0)
-    if at != born:
-        return at > born
-    return int(getattr(event, "id", 0) or 0) > int(sub.get("last_event_id") or 0)
 
 
 def _wake_source(plat, platform_str, route, profile, adapter):
@@ -3159,33 +3148,44 @@ class GatewayKanbanWatchersMixin:
     async def _kanban_wake_owed(self, delivery: dict, wake_kinds: tuple) -> tuple[set, bool]:
         """The wake kinds this delivery still owes its session, and whether the wake also speaks for the portal.
 
-        WAKE_ONCE_PER_SESSION_20261012: a decision request that another subscription of the same card owes to the
-        same session is not woken for again. WAKE_STILL_ASKED_20261012: nor is one whose decision no longer waits.
-        Only decision requests are counted together: of every wake kind, they are the one a claim never coalesces
-        away (``_coalesce_notify_events``), so the subscription that owes the wake is sure to carry it.
+        WAKE_ONCE_PER_SESSION_20261012: a decision request that another subscription of the same card carries to
+        the same session in this pass is not woken for again. WAKE_STILL_ASKED_20261012: nor is one whose decision
+        no longer waits. Only decision requests are counted together: of every wake kind, they are the one a claim
+        never coalesces away (``_coalesce_notify_events``), so the subscription that carries one wakes for it.
+
+        The wake speaks for the portal only when it is for the request alone: with a completion or a block in the
+        same wake, the text is the one the chat subscription always had. If any of this cannot be worked out the
+        delivery wakes for everything it carries, as it did before: a lost wake costs more than a repeated one,
+        and an error here must not end the pass for the deliveries that come after.
         """
         sub = delivery["sub"]
         events = [ev for ev in delivery["events"] if ev.kind in wake_kinds]
-        requests = [ev for ev in events if ev.kind == "nfos_principal_requested"]
-        if not requests:
+        try:
+            requests = [ev for ev in events if ev.kind == "nfos_principal_requested"]
+            if not requests:
+                return {ev.kind for ev in events}, False
+            others = delivery.get("card_subs") or ()
+            session = self._kanban_wake_session(sub) if others else ""
+            peers = [peer for peer in others if session and self._kanban_wake_session(peer) == session]
+            mine = _wake_owner_rank(sub)
+            ahead = [peer for peer in peers if _wake_owner_rank(peer) < mine]
+            owed = [ev for ev in requests if not any(ev.id in peer.get("_wake_carries", ()) for peer in ahead)]
+            asked = await asyncio.to_thread(_requests_still_asked, delivery.get("board"), sub["task_id"], owed)
+            if len(asked) < len(requests):
+                logger.info(
+                    "kanban notifier: %d of %d decision request(s) of %s do not wake from %s/%s: "
+                    "%d carried by another subscription of the same session, %d no longer waiting",
+                    len(requests) - len(asked), len(requests), sub["task_id"], sub.get("platform"),
+                    sub.get("chat_id"), len(requests) - len(owed), len(owed) - len(asked),
+                )
+            kept = {id(ev) for ev in asked}
+            kinds = {ev.kind for ev in events if ev.kind != "nfos_principal_requested" or id(ev) in kept}
+            return kinds, kinds == {"nfos_principal_requested"} and any(
+                peer.get("_principal_target") for peer in peers)
+        except Exception:
+            logger.warning("kanban notifier: what %s still owes its session could not be worked out; waking as asked",
+                           sub.get("task_id"), exc_info=True)
             return {ev.kind for ev in events}, False
-        others = delivery.get("card_subs") or ()
-        session = self._kanban_wake_session(sub) if others else ""
-        peers = [peer for peer in others if session and self._kanban_wake_session(peer) == session]
-        mine = _wake_owner_rank(sub)
-        ahead = [peer for peer in peers if _wake_owner_rank(peer) < mine]
-        owed = [ev for ev in requests if not any(_subscribed_when(peer, ev) for peer in ahead)]
-        asked = await asyncio.to_thread(_requests_still_asked, delivery.get("board"), sub["task_id"], owed)
-        if len(asked) < len(requests):
-            logger.info(
-                "kanban notifier: %d of %d decision request(s) of %s do not wake from %s/%s: "
-                "%d owed by another subscription of the same session, %d no longer waiting",
-                len(requests) - len(asked), len(requests), sub["task_id"], sub.get("platform"),
-                sub.get("chat_id"), len(requests) - len(owed), len(owed) - len(asked),
-            )
-        kept = {id(ev) for ev in asked}
-        kinds = {ev.kind for ev in events if ev.kind != "nfos_principal_requested" or id(ev) in kept}
-        return kinds, bool(asked) and any(peer.get("_principal_target") for peer in peers)
 
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver material lifecycle events.
@@ -3711,8 +3711,10 @@ class GatewayKanbanWatchersMixin:
                                         "kanban notifier: subscription for %s on board %s failed: %s",
                                         sub.get("task_id"), slug, sub_exc,
                                     )
-                            # WAKE_ONCE_PER_SESSION_20261012: a delivery knows the other subscriptions of its card.
+                            # WAKE_ONCE_PER_SESSION_20261012: a delivery knows the other subscriptions of its card,
+                            # and each of them says which events it has in hand in this pass.
                             for delivery in deliveries[board_first:]:
+                                delivery["sub"]["_wake_carries"] = {ev.id for ev in delivery["events"]}
                                 delivery["card_subs"] = [
                                     other for other in subs
                                     if other is not delivery["sub"]
