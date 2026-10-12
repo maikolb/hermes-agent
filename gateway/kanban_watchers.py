@@ -4727,6 +4727,11 @@ class GatewayKanbanWatchersMixin:
         management topic of the profiles on this host, once per wall: the
         claim and the receipt live beside the wall (``nfos_route_walls``), so
         neither a restart nor a second gateway sends it again.
+
+        While the wall stands the notice is repeated once a day, in the same
+        topic and in no other (WALL_DAILY_NOTICE_20261012): how long the route
+        has been closed and how many cards and inbox entries wait for it. It
+        stops when the route reopens, and its receipt is the same one.
         """
         from gateway.config import Platform as _Platform
         from hermes_cli import nfos_route_walls as _walls
@@ -4782,9 +4787,16 @@ class GatewayKanbanWatchersMixin:
                         "connected management topic to say so", route,
                     )
                 continue
-            if not await asyncio.to_thread(_walls.claim_notice, wall):
+            claim = await asyncio.to_thread(_walls.claim_notice, wall)
+            if not claim:
                 continue
-            text = _walls.notice(wall)
+            if claim.get("notices"):  # the wall has had its notice: this is the day's
+                count = await asyncio.to_thread(
+                    _walls.waiting, wall, owner_of=self._nfos_receipt_owner
+                )
+                text = _walls.still_closed(wall, count)
+            else:
+                text = _walls.notice(wall)
             deliveries: list = []
             for adapter, platform, profile, target in senders:
                 metadata = (

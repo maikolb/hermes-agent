@@ -116,7 +116,7 @@
   {"pr": 327, "file": "agent/conversation_loop.py", "text": "from hermes_cli.nfos_route_walls import answered"},
   {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "def _route_wall_hold("},
   {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "route_hold = _route_wall_hold(conn, row[\"id\"], dry_run=dry_run)"},
-  {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "_route_wall_probe(conn, claimed, board=board)"},
+  {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "_route_wall_probe(conn, candidate, board=board)"},
   {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "env[\"HERMES_KANBAN_ROUTE\"] = launch_route"},
   {"pr": 327, "file": "hermes_cli/nfos_waits.py", "text": "if reason == 'provider_quota':"},
   {"pr": 327, "file": "hermes_cli/nfos_waits.py", "text": "return spec['withdrawn'](conn, wait)"},
@@ -154,5 +154,17 @@
   {"pr": 328, "file": "hermes_cli/nfos_route_walls.py", "text": "receipt = current_notify_receipt.get() if is_dispatcher_owned_worker_context() else None"},
   {"pr": 328, "file": "hermes_cli/nfos_route_walls.py", "text": "wall, opened = close(*route, limit=quota.get('limit') or reason, reset_at=None,"},
   {"pr": 328, "file": "hermes_cli/nfos_delivery.py", "text": "if request_id and how == 'principal':"},
-  {"pr": 328, "file": "hermes_cli/nfos_runtime.py", "text": "urgent_command+=' --request '+shlex.quote(str(context['request_id']))"}
+  {"pr": 328, "file": "hermes_cli/nfos_runtime.py", "text": "urgent_command+=' --request '+shlex.quote(str(context['request_id']))"},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "def _next_probe(now, probes, reset_at):"},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "return min(probe_at, reset_at) if reset_at else probe_at"},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "def _locked(profile, provider, model):"},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "if (wall.get('probe') or {}).get('task_id') != task_id and _holds(wall, now):"},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "def probe_not_launched("},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "NOTICE_REPEAT_SECONDS = 86400"},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "def still_closed("},
+  {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "def waiting(wall, *, owner_of):"},
+  {"pr": 329, "file": "hermes_cli/kanban_db.py", "text": "probe_hold = _route_wall_probe(conn, candidate, board=board)"},
+  {"pr": 329, "file": "hermes_cli/kanban_db.py", "text": "_route_wall_probe_back(conn, candidate)"},
+  {"pr": 329, "file": "gateway/kanban_watchers.py", "text": "text = _walls.still_closed(wall, count)"},
+  {"pr": 329, "file": "gateway/kanban_watchers.py", "text": "_walls.waiting, wall, owner_of=self._nfos_receipt_owner"}
 ]

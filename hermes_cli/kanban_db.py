@@ -11362,9 +11362,10 @@ class DispatchResult:
     """Ready tasks whose claim a hold refused this tick, as ``(task_id, reason)``:
     principal_suspension, support_approval_pending, maintenance_pause,
     execution_budget_exhausted, retained_workspace, previous_run_termination,
-    parents_not_done, open_decision, and ``route_closed:<provider>/<model>``
-    (ROUTE_WALL_20261012: the provider closed the card's route with a long usage
-    window). The card waits for that resolution, not for the dispatcher."""
+    parents_not_done, open_decision, and ``route_closed:<provider>/<model>@<profile>``
+    (ROUTE_WALL_20261012: the provider closed the route of the profile the card
+    is launched as with a long usage window, or another launch is that route's
+    probe). The card waits for that resolution, not for the dispatcher."""
     skipped_capacity: list[dict] = field(default_factory=list)
     """Patch 10/09/2026: por que este tick não gerou spawn quando o motivo foi capacidade.
     Cada item: {reason: max_spawn|max_in_progress|workers, running, limit, reserved?}. Não é falha:
@@ -13911,14 +13912,28 @@ def _route_wall_hold(
         return None
 
 
-def _route_wall_probe(conn: sqlite3.Connection, task: "Task", *, board: Optional[str] = None) -> None:
-    """A card was claimed on a route that is still closed: its launch is that route's probe (ROUTE_WALL_20261012)."""
+def _route_wall_probe(conn: sqlite3.Connection, task: "Task", *, board: Optional[str] = None) -> Optional[str]:
+    """A card is about to be claimed on a route that is still closed: its launch is that route's probe
+    (ROUTE_WALL_20261012). One launch probes a route. When another launch took the probe first (the dispatcher of
+    another board, the intake), the answer is the hold ``route_closed:...`` and the card is not claimed."""
     try:
         from hermes_cli import nfos_route_walls as walls
         if walls.any_closed():
-            walls.probe_launched(conn, task, board=board)
+            wall = walls.probe_launched(conn, task, board=board)
+            return f"route_closed:{walls.label(wall)}" if wall else None
     except Exception:  # noqa: BLE001
         _log.warning("kanban dispatcher: route probe mark failed for %s", task.id, exc_info=True)
+    return None
+
+
+def _route_wall_probe_back(conn: sqlite3.Connection, task: "Task") -> None:
+    """The claim of the card that took a route's probe was refused: the probing goes back (ROUTE_WALL_20261012)."""
+    try:
+        from hermes_cli import nfos_route_walls as walls
+        if walls.any_closed():
+            walls.probe_not_launched(conn, task)
+    except Exception:  # noqa: BLE001
+        _log.warning("kanban dispatcher: route probe release failed for %s", task.id, exc_info=True)
 
 
 def _respawn_guard_backoff_remaining(
@@ -15292,14 +15307,19 @@ def _dispatch_once_locked(
             result.claim_held.append((row["id"], "open_decision"))
             continue
         _apply_project_max_runtime_default(conn, delivery_project, row["id"])  # MAX_RUNTIME_DEFAULT_20260910
+        probe_hold = _route_wall_probe(conn, candidate, board=board)
+        if probe_hold is not None:  # another launch is the probe of this card's closed route
+            _release_workspace_lease(workspace_lease)
+            result.claim_held.append((row["id"], probe_hold))
+            continue
         refusal: list[str] = []
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds, refusal=refusal)
         if claimed is None:
+            _route_wall_probe_back(conn, candidate)
             _release_workspace_lease(workspace_lease)
             if refusal:  # a hold, not a lost race: the diagnosis names it instead of reading as a stuck dispatcher
                 result.claim_held.append((row["id"], refusal[0]))
             continue
-        _route_wall_probe(conn, claimed, board=board)
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         if claimed.workspace_kind == "worktree":
@@ -15485,11 +15505,16 @@ def _dispatch_once_locked(
             _log.debug("kanban dispatcher: %s aguarda decisão aberta (pending/human); não relançado", row["id"])  # LOGGER_NAME_20260910
             continue
         _apply_project_max_runtime_default(conn, delivery_project, row["id"])  # MAX_RUNTIME_DEFAULT_20260910
+        probe_hold = _route_wall_probe(conn, candidate, board=board)  # ROUTE_WALL_20261012, as in the ready lane
+        if probe_hold is not None:
+            _release_workspace_lease(workspace_lease)
+            result.claim_held.append((row["id"], probe_hold))
+            continue
         claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
+            _route_wall_probe_back(conn, candidate)
             _release_workspace_lease(workspace_lease)
             continue
-        _route_wall_probe(conn, claimed, board=board)
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         if claimed.workspace_kind == "worktree":
