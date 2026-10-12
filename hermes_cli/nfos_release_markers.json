@@ -108,5 +108,15 @@
   {"pr": 326, "file": "cli.py", "text": "def _kanban_quota_wall("},
   {"pr": 326, "file": "cli.py", "text": "quota_wall_fn=lambda: _kanban_quota_wall(last_result[0])"},
   {"pr": 326, "file": "cli.py", "text": "result = _run_kanban_goal_loop_q(cli, response, result) or result"},
-  {"pr": 326, "file": "hermes_cli/kanban_db.py", "text": "quota_exit_decision = _nfos_open_decision(conn, row[\"id\"])"}
+  {"pr": 326, "file": "hermes_cli/kanban_db.py", "text": "quota_exit_decision = _nfos_open_decision(conn, row[\"id\"])"},
+  {"pr": 327, "file": "hermes_cli/nfos_route_walls.py", "text": "def quota_window("},
+  {"pr": 327, "file": "hermes_cli/nfos_route_walls.py", "text": "def on_quota_error("},
+  {"pr": 327, "file": "hermes_cli/nfos_route_walls.py", "text": "def answered("},
+  {"pr": 327, "file": "agent/conversation_loop.py", "text": "if on_quota_error(agent, api_error):"},
+  {"pr": 327, "file": "agent/conversation_loop.py", "text": "from hermes_cli.nfos_route_walls import answered"},
+  {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "def _route_wall_hold("},
+  {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "route_hold = _route_wall_hold(conn, row[\"id\"], dry_run=dry_run)"},
+  {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "_route_wall_probe(conn, claimed, board=board)"},
+  {"pr": 327, "file": "hermes_cli/kanban_db.py", "text": "env[\"HERMES_KANBAN_ROUTE\"] = launch_route"},
+  {"pr": 327, "file": "hermes_cli/nfos_waits.py", "text": "if reason == 'provider_quota':"}
 ]

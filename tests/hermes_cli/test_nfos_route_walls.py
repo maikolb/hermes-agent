@@ -189,6 +189,21 @@ def test_a_card_of_another_route_is_launched_while_the_route_is_closed(quota_boa
         assert [w['status'] for w in quota_waits(conn, same)] == ['open']
 
 
+def test_a_card_with_an_open_decision_stays_with_that_hold(quota_board, launcher, monkeypatch):
+    """A question to the Principal or to a person already holds the card and has its own wait and reminders. The
+    closed route does not take the card over: it waits for one thing at a time."""
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        first, second, _, _ = close_route_with_two_cards(conn, launcher, monkeypatch, GoUsageLimit)
+        # The dispatcher's own predicate for "this card has an open question", answered here for the second card.
+        monkeypatch.setattr(kb, '_nfos_decision_open', lambda conn, task_id: task_id == second)
+        kb.dispatch_once(conn)
+        clock.advance(300)  # past the per-card wait of the quota exit, which comes before the decision's hold
+        tick = kb.dispatch_once(conn)
+        assert sorted(tick.claim_held) == sorted([(first, HELD), (second, 'open_decision')]) and not tick.spawned, tick
+        assert [w['status'] for w in quota_waits(conn, first)] == ['open'] and quota_waits(conn, second) == []
+
+
 def test_route_reopens_at_the_reset_time_the_provider_gave(quota_board, launcher, monkeypatch):
     with kb.connect_closing() as conn:
         clock = Clock(monkeypatch)

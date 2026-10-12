@@ -13893,11 +13893,12 @@ def _route_wall_hold(
 
     ROUTE_WALL_20261012. Asked for each ready/review card before any claim. A held card is not launched, holds no
     slot and counts no failure; it stands in the wait registry until the route reopens (``nfos_route_walls``).
-    Never a reason to stop dispatch: an unreadable wall lets the card through, as before this rule.
+    A card with an open decision is left to that hold, which keeps its reminders and its own wait: one wait at a
+    time. Never a reason to stop dispatch: an unreadable wall lets the card through, as before this rule.
     """
     try:
         from hermes_cli import nfos_route_walls as walls
-        if not walls.any_closed():
+        if not walls.any_closed() or _nfos_decision_open(conn, task_id):
             return None
         task = get_task(conn, task_id)
         wall = walls.hold(conn, task, dry_run=dry_run) if task is not None else None
