@@ -202,5 +202,10 @@
   {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "what %s still owes its session could not be worked out; waking as asked"},
   {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "_wake_kinds, _wake_for_portal = await self._kanban_wake_owed(d, _WAKE_KINDS)"},
   {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "if principal_target or _wake_for_portal:"},
-  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "delivery[\"card_subs\"] = ["}
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "delivery[\"card_subs\"] = ["},
+  {"pr": 334, "file": "agent/anthropic_adapter.py", "text": "if key.startswith((\"sk-ant-api\", \"sk-ant-usr\", \"sk-ant-svc\", \"sk-ant-admin\")):"},
+  {"pr": 334, "file": "agent/anthropic_adapter.py", "text": "def resolve_anthropic_workspace_id() -> str:"},
+  {"pr": 334, "file": "agent/anthropic_adapter.py", "text": "headers = anthropic_workspace_headers(api_key, normalized_base_url)"},
+  {"pr": 334, "file": "hermes_cli/models.py", "text": "headers.update(anthropic_workspace_headers(token, resolved_base_url))"},
+  {"pr": 334, "file": "run_agent.py", "text": "with_anthropic_workspace_hint(f\"{prefix}{msg[:300]}\")"}
 ]

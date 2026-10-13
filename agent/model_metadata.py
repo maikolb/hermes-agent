@@ -2445,9 +2445,12 @@ def _query_anthropic_context_length(model: str, base_url: str, api_key: str) -> 
         if base.endswith("/v1"):
             base = base[:-3]
         url = f"{base}/v1/models?limit=1000"
+        from agent.anthropic_adapter import anthropic_workspace_headers
+
         headers = {
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
+            **anthropic_workspace_headers(api_key, base_url),
         }
         _ensure_requests()
         resp = requests.get(url, headers=headers, timeout=(5, 10), verify=_resolve_requests_verify(base_url))

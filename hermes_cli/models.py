@@ -4587,7 +4587,11 @@ def _fetch_anthropic_models(
     Returns sorted model IDs or None.
     """
     try:
-        from agent.anthropic_adapter import resolve_anthropic_token, _is_oauth_token
+        from agent.anthropic_adapter import (
+            _is_oauth_token,
+            anthropic_workspace_headers,
+            resolve_anthropic_token,
+        )
     except ImportError:
         return None
 
@@ -4608,6 +4612,7 @@ def _fetch_anthropic_models(
         headers["anthropic-beta"] = ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)
     else:
         headers["x-api-key"] = token
+        headers.update(anthropic_workspace_headers(token, resolved_base_url))
 
     def _do_request(h: dict[str, str]):
         req = urllib.request.Request(

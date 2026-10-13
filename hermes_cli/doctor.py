@@ -2585,6 +2585,8 @@ def run_doctor(args):
                 _COMMON_BETAS,
                 _OAUTH_ONLY_BETAS,
                 _CONTEXT_1M_BETA,
+                anthropic_workspace_error_hint,
+                anthropic_workspace_headers,
             )
             headers = {"anthropic-version": "2023-06-01"}
             is_oauth = _is_oauth_token(key)
@@ -2593,6 +2595,7 @@ def run_doctor(args):
                 headers["anthropic-beta"] = ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)
             else:
                 headers["x-api-key"] = key
+                headers.update(anthropic_workspace_headers(key))
             r = httpx.get(
                 "https://api.anthropic.com/v1/models",
                 headers=headers, timeout=10,
@@ -2627,6 +2630,14 @@ def run_doctor(args):
                     [(color("✗", Colors.RED), "Anthropic API",
                       color("(invalid API key)", Colors.DIM))],
                     [],
+                )
+            workspace_hint = anthropic_workspace_error_hint(r.text)
+            if workspace_hint:
+                return _ConnectivityResult(
+                    "Anthropic API",
+                    [(color("✗", Colors.RED), "Anthropic API",
+                      color("(workspace ID missing or invalid)", Colors.DIM))],
+                    [f"Anthropic: {workspace_hint}"],
                 )
             return _ConnectivityResult(
                 "Anthropic API",
