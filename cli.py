@@ -20956,6 +20956,29 @@ def _kanban_quota_wall(result) -> bool:
     )
 
 
+def _kanban_route_unresolved_on_quota(cli) -> bool:
+    """True when a card's worker could not resolve its route because every
+    credential of the provider's pool is inside a usage window
+    (POOL_WALL_20261012).
+
+    That launch met the quota wall before its first call, so it leaves by the
+    same door as a turn the provider refused (see ``_kanban_quota_wall``): the
+    quota exit code, and the route closed with the soonest reset time the pool
+    keeps (``nfos_pool_wall.close_route``). Without this the launch left with
+    the generic 1: a failure counted against the card, and the probe of a
+    closed route giving no verdict.
+    """
+    from hermes_cli import nfos_pool_wall
+
+    refusal = nfos_pool_wall.quota_cause(getattr(cli, "_runtime_credentials_error", None))
+    if not os.environ.get("HERMES_KANBAN_TASK") or refusal is None:
+        return False
+    nfos_pool_wall.close_route(
+        refusal, model=getattr(cli, "model", ""), provider=getattr(cli, "requested_provider", ""),
+    )
+    return True
+
+
 def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, first_result=None) -> "dict | None":
     """Drive a kanban goal_mode worker through the Ralph-style goal loop.
 
@@ -21708,7 +21731,13 @@ def main(
                                     _exit_code = 1
                         sys.exit(_exit_code)
 
-                # Exit with error code if credentials or agent init fails
+                # Exit with error code if credentials or agent init fails.
+                # A kanban worker whose route resolved no credential because
+                # the whole pool is inside a usage window leaves by the quota
+                # door, like the turn above that the provider refused.
+                if _kanban_route_unresolved_on_quota(cli):
+                    from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+                    sys.exit(KANBAN_RATE_LIMIT_EXIT_CODE)
                 sys.exit(1)
             else:
                 # Single-query mode (`hermes chat -q "…"`): skip the welcome

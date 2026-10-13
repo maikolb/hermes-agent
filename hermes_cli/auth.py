@@ -4275,6 +4275,7 @@ def resolve_codex_runtime_credentials(
             if stale_token and _probe_codex_quota_restored(
                 stale_token,
                 base_url=pool_rate_limit.get("base_url"),
+                not_before=pool_rate_limit.get("status_at"),
             ):
                 logger.info(
                     "Codex quota restored upstream — clearing stale pool cooldown(s)."
@@ -4422,6 +4423,7 @@ def _probe_codex_quota_restored(
     *,
     base_url: Optional[str] = None,
     min_interval_seconds: float = CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS,
+    not_before: Optional[float] = None,
 ) -> Optional[bool]:
     """Ask the Codex usage endpoint whether this account's quota is usable again.
 
@@ -4443,10 +4445,30 @@ def _probe_codex_quota_restored(
 
     Probes are throttled per access token (module-local cache) so the hot
     selection path can fire this freely.
+
+    *not_before* is the epoch time of the refusal that benched the credential
+    (the pool entry's ``last_status_at``, which every refusal rewrites and
+    auth.json keeps).  A refusal younger than the probe's own interval
+    stands: the provider has just refused the account, whatever this endpoint
+    reports of it (a verdict cached from before the refusal, purchased
+    credits, a limit the endpoint does not list), so the answer is ``None``
+    and nothing is asked.  Lifting the cooldown inside that interval handed
+    the refused account back on every 429.  Past it the endpoint is asked as
+    before, which is how a window that reopened early is seen, by a process
+    that has just started and by one that has held its pool for hours alike.
     """
     token = str(access_token or "").strip()
     if not token:
         return None
+    if not_before is not None:
+        try:
+            refused_for = time.time() - float(not_before)
+        except (TypeError, ValueError):
+            refused_for = None
+        # A mark ahead of the clock (the host's time was set back) is no
+        # fresh refusal: it is asked about as any other.
+        if refused_for is not None and 0 <= refused_for < min_interval_seconds:
+            return None
     # Real Codex access tokens are JWTs. Refusing to probe non-JWT tokens
     # avoids pointless network calls for corrupt/placeholder entries (and
     # keeps hermetic test fixtures with dummy tokens offline).
@@ -4621,6 +4643,7 @@ def _codex_pool_rate_limit_status() -> Optional[Dict[str, Any]]:
                 "label": entry.get("label"),
                 "last_refresh": entry.get("last_refresh"),
                 "reset_at": reset_at,
+                "status_at": _parse_reset_at(entry.get("last_status_at")),
                 "reason": entry.get("last_error_reason"),
                 "message": entry.get("last_error_message"),
                 "access_token": token.strip(),

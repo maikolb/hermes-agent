@@ -80,6 +80,9 @@ class CLIAgentSetupMixin:
                     except Exception:
                         continue
 
+        # What kept the route from resolving, for the caller that has to tell
+        # a quota wall from a broken setup (the quiet single-query exit code).
+        self._runtime_credentials_error = _primary_exc if runtime is None else None
         if runtime is None:
             message = format_runtime_provider_error(_primary_exc) if _primary_exc else "Provider resolution failed."
             ChatConsole().print(f"[bold red]{message}[/]")

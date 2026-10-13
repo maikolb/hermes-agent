@@ -5034,6 +5034,21 @@ def _runtime_turn_ended_on_quota(event, agent_result):
         return False
 
 
+def _route_unresolved_on_quota(error, user_config):
+    """POOL_WALL_20261012: what a turn whose route resolved no credential adds to its result. When every credential
+    of the provider's pool is inside a usage window, that turn ended on the provider's quota before its first call:
+    it is a quota failure like the turn the provider refused, so the turn of an inbox entry closes the route and
+    gives the entry back, and a wake nobody typed says nothing in its chat. Any other failure adds nothing."""
+    try:
+        from hermes_cli import nfos_pool_wall
+        if nfos_pool_wall.quota_cause(error) is None:
+            return {}
+        return nfos_pool_wall.unresolved_turn(error, model=_resolve_gateway_model(user_config))
+    except Exception:
+        logger.debug("POOL_WALL_20261012 could not read an unresolved route", exc_info=True)
+        return {}
+
+
 def _runtime_wake_refused_on_quota(agent):
     """PRINCIPAL_WALL_20261012: the lifecycle status of that same refusal, while the turn is still running."""
     try:
@@ -6488,6 +6503,7 @@ class TurnRunner:
                 "messages": [],
                 "api_calls": 0,
                 "tools": [],
+                **_route_unresolved_on_quota(exc, ctx.user_config),
             }
 
         pr = self._runner._provider_routing

@@ -30,14 +30,17 @@ the limit (``metadata.limitName``), the reset time (``resets_at`` / ``reset_at``
   holds no slot, counts no failure and stands in the wait registry (``nfos_waits``, reason ``provider_quota``).
   That wait is the card's only while the route is what the card waits for: a card whose route changed, or that
   another hold took, loses it (``wait_withdrawn``).
-* The route reopens when the provider answers a launch on it (``answered``), and a closed route is always probed:
-  one launch at a time (``take_probe``), which on the wall leaves on its first refused call and spends nothing of
-  the balance of an escalated card that probes (``nfos_principal_review.escalation_usage``). With no reset time
+* The route reopens when the provider answers a launch on it (``answered``), and a closed route is probed by the
+  launch of what waits for it: one launch at a time (``take_probe``), which on the wall leaves on its first
+  refused call and spends nothing of the balance of an escalated card that probes
+  (``nfos_principal_review.escalation_usage``). With no reset time
   the spacing is the respawn guard's own (the rate-limit cooldown, doubling up to one hour), kept once for the
   route instead of once per card. With a reset time the route is probed every hour and at that time: the time
   the provider gave can only bring the next launch forward (``open_at``), so a limit lifted early (quota bought,
-  plan changed) is found within the hour and nobody has to erase a file. A route that closes again sooner than
-  its next probe would have come is the same wall going on (``close``).
+  plan changed) is found within the hour and nobody has to erase a file. That is of a route a card waits for:
+  under a reset time still ahead a request is not a probe (``entry_held``), and a route only requests wait for is
+  probed by nobody until that time. A route that closes again sooner than its next probe would have come is the
+  same wall going on (``close``).
 * One notice per wall, sent by the gateway's notifier to the management topic (``unannounced``, ``claim_notice``):
   a closed route is a fact of one profile of the host, and the card that met the wall may have no chat a passive
   notice is allowed in. While the wall stands and something waits for its route the notice is repeated there
@@ -49,6 +52,9 @@ the limit (``metadata.limitName``), the reset time (``resets_at`` / ``reset_at``
   request that ends on quota with no window named closes the route as well, with no reset time: the wall is the
   only clock a held request has, and its notices the only word about it. With a reset time still ahead a request
   is not the probe of the hour: it waits for that time (``entry_held``), and the hourly probe is of the cards.
+  With no card waiting, a limit lifted before that time is found only by a turn of a session of the profile that
+  is not the turn of a request (``session_answered``); a person's message in the topic of a delivery project is
+  not one, the intake takes it as one more request.
 
 Nothing here selects another provider or model: a closed route makes its cards, and the requests whose decision
 is the Principal's, wait.
@@ -387,7 +393,8 @@ def _next_probe(now, probes, reset_at):
 def open_at(wall):
     """When the route admits its next launch: its next probe, or the reset time the provider gave when that comes
     first. The reset time only brings the launch forward. It never holds the probe back: a window whose end is
-    days away is still tried every hour, because the limit may be lifted before the time the provider gave."""
+    days away is still tried every hour, because the limit may be lifted before the time the provider gave. Tried
+    by the launch of a card: an inbox entry waits for the reset time (``entry_held``)."""
     probe_at, reset_at = float(wall.get('next_probe_at') or 0), float(wall.get('reset_at') or 0)
     return min(probe_at, reset_at) if reset_at else probe_at
 
@@ -540,9 +547,13 @@ def _reset_time(wall):
     return time.strftime('%d/%m %H:%M UTC', time.gmtime(float(wall['reset_at'])))
 
 
-# What becomes of the inbox entries of a wall with a reset time still ahead (``entry_held``, ``session_answered``).
+# What becomes of the inbox entries of a wall with a reset time still ahead (``entry_held``, ``session_answered``),
+# and which turn reopens the route before that time. Not a person's message in the topic of a delivery project: the
+# intake takes it as a request before any turn (``_nfos_receive``), so it tests nothing.
 ENTRIES_RESUMED = ('Os pedidos na caixa do Principal são retomados nessa hora, ou antes se o provedor responder a '
-                   'qualquer turno de sessão desse perfil nessa rota.')
+                   'um turno de sessão desse perfil nessa rota que não seja o de um pedido: mensagem no tópico de '
+                   'gestão, despertar de decisão de card. Mensagem nova em tópico de projeto não testa a rota: '
+                   'entra como pedido.')
 
 
 def notice(wall):
@@ -1024,10 +1035,15 @@ def entry_held(profile, provider, model, *, now=None):
     that time the entry waits and is not the probe of the hour. The probe of an entry is the whole turn of its
     request, and every one the provider refuses leaves the wake of the request once more in the session of the
     topic (measured on a wall of 150 h with a reset time: 151 refused turns and 151 copies, about 135 thousand
-    tokens, against 1 and 1 when the entry waits). And it finds nothing the session does not find by itself: any
-    turn of that profile on that model the provider answers, a person's message or the wake of a card's decision,
-    reopens the route (``session_answered``). The probe of the hour is left to the cards of the route. With no
-    reset time the wall is the only clock the entry has, and it probes at the route's spacing."""
+    tokens, against 1 and 1 when the entry waits). The probe of the hour is left to the cards of the route. With
+    no reset time the wall is the only clock the entry has, and it probes at the route's spacing.
+
+    What reopens the route before the reset time when no card waits for it: a turn of a session of that profile
+    on that model the provider answers (``session_answered``), which is never the turn of a held entry. The wake
+    of a card's decision is one, and a person's message in a topic the intake takes no request from (the
+    management topic). A person's message in the topic of a delivery project is not: the intake takes it as a
+    request before any turn (``_nfos_receive``), and as an inbox entry it is held with the others. With none of
+    those turns the entries wait for the reset time, as they did before the hourly probe."""
     wall = read(profile, provider, model)
     if wall is None:
         return None

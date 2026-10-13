@@ -21,9 +21,10 @@ What these tests hold:
   reopens the route, the request becomes one card, and a request the Principal had released before its turn died
   is not offered again;
 * with a reset time ahead a request is not the probe of the hour, which is left to the cards of the route: in 150
-  hours of wall its turn is refused once and its wake stands once in the session of the topic; a turn of that
-  session the provider answers before that time (a person's message) reopens the route and the request comes
-  back;
+  hours of wall its turn is refused once and its wake stands once in the session of the topic; a turn the provider
+  answers before that time reopens the route and the request comes back, and that turn is never a person's message
+  in the topic of the project, which the intake takes as one more request, held with the others: it is a message
+  in the management topic or a wake of the runtime;
 * a turn that ends on quota with no usage window named (a throttle that outlasts the client's retries) closes the
   route too, with no reset time: the request waits on the wall, never on a clock of its own with nobody told;
 * a billing verdict the classifier holds unverified is not a quota wall; a delegated child inside the turn is not
@@ -40,6 +41,7 @@ the Telegram adapter are stand-ins. With quota, the stand-in provider does what 
 work: it runs the intake with the exact request of the wake.
 """
 import asyncio
+import dataclasses
 import json
 import os
 import time
@@ -197,11 +199,34 @@ class Session:
         await self._turn(event, event.metadata['nfos_coordinator_intake']['request'],
                          event.metadata['kanban_wake_delivery'])
 
-    async def person_says(self, text, source):
-        """A message a person typed in the topic: a turn of the same session through the gateway's own handler,
-        with no wake and no request behind it."""
-        await self._turn(MessageEvent(text=text, message_id='200', message_type=MessageType.TEXT, source=source),
-                         None, None)
+    async def message(self, text, source, *, internal=False):
+        """A message that reaches the gateway with no request behind it yet: one a person typed, or a wake of the
+        runtime (`internal`). It enters by the first line of the gateway's own handler, so the intake reads it
+        before any turn (`desk`), and only what the intake leaves alone becomes a turn of a session of the
+        profile, run when the handler asks for it. Returns what the handler handed to the topic it came from."""
+        event = MessageEvent(text=text, message_id='200', message_type=MessageType.TEXT, source=source,
+                             internal=internal)
+        key = f'agent:main:telegram:group:{source.chat_id}:{source.thread_id}'
+
+        async def run_agent(**asked):
+            self.request = None
+            result = self.agent.run_conversation(text)
+            self.results.append(result)
+            return self._as_the_gateway_returns(result)
+
+        self.gateway._run_agent = run_agent
+        self.turn.source, self.turn._loop_for_step = source, asyncio.get_running_loop()
+        try:
+            return await self.gateway._handle_message_with_agent(event, source, key, 1)
+        finally:
+            self.gateway._release_turn_lease(key, 1)
+
+    def _as_the_gateway_returns(self, result):
+        """The keys GatewayRunner._run_agent returns for a turn that ended with text."""
+        return {'final_response': result['final_response'], 'messages': [], 'api_calls': result['api_calls'],
+                'failed': bool(result.get('failed')), 'failure_reason': result.get('failure_reason'),
+                'completed': result['completed'], 'error': result.get('error'), 'tools': [], 'history_offset': 0,
+                'last_prompt_tokens': 0, 'model': self.agent.model}
 
     async def _turn(self, event, request, receipt):
         self.request = request
@@ -210,12 +235,7 @@ class Session:
         try:
             result = self.agent.run_conversation(event.text)
             self.results.append(result)
-            # The keys GatewayRunner._run_agent returns for a turn that ended with text.
-            self.gateway._run_agent = AsyncMock(return_value={
-                'final_response': result['final_response'], 'messages': [], 'api_calls': result['api_calls'],
-                'failed': bool(result.get('failed')), 'failure_reason': result.get('failure_reason'),
-                'completed': result['completed'], 'error': result.get('error'), 'tools': [], 'history_offset': 0,
-                'last_prompt_tokens': 0, 'model': self.agent.model})
+            self.gateway._run_agent = AsyncMock(return_value=self._as_the_gateway_returns(result))
             handed = await self.gateway._handle_message_with_agent(event, event.source, SESSION_KEY, 1)
         finally:
             current_notify_receipt.reset(token)
@@ -269,9 +289,19 @@ def intake(setup, monkeypatch):
 
 @pytest.fixture
 def desk(intake, monkeypatch, tmp_path):
-    """The intake with the whole coordinating session behind the topic, and a Telegram that confirms what it sends."""
+    """The intake with the whole coordinating session behind the topic, and a Telegram that confirms what it sends.
+
+    The gateway of production is one object; here it is in two halves, the intake with the delivery project on
+    (`runner`) and the handler of a turn (`session.gateway`). The handler reads every message through that intake
+    before any turn, as production does, and the router's two topics are told apart: in the management one the
+    intake takes no request."""
     runner, event, adapter, inbox = intake
     session = Session(monkeypatch, tmp_path, inbox.root)
+    project = runner._resolve_project_context_for_message
+    runner._resolve_project_context_for_message = lambda event, source: (
+        (SimpleNamespace(board_slug='', project_id='', is_management=True), None)
+        if (str(source.chat_id), str(source.thread_id)) == MANAGEMENT_TOPIC else project(event, source))
+    session.gateway._nfos_receive = runner._nfos_receive
     adapter.handle_message = session.handle_message
     adapter._send_with_retry = AsyncMock(return_value=SimpleNamespace(success=True, message_id='900'))
     return runner, event, adapter, session
@@ -492,11 +522,15 @@ async def test_the_same_request_is_resumed_once_at_the_reset_time_with_one_refus
 
 
 @pytest.mark.asyncio
-async def test_a_turn_of_a_person_the_provider_answers_before_the_reset_time_brings_the_request_back(
-        desk, monkeypatch, ops):
-    """What finds a limit lifted before the time the provider gave, with the request held until that time: any
-    turn of the session the provider answers. A person writes in the topic, the answer reopens the route, and the
-    request that waited is offered in the next round of the gateway."""
+@pytest.mark.parametrize('internal', [False, True], ids=['a-person-in-the-management-topic', 'a-wake-of-the-runtime'])
+async def test_a_turn_that_is_not_of_a_request_answered_before_the_reset_time_brings_the_request_back(
+        desk, monkeypatch, ops, internal):
+    """What finds a limit lifted before the time the provider gave, with the request held until that time: a turn
+    of a session of the profile the provider answers, and the turn of a request is not offered. Two that exist with
+    the delivery on: a person's message in the management topic, where the intake takes no request, and a wake of
+    the runtime (the decision or the event of a card), which the intake does not read. Both enter by the first line
+    of the gateway's handler, the intake included. The answer reopens the route, and the request that waited is
+    offered in the next round of the gateway."""
     runner, event, adapter, session = desk
     clock = Clock(monkeypatch)
     start = clock.now
@@ -509,15 +543,24 @@ async def test_a_turn_of_a_person_the_provider_answers_before_the_reset_time_bri
     await _through(runner, clock, 6 * 3600, ops)
     assert session.offered() == [request_id] and session.seen.provider_calls == 1, 'held: not the probe of the hour'
 
-    # The limit is lifted days before the reset time. The held request does not find it out: a person's message does.
+    # The limit is lifted days before the reset time. The held request does not find it out: that turn does.
     session.refusal = None
     await _through(runner, clock, 3600, ops)
     assert session.offered() == [request_id] and walls.entry_held(*PRINCIPAL) is not None and not _cards()
-    await session.person_says('E o card da folha?', event.source)
-    assert session.results[-1]['failed'] is False and clock.now == start + 7 * 3600 < reset - 5 * 86400
+    if internal:
+        said = await session.message('[kanban] Task t_1 asks: which of the two sources?', event.source, internal=True)
+    else:
+        management = dataclasses.replace(event.source, thread_id=MANAGEMENT_TOPIC[1])
+        said = await session.message('[Japa|1]\nE o card da folha?', management)
+    await _settle(runner)
+    assert len(_requests()) == 1, 'the intake took no request from it: it was a turn'
+    assert len(session.results) == 2 and session.results[-1]['failed'] is False
+    assert clock.now == start + 7 * 3600 < reset - 5 * 86400
     assert walls.read(*PRINCIPAL) is None, 'the provider answered a turn of the session: the route is open'
-    (said,) = session.said_in_the_topic()
-    assert said.startswith('The card of the sheet is in review.'), 'the person got the answer to what they asked'
+    answer = 'The card of the sheet is in review.'
+    assert session.results[-1]['final_response'].startswith(answer), 'the provider answered what the turn asked'
+    assert internal or said.startswith(answer), 'a person gets the answer in the topic they wrote in'
+    assert session.said_in_the_topic() == [], 'and nothing of the wall in the topic of who asked'
     assert _board()[0]['status'] == 'coordinating' and session.offered() == [request_id], 'that turn was not the request'
 
     await _tick(runner, clock, 5, ops)
@@ -529,6 +572,45 @@ async def test_a_turn_of_a_person_the_provider_answers_before_the_reset_time_bri
     assert receipt.kwargs['reply_to'] == '123'
     await _through(runner, clock, 3600, ops)
     assert len(session.wakes) == 2 and len(_cards()) == 1 and len(ops.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_message_in_the_topic_of_the_project_is_one_more_request_held_and_reopens_nothing(
+        desk, monkeypatch, ops):
+    """A person who writes in the topic of the project while a request waits does not test the route. With the
+    delivery on the intake takes that message as a request before any turn, and as an inbox entry it is held by the
+    same wall: no call goes to the provider. With quota back the whole time, both wait for the reset time, and the
+    day's notice says so."""
+    runner, event, adapter, session = desk
+    clock = Clock(monkeypatch)
+    start = clock.now
+    reset = start + WEEKLY_RESET
+    session.refusal = lambda: CodexUsageLimit(resets_in=int(reset - clock.now))
+
+    await runner._nfos_receive(event)
+    await _settle(runner)
+    await _through(runner, clock, 6 * 3600, ops)
+    session.refusal = None  # the limit is lifted, days before the reset time
+
+    asked = '[Japa|1]\nE o card da folha?'
+    assert await session.message(asked, event.source) is None, 'the intake took it: no turn, nothing for the topic'
+    await _settle(runner)
+    first, second = _requests()
+    assert [r['status'] for r in (first, second)] == ['coordinating', 'coordinating']
+    assert second['payload']['text'] == asked and 'quota' not in second['payload']['coordination']
+    assert session.offered() == [first['id']] and len(session.results) == 1, 'offered to nobody: held like the first'
+    assert session.seen.provider_calls == 1, 'and no call: the provider was not asked'
+
+    # Two days with quota back. Nothing asks the provider, so the route stays closed and both requests wait.
+    await _through(runner, clock, 48 * 3600, ops, step=3600)
+    assert clock.now == start + 54 * 3600 < reset
+    assert walls.read(*PRINCIPAL) is not None and walls.entry_held(*PRINCIPAL) is not None
+    assert session.offered() == [first['id']] and session.seen.provider_calls == 1 and not _cards()
+    assert [r['status'] for r in _requests()] == ['coordinating', 'coordinating']
+    opening, *daily = [text for chat, topic, text in ops.sent]
+    assert len(daily) == 2 and all('ainda sem card: 2.' in text and walls.ENTRIES_RESUMED in text for text in daily)
+    assert 'tópico de gestão' in opening and 'Mensagem nova em tópico de projeto não testa a rota' in opening
+    assert session.said_in_the_topic() == [] and not adapter._send_with_retry.await_count
 
 
 @pytest.mark.asyncio
