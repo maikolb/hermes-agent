@@ -30,31 +30,46 @@ the limit (``metadata.limitName``), the reset time (``resets_at`` / ``reset_at``
   holds no slot, counts no failure and stands in the wait registry (``nfos_waits``, reason ``provider_quota``).
   That wait is the card's only while the route is what the card waits for: a card whose route changed, or that
   another hold took, loses it (``wait_withdrawn``).
-* The route reopens at the reset time the provider gave. With none, and whenever a reset time passes with the
-  wall still up, one launch probes it: a worker on the wall leaves on its first refused call. The spacing is the
-  respawn guard's own (the rate-limit cooldown, doubling up to one hour), kept once for the route instead of
-  once per card. A worker the provider answers reopens the route (``answered``). A route that closes again
-  sooner than its next probe would have come is the same wall going on (``close``).
+* The route reopens when the provider answers a launch on it (``answered``), and a closed route is probed by the
+  launch of what waits for it: one launch at a time (``take_probe``), which on the wall leaves on its first
+  refused call and spends nothing of the balance of an escalated card that probes
+  (``nfos_principal_review.escalation_usage``). With no reset time
+  the spacing is the respawn guard's own (the rate-limit cooldown, doubling up to one hour), kept once for the
+  route instead of once per card. With a reset time the route is probed every hour and at that time: the time
+  the provider gave can only bring the next launch forward (``open_at``), so a limit lifted early (quota bought,
+  plan changed) is found within the hour and nobody has to erase a file. That is of a route a card waits for:
+  under a reset time still ahead a request is not a probe (``entry_held``), and a route only requests wait for is
+  probed by nobody until that time. A route that closes again sooner than its next probe would have come is the
+  same wall going on (``close``).
 * One notice per wall, sent by the gateway's notifier to the management topic (``unannounced``, ``claim_notice``):
-  a closed route is a fact of the host, and the card that met the wall may have no chat a passive notice is
-  allowed in.
+  a closed route is a fact of one profile of the host, and the card that met the wall may have no chat a passive
+  notice is allowed in. While the wall stands and something waits for its route the notice is repeated there
+  once a day (``still_closed``), with how long the route has been closed and what waits for it. The account the
+  provider named stays on the wall and out of both texts.
 * The coordinating session's route closes the same way when it meets the window on the turn of a preserved
   request (PRINCIPAL_WALL_20261012, "The intake's side" below): the request goes back to the Principal's inbox and
-  is offered again when the route reopens, its turn being the probe of a route with no reset time. A turn of a
+  is offered again when the route is due, the oldest entry first, its turn being the route's probe. A turn of a
   request that ends on quota with no window named closes the route as well, with no reset time: the wall is the
-  only clock a held request has, and its notice the only word about it.
+  only clock a held request has, and its notices the only word about it. With a reset time still ahead a request
+  is not the probe of the hour: it waits for that time (``entry_held``), and the hourly probe is of the cards.
+  With no card waiting, a limit lifted before that time is found only by a turn of a session of the profile that
+  is not the turn of a request (``session_answered``); a person's message in the topic of a delivery project is
+  not one, the intake takes it as one more request.
 
 Nothing here selects another provider or model: a closed route makes its cards, and the requests whose decision
 is the Principal's, wait.
 """
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import re
+import sqlite3
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +80,19 @@ PROBE_CEILING_SECONDS = 3600
 # A probe that neither met the wall again nor got an answer in this time gave no verdict: another card may probe.
 # The same for a notifier that took a wall's notice and neither sent it nor let it go.
 PROBE_LEASE_SECONDS = 900
+# While a wall stands, its notice is repeated at this interval (WALL_DAILY_NOTICE_20261012).
+NOTICE_REPEAT_SECONDS = 86400
+# The longest a writer waits for the lock of a route's wall. It is held for one read and one write, and the intake
+# asks for it on the gateway's event loop: a holder that stopped (a frozen process) must not stop the gateway.
+LOCK_WAIT_SECONDS = 5
 # Wait registry: how often a held card's wait is rechecked and when it stops counting as a healthy wait.
 WAIT_RECHECK_SECONDS = 300
 WAIT_DEADLINE_SECONDS = 35 * 86400
 
 ROUTE_ENV = 'HERMES_KANBAN_ROUTE'
-# Beside a route's wall (``.json``): the wall it had when it last reopened, and the notice of its wall.
-REOPENED, NOTICE = '.reopened', '.notice'
+# Beside a route's wall (``.json``): the wall it had when it last reopened, the notice of its wall, and the lock
+# the writers of the wall take.
+REOPENED, NOTICE, LOCK = '.reopened', '.notice', '.lock'
 _ABSOLUTE_FIELDS = ('resets_at', 'reset_at')
 _RELATIVE_FIELDS = ('resets_in_seconds', 'retry_after')
 
@@ -306,6 +327,51 @@ def _create(path, record):
             pass
 
 
+@contextlib.contextmanager
+def _locked(profile, provider, model):
+    """One writer at a time on this route's wall, among the processes of the host that write it: the gateway's
+    dispatcher and intake, the worker of a card, a launch made outside the gateway. Held for one read and one
+    write, never across a launch. Where the platform gives no file lock, or the lock is not given within
+    ``LOCK_WAIT_SECONDS``, the writer goes on unserialised."""
+    handle = None
+    try:
+        path = _path(profile, provider, model, LOCK)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, 'a+b')
+        if os.name == 'nt':
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # gives up by itself after ten tries a second apart
+        else:
+            import fcntl
+            deadline = time.monotonic() + LOCK_WAIT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
+    except BlockingIOError:
+        logger.warning('ROUTE_WALL_20261012 the lock on the wall of %s/%s@%s was not given in %s s: going on without it',
+                       provider, model, profile, LOCK_WAIT_SECONDS)
+    except (OSError, ImportError, AttributeError):
+        logger.debug('ROUTE_WALL_20261012 no lock on the wall of %s/%s@%s', provider, model, profile, exc_info=True)
+    try:
+        yield
+    finally:
+        if handle is not None:
+            if os.name == 'nt':
+                try:
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                except (OSError, ImportError, AttributeError):
+                    pass
+            handle.close()  # closing the file gives the lock back
+
+
 def _probe_spacing(probes):
     """The respawn guard's schedule (cooldown doubling up to one hour), once for the route."""
     try:
@@ -317,10 +383,20 @@ def _probe_spacing(probes):
     return min(PROBE_CEILING_SECONDS, first * (2 ** min(int(probes), 12)))
 
 
+def _next_probe(now, probes, reset_at):
+    """When the route is probed next. With no reset time, the guard's schedule. With one, the ceiling of that
+    schedule: the provider said how far the end of the window is, so the early, closely spaced probes have
+    nothing to find, and one launch an hour is what finds a limit lifted before that time."""
+    return now + (PROBE_CEILING_SECONDS if reset_at else _probe_spacing(probes))
+
+
 def open_at(wall):
-    """When the route admits its next launch: the reset time the provider gave, never sooner than the probe
-    spacing allows (a reset time that passed with the wall still up was not the end of the window)."""
-    return max(float(wall.get('reset_at') or 0), float(wall.get('next_probe_at') or 0))
+    """When the route admits its next launch: its next probe, or the reset time the provider gave when that comes
+    first. The reset time only brings the launch forward. It never holds the probe back: a window whose end is
+    days away is still tried every hour, because the limit may be lifted before the time the provider gave. Tried
+    by the launch of a card: an inbox entry waits for the reset time (``entry_held``)."""
+    probe_at, reset_at = float(wall.get('next_probe_at') or 0), float(wall.get('reset_at') or 0)
+    return min(probe_at, reset_at) if reset_at else probe_at
 
 
 def close(profile, provider, model, *, limit, reset_at=None, account=None, task_id=None, board=None,
@@ -343,79 +419,109 @@ def close(profile, provider, model, *, limit, reset_at=None, account=None, task_
     now = time.time() if now is None else float(now)
     wall = {'profile': profile, 'provider': provider, 'model': model, 'limit': str(limit), 'reset_at': reset_at,
             'account': account, 'closed_at': now, 'walled_at': now, 'probes': 0,
-            'next_probe_at': now + _probe_spacing(0), 'probe': None,
+            'next_probe_at': _next_probe(now, 0, reset_at), 'probe': None,
             'closed_by': {'task_id': task_id, 'board': board}}
     if request_id:
         wall['closed_by']['request_id'] = request_id
     prober = task_id or request_id
-    before = _load(_path(*route, REOPENED)) or {}
-    probes = int(before.get('probes') or 0) + 1
-    goes_on = (before.get('limit') == wall['limit'] and before.get('closed_at')
-               and now - float(before.get('reopened_at') or 0) < _probe_spacing(probes))
-    if goes_on:
-        wall.update(closed_at=before['closed_at'], closed_by=before.get('closed_by') or wall['closed_by'],
-                    probes=probes, next_probe_at=now + _probe_spacing(probes))
-    if _create(_path(*route), wall):
-        return wall, not goes_on
-    existing = read(*route)
-    if existing is None:
-        return None, False
-    if prober and (existing.get('probe') or {}).get('task_id') == prober:
-        probes = int(existing.get('probes') or 0) + 1
-        existing.update(probes=probes, probe=None, walled_at=now, limit=str(limit), reset_at=reset_at,
-                        account=account or existing.get('account'), next_probe_at=now + _probe_spacing(probes))
-        _write(_path(*route), existing)
-    return existing, False
+    with _locked(*route):
+        before = _load(_path(*route, REOPENED)) or {}
+        probes = int(before.get('probes') or 0) + 1
+        goes_on = (before.get('limit') == wall['limit'] and before.get('closed_at')
+                   and now - float(before.get('reopened_at') or 0) < _probe_spacing(probes))
+        if goes_on:
+            wall.update(closed_at=before['closed_at'], closed_by=before.get('closed_by') or wall['closed_by'],
+                        probes=probes, next_probe_at=_next_probe(now, probes, reset_at))
+        if _create(_path(*route), wall):
+            return wall, not goes_on
+        existing = read(*route)
+        if existing is None:
+            return None, False
+        if prober and (existing.get('probe') or {}).get('task_id') == prober:
+            probes = int(existing.get('probes') or 0) + 1
+            existing.update(probes=probes, probe=None, walled_at=now, limit=str(limit), reset_at=reset_at,
+                            account=account or existing.get('account'),
+                            next_probe_at=_next_probe(now, probes, reset_at))
+            _write(_path(*route), existing)
+        return existing, False
 
 
 def reopen(profile, provider, model, *, now=None):
     """The provider answered: the route is open. The wall is put aside, not erased, so ``close`` can tell a
     route that closes again at once from a new wall."""
     route = _key(profile, provider, model)
-    wall = read(*route)
-    if wall is None:
-        return False
-    wall.update(reopened_at=time.time() if now is None else float(now), probe=None)
-    try:
-        _write(_path(*route, REOPENED), wall)
-    except OSError:  # the route opens all the same; its next wall will be a new one
-        logger.warning('ROUTE_WALL_20261012 could not keep the reopened wall of %s', label(wall), exc_info=True)
-    try:
-        _path(*route).unlink()
-        return True
-    except OSError:
-        return False
+    with _locked(*route):
+        wall = read(*route)
+        if wall is None:
+            return False
+        wall.update(reopened_at=time.time() if now is None else float(now), probe=None)
+        try:
+            _write(_path(*route, REOPENED), wall)
+        except OSError:  # the route opens all the same; its next wall will be a new one
+            logger.warning('ROUTE_WALL_20261012 could not keep the reopened wall of %s', label(wall), exc_info=True)
+        try:
+            _path(*route).unlink()
+            return True
+        except OSError:
+            return False
+
+
+def _holds(wall, now):
+    """A probe of this wall is in flight, or its next launch is not due yet."""
+    probe = wall.get('probe') or {}
+    return bool(probe and now - float(probe.get('at') or 0) < PROBE_LEASE_SECONDS) or now < open_at(wall)
+
+
+def _awaits_reset(wall, now):
+    """The provider gave this wall a reset time and it is still ahead."""
+    return now < float(wall.get('reset_at') or 0)
 
 
 def closed(profile, provider, model, *, now=None):
-    """The wall holding launches on this route right now, or ``None``: the route is open, or its reopening is
+    """The wall holding launches on this route right now, or ``None``: the route is open, or its next launch is
     due and no probe is in flight, so the next launch is the probe (``take_probe``)."""
     wall = read(profile, provider, model)
     if wall is None:
         return None
-    now = time.time() if now is None else float(now)
-    probe = wall.get('probe') or {}
-    if probe and now - float(probe.get('at') or 0) < PROBE_LEASE_SECONDS:
-        return wall
-    return wall if now < open_at(wall) else None
+    return wall if _holds(wall, time.time() if now is None else float(now)) else None
 
 
 def take_probe(profile, provider, model, *, task_id, board=None, now=None):
-    """The dispatcher claimed ``task_id`` on a closed route whose reopening is due: that launch is the probe."""
-    wall = read(profile, provider, model)
-    if wall is None:
+    """A launch of ``task_id`` is about to go out on this route. On a closed route whose next launch is due that
+    launch is the probe, and only one launch is: the wall is read again and marked under the route's lock, so of
+    the launchers that all saw the route due (the dispatchers of two boards, a dispatcher and the intake) one
+    takes it.
+
+    Returns the wall, with this launch as its probe; ``None`` when the route has no wall (it is open and every
+    launch goes); ``False`` when the wall holds this launch after all: another launch took the probe first, or
+    the verdict of that probe has already moved the schedule.
+
+    The probe is of the launch that took it, not of every launch that carries its id: a second launcher of the
+    same card or of the same inbox entry (two gateways serving one profile) is held like any other, so it never
+    reaches the point where it would give back, with ``release_probe``, a probe it does not have."""
+    now = time.time() if now is None else float(now)
+    if read(profile, provider, model) is None:
         return None
-    wall['probe'] = {'task_id': task_id, 'board': board, 'at': time.time() if now is None else float(now)}
-    _write(_path(profile, provider, model), wall)
-    return wall
+    with _locked(profile, provider, model):
+        wall = read(profile, provider, model)
+        if wall is None:
+            return None
+        if _holds(wall, now):
+            return False
+        wall['probe'] = {'task_id': task_id, 'board': board, 'at': now}
+        _write(_path(profile, provider, model), wall)
+        return wall
 
 
 def release_probe(profile, provider, model, *, task_id):
     """The launch that took the probe did not happen: the turn of probing goes back at once."""
-    wall = read(profile, provider, model)
-    if wall is not None and (wall.get('probe') or {}).get('task_id') == task_id:
-        wall['probe'] = None
-        _write(_path(profile, provider, model), wall)
+    if read(profile, provider, model) is None:
+        return
+    with _locked(profile, provider, model):
+        wall = read(profile, provider, model)
+        if wall is not None and (wall.get('probe') or {}).get('task_id') == task_id:
+            wall['probe'] = None
+            _write(_path(profile, provider, model), wall)
 
 
 def label(wall):
@@ -423,7 +529,12 @@ def label(wall):
     return f"{wall.get('provider')}/{wall.get('model')}@{wall.get('profile')}"
 
 
-# ── The one notice of a wall ────────────────────────────────────────────
+# ── The notices of a wall ───────────────────────────────────────────────
+#
+# One when the route closes, and one a day while the wall stands with something waiting for its route
+# (WALL_DAILY_NOTICE_20261012: a notice on the first day and silence for a week is a board standing still in
+# silence). Both go to the management topic and to no other; neither names the account the provider refused, which
+# stays on the wall for whoever reads the file.
 
 def _span(seconds):
     minutes = max(1, round(float(seconds) / 60))
@@ -432,61 +543,172 @@ def _span(seconds):
     return ' '.join(f'{amount} {unit}' for amount, unit in ((days, 'd'), (hours, 'h'), (minutes, 'min')) if amount)
 
 
+def _reset_time(wall):
+    return time.strftime('%d/%m %H:%M UTC', time.gmtime(float(wall['reset_at'])))
+
+
+# What becomes of the inbox entries of a wall with a reset time still ahead (``entry_held``, ``session_answered``),
+# and which turn reopens the route before that time. Not a person's message in the topic of a delivery project: the
+# intake takes it as a request before any turn (``_nfos_receive``), so it tests nothing.
+ENTRIES_RESUMED = ('Os pedidos na caixa do Principal são retomados nessa hora, ou antes se o provedor responder a '
+                   'um turno de sessão desse perfil nessa rota que não seja o de um pedido: mensagem no tópico de '
+                   'gestão, despertar de decisão de card. Mensagem nova em tópico de projeto não testa a rota: '
+                   'entra como pedido.')
+
+
 def notice(wall):
-    """The one message of a wall, for the operations channel. It says whose route closed: another profile on the
-    same provider and model goes on with its own credential."""
+    """The message of a wall when its route closes, for the operations channel. It says whose route closed:
+    another profile on the same provider and model goes on with its own credential."""
     route = f"{wall['provider']}/{wall['model']}"
-    account = f" (conta {wall['account']})" if wall.get('account') else ''
+    ceiling = PROBE_CEILING_SECONDS // 60
+    # PRINCIPAL_WALL_20261012: the window was met by the coordinating session, on the turn of a request.
+    by_session = bool((wall.get('closed_by') or {}).get('request_id'))
     if wall.get('reset_at'):
-        when = time.strftime('%d/%m %H:%M UTC', time.gmtime(float(wall['reset_at'])))
         asked = _span(float(wall['reset_at']) - float(wall.get('walled_at') or wall.get('closed_at') or 0))
-        reopening = (f'com reinício informado para {when} (o provedor pediu {asked} de espera). '
-                     'A rota reabre nessa hora.')
+        # A request is not the probe of the hour (``entry_held``): the text promises no probe on its account.
+        reopening = (f'com reinício informado para {_reset_time(wall)} (o provedor pediu {asked} de espera). '
+                     + (ENTRIES_RESUMED if by_session else
+                        f'Um lançamento sonda a rota a cada {ceiling} min e nessa hora; ela reabre quando o provedor '
+                        'responder, mesmo antes da hora informada.'))
     else:
-        first, ceiling = _probe_spacing(0) // 60, PROBE_CEILING_SECONDS // 60
+        first = _probe_spacing(0) // 60
         reopening = (f'sem hora de reinício informada. Um lançamento sonda a rota em {first} min e depois a intervalos '
                      f'que dobram até {ceiling} min; ela reabre quando o provedor responder.')
-    # PRINCIPAL_WALL_20261012: the window was met by the coordinating session, on the turn of a request.
     intake = (' É a rota da sessão coordenadora (Principal): os pedidos que chegam pelo Telegram ficam gravados e a '
               'decisão de entrada de cada um é retomada, na ordem de chegada, quando a rota reabrir.'
-              if (wall.get('closed_by') or {}).get('request_id') else '')
-    return (f"Rota {route} fechada para o perfil {wall['profile']}: o provedor recusou pelo limite {wall['limit']}"
-            f'{account}, {reopening} Os cards desse perfil nessa rota esperam sem ocupar vaga e sem contar falha. '
-            f'Nenhuma outra rota é usada no lugar.{intake}')
+              if by_session else '')
+    return (f"Rota {route} fechada para o perfil {wall['profile']}: o provedor recusou pelo limite {wall['limit']}, "
+            f'{reopening} Os cards desse perfil nessa rota esperam sem ocupar vaga e sem contar falha. '
+            f'Nenhuma outra rota é usada no lugar. Enquanto ela seguir fechada com card ou pedido esperando por ela, '
+            f'sai aqui um aviso por dia.{intake}')
+
+
+def still_closed(wall, count, *, now=None):
+    """The day's message of a wall that still stands: for how long the route has been closed and what waits for
+    it (``count``, from ``waiting``). ``None`` when nothing waits for the route: the day's notice is of a wall
+    somebody waits behind. A wall whose cards went to another route, were cancelled or are held by something else
+    is probed by no launch and holds nobody, and a notice a day about it would never end; it has had its notice,
+    and gets the day's again from the day something waits for it.
+
+    The probe is the launch of what waits, so the text speaks of it only when the count shows a card or an entry
+    (a count that is only partial says neither). An entry that waits for the reset time is not a probe
+    (``entry_held``): of the entries the text then says when they are resumed, and the probe it speaks of is the
+    one of a card, when a card waits."""
+    now = time.time() if now is None else float(now)
+    waits = bool(count['cards'] or count['entries'])
+    if not waits and not count.get('unread'):
+        return None
+    route = f"{wall['provider']}/{wall['model']}"
+    reset = (f'O reinício informado pelo provedor é {_reset_time(wall)}.' if wall.get('reset_at')
+             else 'O provedor não informou hora de reinício.')
+    partial = (' A contagem é parcial: houve quadro que não pôde ser lido.' if count.get('unread') else '')
+    resumed = bool(count['entries']) and _awaits_reset(wall, now)
+    probes = 'O lançamento de um card' if resumed else 'Um lançamento'
+    probing = (f' {probes} sonda a rota a intervalos de até {PROBE_CEILING_SECONDS // 60} min e ela reabre '
+               'quando o provedor responder.' if count['cards'] or (waits and not resumed) else '')
+    since = _span(now - float(wall.get('closed_at') or now))
+    return (f"Rota {route} do perfil {wall['profile']} segue fechada há {since}, pelo limite {wall['limit']}. "
+            f"Cards esperando por ela: {count['cards']}. Pedidos na caixa do Principal, ainda sem card: "
+            f"{count['entries']}.{partial} {reset}{' ' + ENTRIES_RESUMED if resumed else ''}{probing} "
+            'Nenhuma outra rota é usada no lugar.')
+
+
+def waiting(wall, *, owner_of):
+    """What waits for this route on the boards of the host, for the day's notice: the cards held on it (their open
+    ``provider_quota`` rows of the wait registry, for a card that stands in a lane the dispatcher launches from or
+    is running as the probe: those are the cards whose launch probes the route; a blocked card is not one) and the
+    Principal's inbox entries kept with no card (still ``coordinating``, taken by no turn, on this route).
+    ``owner_of`` names the profile an entry's session runs as, as the intake does. Read-only; a board that cannot
+    be read is counted in ``unread`` and the text says so."""
+    from hermes_cli import kanban_db as kb
+    route = _key(*_route(wall))
+    found = {'cards': 0, 'entries': 0, 'unread': 0}
+    seen = set()
+    for meta in kb.list_boards(include_archived=False):
+        slug = meta.get('slug') or kb.DEFAULT_BOARD
+        path = Path(meta.get('db_path') or kb.kanban_db_path(board=slug)).resolve()
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        try:
+            with contextlib.closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2)) as conn:
+                conn.row_factory = sqlite3.Row
+                tables = {row['name'] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('nfos_waits','nfos_requests')")}
+                held = conn.execute("SELECT w.predicate FROM nfos_waits w JOIN tasks t ON t.id=w.task_id "
+                                    "WHERE w.reason='provider_quota' AND w.status='open' "
+                                    "AND t.status IN ('ready','review','running')"
+                                    ).fetchall() if 'nfos_waits' in tables else []
+                kept = conn.execute("SELECT payload FROM nfos_requests WHERE status='coordinating'"
+                                    ).fetchall() if 'nfos_requests' in tables else []
+            for row in held:
+                predicate = json.loads(row['predicate'] or '{}')
+                found['cards'] += _key(*(predicate.get(part) for part in ('profile', 'provider', 'model'))) == route
+            for row in kept:
+                payload = json.loads(row['payload'])
+                if not (payload.get('coordination') or {}).get('wake_accepted'):
+                    found['entries'] += entry_route(payload, owner_of(payload)) == route
+        except (sqlite3.Error, OSError, ValueError, TypeError):
+            found['unread'] += 1
+            logger.warning('WALL_DAILY_NOTICE_20261012 board %s could not be read for the count', slug, exc_info=True)
+    return found
 
 
 def _noticed(wall, sent, now):
-    """This wall's notice went out, or a notifier holds it right now."""
+    """Nothing is to be said of this wall now: its notice went out less than a day ago, or a notifier holds it."""
     if not sent or sent.get('closed_at') != wall.get('closed_at'):
         return False
-    return bool(sent.get('sent_at')) or now - float(sent.get('claimed_at') or 0) < PROBE_LEASE_SECONDS
+    if now - float(sent.get('claimed_at') or 0) < PROBE_LEASE_SECONDS:
+        return True
+    return bool(sent.get('sent_at')) and now - float(sent['sent_at']) < NOTICE_REPEAT_SECONDS
+
+
+def _notices(sent):
+    """How many notices this receipt counts (one, for a receipt written before they were counted)."""
+    return int(sent.get('notices') or bool(sent.get('sent_at')))
 
 
 def unannounced(*, now=None):
-    """The closed routes whose notice has not gone out. The gateway's notifier sends it."""
+    """The closed routes with a notice due: the one of the wall, or the day's while the wall stands. The gateway's
+    notifier sends it."""
     now = time.time() if now is None else float(now)
     return [wall for wall in walls() if not _noticed(wall, _load(_path(*_route(wall), NOTICE)), now)]
 
 
 def claim_notice(wall, *, now=None):
-    """Take this wall's notice for the caller. False when another notifier holds it or has sent it."""
+    """Take the notice this wall is due for the caller. False when another notifier holds it or has sent it, and
+    when the wall the notifier listed is no longer the one standing (the route reopened, or closed anew, in the
+    meantime: a notice of a closed route must not go out for a route the provider has just answered); else the
+    claim, whose ``notices`` counts the ones this wall has had (none yet: the wall's own notice is due)."""
     now = time.time() if now is None else float(now)
-    path = _path(*_route(wall), NOTICE)
-    claim = {'closed_at': wall.get('closed_at'), 'claimed_at': now, 'sent_at': None, 'deliveries': []}
-    sent = _load(path)
-    if _noticed(wall, sent, now):
-        return False
-    if sent is None and not path.exists():
-        return _create(path, claim)
-    _write(path, claim)  # what is there is of an earlier wall of this route, or a claim nobody finished
-    return True
+    route = _route(wall)
+    path = _path(*route, NOTICE)
+    with _locked(*route):  # two gateways of the host at the same due time: one takes it
+        standing = read(*route)
+        if standing is None or standing.get('closed_at') != wall.get('closed_at'):
+            return False
+        sent = _load(path)
+        if _noticed(wall, sent, now):
+            return False
+        same = bool(sent) and sent.get('closed_at') == wall.get('closed_at')
+        # What is there of another wall of this route is replaced; a claim nobody finished is taken over.
+        claim = {'closed_at': wall.get('closed_at'), 'claimed_at': now,
+                 'sent_at': sent.get('sent_at') if same else None, 'notices': _notices(sent) if same else 0,
+                 'deliveries': list(sent.get('deliveries') or []) if same else []}
+        _write(path, claim)
+        return claim
 
 
 def notice_sent(wall, deliveries, *, now=None):
-    """The receipt of the notice: a restart or a second gateway does not send it again."""
-    _write(_path(*_route(wall), NOTICE),
-           {'closed_at': wall.get('closed_at'), 'claimed_at': None, 'deliveries': list(deliveries),
-            'sent_at': time.time() if now is None else float(now)})
+    """The receipt of the notice: a restart or a second gateway does not send it again before the next one is due.
+    ``deliveries`` are the ones of the latest notice."""
+    route = _route(wall)
+    path = _path(*route, NOTICE)
+    with _locked(*route):
+        sent = _load(path) or {}
+        notices = _notices(sent) if sent.get('closed_at') == wall.get('closed_at') else 0
+        _write(path, {'closed_at': wall.get('closed_at'), 'claimed_at': None, 'deliveries': list(deliveries),
+                      'sent_at': time.time() if now is None else float(now), 'notices': notices + 1})
 
 
 # ── The worker's side ───────────────────────────────────────────────────
@@ -740,10 +962,19 @@ def hold(conn, task, *, dry_run=False):
 
 
 def probe_launched(conn, task, *, board=None):
-    """The dispatcher claimed this card. On a route still closed that launch is the probe."""
+    """The dispatcher is about to claim this card. On a route still closed that launch is the probe, and one
+    launch is: the wall that holds the card when another launch took the probe first, else ``None``."""
     route = card_route(conn, task)
-    if route and read(*route) is not None:
-        take_probe(*route, task_id=task.id, board=board)
+    if route and take_probe(*route, task_id=task.id, board=board) is False:
+        return read(*route)  # ``None`` if the route reopened this instant: the card goes
+    return None
+
+
+def probe_not_launched(conn, task):
+    """The claim of the card that took the probe was refused: the turn of probing goes back at once."""
+    route = card_route(conn, task)
+    if route:
+        release_probe(*route, task_id=task.id)
 
 
 def spawn_route(conn, task):
@@ -763,7 +994,7 @@ def spawn_route(conn, task):
 # Not in the wait registry: a held entry has no card yet and ``nfos_waits`` is keyed by card (``task_id NOT NULL``),
 # so it is not a row there and has none of a row's deadline, attempt cap or expiry outcome. It keeps no clock of its
 # own either: the wall of its route, the same file the ``provider_quota`` rows of held cards check, is what says
-# when it is offered again, and the wall's notice is the only word about it. A request-keyed row is a change of the
+# when it is offered again, and the wall's notices are the only word about it. A request-keyed row is a change of the
 # registry's schema, which this module does not make.
 
 QUOTA_REASONS = ('rate_limit', 'billing')
@@ -797,20 +1028,46 @@ def entry_route(payload, profile):
     return session_route(profile)
 
 
+def entry_held(profile, provider, model, *, now=None):
+    """The wall that keeps the inbox entries of this route from being offered now, or ``None``.
+
+    It holds an entry as it holds a card (``closed``), and for longer when the provider gave a reset time: until
+    that time the entry waits and is not the probe of the hour. The probe of an entry is the whole turn of its
+    request, and every one the provider refuses leaves the wake of the request once more in the session of the
+    topic (measured on a wall of 150 h with a reset time: 151 refused turns and 151 copies, about 135 thousand
+    tokens, against 1 and 1 when the entry waits). The probe of the hour is left to the cards of the route. With
+    no reset time the wall is the only clock the entry has, and it probes at the route's spacing.
+
+    What reopens the route before the reset time when no card waits for it: a turn of a session of that profile
+    on that model the provider answers (``session_answered``), which is never the turn of a held entry. The wake
+    of a card's decision is one, and a person's message in a topic the intake takes no request from (the
+    management topic). A person's message in the topic of a delivery project is not: the intake takes it as a
+    request before any turn (``_nfos_receive``), and as an inbox entry it is held with the others. With none of
+    those turns the entries wait for the reset time, as they did before the hourly probe."""
+    wall = read(profile, provider, model)
+    if wall is None:
+        return None
+    now = time.time() if now is None else float(now)
+    return wall if _holds(wall, now) or _awaits_reset(wall, now) else None
+
+
 def entry_turn(payload, profile, request_id):
-    """May this inbox entry be offered to the Principal now? ``False`` while a wall holds its route. On a route
-    whose reopening is due the offer is the probe, and is taken here, so one entry probes at a time. Returns the
-    route when the offer is that probe, else ``True``."""
+    """May this inbox entry be offered to the Principal now? ``False`` while a wall holds it (``entry_held``). On
+    a route whose reopening is due, at the reset time the provider gave or at the route's spacing when it gave
+    none, the offer is the probe, and is taken here, so one entry probes at a time. Returns the route when the
+    offer is that probe, else ``True``."""
     try:
         if not any_closed():
             return True
         route = entry_route(payload, profile)
         if not route or read(*route) is None:
             return True
-        if closed(*route) is not None:
+        if entry_held(*route) is not None:
             return False
-        take_probe(*route, task_id=request_id)
-        return route
+        taken = take_probe(*route, task_id=request_id)
+        if taken is False:  # a card's launch took the probe between the two readings
+            return False
+        return route if taken else True
     except Exception:  # noqa: BLE001 - a wall that cannot be read holds nothing: offered as before this rule
         logger.warning('PRINCIPAL_WALL_20261012 could not read the route of request %s', request_id, exc_info=True)
         return True
@@ -823,7 +1080,7 @@ def entry_refused(conn, receipt, *, reason, profile, answered_calls=0):
     said of a window. When the provider named one, the route was closed during the turn (``on_quota_error``) and
     nothing changes here. When it named none (a throttle that outlasted the client's retries, credit that ran out,
     a usage limit with no reset time in the answer), the route is closed here with no reset time: one probe at the
-    route's spacing, the oldest entry first, and the one notice of a wall, so that an entry never waits on a clock
+    route's spacing, the oldest entry first, and the notices of a wall, so that an entry never waits on a clock
     of its own with nobody told. On a route already closed whose probe this turn was, this is the probe's verdict.
 
     The wall is then what says when the entry is offered again. Only an entry whose route cannot be told (no

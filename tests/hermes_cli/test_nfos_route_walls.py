@@ -13,16 +13,23 @@ single-query path of the worker (only the provider call, the goal judge and the 
 * the route (the profile the card is launched as, the provider and the model) is closed on every board of the
   host, with the name of the limit, the reset time when the provider gives one and the account it named, and one
   notice goes out for it, from the gateway's notifier to the management topic, whatever chat the card that met
-  the wall was born in;
+  the wall was born in; the account stays on the wall and out of the notice; while the wall stands and something
+  waits for its route the notice is repeated once a day, with how long the route has been closed and how many
+  cards and inbox entries wait for it, and a wall nothing waits for any more is not announced again;
 * the wall is of that profile's credential: another profile of the host on the same provider and model, with an
   account of its own, goes on being launched and delivers, and gets a wall and a notice of its own when its own
   window ends; the dispatcher and the worker name the same route when the card's profile is not the dispatcher's;
 * while it is closed no card of that route is launched: the cards hold no slot, count no failure and stand in the
   wait registry; a card of another route is launched as always, and a card that leaves the route, or that another
   hold takes, stops being said to wait for it;
-* the route reopens at the reset time the provider gave, or by one probe at spaced intervals when it gave none,
-  and a probe the provider refuses does not send a second notice; a route that closes again at once is the same
-  wall going on;
+* a closed route is always probed, one launch at a time, and reopens when the provider answers one: every hour
+  and at the reset time when the provider gave one (the reset time only brings the launch forward), at spaced
+  intervals when it gave none; a probe the provider refuses does not send a second notice; of the launchers that
+  see a route due at the same moment one takes the probe, two launchers of the same card or inbox entry included;
+  a route that closes again at once is the same wall going on; the probe of the hour is a card's: an inbox entry
+  waits for the reset time the provider gave, and the notices promise no probe on its account;
+* a probe the provider refuses spends nothing of the balance of the escalated card that probes: not a goal turn,
+  not an iteration, not a second of its runtime;
 * a throttle that resets inside the client's own wait is retried as before;
 * no other provider or model is used in place of a closed route.
 """
@@ -30,7 +37,9 @@ import asyncio
 import copy
 import json
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from email.utils import formatdate
 from types import SimpleNamespace
 
@@ -191,9 +200,10 @@ def test_worker_on_a_weekly_window_leaves_on_the_first_refusal_and_the_route_clo
         assert tuple(topic) == MANAGEMENT_TOPIC
         when = time.strftime('%d/%m %H:%M UTC', time.gmtime(clock.now + DAY))
         assert f'Rota {EXECUTOR_PROVIDER}/{EXECUTOR_MODEL} fechada para o perfil {PROFILE}' in message
-        assert 'limite weekly (conta wrk_quota_wall_suite)' in message
+        assert 'pelo limite weekly, com reinício informado' in message
+        assert 'wrk_quota_wall_suite' not in message and 'conta ' not in message, 'the account stays on the wall'
         assert when in message and 'o provedor pediu 1 d de espera' in message
-        assert 'esperam sem ocupar vaga' in message
+        assert 'a cada 60 min' in message and 'esperam sem ocupar vaga' in message
 
         # (3) the dispatcher reaps both exits and launches neither card again
         tick = kb.dispatch_once(conn)
@@ -204,10 +214,11 @@ def test_worker_on_a_weekly_window_leaves_on_the_first_refusal_and_the_route_clo
         clock.advance(60)
         assert_waiting(conn, kb.dispatch_once(conn), [first, second])  # the runtime also closes the two ended runs
         launches, events = len(launcher.launches), event_kinds(conn)
-        for _ in range(6):
-            clock.advance(3600)
+        for _ in range(58):
+            clock.advance(60)
             assert_waiting(conn, kb.dispatch_once(conn), [first, second])
-        assert len(launcher.launches) == launches == 2, 'six hours of ticks launched nothing on the closed route'
+        assert clock.now == wall['next_probe_at'] - 60 == wall['closed_at'] + 3540
+        assert len(launcher.launches) == launches == 2, 'an hour of ticks launched nothing: the probe is hourly'
         assert event_kinds(conn) == events, 'and wrote no event: the cards wait, they are not re-examined aloud'
         assert len(ops.notices()) == 1 and 'model_fallback' not in events
 
@@ -288,27 +299,64 @@ def test_a_card_with_an_open_decision_stays_with_that_hold(quota_board, launcher
         assert [w['status'] for w in quota_waits(conn, first)] == ['open'] and quota_waits(conn, second) == []
 
 
-def test_route_reopens_at_the_reset_time_the_provider_gave(quota_board, launcher, monkeypatch, ops):
+def go_window(seconds):
+    """The opencode-go weekly refusal with the reset this many seconds away."""
+    return type('GoUsageLimitIn', (GoUsageLimit,), {
+        'response': SimpleNamespace(status_code=429, headers={'retry-after': str(seconds)})})
+
+
+def probe_of(launcher, tick, cards):
+    """The one card this tick launched on the closed route, with the other cards of the route still held."""
+    (probe,) = spawned(tick)
+    assert sorted(tick.claim_held) == sorted((task_id, HELD) for task_id in cards if task_id != probe), tick
+    assert walls.read(*ROUTE)['probe']['task_id'] == probe
+    assert_executor_route(launch_of(launcher, probe)[0])
+    return probe
+
+
+def test_a_route_with_a_distant_reset_time_is_probed_every_hour_and_reopens_at_the_first_probe_answered(
+        quota_board, launcher, monkeypatch, ops):
+    """The provider says the window ends in seven days. Obeyed as a time before which nothing is tried, that kept
+    the route shut for the week even when the limit was lifted on the first day (quota bought, plan changed):
+    someone had to erase the wall's file. The time the provider gave only brings the next launch forward; the
+    route is tried every hour, one launch that leaves on its first refused call."""
+    week = go_window(7 * DAY)
     with kb.connect_closing() as conn:
         clock = Clock(monkeypatch)
-        first, second, _, _ = close_route_with_two_cards(conn, launcher, monkeypatch, GoUsageLimit)
+        start = clock.now
+        first, second, _, _ = close_route_with_two_cards(conn, launcher, monkeypatch, week)
+        wall = walls.read(*ROUTE)
+        assert (wall['reset_at'], wall['next_probe_at']) == (start + 7 * DAY, start + 3600)
+        assert walls.open_at(wall) == start + 3600, 'the next launch is the probe of the hour, not the reset time'
         assert_waiting(conn, kb.dispatch_once(conn), [first, second])
         assert len(ops.notices()) == 1
-        clock.advance(DAY - 1)
-        assert_waiting(conn, kb.dispatch_once(conn), [first, second])
 
-        clock.advance(1)
-        tick = kb.dispatch_once(conn)
-        (probe,) = spawned(tick)
-        (waiting,) = {first, second} - {probe}
-        assert tick.claim_held == [(waiting, HELD)], 'one launch tries the route; the other card keeps waiting'
-        assert walls.read(*ROUTE)['probe']['task_id'] == probe
-        assert_executor_route(launcher.launches[-1][0])
+        launches = len(launcher.launches)
+        for hour in (1, 2):
+            clock.advance(3599)
+            assert_waiting(conn, kb.dispatch_once(conn), [first, second])
+            clock.advance(1)
+            probe = probe_of(launcher, kb.dispatch_once(conn), [first, second])
+            refused = run_card(conn, launcher, monkeypatch, probe, refusing(week))
+            assert (refused.provider_calls, refused.waits.waited, refused.exit_code) == (1, 0, 75), hour
+            wall = walls.read(*ROUTE)
+            assert (wall['probes'], wall['probe'], wall['closed_at']) == (hour, None, start), 'the same wall'
+            assert (wall['reset_at'], wall['next_probe_at']) == (clock.now + 7 * DAY, clock.now + 3600)
+            tick = kb.dispatch_once(conn)
+            assert tick.rate_limited == [probe]
+            assert_waiting(conn, tick, [first, second])
+        assert len(launcher.launches) == launches + 2, 'one launch an hour on the closed route'
+        assert len(ops.notices()) == 1, 'a refused probe is not a new wall'
 
+        # The limit is lifted on the first day. The probe of the next hour is answered and the route reopens.
+        clock.advance(3600)
+        probe = probe_of(launcher, kb.dispatch_once(conn), [first, second])
         run = run_card(conn, launcher, monkeypatch, probe, answered_once, judge_reply=CONTINUE)
         assert not run.results[0].get('failed') and run.turns == 2
         assert walls.read(*ROUTE) is None and not walls.any_closed(), 'the provider answered: the route is open'
+        assert clock.now == start + 3 * 3600 < wall['reset_at'] - 6 * DAY, 'six days before the time it gave'
 
+        (waiting,) = {first, second} - {probe}
         tick = kb.dispatch_once(conn)
         assert spawned(tick) == [waiting] and not [held for held in tick.claim_held if held[1] == HELD], tick
         # The registry closes each card's wait at its next recheck; the launch above did not wait for that.
@@ -320,6 +368,48 @@ def test_route_reopens_at_the_reset_time_the_provider_gave(quota_board, launcher
         assert len(ops.notices()) == 1
         for launch_argv, _ in launcher.launches:
             assert_executor_route(launch_argv)
+
+
+def test_a_reset_time_sooner_than_the_probe_of_the_hour_brings_the_launch_forward(
+        quota_board, launcher, monkeypatch, ops):
+    """Twenty minutes is past what the client waits inside a turn, so it is a window; and it is sooner than the
+    probe of the hour, so the launch goes at the time the provider gave."""
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        start = clock.now
+        first, second, run, _ = close_route_with_two_cards(conn, launcher, monkeypatch, go_window(1200))
+        assert (run.provider_calls, run.waits.waited, run.exit_code) == (1, 0, 75)
+        wall = walls.read(*ROUTE)
+        assert (wall['reset_at'], wall['next_probe_at'], walls.open_at(wall)) == (start + 1200, start + 3600,
+                                                                                  start + 1200)
+        (*_, message), = ops.notices()
+        assert 'o provedor pediu 20 min de espera' in message
+        assert_waiting(conn, kb.dispatch_once(conn), [first, second])
+        clock.advance(1199)
+        assert_waiting(conn, kb.dispatch_once(conn), [first, second])
+
+        # At that time one launch tries the route. The window had not ended: the provider gives a new time, which
+        # is again sooner than an hour.
+        clock.advance(1)
+        probe = probe_of(launcher, kb.dispatch_once(conn), [first, second])
+        refused = run_card(conn, launcher, monkeypatch, probe, refusing(go_window(900)))
+        assert (refused.provider_calls, refused.waits.waited, refused.exit_code) == (1, 0, 75)
+        wall = walls.read(*ROUTE)
+        assert (wall['probes'], wall['reset_at'], wall['next_probe_at']) == (1, clock.now + 900, clock.now + 3600)
+        assert walls.open_at(wall) == clock.now + 900
+        tick = kb.dispatch_once(conn)
+        assert tick.rate_limited == [probe]
+        assert_waiting(conn, tick, [first, second])
+        clock.advance(899)
+        assert_waiting(conn, kb.dispatch_once(conn), [first, second])
+
+        clock.advance(1)
+        probe = probe_of(launcher, kb.dispatch_once(conn), [first, second])
+        run_card(conn, launcher, monkeypatch, probe, answered_once, judge_reply=CONTINUE)
+        assert walls.read(*ROUTE) is None and clock.now == start + 2100
+        (waiting,) = {first, second} - {probe}
+        assert spawned(kb.dispatch_once(conn)) == [waiting]
+        assert len(ops.notices()) == 1
 
 
 def test_route_with_no_reset_time_is_probed_at_spaced_intervals_until_the_provider_answers(
@@ -393,6 +483,9 @@ def test_a_wait_that_outlives_its_deadline_is_closed_as_still_closed_and_the_car
             conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (card,))
         assert kb.dispatch_once(conn).claim_held == [(card, HELD)]
         clock.advance(walls.WAIT_DEADLINE_SECONDS + 1)
+        # The wall as its latest hourly probe left it: refused this instant, the window still five days long.
+        assert walls.take_probe(*ROUTE, task_id='t_probe')
+        walls.close(*ROUTE, limit='monthly', reset_at=clock.now + 5 * DAY, task_id='t_probe')
         tick = kb.dispatch_once(conn)
         assert tick.claim_held == [(card, HELD)] and not tick.spawned
         (wait,) = quota_waits(conn, card)
@@ -635,7 +728,8 @@ def test_a_wall_holds_the_cards_of_its_profile_and_no_other_profile_of_the_host(
         (*topic, message), = ops.notices()
         assert tuple(topic) == MANAGEMENT_TOPIC
         assert f'Rota {EXECUTOR_PROVIDER}/{EXECUTOR_MODEL} fechada para o perfil {PROFILE}' in message
-        assert 'limite weekly (conta wrk_factory)' in message and OTHER not in message
+        assert 'limite weekly,' in message and OTHER not in message
+        assert 'wrk_factory' not in message, 'whose account it is stays on the wall'
 
         # Later the other account's own window ends: its own wall, its own notice, its own cards held.
         provider.walled.add(ACCOUNTS[OTHER])
@@ -652,7 +746,7 @@ def test_a_wall_holds_the_cards_of_its_profile_and_no_other_profile_of_the_host(
         assert [name.split('--')[0] for name in names] == [PROFILE, OTHER]
         first_notice, second_notice = (sent[2] for sent in ops.notices())
         assert first_notice == message and f'fechada para o perfil {OTHER}' in second_notice
-        assert 'conta wrk_personal' in second_notice and 'wrk_factory' not in second_notice
+        assert 'wrk_personal' not in second_notice and 'wrk_factory' not in second_notice
         tick = kb.dispatch_once(conn)
         assert tick.rate_limited == [third] and not tick.spawned
         assert sorted(tick.claim_held) == sorted([(first, HELD), (second, HELD), (third, HELD_OTHER)])
@@ -660,9 +754,10 @@ def test_a_wall_holds_the_cards_of_its_profile_and_no_other_profile_of_the_host(
         assert wait['predicate'] == {'kind': 'route_open', 'profile': OTHER, 'provider': EXECUTOR_PROVIDER,
                                      'model': EXECUTOR_MODEL}
 
-        # Each route reopens on its own: the first profile's reset time comes while the other's is still ahead.
+        # Each route reopens on its own: the first profile's hourly probe comes while the other's is still ahead.
         provider.walled.discard(ACCOUNTS[PROFILE])
-        clock.advance(wall['reset_at'] - clock.now)
+        clock.advance(wall['next_probe_at'] - clock.now)
+        assert clock.now < other_wall['next_probe_at'] < wall['reset_at']
         tick = kb.dispatch_once(conn)
         (probe,) = spawned(tick)
         assert probe in (first, second) and (third, HELD_OTHER) in tick.claim_held
@@ -672,10 +767,10 @@ def test_a_wall_holds_the_cards_of_its_profile_and_no_other_profile_of_the_host(
         assert spawned(tick) == [({first, second} - {probe}).pop()]
         assert [held for held in tick.claim_held if held[1].startswith('route_closed')] == [(third, HELD_OTHER)]
 
-        # The other profile's reset time comes: this dispatcher launches its card as that route's probe, and the
+        # The other profile's probe comes due: this dispatcher launches its card as that route's probe, and the
         # answer its own account gives reopens its route.
         provider.walled.discard(ACCOUNTS[OTHER])
-        clock.advance(other_wall['reset_at'] - clock.now)
+        clock.advance(other_wall['next_probe_at'] - clock.now)
         assert third in spawned(kb.dispatch_once(conn))
         assert walls.read(*OTHER_ROUTE)['probe']['task_id'] == third
         run = run_card(conn, launcher, monkeypatch, third, provider)
@@ -702,8 +797,8 @@ def test_two_boards_of_one_profile_share_the_wall_of_their_route(quota_board, la
         assert_waiting(conn, kb.dispatch_once(conn), [task.id])
         assert walls.walls() == [wall] and len(ops.notices()) == 1
 
-        # At the reset time the first board to tick launches the route's one probe; the other board waits for it.
-        clock.advance(DAY)
+        # At the hour the first board to tick launches the route's one probe; the other board waits for it.
+        clock.advance(3600)
         assert spawned(kb.dispatch_once(other, board='second')) == [card]
         assert walls.read(*ROUTE)['probe'] == {'task_id': card, 'board': 'second', 'at': clock.now}
         tick = kb.dispatch_once(conn)
@@ -751,7 +846,9 @@ def test_dispatcher_and_worker_name_the_same_route_when_the_card_is_of_another_p
             assert walls.read(PROFILE, *route[1:]) is None, "not a wall of the dispatcher's own profile"
             assert kb._route_wall_hold(conn, task_id, dry_run=True) == HELD_OTHER
             assert kb._route_wall_hold(conn, own, dry_run=True) is None
-            kb._route_wall_probe(conn, kb.get_task(conn, task_id))
+            clock.advance(3600)  # the hour of the route's probe
+            assert kb._route_wall_hold(conn, task_id, dry_run=True) is None
+            assert kb._route_wall_probe(conn, kb.get_task(conn, task_id)) is None, 'this launch is the probe'
             assert walls.read(*route)['probe']['task_id'] == task_id, 'the probe is marked on the wall the worker wrote'
             assert walls.reopen(*route)
             clock.advance(DAY)  # long open: the next card's refusal is a new wall, closed by that card
@@ -898,3 +995,579 @@ def test_probe_slot_is_single_and_a_silent_probe_gives_it_back(quota_board, monk
     refused, opened = walls.close(*ROUTE, limit='weekly', task_id='t_b')
     assert not opened and (refused['probes'], refused['probe']) == (1, None)
     assert refused['next_probe_at'] == clock.now + 600
+
+
+# ── One launch probes a route ───────────────────────────────────────────
+#
+# The probe used to be marked with an unconditional rewrite of the wall, after the card was claimed: two launchers
+# that both read the route as due both launched, and the last one to write was the probe. On the production host
+# two things launch a card: the gateway's dispatcher (one tick per board, each under its board's own lock) and the
+# support desk's start of an approved ticket (`start_approved` of deploy/nfos-reviewer-control.py in the NFOS
+# repository, read at 08ece04), which runs in a process of its own.
+
+def start_approved(conn, task_id, board=None):
+    """The support desk starting an approved ticket: the runtime calls `start_approved` makes, in its order, under
+    the board's dispatch lock as it takes it. It asks nothing of the route: it claims the card and launches it."""
+    with kb._dispatch_tick_lock(kb.kanban_db_path(board=board)) as held:
+        assert held
+        task = kb.get_task(conn, task_id)
+        assert task.status == 'ready' and not kb._nfos_decision_open(conn, task_id)
+        assert not kb.check_respawn_guard(conn, task_id)
+        workspace = kb.resolve_workspace(task, board=board)
+        lease, _ = kb._try_acquire_workspace_lease(workspace, task_id=task_id)
+        claimed = kb.claim_task(conn, task_id)
+        assert lease is not None and claimed is not None
+        kb.set_workspace_path(conn, task_id, str(workspace))
+        pid = kb._default_spawn(claimed, str(workspace), board=board)
+        kb._set_worker_pid(conn, task_id, int(pid))
+        kb._promote_workspace_lease(lease, int(pid))
+        return pid
+
+
+def test_the_probe_of_a_due_route_is_taken_by_one_of_the_launchers_that_ask_at_once(quota_board, monkeypatch):
+    clock = Clock(monkeypatch)
+    walls.close(*ROUTE, limit='weekly', task_id='t_a')
+    clock.advance(300)
+    assert walls.closed(*ROUTE) is None, 'due: every launcher that looks now sees a route to probe'
+    together = threading.Barrier(8)
+
+    def ask(number):
+        together.wait(timeout=30)
+        return walls.take_probe(*ROUTE, task_id=f't_{number}', board=f'board-{number}')
+
+    with ThreadPoolExecutor(max_workers=8) as launchers:
+        answers = list(launchers.map(ask, range(8)))
+    (taken,) = [answer for answer in answers if answer]
+    assert answers.count(False) == 7, 'the others are held by the wall after all'
+    assert walls.read(*ROUTE)['probe'] == taken['probe'] and walls.closed(*ROUTE) is not None
+    winner = taken['probe']['task_id']
+    # The probe is of the launch that took it, not of its id: a second launcher of the same card is held as well.
+    assert walls.take_probe(*ROUTE, task_id=winner, board=taken['probe']['board']) is False
+    assert walls.read(*ROUTE)['probe'] == taken['probe']
+    # The intake asks for the same route a moment later: its entry is not offered.
+    entry = {'coordination': {'quota': {'route': list(ROUTE)}}}
+    assert walls.entry_turn(entry, PROFILE, 'req_1') is False and walls.read(*ROUTE)['probe'] == taken['probe']
+
+    # A launch that did not take the probe changes nothing when it meets the wall; the probe's refusal is the verdict.
+    loser = next(f't_{number}' for number in range(8) if f't_{number}' != winner)
+    before = walls.read(*ROUTE)
+    assert walls.close(*ROUTE, limit='weekly', task_id=loser) == (before, False)
+    refused, opened = walls.close(*ROUTE, limit='weekly', task_id=winner)
+    assert not opened and (refused['probes'], refused['probe'], refused['next_probe_at']) == (1, None, clock.now + 600)
+    # That verdict moved the schedule: a launcher that had read the route as due before it is held too.
+    assert walls.take_probe(*ROUTE, task_id=loser) is False and walls.read(*ROUTE) == refused
+    clock.advance(600)
+    assert walls.entry_turn(entry, PROFILE, 'req_1') == ROUTE, 'due again: the intake takes this one'
+    assert walls.take_probe(*ROUTE, task_id=loser) is False
+    # A route with no wall holds nobody, and asking for its probe does not close it.
+    assert walls.reopen(*ROUTE) and walls.take_probe(*ROUTE, task_id=loser) is None and not walls.any_closed()
+
+
+def test_of_two_gateways_offering_the_same_inbox_entry_one_is_the_probe_and_keeps_it(quota_board, monkeypatch):
+    """Two gateways serving one profile both read the route as due for the same entry. A probe known by the id
+    of what it launches made both of them its owner: the one that then lost the claim of the entry gave the probe
+    back, and it was the other's, with its turn running."""
+    clock = Clock(monkeypatch)
+    walls.close(*ROUTE, limit='usage_limit_reached', request_id='req_1')
+    entry = {'coordination': {'quota': {'route': list(ROUTE)}}}
+    clock.advance(300)
+    read_the_wall, theirs = walls.entry_held, []
+
+    def read_then_the_other_gateway_offers(*route, **kwargs):
+        held = read_the_wall(*route, **kwargs)
+        if not theirs:
+            assert held is None, 'this gateway saw the route due'
+            theirs.append(None)
+            theirs[0] = walls.entry_turn(entry, PROFILE, 'req_1')
+        return held
+
+    monkeypatch.setattr(walls, 'entry_held', read_then_the_other_gateway_offers)
+    ours = walls.entry_turn(entry, PROFILE, 'req_1')
+    monkeypatch.setattr(walls, 'entry_held', read_the_wall)
+    assert theirs == [ROUTE], 'the gateway that asked first offers the entry: its turn is the probe'
+    assert ours is False, 'the other is held by the wall: it offers nothing, so it has no claim to lose'
+    probe = walls.read(*ROUTE)['probe']
+    assert probe == {'task_id': 'req_1', 'board': None, 'at': clock.now}
+    # A card of the route is held beside that probe, and the probe's refusal is the one verdict.
+    assert walls.take_probe(*ROUTE, task_id='t_card') is False and walls.read(*ROUTE)['probe'] == probe
+    refused, opened = walls.close(*ROUTE, limit='usage_limit_reached', request_id='req_1')
+    assert not opened and (refused['probes'], refused['probe'], refused['next_probe_at']) == (1, None, clock.now + 600)
+
+
+def test_an_inbox_entry_waits_for_the_reset_time_and_the_probe_of_the_hour_is_left_to_the_cards(
+        quota_board, monkeypatch):
+    """The probe of an inbox entry is the whole turn of its request, and each refused one leaves the wake of the
+    request once more in the session of the topic. With a reset time ahead the entry waits for it; a card of the
+    same route is still launched every hour, and the notices say of each what happens to it."""
+    clock = Clock(monkeypatch)
+    start, reset = clock.now, clock.now + 6 * DAY
+    entry = {'coordination': {'quota': {'route': list(ROUTE)}}}
+    wall, _ = walls.close(*ROUTE, limit='usage_limit_reached', reset_at=reset, request_id='req_1')
+    assert walls.open_at(wall) == start + 3600 and walls.entry_held(*ROUTE) == wall
+
+    for hour in (1, 2, 3):
+        clock.advance(3600)
+        assert walls.closed(*ROUTE) is None, 'due: the launch of a card of this route is its probe'
+        assert walls.entry_turn(entry, PROFILE, 'req_1') is False, 'the entry is held all the same'
+        assert walls.read(*ROUTE)['probe'] is None, 'and took no probe'
+        assert walls.take_probe(*ROUTE, task_id='t_card')['probe']['task_id'] == 't_card'
+        refused, opened = walls.close(*ROUTE, limit='usage_limit_reached', reset_at=reset, task_id='t_card')
+        assert (refused['probes'], refused['probe'], refused['next_probe_at']) == (hour, None, clock.now + 3600)
+
+    # The first notice of this wall promises no probe: no entry is one, and it cannot tell whether a card waits.
+    opening = walls.notice(wall)
+    assert walls.ENTRIES_RESUMED in opening and 'sonda' not in opening and 'a cada 60 min' not in opening
+    of_a_card = walls.notice(dict(wall, closed_by={'task_id': 't_a', 'board': None}))
+    assert 'Um lançamento sonda a rota a cada 60 min e nessa hora' in of_a_card
+    assert walls.ENTRIES_RESUMED not in of_a_card
+
+    def daily(cards, entries, standing=wall):
+        return walls.still_closed(standing, {'cards': cards, 'entries': entries, 'unread': 0})
+
+    # The day's notice knows what waits: of the entries it says when they are resumed, and a probe is a card's.
+    assert walls.ENTRIES_RESUMED in daily(0, 2) and 'sonda' not in daily(0, 2)
+    both = daily(1, 2)
+    assert walls.ENTRIES_RESUMED in both and 'O lançamento de um card sonda a rota a intervalos de até 60 min' in both
+    assert 'Um lançamento sonda a rota a intervalos de até 60 min' in daily(1, 0)
+    assert walls.ENTRIES_RESUMED not in daily(1, 0)
+    no_reset = dict(wall, reset_at=None)
+    assert 'Um lançamento sonda a rota a intervalos de até 60 min' in daily(0, 2, no_reset)
+    assert walls.ENTRIES_RESUMED not in daily(0, 2, no_reset)
+
+    # One second before the reset time the entry is still held. At that time its offer is the probe of the route.
+    clock.advance(reset - 1 - clock.now)
+    assert walls.closed(*ROUTE) is None and walls.entry_turn(entry, PROFILE, 'req_1') is False
+    clock.advance(1)
+    assert walls.entry_turn(entry, PROFILE, 'req_1') == ROUTE and walls.read(*ROUTE)['probe']['task_id'] == 'req_1'
+    assert 'Um lançamento sonda a rota a intervalos de até 60 min' in daily(0, 2)
+    assert walls.ENTRIES_RESUMED not in daily(0, 2)
+    # Refused there with no reset time: the wall is now the only clock the entry has, and it probes at its spacing.
+    refused, _ = walls.close(*ROUTE, limit='usage_limit_reached', request_id='req_1')
+    assert (refused['reset_at'], refused['probe'], refused['next_probe_at']) == (None, None, clock.now + 3600)
+    clock.advance(3600)
+    assert walls.entry_turn(entry, PROFILE, 'req_1') == ROUTE
+
+
+def test_a_writer_of_a_wall_does_not_wait_for_ever_for_its_lock(quota_board, monkeypatch, caplog):
+    """The intake asks for the lock on the gateway's event loop. A holder that stopped with the lock in hand (a
+    frozen process) is waited for a bounded time, and the writer then goes on without it and says so."""
+    import fcntl
+    clock = Clock(monkeypatch)
+    walls.close(*ROUTE, limit='weekly', task_id='t_a')
+    entry = {'coordination': {'quota': {'route': list(ROUTE)}}}
+    clock.advance(300)
+    monkeypatch.setattr(walls, 'LOCK_WAIT_SECONDS', 0.2)
+
+    def not_given():
+        return [record for record in caplog.records if 'was not given' in record.getMessage()]
+
+    with caplog.at_level('WARNING', logger=walls.logger.name):
+        with open(walls._path(*ROUTE, walls.LOCK), 'a+b') as stopped:
+            fcntl.flock(stopped.fileno(), fcntl.LOCK_EX)
+            began = time.monotonic()
+            assert walls.entry_turn(entry, PROFILE, 'req_1') == ROUTE
+            assert time.monotonic() - began >= 0.2 and len(not_given()) == 1, 'waited for the lock, and not for ever'
+        assert walls.read(*ROUTE)['probe']['task_id'] == 'req_1'
+        walls.release_probe(*ROUTE, task_id='req_1')
+        assert walls.read(*ROUTE)['probe'] is None and len(not_given()) == 1, 'a free lock is taken at once'
+
+
+def test_of_two_dispatchers_that_see_the_route_due_one_launches_the_probe(quota_board, launcher, monkeypatch, ops):
+    """Two boards of one profile, each ticked under its own lock. The first board's dispatcher reads the route as
+    due for its card, and before it claims the card the whole tick of the second board runs."""
+    monkeypatch.delenv('HERMES_KANBAN_DB')  # each board at its own path under the shared root
+    kb.create_board('second')
+    with kb.connect_closing() as conn, kb.connect_closing(board='second') as other:
+        clock = Clock(monkeypatch)
+        task = enrol(conn, launcher)
+        run_card(conn, launcher, monkeypatch, task.id, refusing(GoUsageLimit))
+        card = ready_card(other, 'Same profile, another board', assignee=PROFILE)
+        assert kb.dispatch_once(other, board='second').claim_held == [(card, HELD)]
+        assert_waiting(conn, kb.dispatch_once(conn), [task.id])
+        assert len(ops.notices()) == 1
+
+        clock.advance(3600)
+        read_the_wall, raced = kb._route_wall_hold, []
+
+        def read_then_the_other_board_ticks(conn_, task_id, **kwargs):
+            held = read_the_wall(conn_, task_id, **kwargs)
+            if task_id == task.id and not raced:
+                assert held is None, 'this dispatcher saw the route due'
+                raced.append(kb.dispatch_once(other, board='second'))
+            return held
+
+        monkeypatch.setattr(kb, '_route_wall_hold', read_then_the_other_board_ticks)
+        launches = len(launcher.launches)
+        tick = kb.dispatch_once(conn)
+        monkeypatch.setattr(kb, '_route_wall_hold', read_the_wall)
+        (theirs,) = raced
+        assert spawned(theirs) == [card], 'the second board launched the probe'
+        assert not tick.spawned and tick.claim_held == [(task.id, HELD)], tick
+        assert len(launcher.launches) == launches + 1, 'one launch on the closed route, not two'
+        assert walls.read(*ROUTE)['probe'] == {'task_id': card, 'board': 'second', 'at': clock.now}
+        held = kb.get_task(conn, task.id)
+        assert (held.status, held.claim_lock, held.consecutive_failures) == ('ready', None, 0)
+        assert kb.count_running_tasks(conn) == 0, 'the card that lost the probe holds no slot'
+
+        # The probe is refused: one verdict, the next probe an hour on, no second notice. Then it is answered, and
+        # the card the first board held is launched: nothing of the lost probe stayed on it.
+        refused = run_card(other, launcher, monkeypatch, card, refusing(GoUsageLimit))
+        assert (refused.provider_calls, refused.waits.waited, refused.exit_code) == (1, 0, 75)
+        wall = walls.read(*ROUTE)
+        assert (wall['probes'], wall['probe'], wall['next_probe_at']) == (1, None, clock.now + 3600)
+        assert kb.dispatch_once(other, board='second').rate_limited == [card]
+        assert_waiting(conn, kb.dispatch_once(conn), [task.id])
+        clock.advance(3600)
+        assert spawned(kb.dispatch_once(conn)) == [task.id]
+        run_card(conn, launcher, monkeypatch, task.id, answered_once, judge_reply=CONTINUE)
+        assert not walls.any_closed() and len(ops.notices()) == 1
+        assert spawned(kb.dispatch_once(other, board='second')) == [card]
+
+
+def test_a_launch_made_outside_the_dispatcher_beside_the_probe_leaves_the_wall_to_the_probe(
+        quota_board, launcher, monkeypatch, ops):
+    """The desk starts an approved ticket in the same moment the dispatcher's tick probes the route. The desk's
+    launch asks nothing of the wall, so two workers go out. That is harmless: each leaves on its first refused
+    call, only the probe's refusal is the verdict of the route, and an answer to either reopens it."""
+    wall_of = GoUsageLimitFromSDK  # a named limit and no reset time: the first probe is due in 300 s
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        first, second, _, _ = close_route_with_two_cards(conn, launcher, monkeypatch, wall_of)
+        assert_waiting(conn, kb.dispatch_once(conn), [first, second])
+        assert len(ops.notices()) == 1
+
+        # The desk first, the dispatcher right after it.
+        ticket = ready_card(conn, 'Approved ticket', assignee=PROFILE)
+        clock.advance(300)
+        start_approved(conn, ticket)
+        assert walls.read(*ROUTE)['probe'] is None, 'that launch took nothing from the wall'
+        probe = probe_of(launcher, kb.dispatch_once(conn), [first, second])
+        marked = walls.read(*ROUTE)
+        outside = run_card(conn, launcher, monkeypatch, ticket, refusing(wall_of))
+        assert (outside.provider_calls, outside.waits.waited, outside.exit_code) == (1, 0, 75)
+        assert walls.read(*ROUTE) == marked, 'the refusal of the launch that is not the probe changes nothing'
+        refused = run_card(conn, launcher, monkeypatch, probe, refusing(wall_of))
+        assert (refused.provider_calls, refused.waits.waited, refused.exit_code) == (1, 0, 75)
+        wall = walls.read(*ROUTE)
+        assert (wall['probes'], wall['probe'], wall['next_probe_at']) == (1, None, clock.now + 600)
+        tick = kb.dispatch_once(conn)
+        assert sorted(tick.rate_limited) == sorted([ticket, probe])
+        assert_waiting(conn, tick, [first, second, ticket])
+        assert len(ops.notices()) == 1, 'two refusals on the same wall: no second notice'
+
+        # The dispatcher first, the desk right after it, with the probe in flight. The quota is back: the desk's
+        # worker is answered and the route reopens on that answer, whatever the probe does later.
+        clock.advance(600)
+        probe = probe_of(launcher, kb.dispatch_once(conn), [first, second, ticket])
+        another = ready_card(conn, 'Another approved ticket', assignee=PROFILE)
+        start_approved(conn, another)
+        assert walls.read(*ROUTE)['probe']['task_id'] == probe, 'the probe is still the launch of the dispatcher'
+        run = run_card(conn, launcher, monkeypatch, another, answered_once, judge_reply=CONTINUE)
+        assert not run.results[0].get('failed') and walls.read(*ROUTE) is None and not walls.any_closed()
+        run_card(conn, launcher, monkeypatch, probe, answered_once, judge_reply=CONTINUE)
+        assert not walls.any_closed() and len(ops.notices()) == 1
+        waiting = sorted({first, second, ticket} - {probe})
+        assert sorted(spawned(kb.dispatch_once(conn))) == waiting, 'the route is open: the held cards go'
+        for task_id in (first, second, ticket, another):
+            assert kb.get_task(conn, task_id).consecutive_failures == 0
+
+
+# ── The day's notice of a wall that stands ──────────────────────────────
+
+def test_a_wall_that_stands_is_announced_once_a_day_with_how_long_and_what_waits(
+        quota_board, launcher, monkeypatch, ops):
+    """One notice on the first day and silence for a week is a board standing still in silence. While the wall
+    stands the management topic hears of it once a day: for how long the route has been closed and how many cards
+    wait for it. The account the provider named is in neither text; it is on the wall."""
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        start = clock.now
+        first, second, _, _ = close_route_with_two_cards(conn, launcher, monkeypatch, GoUsageLimitFromSDK)
+        assert_waiting(conn, kb.dispatch_once(conn), [first, second])
+        (*topic, opening), = ops.notices()
+        assert tuple(topic) == MANAGEMENT_TOPIC
+        assert 'Enquanto ela seguir fechada com card ou pedido esperando por ela, sai aqui um aviso por dia.' in opening
+        receipt = walls._load(walls._path(*ROUTE, walls.NOTICE))
+        assert (receipt['notices'], receipt['sent_at']) == (1, start)
+
+        # The first day: the notifier ticks every hour and says nothing more.
+        for _ in range(23):
+            clock.advance(3600)
+            assert len(ops.notices()) == 1
+        clock.advance(3599)
+        assert len(ops.notices()) == 1 and walls.unannounced() == []
+
+        clock.advance(1)
+        assert [walls._route(wall) for wall in walls.unannounced()] == [ROUTE]
+        (_, (*topic, daily)) = ops.notices()
+        assert tuple(topic) == MANAGEMENT_TOPIC, 'the same topic as the notice of the wall, and no other'
+        assert f'Rota {EXECUTOR_PROVIDER}/{EXECUTOR_MODEL} do perfil {PROFILE} segue fechada há 1 d, ' in daily
+        assert 'pelo limite weekly.' in daily and 'O provedor não informou hora de reinício.' in daily
+        assert 'Cards esperando por ela: 2.' in daily
+        assert 'Pedidos na caixa do Principal, ainda sem card: 0.' in daily
+        assert 'contagem é parcial' not in daily
+        # Neither text names the account. The wall does.
+        assert walls.read(*ROUTE)['account'] == 'wrk_quota_wall_suite'
+        for text in (opening, daily):
+            assert 'wrk_quota_wall_suite' not in text and 'conta ' not in text
+        receipt = walls._load(walls._path(*ROUTE, walls.NOTICE))
+        assert (receipt['notices'], receipt['sent_at'], receipt['closed_at']) == (2, clock.now, start)
+        assert [(sent['chat_id'], sent['thread_id']) for sent in receipt['deliveries']] == [MANAGEMENT_TOPIC]
+
+        # Not twice on the same day: not on the next ticks, not from a gateway that restarts, not from a second
+        # gateway of the host. The receipt is beside the wall.
+        clock.advance(600)
+        assert len(ops.notices()) == 2 and Operations().notices() == [] and walls.unannounced() == []
+        assert not walls.claim_notice(walls.read(*ROUTE))
+        clock.advance(DAY - 601)
+        assert len(ops.notices()) == 2 and Operations().notices() == []
+
+        # The second day, from the gateway that restarted. A third card waits by now.
+        third = ready_card(conn, 'Order filter', assignee=PROFILE)
+        # The wall as its latest probe left it, refused this instant; then the hold the dispatcher asks for.
+        assert walls.take_probe(*ROUTE, task_id=first) and walls.close(*ROUTE, limit='weekly', task_id=first)
+        assert kb._route_wall_hold(conn, third) == HELD
+        clock.advance(1)
+        restarted = Operations()
+        (*topic, second_day), = restarted.notices()
+        assert tuple(topic) == MANAGEMENT_TOPIC and 'segue fechada há 2 d, ' in second_day
+        assert 'Cards esperando por ela: 3.' in second_day
+        assert ops.notices() == [(*MANAGEMENT_TOPIC, opening), (*MANAGEMENT_TOPIC, daily)], 'one gateway sent it'
+
+        # The route reopens: nothing more is said, that day or the days after.
+        assert walls.reopen(*ROUTE)
+        for _ in range(4):
+            clock.advance(DAY)
+            assert len(ops.notices()) == 2 and len(restarted.notices()) == 1 and walls.unannounced() == []
+
+
+def test_the_days_notice_that_no_topic_took_is_tried_again_and_a_new_wall_starts_its_own_days(
+        quota_board, monkeypatch):
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        wall, _ = walls.close(*ROUTE, limit='weekly', account='wrk_quota_wall_suite', reset_at=clock.now + 7 * DAY,
+                              task_id='t_a')
+        card = ready_card(conn, 'Held by the route', assignee=PROFILE)
+        assert kb._route_wall_hold(conn, card) == HELD, 'a card waits for the route'
+        ops = Operations()
+        (*_, opening), = ops.notices()
+        assert 'wrk_quota_wall_suite' not in opening
+        clock.advance(DAY)
+        # A notifier takes the day's notice and dies before sending it: the claim lapses and the notice goes out.
+        claim = walls.claim_notice(walls.read(*ROUTE))
+        assert claim['notices'] == 1 and ops.notices() == [(*MANAGEMENT_TOPIC, opening)]
+        clock.advance(walls.PROBE_LEASE_SECONDS)
+        (_, (*_, daily)) = ops.notices()
+        when = time.strftime('%d/%m %H:%M UTC', time.gmtime(wall['reset_at']))
+        assert 'segue fechada há 1 d 15 min' in daily and f'O reinício informado pelo provedor é {when}.' in daily
+        assert 'Cards esperando por ela: 1.' in daily and 'wrk_quota_wall_suite' not in daily
+        # The route reopens and stays open for long: its next wall is a new one, with its own notice and its own
+        # days.
+        assert walls.reopen(*ROUTE)
+        clock.advance(3 * DAY)
+        assert len(ops.notices()) == 2
+        walls.close(*ROUTE, limit='weekly', task_id='t_b')
+        assert kb._route_wall_hold(conn, card) == HELD
+        assert len(ops.notices()) == 3 and 'fechada para o perfil' in ops.sent[-1][2]
+        clock.advance(DAY - 1)
+        assert len(ops.notices()) == 3
+        clock.advance(1)
+        assert len(ops.notices()) == 4 and 'segue fechada há 1 d, ' in ops.sent[-1][2]
+
+
+def test_a_wall_nothing_waits_for_any_more_is_not_announced_again_until_something_waits(
+        quota_board, launcher, monkeypatch, ops):
+    """The cards of a route on its weekly wall are moved to another model to get away from it, and are delivered
+    there. The old wall stands with nothing behind it: no launch probes it and it holds nobody. A notice a day
+    about it would go on for as long as the file is there, saying that a launch probes a route no launch probes."""
+    week, provider = go_window(7 * DAY), Accounts()
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        first, second = (ready_card(conn, title, assignee=PROFILE) for title in ('Order total', 'Order sorting'))
+        assert sorted(spawned(kb.dispatch_once(conn))) == sorted([first, second])
+        for task_id in (first, second):
+            run_card(conn, launcher, monkeypatch, task_id, refusing(week))
+        assert_waiting(conn, kb.dispatch_once(conn), [first, second])
+        (*_, opening), = ops.notices()
+
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET model_override='other-model' WHERE id IN (?,?)", (first, second))
+        clock.advance(300)  # past the per-card wait of the quota exit
+        assert sorted(spawned(kb.dispatch_once(conn))) == sorted([first, second])
+        for task_id in (first, second):
+            (wait,) = quota_waits(conn, task_id)
+            assert (wait['status'], wait['outcome']) == ('withdrawn', 'route_changed')
+            delivered = run_card(conn, launcher, monkeypatch, task_id, provider)
+            assert delivered.exit_code == 0 and kb.get_task(conn, task_id).status == 'done'
+        assert not kb.dispatch_once(conn).spawned
+        standing = walls.read(*ROUTE)
+        assert standing is not None and standing['probe'] is None, 'the old wall stands, unprobed'
+
+        # Five days: the wall is due for its day's notice at every tick of the notifier, and nothing waits for it.
+        for day in range(1, 6):
+            clock.advance(DAY)
+            assert [walls._route(wall) for wall in walls.unannounced()] == [ROUTE]
+            assert ops.notices() == [(*MANAGEMENT_TOPIC, opening)], day
+            assert Operations().notices() == [], 'nor from a gateway that restarts'
+        assert walls.read(*ROUTE) == standing, 'nothing wrote on the wall'
+        count = walls.waiting(standing, owner_of=lambda payload: PROFILE)
+        assert count == {'cards': 0, 'entries': 0, 'unread': 0} and walls.still_closed(standing, count) is None
+        # A board that could not be read leaves the count unknown: that is said, and nothing is said of a probe.
+        unknown = walls.still_closed(standing, dict(count, unread=1))
+        assert 'contagem é parcial' in unknown and 'sonda a rota' not in unknown
+
+        # A card pinned to the old route arrives. The route is long due: its launch is the probe, the provider
+        # refuses it, and from then on a card waits behind the wall. The day's notice is owed and goes out.
+        back = ready_card(conn, 'Pinned to the closed route', assignee=PROFILE)
+        assert spawned(kb.dispatch_once(conn)) == [back]
+        assert walls.read(*ROUTE)['probe']['task_id'] == back
+        refused = run_card(conn, launcher, monkeypatch, back, refusing(week))
+        assert (refused.provider_calls, refused.exit_code) == (1, 75)
+        tick = kb.dispatch_once(conn)
+        assert tick.rate_limited == [back] and tick.claim_held == [(back, HELD)], tick
+        clock.advance(walls.PROBE_LEASE_SECONDS)  # the notifier's last look at the wall has lapsed
+        (_, (*topic, daily)) = ops.notices()
+        assert tuple(topic) == MANAGEMENT_TOPIC and 'segue fechada há 5 d ' in daily
+        assert 'Cards esperando por ela: 1.' in daily and 'Um lançamento sonda a rota a intervalos de até 60 min' in daily
+        assert len(ops.notices()) == 2, 'and not again that day'
+
+        # A card that stands in no lane the dispatcher launches from does not probe the route: it is not counted
+        # as waiting for it, whatever the registry still holds of it.
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (back,))
+        assert [wait['status'] for wait in quota_waits(conn, back)] == ['open']
+        assert walls.waiting(walls.read(*ROUTE), owner_of=lambda payload: PROFILE)['cards'] == 0
+        clock.advance(DAY)
+        assert len(ops.notices()) == 2, 'and with it blocked nothing waits: no notice the next day'
+
+
+def test_a_notice_listed_for_a_wall_is_not_taken_once_the_route_has_reopened(quota_board, monkeypatch):
+    """The notifier lists the walls with a notice due and then takes each. A probe answered in between reopens the
+    route: the notice of a closed route must not go out for it, and no notice of a reopening exists to unsay it."""
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        walls.close(*ROUTE, limit='weekly', task_id='t_a')
+        card = ready_card(conn, 'Held by the route', assignee=PROFILE)
+        assert kb._route_wall_hold(conn, card) == HELD
+        ops = Operations()
+        assert len(ops.notices()) == 1
+        clock.advance(DAY)
+        (listed,) = walls.unannounced()
+        assert walls.reopen(*ROUTE)
+        assert walls.claim_notice(listed) is False and len(ops.notices()) == 1
+        # Nor is it taken for a new wall of the route: that one has a notice of its own.
+        clock.advance(DAY)
+        new, opened = walls.close(*ROUTE, limit='weekly', task_id='t_b')
+        assert opened and walls.claim_notice(listed) is False
+        assert walls.claim_notice(new)['notices'] == 0, "the new wall's own notice is the one due"
+
+
+# ── What a probe spends of the card that probes ─────────────────────────
+#
+# A card in rework the Principal escalated carries a balance for its whole lineage of runs: goal turns, iterations
+# and seconds of runtime, summed over the runs since the escalation (`nfos_principal_review.escalation_usage`). The
+# turn and the iteration are counted before the provider is asked, and a run's seconds whatever it did. On a closed
+# route such a card is launched once an hour as the probe, and each launch the provider refuses used to count one
+# turn, one iteration and the seconds of the launch: on its twentieth probe the claim found the balance of goal
+# turns spent, blocked the card and asked the Principal about a balance nothing had been done with.
+
+def run_owned_card(conn, launcher, monkeypatch, task_id, answer, judge_reply=None):
+    """As `run_card`, with the run handed to this process for as long as the worker runs in it. The suite's
+    worker process is a stand-in child, and what a run spends of its lineage is written only by the process that
+    owns the run (`nfos_principal_review._owned_worker_run`)."""
+    child = tuple(conn.execute('SELECT worker_pid,worker_started_at,current_run_id FROM tasks WHERE id=?',
+                               (task_id,)).fetchone())
+
+    def hand_to(pid, started_at):
+        with kb.write_txn(conn):
+            conn.execute('UPDATE tasks SET worker_pid=?,worker_started_at=? WHERE id=?', (pid, started_at, task_id))
+            conn.execute('UPDATE task_runs SET worker_pid=? WHERE id=?', (pid, child[2]))
+
+    hand_to(os.getpid(), kb._process_start_time(os.getpid()))
+    try:
+        run = run_executor(monkeypatch, *launch_of(launcher, task_id), answer=answer, judge_reply=judge_reply)
+    finally:
+        hand_to(*child[:2])
+    launcher.exit(child[0], run.exit_code)
+    return run
+
+
+def test_a_probe_the_provider_refuses_spends_nothing_of_the_balance_of_the_escalated_card_that_probes(
+        quota_board, launcher, monkeypatch):
+    from hermes_cli import goals, nfos_delivery as delivery
+    from hermes_cli.nfos_workspace_repair import execution_budget
+    assert kb._process_start_time(os.getpid()) is not None, 'the owner of a run is told by its start time'
+    config = dict(copy.deepcopy(PROFILE_CONFIG), agent={'max_turns': 90})
+    (quota_board / 'config.yaml').write_text(yaml.safe_dump(config), encoding='utf-8')
+    week, loop_turns, run_the_loop = go_window(7 * DAY), [], goals.run_kanban_goal_loop
+
+    def goal_loop(*args, **kwargs):
+        loop_turns.append(kwargs['max_turns'])
+        return run_the_loop(*args, **kwargs)
+
+    monkeypatch.setattr(goals, 'run_kanban_goal_loop', goal_loop)
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        task = enrol(conn, launcher)
+        # The lineage as the one live card that has one on the production boards carries it (read on 2026-10-12):
+        # level 1, applied, 9,900 s of runtime. The card's goal loop has its 20 turns.
+        with kb.write_txn(conn):
+            state = json.loads(delivery.get_workflow(conn, task.id)['state_json'])
+            state['worker_escalation'] = dict(
+                level=1, model='gpt-6-luna', reasoning_effort='max', reason='Rework the Principal escalated',
+                source_run_id=task.current_run_id, first_run_id=task.current_run_id, run_id=task.current_run_id,
+                status='applied')
+            conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?', (json.dumps(state), task.id))
+            conn.execute('UPDATE tasks SET goal_max_turns=20,max_runtime_seconds=9900 WHERE id=?', (task.id,))
+
+        def balance():
+            left = execution_budget(conn, kb.get_task(conn, task.id))
+            return left['remaining_goal_turns'], left['remaining_iterations'], left['remaining_runtime_seconds']
+
+        def probe_refused():
+            clock.advance(40)  # from the launch to the provider's refusal of its first call
+            refused = run_owned_card(conn, launcher, monkeypatch, task.id, refusing(week))
+            assert (refused.turns, refused.provider_calls, refused.exit_code) == (1, 1, 75)
+            assert kb.dispatch_once(conn).rate_limited == [task.id]
+            return json.loads(conn.execute('SELECT metadata FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1',
+                                           (task.id,)).fetchone()[0])['escalation_usage']
+
+        assert balance() == (20, 90, 9900)
+        usage = probe_refused()
+        assert walls.read(*ROUTE)['closed_by']['task_id'] == task.id
+        assert balance() == (20, 90, 9900), 'the launch that met the wall spent nothing of the balance'
+        # The run's record says what was counted before the provider was asked, and that the turn was at its first
+        # call when the worker left on the wall.
+        assert (usage['turns'], usage['iterations'], usage['turn_calls']) == (1, 1, 1)
+
+        # A day on the wall: the card is the probe of every hour.
+        for hour in range(1, 25):
+            clock.advance(walls.read(*ROUTE)['next_probe_at'] - clock.now)
+            tick = kb.dispatch_once(conn)
+            assert spawned(tick) == [task.id] and not tick.claim_held, (hour, tick)
+            usage = probe_refused()
+            assert balance() == (20, 90, 9900), hour
+            assert (usage['turns'], usage['iterations'], usage['turn_calls']) == (1, 1, 1), hour
+        assert loop_turns == [20] * 25, 'every launch found the whole allowance of the goal loop'
+        outcomes = [row['outcome'] for row in conn.execute('SELECT outcome FROM task_runs ORDER BY id')]
+        assert outcomes == ['rate_limited'] * 25
+        card = kb.get_task(conn, task.id)
+        assert (card.status, card.block_kind, card.consecutive_failures) == ('ready', None, 0)
+        assert not conn.execute('SELECT 1 FROM nfos_decisions').fetchone(), 'nobody was asked about its balance'
+        assert 'nfos_execution_budget_exhausted' not in event_kinds(conn)
+
+        # The quota is back: the probe of the next hour is answered and works with the allowance it had before the
+        # wall. That run did work, and what it did counts: the turn the provider answered and the run's seconds.
+        # The turn it then left on (a throttle on that turn's only call) does not.
+        clock.advance(walls.read(*ROUTE)['next_probe_at'] - clock.now)
+        assert spawned(kb.dispatch_once(conn)) == [task.id]
+        clock.advance(40)
+        run = run_owned_card(conn, launcher, monkeypatch, task.id, answered_once, judge_reply=CONTINUE)
+        assert not run.results[0].get('failed') and (run.turns, run.exit_code) == (2, 75)
+        assert walls.read(*ROUTE) is None and loop_turns[-1] == 20
+        assert kb.dispatch_once(conn).rate_limited == [task.id]
+        usage = json.loads(conn.execute('SELECT metadata FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1',
+                                        (task.id,)).fetchone()[0])['escalation_usage']
+        assert (usage['turns'], usage['turn_calls']) == (2, 1)
+        turns, _, seconds = balance()
+        assert (turns, seconds) == (19, 9900 - 40)

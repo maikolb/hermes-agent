@@ -39,6 +39,7 @@ Owner instruction (2026-10-10): "O NFOS tem que ser autonomo, eu não quero ser 
 - `step` is the only transition. An expired wait gets one bounded internal repair or an explicit outcome: never `[CANCELADO]`, never counted as a delivery, never a grant of budget, access or permission.
 - In the registry so far: the laboratory queue wait (`lab_queue`) and the decision an expired wait hands to the Principal (`principal_decision`). Each remaining kind (laboratory transport, pause dependency, destination, human question, parent card) moves in its own PR and deletes its own clock. Do not add a wait that lives only in a decision context, in `state_json` or in a reminder.
 - The table is created on first use and no existing table changes, so the previous release keeps operating a board that already has it.
+- One exception (PRINCIPAL_WALL_20261012): an inbox entry that has no card yet has no row in the wait registry, which is keyed by card. What holds it is the wall of the Principal's route (`hermes_cli/nfos_route_walls.py`), the one clock it has.
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
