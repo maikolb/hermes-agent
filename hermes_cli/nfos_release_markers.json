@@ -209,5 +209,16 @@
   {"pr": 334, "file": "hermes_cli/models.py", "text": "headers.update(anthropic_workspace_headers(token, resolved_base_url))"},
   {"pr": 334, "file": "run_agent.py", "text": "with_anthropic_workspace_hint(f\"{prefix}{msg[:300]}\")"},
   {"pr": 335, "file": "plugins/platforms/whatsapp/adapter.py", "text": "_NODE_PROBE_TIMEOUT_S = 5"},
-  {"pr": 335, "file": "plugins/platforms/whatsapp/adapter.py", "text": "\"WhatsApp: `%s --version` did not answer within %ss; treating Node.js as present\","}
+  {"pr": 335, "file": "plugins/platforms/whatsapp/adapter.py", "text": "\"WhatsApp: `%s --version` did not answer within %ss; treating Node.js as present\","},
+  {"pr": 336, "file": "agent/credential_pool.py", "text": "def _sync_entry_from_pool_store("},
+  {"pr": 336, "file": "agent/credential_pool.py", "text": "token_bases=self._persisted_token_pairs,"},
+  {"pr": 336, "file": "hermes_cli/auth.py", "text": "def _merge_pool_row_generation("},
+  {"pr": 336, "file": "agent/credential_pool.py", "text": "return bool(refresh_token) and refresh_token == str(singleton_tokens.get(\"refresh_token\") or \"\").strip()"},
+  {"pr": 336, "file": "agent/auxiliary_client.py", "text": "def _provider_refresh_serves_key("},
+  {"pr": 336, "file": "agent/auxiliary_client.py", "text": "refreshed = pool.try_refresh_matching(api_key_hint=hint)"},
+  {"pr": 336, "file": "agent/credential_pool.py", "text": "if base_pair is not None and disk_pair == base_pair:"},
+  {"pr": 336, "file": "agent/credential_pool.py", "text": "if synced is not entry and synced.last_status == STATUS_DEAD:"},
+  {"pr": 336, "file": "agent/credential_pool.py", "text": "if item.id != updated.id and item.refresh_token == entry.refresh_token"},
+  {"pr": 336, "file": "hermes_cli/auth.py", "text": "or (prev_rt and entry.get(\"refresh_token\") == prev_rt)"},
+  {"pr": 336, "file": "agent/auxiliary_client.py", "text": "failed_api_key=retry_key[0] if retry_key and pool_provider == \"openai-codex\" else \"\",", "min": 2}
 ]

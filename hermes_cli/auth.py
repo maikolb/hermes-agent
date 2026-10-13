@@ -1730,6 +1730,67 @@ _POOL_STATUS_FIELDS = (
     "last_error_message",
     "last_error_reset_at",
 )
+# Fields that travel with one token generation of a pool row: a stale writer
+# must not stamp them onto a pair another process rotated in since.
+_POOL_TOKEN_GENERATION_FIELDS = (
+    "access_token", "refresh_token", "expires_at", "expires_at_ms", "expires_in", "obtained_at",
+    "last_refresh", "agent_key", "agent_key_expires_at", "agent_key_expires_in", "agent_key_id",
+    "agent_key_obtained_at", "agent_key_reused", "scope", "inference_base_url",
+)
+
+
+def _credential_token_pair(row: Any) -> Tuple[Any, Any]:
+    if not isinstance(row, dict):
+        return (None, None)
+    return row.get("access_token"), row.get("refresh_token")
+
+
+def _token_pairs_by_id(rows: Iterable[Any]) -> Dict[str, Tuple[Any, Any]]:
+    """Token-generation base per row id, including ``(None, None)`` for token-less rows.
+
+    A blank base is a known generation ("no pair when we last looked"), so a peer that
+    later lands a pair on that row is kept by ``_merge_pool_row_generation``."""
+    return {
+        row["id"]: _credential_token_pair(row)
+        for row in rows
+        if isinstance(row, dict) and row.get("id")
+    }
+
+
+def _merge_pool_row_generation(
+    entry: Dict[str, Any],
+    disk_entry: Optional[Dict[str, Any]],
+    provider_id: str,
+    *,
+    base_pair: Optional[Tuple[Any, Any]] = None,
+) -> Dict[str, Any]:
+    """Keep a newer on-disk token generation authoritative during stale writes.
+
+    ``base_pair`` is the pair the writer last read from or wrote to this row. When the
+    row on disk holds another pair, a peer rotated it since: the writer's pair is the
+    older one, and its single-use refresh token may already be spent. Only a terminal
+    auth verdict (``last_status == dead``) is scoped to the pair it was observed on;
+    account-wide cooldowns from the stale writer still go through the ordinary
+    recency merge in ``_merge_disk_cooldown_state``."""
+    from agent.credential_pool import STATUS_DEAD
+
+    disk_pair = _credential_token_pair(disk_entry)
+    if base_pair is None or not any(disk_pair) or disk_pair == base_pair:
+        return _merge_disk_cooldown_state(entry, disk_entry, provider_id)
+
+    merged = dict(entry)
+
+    def _take_from_disk(field_names: Iterable[str]) -> None:
+        for field_name in field_names:
+            if field_name in disk_entry:
+                merged[field_name] = disk_entry[field_name]
+            else:
+                merged.pop(field_name, None)
+
+    _take_from_disk(_POOL_TOKEN_GENERATION_FIELDS)
+    if entry.get("last_status") == STATUS_DEAD:
+        _take_from_disk((*_POOL_STATUS_FIELDS, "failure_reason"))
+    return _merge_disk_cooldown_state(merged, disk_entry, provider_id)
 
 
 def _merge_disk_cooldown_state(
@@ -1794,8 +1855,9 @@ def write_credential_pool(
     entries: List[Dict[str, Any]],
     *,
     removed_ids: Optional[Iterable[str]] = None,
-) -> Path:
-    """Persist one provider's credential pool under auth.json.
+    token_bases: Optional[Dict[str, Tuple[Any, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Persist one provider's credential pool under auth.json and return the rows written.
 
     This is the final disk-boundary guard for borrowed/reference-only
     credentials. Callers may pass raw dictionaries, so sanitize here even when
@@ -1809,11 +1871,15 @@ def write_credential_pool(
     For entries present on BOTH sides, status fields are merged by
     ``last_status_at`` recency via ``_merge_disk_cooldown_state`` so a stale
     snapshot cannot erase a cooldown/quarantine another process just wrote.
+    ``token_bases`` maps a row id to the token pair the caller last read from
+    or wrote to that row: when the disk holds another pair, another process
+    rotated it and the disk pair is kept (``_merge_pool_row_generation``).
 
     Pass ``removed_ids`` for entries the caller intentionally removed, so the
     merge does not resurrect them from the on-disk copy.
     """
     removed = {rid for rid in (removed_ids or ()) if rid}
+    bases = token_bases or {}
     with _auth_store_lock():
         auth_store = _load_auth_store()
         pool = auth_store.get("credential_pool")
@@ -1838,8 +1904,11 @@ def write_credential_pool(
             if isinstance(entry, dict) and entry.get("id")
         }
         merged: List[Dict[str, Any]] = [
-            _merge_disk_cooldown_state(
-                entry, existing_by_id.get(entry.get("id")), provider_id
+            _merge_pool_row_generation(
+                entry,
+                existing_by_id.get(entry.get("id")),
+                provider_id,
+                base_pair=bases.get(entry.get("id")),
             )
             if isinstance(entry, dict)
             else entry
@@ -1853,7 +1922,8 @@ def write_credential_pool(
                 continue
             merged.append(sanitize_borrowed_credential_payload(disk_entry, provider_id))
         pool[provider_id] = merged
-        return _save_auth_store(auth_store)
+        _save_auth_store(auth_store)
+        return merged
 
 
 def suppress_credential_source(provider_id: str, source: str) -> None:
@@ -3880,8 +3950,9 @@ def _sync_codex_pool_entries(
       that use the same device-code OAuth mechanism.  ONLY synced if the
       entry's existing access_token matches the *previous* singleton
       access_token (i.e. the entry is a legacy singleton-alias from the
-      #33000 workaround era).  Manual entries whose tokens never matched the
-      singleton represent INDEPENDENT accounts added via
+      #33000 workaround era) or its refresh_token matches the previous
+      singleton refresh_token (the same chain, now rotated).  Manual entries
+      whose tokens never matched the singleton represent INDEPENDENT accounts added via
       ``hermes auth add openai-codex`` and must not be overwritten by a
       re-auth that targeted a different account (regression for #39236).
 
@@ -3898,7 +3969,7 @@ def _sync_codex_pool_entries(
     * ``manual:api_key`` and any other non-device-code manual sources — those
       are independent credentials (an explicit API key, a different ChatGPT
       account, etc.) and must not be overwritten by a single re-auth.
-    * ``manual:device_code`` entries whose access_token does NOT match the
+    * ``manual:device_code`` entries whose tokens do NOT match the
       previous singleton — see above; these are independent accounts.
 
     Error markers (``last_status``, ``last_error_*``) are cleared ONLY on
@@ -3922,8 +3993,10 @@ def _sync_codex_pool_entries(
     # is the right default for first-ever-save or a freshly initialized
     # auth.json).
     prev_at = None
+    prev_rt = None
     if isinstance(previous_singleton_tokens, dict):
         prev_at = previous_singleton_tokens.get("access_token") or None
+        prev_rt = previous_singleton_tokens.get("refresh_token") or None
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -3934,11 +4007,14 @@ def _sync_codex_pool_entries(
         elif source == "manual:device_code":
             # Refresh only if this entry's existing access_token matches the
             # previous singleton access_token (i.e. it is a true alias of the
-            # singleton from the #33000 workaround era).  An entry with its
+            # singleton from the #33000 workaround era), or it holds the
+            # previous singleton refresh_token (one chain: once the singleton
+            # rotated, the entry's refresh token is spent).  An entry with its
             # own distinct token material is an independent account and must
             # be left alone (#39236).
             refresh_this_entry = bool(
-                prev_at and entry.get("access_token") == prev_at
+                (prev_at and entry.get("access_token") == prev_at)
+                or (prev_rt and entry.get("refresh_token") == prev_rt)
             )
         else:
             # ``manual:api_key`` and any future non-device-code sources.

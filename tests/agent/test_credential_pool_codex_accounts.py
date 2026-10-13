@@ -10,8 +10,10 @@ What these tests hold, on a real pool over a real ``auth.json`` (only the HTTP t
 token is a fake written here):
 
 * a ``manual:device_code`` entry of another account keeps its own token pair beside the singleton, on the proactive
-  refresh and on the forced refresh after a 401; an entry of the singleton's own account still follows it, and one
-  whose account cannot be told adopts nothing (ported from NousResearch/hermes-agent 46503f1672, 20512a47a6);
+  refresh and on the forced refresh after a 401, and one whose account cannot be told adopts nothing (ported from
+  NousResearch/hermes-agent 46503f1672, 20512a47a6); a new login saved to the singleton frees the entries that held
+  the old singleton's pair, and a singleton of another chain is not followed, newer or older (see
+  test_credential_pool_codex_concurrent_refresh for a login of the same account in another chain);
 * the rotation that follows a refusal never hands back the refused account, whatever the usage probe says: a
   verdict it kept from before the refusal, or purchased credits (the no-recovery contract of 8530d81b55, by
   exclusion); with three accounts the rotation goes A, B, C and then reports that nothing is left;
@@ -19,7 +21,8 @@ token is a fake written here):
   seen by a pool that has just been loaded and by one an agent has held for hours without selecting again (a cached
   gateway session, a long card worker), and with credits authorized a new process starts on the next account;
 * a refusal met on the auxiliary path leaves the same reason and reset time on the entry as one met by the main
-  loop, and nothing else of that path changes: a 401 is marked as before, an answer that cannot be read too.
+  loop, and an answer that cannot be read is marked as before; a 401 is handled as the main loop handles it: the
+  entry that made the call is refreshed, and written off with the provider's reason when the refresh is refused.
 """
 import time
 from dataclasses import replace
@@ -125,21 +128,26 @@ def test_the_forced_refresh_after_a_401_keeps_the_login_of_another_account(store
     assert account_of(store.disk()['e-B']['access_token']) == 'B'
 
 
-def test_a_login_of_the_singletons_own_account_still_follows_it(store, provider):
-    """A new login of the same account, written to the singleton after a 429, frees the entries that alias it:
-    the ``device_code`` entry and a ``manual:device_code`` entry of that account."""
+def test_a_new_login_of_the_singletons_account_frees_the_entries_that_alias_it(store, provider):
+    """A new login of the same account, saved to the singleton after a 429, frees the entries that alias it: the
+    ``device_code`` entry and a ``manual:device_code`` entry that held the old singleton's pair (the save moves
+    them). A ``manual:device_code`` entry is not moved by reading a singleton of another chain."""
     old, new = jwt('A'), jwt('A', expires_in=9 * DAY)
     frozen = {'last_status': 'exhausted', 'last_status_at': time.time() - 60, 'last_error_code': 401,
               'last_error_reason': 'token_expired'}
-    pool = store([entry('e-A', 'device_code', 0, old, 'rA-old', **frozen),
-                  entry('e-alias', 'manual:device_code', 1, old, 'rA-old')], singleton=(new, 'rA-new'))
+    store([entry('e-A', 'device_code', 0, old, 'rA-old', **frozen),
+           entry('e-alias', 'manual:device_code', 1, old, 'rA-old')], singleton=(old, 'rA-old'))
+    auth_mod._save_codex_tokens({'access_token': new, 'refresh_token': 'rA-new'})
+    pool = cp.load_pool('openai-codex')
     assert pool.select().id == 'e-A'
-    seeded = next(e for e in pool.entries() if e.id == 'e-A')
-    assert (seeded.access_token, seeded.refresh_token) == (new, 'rA-new') and seeded.last_status != 'exhausted'
-    alias = next(e for e in pool.entries() if e.id == 'e-alias')
-    synced = pool._sync_codex_entry_from_auth_store(alias)
-    assert (synced.access_token, synced.refresh_token) == (new, 'rA-new')
+    for ident in ('e-A', 'e-alias'):
+        moved = next(e for e in pool.entries() if e.id == ident)
+        assert (moved.access_token, moved.refresh_token) == (new, 'rA-new') and moved.last_status != 'exhausted'
     assert provider.refresh_posted == []
+
+    pool = store([entry('e-alias', 'manual:device_code', 0, old, 'rA-old')], singleton=(new, 'rA-new'))
+    kept = next(e for e in pool.entries() if e.id == 'e-alias')
+    assert pool._sync_codex_entry_from_auth_store(kept) is kept
 
 
 def test_a_login_whose_account_cannot_be_told_adopts_nothing(store, provider):
@@ -163,7 +171,7 @@ def test_a_singleton_older_than_the_entrys_own_rotation_is_not_adopted_again(sto
     kept = next(e for e in pool.entries() if e.id == 'e-A')
     assert pool._sync_codex_entry_from_auth_store(kept) is kept
     newer = replace(kept, last_refresh='2026-10-08T00:00:00Z')
-    assert pool._sync_codex_entry_from_auth_store(newer).refresh_token == 'rA-old', 'a newer singleton is followed'
+    assert pool._sync_codex_entry_from_auth_store(newer) is newer, 'nor a newer one: it is another chain'
 
 
 # ── The rotation leaves the account the provider refused ────────────────
@@ -385,19 +393,25 @@ def test_a_refusal_on_the_auxiliary_path_keeps_the_reset_time(store, provider, a
     assert again.select().id == 'e-B'
 
 
-def test_a_401_on_the_auxiliary_path_is_marked_as_before(store, provider, auxiliary):
-    """What the pool is told of a quota refusal changed, and only that. An auxiliary call answered 401 with a
-    terminal reason still leaves the one-hour mark with no reason, where the main loop writes the entry off.
-    Making the two agree is another change, with a decision of its own: a manual entry written off is pruned a
-    day later."""
+def test_a_401_on_the_auxiliary_path_is_handled_as_the_main_loop_does(store, provider, auxiliary, monkeypatch):
+    """The main loop's rule for a refused login: refresh the entry that made the call, and when the refresh is
+    refused too, write the entry off with the provider's reason. Before, the auxiliary path left a mark with no
+    reason, and a revoked login came back to both paths once it expired."""
     (a, b, c), entries = three_accounts()
     store(entries)
-    assert auxiliary._pool_error_context(Revoked('Error code: 401')) == {
-        'message': 'Error code: 401', 'status_code': 401}
     assert auxiliary._recover_provider_pool('openai-codex', Revoked('Error code: 401'), failed_api_key=a) is True
+    assert provider.refresh_posted == ['rA']
+    refreshed = store.disk()['e-A']
+    assert (refreshed['refresh_token'], refreshed['last_status']) == ('rA+', 'ok')
+
+    refused = SimpleNamespace(status_code=401, headers={}, json=lambda: {'error': 'invalid_grant'})
+    monkeypatch.setattr(provider, 'post', lambda url, headers=None, data=None: refused)
+    assert auxiliary._recover_provider_pool('openai-codex', Revoked('Error code: 401'),
+                                            failed_api_key=refreshed['access_token']) is True
     marked = store.disk()['e-A']
-    assert (marked['last_status'], marked['last_error_code'], marked.get('last_error_reason')) == (
-        'exhausted', 401, None)
+    assert (marked['last_status'], marked['last_error_code'], marked['last_error_reason']) == (
+        'dead', 401, 'token_revoked')
+    assert cp.load_pool('openai-codex').select().id == 'e-B'
 
 
 def test_a_quota_refusal_that_cannot_be_read_is_marked_as_before(store, provider, auxiliary):
