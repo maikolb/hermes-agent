@@ -189,5 +189,6 @@
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "return wall if _holds(wall, now) or _awaits_reset(wall, now) else None"},
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "if entry_held(*route) is not None:"},
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "resumed = bool(count['entries']) and _awaits_reset(wall, now)"},
-  {"pr": 332, "file": "tools/mcp_tool.py", "text": "return True  # every tracked child has exited"}
+  {"pr": 332, "file": "tools/mcp_tool.py", "text": "return True  # every tracked child has exited"},
+  {"pr": 333, "file": "tools/mcp_tool.py", "text": "and inspect.iscoroutinefunction(_watch_children)"}
 ]
