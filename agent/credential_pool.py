@@ -306,6 +306,40 @@ def label_from_token(token: str, fallback: str) -> str:
     return fallback
 
 
+def _codex_principal_identity(access_token: Any) -> Optional[Tuple[str, str]]:
+    """``(chatgpt_account_id, sub)`` of a Codex access token, or None when either claim is missing.
+
+    Decoded without signature verification: this only decides whether two credentials Hermes
+    already holds belong to the same principal, never whether a token is valid. Both claims are
+    required because members of one ChatGPT workspace share ``chatgpt_account_id`` yet have their
+    own subjects and quotas.
+    """
+    claims = _decode_jwt_claims(access_token)
+    auth_claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else None
+    account_id = auth_claims.get("chatgpt_account_id") if isinstance(auth_claims, dict) else None
+    subject = claims.get("sub") if isinstance(claims, dict) else None
+    if not (isinstance(account_id, str) and account_id.strip() and isinstance(subject, str) and subject.strip()):
+        return None
+    return account_id.strip(), subject.strip()
+
+
+def _codex_entry_tracks_singleton(entry: PooledCredential, singleton_tokens: Dict[str, Any]) -> bool:
+    """Whether a Codex pool entry may adopt the auth.json singleton's token pair.
+
+    ``device_code`` IS the singleton. ``manual:device_code`` is ambiguous: a legacy alias of the
+    singleton (same account, must follow its rotations) or an independent account added with
+    ``hermes auth add openai-codex`` (must never be overwritten — adopting turned two logins into
+    one account, both hitting the same usage limit). Same principal proves the alias; unknown
+    identity fails closed.
+    """
+    if entry.source == "device_code":
+        return True
+    if entry.source != SOURCE_MANUAL_DEVICE_CODE:
+        return False
+    entry_identity = _codex_principal_identity(entry.access_token)
+    return entry_identity is not None and entry_identity == _codex_principal_identity(singleton_tokens.get("access_token"))
+
+
 def _next_priority(entries: List[PooledCredential]) -> int:
     return max((entry.priority for entry in entries), default=-1) + 1
 
@@ -387,6 +421,23 @@ def _parse_absolute_timestamp(value: Any) -> Optional[float]:
         except ValueError:
             return None
     return None
+
+
+def _singleton_predates_entry(state: Any, entry: "PooledCredential") -> bool:
+    """True only when the auth.json singleton is PROVABLY older than *entry*.
+
+    Both sides stamp ``last_refresh`` on every successful rotation. When
+    either side lacks a parseable stamp this returns False (cannot prove),
+    which keeps the historical adopt-on-difference behavior (#70111) intact
+    for legacy writers.
+    """
+    entry_ts = _parse_absolute_timestamp(entry.last_refresh)
+    if entry_ts is None:
+        return False
+    state_ts = _parse_absolute_timestamp(state.get("last_refresh") if isinstance(state, dict) else None)
+    if state_ts is None:
+        return False
+    return state_ts < entry_ts
 
 
 def _extract_retry_delay_seconds(message: str) -> Optional[float]:
@@ -995,6 +1046,8 @@ class CredentialPool:
             tokens = state.get("tokens")
             if not isinstance(tokens, dict):
                 return entry
+            if not _codex_entry_tracks_singleton(entry, tokens):
+                return entry
             store_access = tokens.get("access_token", "")
             store_refresh = tokens.get("refresh_token", "")
             # Adopt auth.json tokens when either side differs.  Codex refresh
@@ -1028,6 +1081,23 @@ class CredentialPool:
                     entry.id,
                 )
                 should_adopt = True
+            if should_adopt and _singleton_predates_entry(state, entry):
+                # #106705: manual:* entries never write back to the singleton
+                # (#39236), so after a pool-side rotation the singleton sits
+                # one chain behind. Adopting it would replay the consumed
+                # refresh token. ``last_refresh`` is stamped on every
+                # successful rotation on both sides; when either side lacks a
+                # parseable stamp this falls through to the historical
+                # adopt-on-difference above (#70111).
+                logger.info(
+                    "Pool entry %s: auth.json singleton predates this entry's "
+                    "rotation (last_refresh %s < %s); keeping pool chain to "
+                    "avoid replaying the consumed refresh token",
+                    entry.id,
+                    state.get("last_refresh") if isinstance(state, dict) else None,
+                    entry.last_refresh,
+                )
+                should_adopt = False
 
             if should_adopt:
                 logger.debug(
@@ -1816,6 +1886,11 @@ class CredentialPool:
                 auth_mod._probe_codex_quota_restored(
                     token,
                     base_url=entry.base_url,
+                    # The refusal that benched this entry stands for one
+                    # probe interval, whatever the usage endpoint reports:
+                    # with several accounts the rotation goes A, B, C and
+                    # ends at "no available entries", never A, B, A.
+                    not_before=entry.last_status_at,
                 )
             )
         except Exception:
@@ -1884,6 +1959,7 @@ class CredentialPool:
 
     def _available_entries(
         self, *, clear_expired: bool = False, refresh: bool = False,
+        skip_ids: frozenset = frozenset(),
     ) -> Tuple[List[PooledCredential], List[tuple]]:
         """Return (available, pending_refresh) for entries not in cooldown.
 
@@ -1895,6 +1971,9 @@ class CredentialPool:
         *pending_refresh* tuples so the caller can execute them outside the
         lock, avoiding stalling all pool consumers during cross-process flock
         acquisition + OAuth network I/O.
+
+        *skip_ids* are entries the caller has just marked: the rotation that
+        follows a refusal never offers the refused credential again.
         """
         now = time.time()
         cleared_any = False
@@ -1912,6 +1991,8 @@ class CredentialPool:
             1 for e in self._entries if e.last_status != STATUS_DEAD
         ) <= 1
         for entry in self._entries:
+            if entry.id in skip_ids:
+                continue
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load.  A stale duplicate row
             # can remain unhydrated; never lease or select it as an empty key.
@@ -2055,13 +2136,17 @@ class CredentialPool:
         self._last_no_entries_log_at = now
         logger.info("credential pool: no available entries (all exhausted or empty)")
 
-    def _select_unlocked(self, *, refresh: bool = True) -> Tuple[Optional[PooledCredential], List[tuple]]:
+    def _select_unlocked(
+        self, *, refresh: bool = True, skip_ids: frozenset = frozenset(),
+    ) -> Tuple[Optional[PooledCredential], List[tuple]]:
         """Select the best available credential entry.
 
         Returns ``(entry, pending_refresh)`` where *pending_refresh* contains
         single-use-token entries that must be refreshed outside the lock.
         """
-        available, pending_refresh = self._available_entries(clear_expired=True, refresh=refresh)
+        available, pending_refresh = self._available_entries(
+            clear_expired=True, refresh=refresh, skip_ids=skip_ids,
+        )
         if not available:
             self._current_id = None
             self._log_no_available_entries()
@@ -2240,6 +2325,7 @@ class CredentialPool:
             # Mark every entry sharing the failed key so the pool can reach the
             # "no available entries" state and let the error propagate.
             failed_runtime_key = getattr(entry, "runtime_api_key", None)
+            refused_ids = {entry.id}
             if identity_supplied and failed_runtime_key:
                 siblings_marked = False
                 for sibling in self._entries:
@@ -2254,6 +2340,7 @@ class CredentialPool:
                             failure_reason=failure_reason,
                         )
                         siblings_marked = True
+                        refused_ids.add(sibling.id)
                 if siblings_marked:
                     self._persist()
             # Re-read the updated entry to log the correct terminal state.
@@ -2272,7 +2359,25 @@ class CredentialPool:
                     _label, status_code,
                 )
             self._current_id = None
-            next_entry, _pending = self._select_unlocked(refresh=False)
+            # The rotation moves to ANOTHER credential: the entry the provider
+            # has just refused, and every entry sharing its key, is no
+            # candidate of the selection that follows its own mark.
+            next_entry, _pending = self._select_unlocked(
+                refresh=False, skip_ids=frozenset(refused_ids),
+            )
+            if next_entry is not None and next_entry.id == entry.id:
+                # No-recovery guard (#97315): selection handed back the very entry that was
+                # just marked (the auth-store sync adopted fresher tokens, or a quota probe
+                # false-positive lifted the bench mid-selection). Returning it reports a
+                # successful rotation without changing the credential, so the caller retries
+                # the same 429 forever (~2 req/s for hours). Mirror the single-entry guard on
+                # the unmatched-identity branch: surface the failure instead.
+                logger.warning(
+                    "credential pool: rotation returned the just-marked entry %s — "
+                    "treating as no-recovery so the failure surfaces", _label,
+                )
+                self._current_id = None
+                return None
             if next_entry:
                 _next_label = next_entry.label or next_entry.id[:8]
                 logger.info("credential pool: rotated to %s", _next_label)
