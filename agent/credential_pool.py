@@ -307,38 +307,25 @@ def label_from_token(token: str, fallback: str) -> str:
     return fallback
 
 
-def _codex_principal_identity(access_token: Any) -> Optional[Tuple[str, str]]:
-    """``(chatgpt_account_id, sub)`` of a Codex access token, or None when either claim is missing.
-
-    Decoded without signature verification: this only decides whether two credentials Hermes
-    already holds belong to the same principal, never whether a token is valid. Both claims are
-    required because members of one ChatGPT workspace share ``chatgpt_account_id`` yet have their
-    own subjects and quotas.
-    """
-    claims = _decode_jwt_claims(access_token)
-    auth_claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else None
-    account_id = auth_claims.get("chatgpt_account_id") if isinstance(auth_claims, dict) else None
-    subject = claims.get("sub") if isinstance(claims, dict) else None
-    if not (isinstance(account_id, str) and account_id.strip() and isinstance(subject, str) and subject.strip()):
-        return None
-    return account_id.strip(), subject.strip()
-
-
 def _codex_entry_tracks_singleton(entry: PooledCredential, singleton_tokens: Dict[str, Any]) -> bool:
     """Whether a Codex pool entry may adopt the auth.json singleton's token pair.
 
-    ``device_code`` IS the singleton. ``manual:device_code`` is ambiguous: a legacy alias of the
-    singleton (same account, must follow its rotations) or an independent account added with
-    ``hermes auth add openai-codex`` (must never be overwritten — adopting turned two logins into
-    one account, both hitting the same usage limit). Same principal proves the alias; unknown
-    identity fails closed.
+    ``device_code`` IS the singleton. A ``manual:device_code`` entry is a login of its own (an
+    independent account added with ``hermes auth add openai-codex``, or another device-code login of
+    the same account): it follows the singleton only while both hold one refresh-token chain, which
+    is when they hold the same refresh token. Same principal is not enough: two logins of one account
+    are two chains, and adopting the singleton's pair leaves two holders of one single-use refresh
+    token (a manual entry never writes back, so whichever rotates second replays a spent one). A
+    legacy alias of the singleton is moved by the side that rotates its chain: the singleton's save
+    (``_sync_codex_pool_entries``) and the pool refresh of the ``device_code`` entry
+    (``_refresh_entry_impl``).
     """
     if entry.source == "device_code":
         return True
     if entry.source != SOURCE_MANUAL_DEVICE_CODE:
         return False
-    entry_identity = _codex_principal_identity(entry.access_token)
-    return entry_identity is not None and entry_identity == _codex_principal_identity(singleton_tokens.get("access_token"))
+    refresh_token = str(entry.refresh_token or "").strip()
+    return bool(refresh_token) and refresh_token == str(singleton_tokens.get("refresh_token") or "").strip()
 
 
 def _next_priority(entries: List[PooledCredential]) -> int:
@@ -767,6 +754,10 @@ class CredentialPool:
         self.provider = provider
         self._entries = sorted(entries, key=lambda entry: entry.priority)
         self._current_id: Optional[str] = None
+        # Token pair this pool last read from or wrote to each row of the
+        # store (load_pool, _persist, _sync_entry_from_pool_store): a row whose
+        # disk pair differs was rotated by another process since.
+        self._persisted_token_pairs: Dict[str, Tuple[Any, Any]] = {}
         self._strategy = get_pool_strategy(provider)
         # RLock: the mutation primitives below (_replace_entry/_persist)
         # self-acquire this lock so the DEFERRED single-use-token refresh
@@ -893,11 +884,29 @@ class CredentialPool:
         # Self-locking (RLock): snapshotting self._entries must not race a
         # concurrent rotation when called from the deferred refresh path.
         with self._lock:
-            write_credential_pool(
+            written = write_credential_pool(
                 self.provider,
                 [entry.to_dict() for entry in self._entries],
                 removed_ids=removed_ids,
+                token_bases=self._persisted_token_pairs,
             )
+            rows = {
+                row["id"]: row
+                for row in written
+                if isinstance(row, dict) and row.get("id")
+            }
+            self._persisted_token_pairs = auth_mod._token_pairs_by_id(written)
+            for entry in list(self._entries):
+                row = rows.get(entry.id)
+                pair = self._persisted_token_pairs.get(entry.id, (None, None))
+                # Reference-only rows are secret-free on disk: never dehydrate
+                # their live in-memory credential.
+                if row is None or not any(pair):
+                    continue
+                # The store kept a pair another process rotated in after this
+                # pool read the row: hold that pair, not the spent one.
+                if pair != (entry.access_token, entry.refresh_token):
+                    self._replace_entry(entry, PooledCredential.from_dict(self.provider, row))
 
     def _is_terminal_auth_failure(
         self,
@@ -1184,18 +1193,26 @@ class CredentialPool:
             logger.debug("Failed to sync xAI OAuth entry from auth.json: %s", exc)
         return entry
 
-    def _sync_xai_oauth_entry_from_pool_store(
+    def _sync_entry_from_pool_store(
         self, entry: PooledCredential
     ) -> PooledCredential:
         """Adopt a token pair rotated by another pool instance.
 
-        Direct xAI integrations load a fresh ``CredentialPool`` for each
-        request. Their in-memory locks therefore cannot protect xAI's
-        single-use refresh token across concurrent requests or processes.
-        This helper is called while the shared auth-store lock is held and
-        re-reads the exact persisted row before a refresh POST is attempted.
+        Every Hermes process (gateway, card workers, auxiliary calls) holds its
+        own ``CredentialPool`` over the same auth.json, and direct xAI
+        integrations load a fresh one per request. Their in-memory locks
+        therefore cannot protect a single-use refresh token (Codex, xAI)
+        across processes. This helper is called while the shared auth-store
+        lock is held and re-reads the exact persisted row before a refresh
+        POST is attempted: a pair another process rotated in is adopted
+        instead of spending the one this pool still holds.
+
+        Only a row whose pair moved since this pool last read or wrote it was
+        rotated by another process. A row still holding that pair while this
+        pool holds another one means this pool's own write failed after its
+        refresh POST: the disk pair is the spent one, and this pool keeps its own.
         """
-        if self.provider != "xai-oauth":
+        if self.provider not in ("openai-codex", "xai-oauth"):
             return entry
         try:
             persisted = next(
@@ -1208,19 +1225,25 @@ class CredentialPool:
             )
             if not isinstance(persisted, dict):
                 return entry
+            base_pair = self._persisted_token_pairs.get(entry.id)
+            disk_pair = auth_mod._credential_token_pair(persisted)
+            self._persisted_token_pairs[entry.id] = disk_pair
+            if base_pair is not None and disk_pair == base_pair:
+                return entry
             stored = PooledCredential.from_dict(self.provider, persisted)
             if (
                 stored.access_token != entry.access_token
                 or stored.refresh_token != entry.refresh_token
             ):
                 logger.debug(
-                    "Pool entry %s: adopting xAI OAuth tokens rotated by another pool instance",
+                    "Pool entry %s: adopting %s OAuth tokens rotated by another pool instance",
                     entry.id,
+                    self.provider,
                 )
                 self._replace_entry(entry, stored)
                 return stored
         except Exception as exc:
-            logger.debug("Failed to sync xAI OAuth entry from credential pool: %s", exc)
+            logger.debug("Failed to sync %s entry from credential pool: %s", self.provider, exc)
         return entry
 
     def _sync_nous_entry_from_auth_store(self, entry: PooledCredential) -> PooledCredential:
@@ -1451,19 +1474,25 @@ class CredentialPool:
         # Serialize the whole sequence through the shared cross-process
         # auth-store flock (the same lock and extended-timeout pattern used by
         # resolve_codex_runtime_credentials()).  When a waiter finally acquires
-        # the lock, the in-lock re-sync below picks up the rotated token the
-        # winner persisted and skips the POST.
+        # the lock, the in-lock re-read of its own pool row picks up the
+        # rotated token the winner persisted and skips the POST.
         if self.provider in ("openai-codex", "xai-oauth"):
-            sync_entry = (
-                self._sync_codex_entry_from_auth_store
-                if self.provider == "openai-codex"
-                else self._sync_xai_oauth_entry_from_pool_store
-            )
             with _auth_store_lock(
                 timeout_seconds=self._single_use_refresh_lock_timeout()
             ):
-                synced = sync_entry(entry)
+                synced = self._sync_entry_from_pool_store(entry)
                 if self.provider == "openai-codex":
+                    if synced is not entry and synced.last_status == STATUS_DEAD:
+                        # Another process wrote this login off on the pair it
+                        # rotated in: nothing here recovers it.
+                        return None
+                    if synced is not entry and not self._entry_needs_refresh(synced):
+                        # Another process rotated this row after the pair that
+                        # expired or failed here: that pair is spent, the row's is not.
+                        return synced
+                    # A Codex login written to the auth.json singleton is
+                    # followed only by the entries holding its chain.
+                    synced = self._sync_codex_entry_from_auth_store(synced)
                     if synced is not entry:
                         entry = synced
                         if not force and not self._entry_needs_refresh(entry):
@@ -1849,6 +1878,27 @@ class CredentialPool:
             last_error_reset_at=None,
         )
         self._replace_entry(entry, updated)
+        if self.provider == "openai-codex" and entry.refresh_token:
+            # Another row holding the refresh token just spent is the same chain
+            # (a legacy manual:device_code alias of the device_code login): it
+            # takes the new pair instead of keeping the spent one.
+            with self._lock:
+                for alias in [
+                    item for item in self._entries
+                    if item.id != updated.id and item.refresh_token == entry.refresh_token
+                ]:
+                    self._replace_entry(alias, replace(
+                        alias,
+                        access_token=updated.access_token,
+                        refresh_token=updated.refresh_token,
+                        last_refresh=updated.last_refresh,
+                        last_status=None,
+                        last_status_at=None,
+                        last_error_code=None,
+                        last_error_reason=None,
+                        last_error_message=None,
+                        last_error_reset_at=None,
+                    ))
         self._persist()
         # Sync refreshed tokens back to auth.json providers so that
         # _seed_from_singletons() on the next load_pool() sees fresh state
@@ -2107,7 +2157,7 @@ class CredentialPool:
                     sync_fn = (
                         self._sync_codex_entry_from_auth_store
                         if self.provider == "openai-codex"
-                        else self._sync_xai_oauth_entry_from_pool_store
+                        else self._sync_entry_from_pool_store
                     )
                     pending_refresh.append((entry, sync_fn))
                     continue
@@ -2531,11 +2581,7 @@ class CredentialPool:
                 replace(entry, priority=new_priority)
                 for new_priority, entry in enumerate(self._entries)
             ]
-            write_credential_pool(
-                self.provider,
-                [entry.to_dict() for entry in self._entries],
-                removed_ids=[removed.id],
-            )
+            self._persist(removed_ids=[removed.id])
             if self._current_id == removed.id:
                 self._current_id = None
             return removed
@@ -3354,11 +3400,9 @@ def load_pool(provider: str) -> CredentialPool:
         )
         changed |= _normalize_pool_priorities(provider, entries)
 
+    pool = CredentialPool(provider, entries)
+    pool._persisted_token_pairs = auth_mod._token_pairs_by_id(raw_entries)
     if changed:
         new_ids = {entry.id for entry in entries}
-        write_credential_pool(
-            provider,
-            [entry.to_dict() for entry in sorted(entries, key=lambda item: item.priority)],
-            removed_ids=disk_ids - new_ids,
-        )
-    return CredentialPool(provider, entries)
+        pool._persist(removed_ids=sorted(disk_ids - new_ids))
+    return pool
