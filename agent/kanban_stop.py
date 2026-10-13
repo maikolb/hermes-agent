@@ -125,6 +125,35 @@ def _principal_continuation(receipt):
             'never invent a grant, credential, repaired receipt or broaden scope. Do not end with a future-action promise.]')
 
 
+def principal_wake_answered(state) -> bool:
+    """True once this card wake's turn recorded the answer and the card has no pending decision left.
+
+    PRINCIPAL_TURN_ENDS_AT_ANSWER_20261013: the call after the answer only wrote the
+    closing text, with the whole context (265 to 278 thousand input tokens on 13/10).
+    A card with another pending decision keeps the turn; a turn opened by a person
+    carries no wake receipt.
+    """
+    from gateway.wake import current_notify_receipt
+    state = state or {}
+    receipt = current_notify_receipt.get() or (state.get('routing') or {}).get('kanban_wake_delivery') or {}
+    task_id = receipt.get('principal_task_id')
+    started = state.get('created_at')
+    if not task_id or not receipt.get('db_path') or not started:
+        return False
+    try:
+        conn = sqlite3.connect(Path(receipt['db_path']).resolve().as_uri()+'?mode=ro', uri=True, timeout=5)
+        try:
+            if conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='pending'", (task_id,)).fetchone():
+                return False
+            # task_events.created_at is whole seconds: the floor of the turn start keeps an answer of its first second.
+            return conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='nfos_principal_resolved' AND created_at>=?",
+                                (task_id, int(started))).fetchone() is not None
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return False
+
+
 def kanban_stop_nudge_enabled() -> bool:
     """Return whether the kanban stop-guard is active for this process.
 
@@ -213,5 +242,6 @@ def build_kanban_stop_nudge(
 __all__ = [
     "build_kanban_stop_nudge",
     "kanban_stop_nudge_enabled",
+    "principal_wake_answered",
     "session_called_kanban_terminal",
 ]
