@@ -4789,10 +4789,11 @@ def _pool_error_context(exc: Exception) -> Dict[str, Any]:
 
 
 def _pool_quota_error_context(exc: Exception) -> Dict[str, Any]:
-    """What the pool is told about an auxiliary call refused on quota: the
-    reason and the reset time the main loop reads from the same answer.  A
-    mark without them forgot the reset time of a usage window and put the
-    exhausted credential back in rotation one hour later.  An answer that
+    """What the pool is told about an auxiliary call the provider refused (quota
+    or auth): the reason and the reset time the main loop reads from the same
+    answer.  A quota mark without them forgot the reset time of a usage window
+    and put the exhausted credential back in rotation one hour later; an auth
+    mark without the reason never wrote a revoked login off.  An answer that
     cannot be read is told as before."""
     payload = _pool_error_context(exc)
     try:
@@ -4847,6 +4848,23 @@ def _recoverable_pool_provider(
     return None
 
 
+def _codex_pool_owns_key(provider: str, api_key: str) -> bool:
+    """Whether a failed openai-codex auxiliary call used a credential-pool entry's key.
+
+    The provider-level refresh (``_refresh_provider_credentials``) resolves the
+    auth.json login, not that entry: it rotated another chain, the retry met the
+    same refusal and the pool never heard of it. Such a failure goes to the pool
+    recovery, which refreshes the entry itself or marks it as the main loop does.
+    """
+    if _normalize_aux_provider(provider) != "openai-codex" or not api_key:
+        return False
+    try:
+        pool = load_pool("openai-codex")
+    except Exception:
+        return False
+    return any(entry.runtime_api_key == api_key for entry in pool.entries())
+
+
 def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str = "") -> bool:
     """Try same-provider credential-pool recovery for auxiliary calls.
 
@@ -4865,17 +4883,23 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
         return False
 
     status_code = getattr(exc, "status_code", None)
-    error_context = _pool_error_context(exc)
     hint = failed_api_key or None
 
     if _is_auth_error(exc):
-        refreshed = pool.try_refresh_current()
+        # A Codex login follows the main loop's rule (recover_with_credential_pool):
+        # refresh the entry that made the failed call, else mark it with the
+        # provider's reason, which writes a revoked login off (STATUS_DEAD).
+        codex_login = normalized == "openai-codex" and hint is not None
+        if codex_login:
+            refreshed = pool.try_refresh_matching(api_key_hint=hint)
+        else:
+            refreshed = pool.try_refresh_current()
         if refreshed is not None:
             _evict_cached_clients(normalized)
             return True
         next_entry = pool.mark_exhausted_and_rotate(
             status_code=status_code if status_code is not None else 401,
-            error_context=error_context,
+            error_context=_pool_quota_error_context(exc) if codex_login else _pool_error_context(exc),
             api_key_hint=hint,
         )
         if next_entry is not None:
@@ -10016,7 +10040,8 @@ def _call_llm_impl(
             resolved_provider, _base_info)
         if (_is_auth_error(first_err)
                 and auth_refresh_provider not in {"auto", "", None}
-                and not client_is_nous):
+                and not client_is_nous
+                and not _codex_pool_owns_key(auth_refresh_provider, str(getattr(client, "api_key", "") or ""))):
             if _refresh_provider_credentials(auth_refresh_provider):
                 if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
                     # The stale client is cached under the route label
@@ -10759,7 +10784,8 @@ async def _async_call_llm_impl(
             resolved_provider, _client_base)
         if (_is_auth_error(first_err)
                 and auth_refresh_provider not in {"auto", "", None}
-                and not client_is_nous):
+                and not client_is_nous
+                and not _codex_pool_owns_key(auth_refresh_provider, str(getattr(client, "api_key", "") or ""))):
             if _refresh_provider_credentials(auth_refresh_provider):
                 if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
                     # The stale client is cached under the route label

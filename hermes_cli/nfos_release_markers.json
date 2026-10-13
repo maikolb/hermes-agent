@@ -207,5 +207,11 @@
   {"pr": 334, "file": "agent/anthropic_adapter.py", "text": "def resolve_anthropic_workspace_id() -> str:"},
   {"pr": 334, "file": "agent/anthropic_adapter.py", "text": "headers = anthropic_workspace_headers(api_key, normalized_base_url)"},
   {"pr": 334, "file": "hermes_cli/models.py", "text": "headers.update(anthropic_workspace_headers(token, resolved_base_url))"},
-  {"pr": 334, "file": "run_agent.py", "text": "with_anthropic_workspace_hint(f\"{prefix}{msg[:300]}\")"}
+  {"pr": 334, "file": "run_agent.py", "text": "with_anthropic_workspace_hint(f\"{prefix}{msg[:300]}\")"},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/credential_pool.py", "text": "def _sync_entry_from_pool_store("},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/credential_pool.py", "text": "token_bases=self._persisted_token_pairs,"},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "hermes_cli/auth.py", "text": "def _merge_pool_row_generation("},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/credential_pool.py", "text": "return bool(refresh_token) and refresh_token == str(singleton_tokens.get(\"refresh_token\") or \"\").strip()"},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/auxiliary_client.py", "text": "def _codex_pool_owns_key("},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/auxiliary_client.py", "text": "refreshed = pool.try_refresh_matching(api_key_hint=hint)"}
 ]
