@@ -209,5 +209,10 @@
   {"pr": 334, "file": "hermes_cli/models.py", "text": "headers.update(anthropic_workspace_headers(token, resolved_base_url))"},
   {"pr": 334, "file": "run_agent.py", "text": "with_anthropic_workspace_hint(f\"{prefix}{msg[:300]}\")"},
   {"pr": 335, "file": "plugins/platforms/whatsapp/adapter.py", "text": "_NODE_PROBE_TIMEOUT_S = 5"},
-  {"pr": 335, "file": "plugins/platforms/whatsapp/adapter.py", "text": "\"WhatsApp: `%s --version` did not answer within %ss; treating Node.js as present\","}
+  {"pr": 335, "file": "plugins/platforms/whatsapp/adapter.py", "text": "\"WhatsApp: `%s --version` did not answer within %ss; treating Node.js as present\","},
+  {"pr": 337, "file": "hermes_cli/auth.py", "text": "def _load_codex_login_state(auth_store: Dict[str, Any]) -> Optional[Dict[str, Any]]:"},
+  {"pr": 337, "file": "hermes_cli/auth.py", "text": "isinstance(row, dict) and row.get(\"source\") != \"device_code\" for row in rows"},
+  {"pr": 337, "file": "hermes_cli/auth.py", "text": "if not owns_pool and not (isinstance(sources, (list, dict)) and \"device_code\" in sources):"},
+  {"pr": 337, "file": "hermes_cli/auth.py", "text": "state = _load_codex_login_state(auth_store)", "min": 2},
+  {"pr": 337, "file": "agent/credential_pool.py", "text": "state = _load_codex_login_state(auth_store)", "min": 3}
 ]
