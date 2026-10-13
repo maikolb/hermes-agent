@@ -1755,7 +1755,10 @@ class CredentialPool:
                     try:
                         with _auth_store_lock():
                             auth_store = _load_auth_store()
-                            state = _load_codex_login_state(auth_store) or {}
+                            # No login to clear, nothing to write: a pool profile
+                            # without its own login would get an empty block, and
+                            # the next resolution would import the Codex CLI login.
+                            state = _load_codex_login_state(auth_store)
                             if isinstance(state, dict):
                                 tokens = state.get("tokens") or {}
                                 if isinstance(tokens, dict):

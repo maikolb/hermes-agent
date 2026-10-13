@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -357,32 +358,54 @@ def test_pool_profile_without_suppression_does_not_seed_root_login(layout, resol
     assert (root / "auth.json").read_bytes() == root_before
 
 
-def test_terminal_refresh_cleanup_saves_no_root_state_into_pool_profile(layout):
-    """A device_code row copied from the root before the profile got its pool dies on refresh."""
+def _dying_row(rows: list, dying: str) -> tuple:
+    """The row whose refresh is refused for good, and its spent refresh token."""
+    if dying == "mirror":
+        # A device_code row copied from the root before the profile got its pool.
+        rows.append(dict(
+            rows[0],
+            id="mirror",
+            label="Codex Desktop account",
+            source="device_code",
+            priority=3,
+            access_token=ROOT_ACCESS_EXPIRED,
+            refresh_token="root-rt-1",
+            last_refresh="2026-09-23T17:50:09Z",
+        ))
+        return rows, "root-rt-1"
+    # One of the profile's own logins, expired and revoked.
+    rows[0]["access_token"] = _jwt(time.time() - 3600, "user-nexa", NEXA_ACCOUNT)
+    return rows, "pool-rt-1"
+
+
+@pytest.mark.parametrize("dying", ["mirror", "manual"])
+def test_terminal_refresh_cleanup_writes_no_login_block_into_pool_profile(layout, dying):
+    """A row dies on refresh in a pool profile without its own login while the root has one."""
     from agent.credential_pool import load_pool
 
-    rows = _pool_rows()
-    mirror = dict(
-        rows[0],
-        id="mirror",
-        label="Codex Desktop account",
-        source="device_code",
-        priority=3,
-        access_token=ROOT_ACCESS_EXPIRED,
-        refresh_token="root-rt-1",
-        last_refresh="2026-09-23T17:50:09Z",
-    )
+    rows, spent = _dying_row(_pool_rows(), dying)
     root, profile, endpoint, root_before = _arrange(
-        layout, root_login=_root_login(ROOT_ACCESS_EXPIRED), pool=rows + [mirror], suppressed=SUPPRESSED,
+        layout, root_login=_root_login(ROOT_ACCESS_EXPIRED), pool=rows, suppressed=SUPPRESSED,
     )
-    endpoint.spent.add("root-rt-1")
+    endpoint.spent.add(spent)
 
     load_pool("openai-codex").select()
 
-    saved = _profile_login(profile) or {}
-    assert saved.get("last_auth_error", {}).get("reason") == "credential_pool_refresh_failure"
-    assert "label" not in saved
-    assert "last_refresh" not in saved
+    assert spent in endpoint.refreshed
+    assert _profile_login(profile) is None
+    assert (root / "auth.json").read_bytes() == root_before
+
+    # An empty block would send the next resolution to the Codex CLI login.
+    cli_home = Path(os.environ["CODEX_HOME"])
+    cli_home.mkdir(parents=True, exist_ok=True)
+    _write(cli_home / "auth.json", {"tokens": {
+        "access_token": _jwt(time.time() + 5 * DAY, "cli"), "refresh_token": "cli-rt-1",
+    }})
+
+    creds = auth_mod.resolve_codex_runtime_credentials()
+
+    assert creds["source"] == "credential_pool"
+    assert _profile_login(profile) is None
     assert (root / "auth.json").read_bytes() == root_before
 
 
