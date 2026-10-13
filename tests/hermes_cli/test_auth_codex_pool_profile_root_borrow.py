@@ -8,17 +8,21 @@ refresh the ROOT's single-use refresh token and save the root's state (label,
 ``last_auth_error``) into the profile.  ``hermes auth remove`` suppressing
 ``device_code`` did not stop it, because only pool seeding read the
 suppression.  The ``api_mode`` the auxiliary fallback asked for never depended
-on the loan: the pool answers ``codex_responses`` on its own.
+on the loan: the pool answers ``codex_responses`` on its own.  The pool read
+the same loan too: seeding a ``device_code`` row from the root's login, a row
+adopting the root's newer pair, and the terminal-refresh cleanup.
 
-Every token here is a local stand-in and the token endpoint is a recording
-double: nothing leaves the process.
+Every token here is a local stand-in, the token endpoint is a recording
+double and the Codex route is a local HTTP double: nothing leaves the process.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -30,8 +34,10 @@ CODEX_BASE = "https://chatgpt.com/backend-api/codex"
 DAY = 86400
 
 
-def _jwt(exp: float, sub: str) -> str:
+def _jwt(exp: float, sub: str, account: str | None = None) -> str:
     claims = {"exp": int(exp), "sub": sub}
+    if account:
+        claims["https://api.openai.com/auth"] = {"chatgpt_account_id": account}
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
     return f"h.{payload}.s"
 
@@ -77,13 +83,24 @@ SUPPRESSED = {"openai-codex": ["device_code", "manual:device_code"]}
 
 
 class _TokenEndpoint:
-    """Records every refresh token presented; answers with a new local pair."""
+    """Records every refresh token presented; answers with a new local pair.
+
+    A token in ``spent`` gets the terminal ``refresh_token_reused`` answer.
+    """
 
     def __init__(self):
         self.refreshed = []
+        self.spent = set()
 
     def __call__(self, access_token, refresh_token, *, timeout_seconds=20.0):
         self.refreshed.append(refresh_token)
+        if refresh_token in self.spent:
+            raise AuthError(
+                "refresh token already used",
+                provider="openai-codex",
+                code="refresh_token_reused",
+                relogin_required=True,
+            )
         return {
             "access_token": _jwt(time.time() + 10 * DAY, "rotated"),
             "refresh_token": refresh_token + "-next",
@@ -253,6 +270,249 @@ def test_auxiliary_fallback_destination_does_not_copy_root_login(layout):
     assert dest.api_mode == "codex_responses"
     assert endpoint.refreshed == []
     assert _profile_login(profile) is None
+    assert (root / "auth.json").read_bytes() == root_before
+
+
+def test_legacy_mapping_suppression_blocks_root_login(layout):
+    """Older stores keep a provider's suppressed sources as a mapping (see suppress_credential_source)."""
+    root, profile, endpoint, root_before = _arrange(
+        layout,
+        root_login=_root_login(ROOT_ACCESS_EXPIRED),
+        suppressed={"openai-codex": {"device_code": True, "manual:device_code": True}},
+    )
+
+    with pytest.raises(AuthError) as exc:
+        auth_mod.resolve_codex_runtime_credentials()
+
+    assert exc.value.code == "codex_auth_missing"
+    assert endpoint.refreshed == []
+    assert _profile_login(profile) is None
+    assert (root / "auth.json").read_bytes() == root_before
+
+
+# --------------------------------------------------------------------------
+# The pool reads the login too: seeding, adoption by a row, terminal cleanup.
+# --------------------------------------------------------------------------
+
+NEXA_ACCOUNT = "acct-nexa"
+ROOT_REFRESH_CHAIN = {"root-rt-1", "root-rt-1-next"}
+
+
+def _pool_refresh_tokens(profile: Path) -> list:
+    store = json.loads((profile / "auth.json").read_text())
+    return [row.get("refresh_token") for row in (store.get("credential_pool") or {}).get("openai-codex", [])]
+
+
+def _root_newer_than_row_one(*, root_access_expired: bool):
+    """Row 1 and the root are one account; the root rotated after row 1, whose access token expired."""
+    root_exp = time.time() + (-DAY if root_access_expired else 5 * DAY)
+    root_login = _root_login(_jwt(root_exp, "user-nexa", NEXA_ACCOUNT))
+    root_login["last_refresh"] = "2026-10-13T12:00:00Z"
+    rows = _pool_rows()
+    rows[0]["access_token"] = _jwt(time.time() - 3600, "user-nexa", NEXA_ACCOUNT)
+    return root_login, rows
+
+
+@pytest.mark.parametrize("root_access_expired", [True, False], ids=["root-expired", "root-fresh"])
+def test_pool_row_does_not_adopt_a_newer_root_login(layout, root_access_expired):
+    from agent.credential_pool import load_pool
+
+    root_login, rows = _root_newer_than_row_one(root_access_expired=root_access_expired)
+    root, profile, endpoint, root_before = _arrange(
+        layout, root_login=root_login, pool=rows, suppressed=SUPPRESSED,
+    )
+
+    load_pool("openai-codex").select()
+
+    assert endpoint.refreshed == ["pool-rt-1"]
+    assert _pool_refresh_tokens(profile) == ["pool-rt-1-next", "pool-rt-2", "pool-rt-3"]
+    assert _profile_login(profile) is None
+    assert (root / "auth.json").read_bytes() == root_before
+
+
+def _select_from_pool():
+    from agent.credential_pool import load_pool
+
+    load_pool("openai-codex").select()
+
+
+def _resolve_main_runtime():
+    """Main agent, gateway, cron and delegation: resolve_runtime_provider without an explicit base."""
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    resolve_runtime_provider(requested="openai-codex")
+
+
+@pytest.mark.parametrize("resolve", [_select_from_pool, _resolve_main_runtime], ids=["pool", "main-runtime"])
+def test_pool_profile_without_suppression_does_not_seed_root_login(layout, resolve):
+    root, profile, endpoint, root_before = _arrange(
+        layout, root_login=_root_login(ROOT_ACCESS_EXPIRED), pool=_pool_rows(),
+    )
+
+    resolve()
+
+    assert _pool_refresh_tokens(profile) == ["pool-rt-1", "pool-rt-2", "pool-rt-3"]
+    assert endpoint.refreshed == []
+    assert _profile_login(profile) is None
+    assert (root / "auth.json").read_bytes() == root_before
+
+
+def test_terminal_refresh_cleanup_saves_no_root_state_into_pool_profile(layout):
+    """A device_code row copied from the root before the profile got its pool dies on refresh."""
+    from agent.credential_pool import load_pool
+
+    rows = _pool_rows()
+    mirror = dict(
+        rows[0],
+        id="mirror",
+        label="Codex Desktop account",
+        source="device_code",
+        priority=3,
+        access_token=ROOT_ACCESS_EXPIRED,
+        refresh_token="root-rt-1",
+        last_refresh="2026-09-23T17:50:09Z",
+    )
+    root, profile, endpoint, root_before = _arrange(
+        layout, root_login=_root_login(ROOT_ACCESS_EXPIRED), pool=rows + [mirror], suppressed=SUPPRESSED,
+    )
+    endpoint.spent.add("root-rt-1")
+
+    load_pool("openai-codex").select()
+
+    saved = _profile_login(profile) or {}
+    assert saved.get("last_auth_error", {}).get("reason") == "credential_pool_refresh_failure"
+    assert "label" not in saved
+    assert "last_refresh" not in saved
+    assert (root / "auth.json").read_bytes() == root_before
+
+
+# --------------------------------------------------------------------------
+# The production path end to end: call_llm(task="compression") gets the
+# Codex 400 and walks auxiliary.compression.fallback_chain.
+# --------------------------------------------------------------------------
+
+COMPRESSION_CONFIG = """model:
+  default: gpt-6-astra
+  provider: openai-codex
+  base_url: https://chatgpt.com/backend-api/codex
+fallback_providers: []
+auxiliary:
+  free_only: true
+  compression:
+    provider: openai-codex
+    model: gpt-5.4-900k
+    fallback_chain:
+      - provider: openai-codex
+        model: gpt-5.6-luna-900k
+      - provider: openai-codex
+        model: gpt-5.6-terra-900k
+      - provider: openai-codex
+        model: gpt-5.6-sol-900k
+    base_url: ''
+    timeout: 60
+codex:
+  use_credits: false
+"""
+
+
+class _CodexRoute:
+    """Local Codex responses route: every model gets the 13/10 400; records model and bearer."""
+
+    def __init__(self):
+        self.calls = []
+        calls = self.calls
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    model = json.loads(raw.decode() or "{}").get("model") or ""
+                except ValueError:
+                    model = ""
+                auth = str(self.headers.get("Authorization") or "")
+                calls.append((model, auth[7:].strip() if auth.lower().startswith("bearer ") else auth))
+                body = json.dumps({
+                    "detail": f"The '{model}' model is not supported when using Codex with a ChatGPT account."
+                }).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}/backend-api/codex"
+
+
+@pytest.fixture()
+def codex_route(monkeypatch):
+    import agent.auxiliary_client as aux_mod
+
+    route = _CodexRoute()
+    create = aux_mod._create_openai_client
+
+    def _local(*args, **kwargs):
+        base = str(kwargs.get("base_url") or "").rstrip("/")
+        if base.startswith(CODEX_BASE):
+            kwargs["base_url"] = route.base + base[len(CODEX_BASE):]
+        return create(*args, **kwargs)
+
+    monkeypatch.setattr(aux_mod, "_create_openai_client", _local)
+    aux_mod.shutdown_cached_clients()
+    aux_mod._aux_unhealthy_until.clear()
+    aux_mod._aux_unhealthy_logged_at.clear()
+    yield route
+    aux_mod.shutdown_cached_clients()
+    aux_mod._aux_unhealthy_until.clear()
+    aux_mod._aux_unhealthy_logged_at.clear()
+    route.server.shutdown()
+    route.server.server_close()
+
+
+@pytest.mark.parametrize("setup", ["suppressed", "unsuppressed", "root-newer"])
+def test_compression_fallback_in_pool_profile_leaves_root_login_alone(layout, codex_route, setup):
+    from agent.auxiliary_client import call_llm
+
+    if setup == "root-newer":
+        root_login, rows = _root_newer_than_row_one(root_access_expired=True)
+    else:
+        root_login, rows = _root_login(ROOT_ACCESS_EXPIRED), _pool_rows()
+    root, profile, endpoint, root_before = _arrange(
+        layout,
+        root_login=root_login,
+        pool=rows,
+        suppressed=None if setup == "unsuppressed" else SUPPRESSED,
+    )
+    (profile / "config.yaml").write_text(COMPRESSION_CONFIG)
+    root_access = root_login["tokens"]["access_token"]
+
+    try:
+        call_llm(
+            task="compression",
+            main_runtime={
+                "model": "gpt-6-astra",
+                "provider": "openai-codex",
+                "base_url": CODEX_BASE,
+                "api_key": POOL_ACCESS[1],
+                "api_mode": "codex_responses",
+            },
+            messages=[{"role": "user", "content": "summarise the conversation"}],
+        )
+    except Exception:
+        pass  # every model answers the 400, as on 13/10
+
+    models = [model for model, _bearer in codex_route.calls]
+    assert any(model.startswith("gpt-5.4") for model in models)
+    assert any(model.startswith("gpt-5.6-luna") for model in models)
+    assert not ROOT_REFRESH_CHAIN & set(endpoint.refreshed)
+    assert root_access not in [bearer for _model, bearer in codex_route.calls]
+    assert _profile_login(profile) is None
+    assert not ROOT_REFRESH_CHAIN & set(_pool_refresh_tokens(profile))
     assert (root / "auth.json").read_bytes() == root_before
 
 

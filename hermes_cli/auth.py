@@ -3817,7 +3817,9 @@ def _load_codex_login_state(auth_store: Dict[str, Any]) -> Optional[Dict[str, An
     ``hermes auth remove`` suppressed ``device_code`` authenticates through its
     pool, so the root's login is not lent to it: refreshing the borrowed login
     would spend the root's single-use refresh token and ``_save_codex_tokens``
-    would save the root's state into the profile.
+    would save the root's state into the profile.  The pool reads the login
+    through here too: seeding the ``device_code`` row, a row adopting the
+    login's newer pair and the terminal-refresh cleanup.
     """
     suppressed = auth_store.get("suppressed_sources")
     sources = suppressed.get("openai-codex") if isinstance(suppressed, dict) else None

@@ -30,6 +30,7 @@ from hermes_cli.auth import (
     _decode_jwt_claims,
     _global_auth_file_path,
     _load_auth_store,
+    _load_codex_login_state,
     _load_provider_state,
     _load_provider_state_with_source,
     _resolve_kimi_base_url,
@@ -1040,7 +1041,7 @@ class CredentialPool:
         try:
             with _auth_store_lock():
                 auth_store = _load_auth_store()
-                state = _load_provider_state(auth_store, "openai-codex")
+                state = _load_codex_login_state(auth_store)
             if not isinstance(state, dict):
                 return entry
             tokens = state.get("tokens")
@@ -1725,7 +1726,7 @@ class CredentialPool:
                     try:
                         with _auth_store_lock():
                             auth_store = _load_auth_store()
-                            state = _load_provider_state(auth_store, "openai-codex") or {}
+                            state = _load_codex_login_state(auth_store) or {}
                             if isinstance(state, dict):
                                 tokens = state.get("tokens") or {}
                                 if isinstance(tokens, dict):
@@ -2975,7 +2976,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
         if _is_suppressed(provider, "device_code"):
             return changed, active_sources
 
-        state = _load_provider_state(auth_store, "openai-codex")
+        state = _load_codex_login_state(auth_store)
         tokens = state.get("tokens") if isinstance(state, dict) else None
         # Hermes owns its own Codex auth state — we do NOT auto-import from
         # ~/.codex/auth.json at pool-load time.  OAuth refresh tokens are
