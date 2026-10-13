@@ -37,8 +37,11 @@ def _card(agent, tmp_path, monkeypatch, decisions=1):
 def _run(agent, provider, db, tid, dids, responses, *, wake=True, message='[kanban] worker aguardando sua decisão'):
     """Run one turn; return the result and the call count seen at each recorded answer."""
     from hermes_cli import kanban_db as kb, nfos_delivery as delivery
+    import model_tools
     from gateway.wake import current_notify_receipt
     from tools.registry import registry
+    # agent_env re-imports tools.* for each test while model_tools keeps dispatching through the first registry.
+    registries = list({id(reg): reg for reg in (registry, model_tools.registry)}.values())
     answered = []
 
     def decide(args, **kwargs):
@@ -47,8 +50,9 @@ def _run(agent, provider, db, tid, dids, responses, *, wake=True, message='[kanb
         answered.append(len(provider.captured_requests))
         return json.dumps({'resolved': True})
 
-    registry.register(DECIDE, 'test_principal_answer', {'name': DECIDE, 'description': 'Resolve the fixture decision',
-                                                        'parameters': {'type': 'object', 'properties': {}}}, decide)
+    for reg in registries:
+        reg.register(DECIDE, 'test_principal_answer', {'name': DECIDE, 'description': 'Resolve the fixture decision',
+                                                       'parameters': {'type': 'object', 'properties': {}}}, decide)
     agent.valid_tool_names.add(DECIDE)
     agent.max_iterations = 10
     provider.response_queue.clear()
@@ -60,7 +64,8 @@ def _run(agent, provider, db, tid, dids, responses, *, wake=True, message='[kanb
         result = agent.run_conversation(message, conversation_history=[], task_id='answer-turn')
     finally:
         current_notify_receipt.reset(token)
-        registry._tools.pop(DECIDE, None)
+        for reg in registries:
+            reg._tools.pop(DECIDE, None)
     return result, answered
 
 
