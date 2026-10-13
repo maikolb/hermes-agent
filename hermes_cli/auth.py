@@ -3950,8 +3950,9 @@ def _sync_codex_pool_entries(
       that use the same device-code OAuth mechanism.  ONLY synced if the
       entry's existing access_token matches the *previous* singleton
       access_token (i.e. the entry is a legacy singleton-alias from the
-      #33000 workaround era).  Manual entries whose tokens never matched the
-      singleton represent INDEPENDENT accounts added via
+      #33000 workaround era) or its refresh_token matches the previous
+      singleton refresh_token (the same chain, now rotated).  Manual entries
+      whose tokens never matched the singleton represent INDEPENDENT accounts added via
       ``hermes auth add openai-codex`` and must not be overwritten by a
       re-auth that targeted a different account (regression for #39236).
 
@@ -3968,7 +3969,7 @@ def _sync_codex_pool_entries(
     * ``manual:api_key`` and any other non-device-code manual sources — those
       are independent credentials (an explicit API key, a different ChatGPT
       account, etc.) and must not be overwritten by a single re-auth.
-    * ``manual:device_code`` entries whose access_token does NOT match the
+    * ``manual:device_code`` entries whose tokens do NOT match the
       previous singleton — see above; these are independent accounts.
 
     Error markers (``last_status``, ``last_error_*``) are cleared ONLY on
@@ -3992,8 +3993,10 @@ def _sync_codex_pool_entries(
     # is the right default for first-ever-save or a freshly initialized
     # auth.json).
     prev_at = None
+    prev_rt = None
     if isinstance(previous_singleton_tokens, dict):
         prev_at = previous_singleton_tokens.get("access_token") or None
+        prev_rt = previous_singleton_tokens.get("refresh_token") or None
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -4004,11 +4007,14 @@ def _sync_codex_pool_entries(
         elif source == "manual:device_code":
             # Refresh only if this entry's existing access_token matches the
             # previous singleton access_token (i.e. it is a true alias of the
-            # singleton from the #33000 workaround era).  An entry with its
+            # singleton from the #33000 workaround era), or it holds the
+            # previous singleton refresh_token (one chain: once the singleton
+            # rotated, the entry's refresh token is spent).  An entry with its
             # own distinct token material is an independent account and must
             # be left alone (#39236).
             refresh_this_entry = bool(
-                prev_at and entry.get("access_token") == prev_at
+                (prev_at and entry.get("access_token") == prev_at)
+                or (prev_rt and entry.get("refresh_token") == prev_rt)
             )
         else:
             # ``manual:api_key`` and any future non-device-code sources.

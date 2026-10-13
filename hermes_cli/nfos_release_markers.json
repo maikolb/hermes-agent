@@ -212,6 +212,11 @@
   {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/credential_pool.py", "text": "token_bases=self._persisted_token_pairs,"},
   {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "hermes_cli/auth.py", "text": "def _merge_pool_row_generation("},
   {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/credential_pool.py", "text": "return bool(refresh_token) and refresh_token == str(singleton_tokens.get(\"refresh_token\") or \"\").strip()"},
-  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/auxiliary_client.py", "text": "def _codex_pool_owns_key("},
-  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/auxiliary_client.py", "text": "refreshed = pool.try_refresh_matching(api_key_hint=hint)"}
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/auxiliary_client.py", "text": "def _provider_refresh_serves_key("},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/auxiliary_client.py", "text": "refreshed = pool.try_refresh_matching(api_key_hint=hint)"},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/credential_pool.py", "text": "if base_pair is not None and disk_pair == base_pair:"},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/credential_pool.py", "text": "if synced is not entry and synced.last_status == STATUS_DEAD:"},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/credential_pool.py", "text": "if item.id != updated.id and item.refresh_token == entry.refresh_token"},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "hermes_cli/auth.py", "text": "or (prev_rt and entry.get(\"refresh_token\") == prev_rt)"},
+  {"pr": null, "note": "fix/nfos-codex-pool-concurrent-refresh, número do PR ao abrir", "file": "agent/auxiliary_client.py", "text": "failed_api_key=retry_key[0] if retry_key and pool_provider == \"openai-codex\" else \"\",", "min": 2}
 ]
