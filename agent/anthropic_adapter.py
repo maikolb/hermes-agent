@@ -5,7 +5,7 @@ Anthropic's Messages API. Follows the same pattern as the codex_responses
 adapter — all provider-specific logic is isolated here.
 
 Auth supports:
-  - Regular API keys (sk-ant-api*) → x-api-key header
+  - Console API keys (sk-ant-api*, sk-ant-usr*, sk-ant-svc*, sk-ant-admin*) → x-api-key header
   - OAuth setup-tokens (sk-ant-oat*) → Bearer auth + beta header
   - Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json) → Bearer auth
 """
@@ -21,10 +21,10 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
-from hermes_constants import get_hermes_home
+from hermes_constants import display_hermes_home, get_hermes_home
 from typing import Any, Dict, List, Optional, Tuple
 from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
-from agent.secret_scope import get_secret as _get_secret
+from agent.secret_scope import UnscopedSecretError, get_secret as _get_secret
 
 try:
     import hermes_cli as _hermes_cli
@@ -452,17 +452,22 @@ def _is_oauth_token(key: str) -> bool:
     """Check if the key is an Anthropic OAuth/setup token.
 
     Positively identifies Anthropic OAuth tokens by their key format:
-    - ``sk-ant-`` prefix (but NOT ``sk-ant-api``) → setup tokens, managed keys
+    - ``sk-ant-`` prefix (but NOT the Console API-key families ``sk-ant-api`` /
+      ``sk-ant-usr`` / ``sk-ant-svc`` / ``sk-ant-admin``) → setup tokens, managed keys
     - ``eyJ`` prefix → JWTs from the Anthropic OAuth flow
     - ``cc-`` prefix → Claude Code OAuth access tokens (from CLAUDE_CODE_OAUTH_TOKEN)
 
     Non-Anthropic keys (MiniMax, Alibaba, etc.) don't match any pattern
-    and correctly return False.
+    and correctly return False. Unknown ``sk-ant-*`` prefixes still classify
+    as OAuth so OAuth prefixes Anthropic ships later keep working.
     """
     if not key:
         return False
     # Regular Anthropic Console API keys — x-api-key auth, never OAuth
-    if key.startswith("sk-ant-api"):
+    # (sk-ant-usr* user, sk-ant-svc* service-account and sk-ant-admin* keys pay
+    # per token, NousResearch#133856: classifying them as OAuth rides the
+    # Claude Code identity on them).
+    if key.startswith(("sk-ant-api", "sk-ant-usr", "sk-ant-svc", "sk-ant-admin")):
         return False
     # Anthropic-issued tokens (setup-tokens sk-ant-oat-*, managed keys)
     if key.startswith("sk-ant-"):
@@ -827,6 +832,87 @@ def _build_anthropic_client_with_bearer_hook(
     return client
 
 
+_WORKSPACE_ID_HEADER = "anthropic-workspace-id"
+
+
+def resolve_anthropic_workspace_id() -> str:
+    """Workspace an Anthropic Console API key acts in, or ``""`` when none is configured.
+
+    Identity-backed keys (personal ``sk-ant-usr*``, service-account ``sk-ant-svc*``)
+    that are not scoped to a single workspace must name one on every request in the
+    ``anthropic-workspace-id`` header, or the API answers 400 invalid_request_error.
+    ``providers.anthropic.workspace_id`` in config.yaml wins; ``ANTHROPIC_WORKSPACE_ID``
+    (the variable the Anthropic SDKs document) is the fallback.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        config = load_config_readonly()
+        providers = config.get("providers") if isinstance(config, dict) else None
+        entry = providers.get("anthropic") if isinstance(providers, dict) else None
+        configured = entry.get("workspace_id") if isinstance(entry, dict) else None
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+    except Exception:
+        logger.debug("Could not read providers.anthropic.workspace_id", exc_info=True)
+    try:
+        return _getenv("ANTHROPIC_WORKSPACE_ID").strip()
+    except UnscopedSecretError:
+        # Multiplexed gateway read outside a profile scope: fail closed (no
+        # header) instead of borrowing another profile's value.
+        return ""
+
+
+def anthropic_workspace_headers(api_key: Any, base_url: Any = None) -> Dict[str, str]:
+    """``{"anthropic-workspace-id": <id>}`` for a Console API key on the native API, else ``{}``.
+
+    OAuth tokens never carry it (subscription tokens have no workspace and
+    federation tokens are bound to one at exchange time), and third-party
+    Anthropic-compatible endpoints have no Anthropic workspaces.
+    """
+    if not isinstance(api_key, str) or not api_key or _is_oauth_token(api_key):
+        return {}
+    if _is_third_party_anthropic_endpoint(base_url):
+        return {}
+    workspace_id = resolve_anthropic_workspace_id()
+    return {_WORKSPACE_ID_HEADER: workspace_id} if workspace_id else {}
+
+
+def anthropic_workspace_error_hint(detail: Any) -> str:
+    """How to fix an Anthropic workspace rejection in Hermes, or ``""`` for any other error.
+
+    A key that is not scoped to one workspace gets 400 invalid_request_error naming
+    the ``anthropic-workspace-id`` header when it is missing or malformed, and 404
+    ``Workspace `wrkspc_...` not found.`` when the key cannot act in the named
+    workspace. Both shapes are Anthropic-specific, so other providers' errors
+    pass through untouched.
+    """
+    text = str(detail or "").lower()
+    if _WORKSPACE_ID_HEADER in text:
+        home = display_hermes_home()
+        return (
+            "this Anthropic API key needs a valid workspace ID on every request: set "
+            f"providers.anthropic.workspace_id in {home}/config.yaml (or "
+            f"ANTHROPIC_WORKSPACE_ID in {home}/.env) to the wrkspc_... ID shown in the "
+            "Claude Console under Settings > Workspaces."
+        )
+    if "workspace `wrkspc_" in text and "not found" in text:
+        return (
+            "the workspace in providers.anthropic.workspace_id (or ANTHROPIC_WORKSPACE_ID) "
+            "does not exist or this API key has no access to it; check the ID in the "
+            "Claude Console under Settings > Workspaces."
+        )
+    return ""
+
+
+def with_anthropic_workspace_hint(detail: str) -> str:
+    """Append :func:`anthropic_workspace_error_hint` to an error summary (idempotent)."""
+    hint = anthropic_workspace_error_hint(detail)
+    if not hint or hint in detail:
+        return detail
+    return f"{detail} | Hermes: {hint}"
+
+
 def build_anthropic_client(
     api_key,
     base_url: str = None,
@@ -954,10 +1040,14 @@ def build_anthropic_client(
             "x-app": "cli",
         }
     else:
-        # Regular API key → x-api-key header + common betas
+        # Regular API key → x-api-key header + common betas, plus the workspace
+        # an identity-backed key acts in when one is configured.
         kwargs["api_key"] = api_key
+        headers = anthropic_workspace_headers(api_key, normalized_base_url)
         if common_betas:
-            kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
+            headers["anthropic-beta"] = ",".join(common_betas)
+        if headers:
+            kwargs["default_headers"] = headers
 
     if _is_opencode_endpoint(base_url):
         # OpenCode identifies clients by request headers, like OpenRouter does.

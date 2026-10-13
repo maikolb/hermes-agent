@@ -23,8 +23,9 @@ def test_block_closeout_is_once_across_failed_wakes_and_gateway_restarts(tmp_pat
         asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
         asyncio.run(runner._kanban_refresh_worker_focus())
     assert len(adapter.sent) == 1, 'Display closeout bypassed the durable delivery receipt'
-    assert 'bloqueado' in adapter.sent[0]
-    assert 'Homologation binding unsupported' in adapter.sent[0]
+    assert 'bloqueado' in adapter.sent[0] and 'Publish tested candidate' in adapter.sent[0]
+    # BAR_STATE_ONLY_20261010: the block reason is written for the Principal and stays on the card.
+    assert 'Homologation binding unsupported' not in adapter.sent[0]
     adapter.fail = False
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
     assert len(adapter.sent) == 1

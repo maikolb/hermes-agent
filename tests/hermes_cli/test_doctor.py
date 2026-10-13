@@ -247,6 +247,9 @@ class TestHonchoDoctorConfigDetection:
 
 
 def test_doctor_reports_vercel_backend_diagnostics(monkeypatch, tmp_path):
+    # In a container the doctor switches any non-docker backend to local and skips this section;
+    # the diagnostics under test are the ones of a host that is not a container.
+    monkeypatch.setattr("hermes_constants.is_container", lambda: False)
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", "python3.13")
     monkeypatch.setenv("TERMINAL_CONTAINER_DISK", "2048")

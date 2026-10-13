@@ -35,8 +35,9 @@ CREATE INDEX IF NOT EXISTS nfos_waits_task ON nfos_waits(task_id,status);
 OPEN, SATISFIED, EXPIRED, WITHDRAWN = 'open', 'satisfied', 'expired', 'withdrawn'
 # Quem pode tornar o predicado verdadeiro. requester, operator e external são pessoas ou terceiros; os demais são internos.
 EXECUTOR_KINDS = ('requester', 'operator', 'external', 'lab', 'card', 'runtime', 'principal')
-REASONS = ('lab_queue', 'principal_decision', 'external_dependency')
-OUTCOMES = {'principal': 'principal_handoff', 'worker': 'returned_to_worker', 'obligation': 'returned_to_obligation'}
+REASONS = ('lab_queue', 'principal_decision', 'external_dependency', 'provider_quota')
+OUTCOMES = {'principal': 'principal_handoff', 'worker': 'returned_to_worker', 'obligation': 'returned_to_obligation',
+            'still_closed': 'still_closed'}
 PRINCIPAL = {'kind': 'principal', 'name': 'Principal (sessão coordenadora)'}
 _JSON_FIELDS = ('executor', 'predicate', 'evidence', 'origin')
 
@@ -53,7 +54,9 @@ def policy(reason):
     max_attempts: conferências falsas que a espera aguenta. holds_decision: a espera segura uma decisão pendente e perde o
     objeto quando outra rota a responde. on_expire: 'principal' entrega a decisão ao Principal uma vez, com lembretes
     contados (o reparo interno limitado); 'worker' responde a decisão e devolve o card ao executor sem a dependência;
-    'obligation' devolve a decisão à obrigação de reparo da pausa, que é de onde a espera saiu."""
+    'obligation' devolve a decisão à obrigação de reparo da pausa, que é de onde a espera saiu; 'still_closed' só grava o
+    desfecho (ROUTE_WALL_20261012: a rota do provedor não é dependência que o card dispense, o despacho segue segurando o
+    card e ele deixa de contar como espera saudável)."""
     d = _delivery()
     if reason == 'lab_queue':
         return dict(executors=('lab',), predicates=('lab_receipt',), holds_decision=True, on_expire='principal',
@@ -75,6 +78,13 @@ def policy(reason):
                     holds_decision=True, on_expire='obligation', first_check=0, recheck=d.LAB_WAIT_RECHECK_SECONDS,
                     deadline=deadline, max_attempts=max(1, deadline // d.LAB_WAIT_RECHECK_SECONDS),
                     satisfied=d._dependency_delivered, expired=d._dependency_expired)
+    if reason == 'provider_quota':
+        from hermes_cli import nfos_route_walls as walls
+        return dict(executors=('external',), predicates=('route_open',), holds_decision=False,
+                    on_expire='still_closed', first_check=walls.WAIT_RECHECK_SECONDS, recheck=walls.WAIT_RECHECK_SECONDS,
+                    deadline=walls.WAIT_DEADLINE_SECONDS,
+                    max_attempts=max(1, walls.WAIT_DEADLINE_SECONDS // walls.WAIT_RECHECK_SECONDS),
+                    withdrawn=walls.wait_withdrawn, expired=walls.wait_expired)
     raise _delivery().WorkflowError('Unknown wait reason; use one of: ' + ', '.join(REASONS))
 
 
@@ -85,7 +95,14 @@ def _checker(kind):
     d = _delivery()
     return {'lab_receipt': (d._lab_queue_check, True), 'decision_resolved': (_decision_resolved, False),
             'card': (_card_delivered, False), 'probe': (d._dependency_probe_check, True),
-            'lab_status': (d._lab_status_check, True), 'lab_command': (d._lab_command_check, True)}[kind]
+            'lab_status': (d._lab_status_check, True), 'lab_command': (d._lab_command_check, True),
+            'route_open': (_route_open, False)}[kind]
+
+
+def _route_open(conn, wait, budget=None):
+    """Predicado route_open (ROUTE_WALL_20261012): a conferência é da parede de cota, que lê o arquivo da rota."""
+    from hermes_cli import nfos_route_walls as walls
+    return walls.wait_check(conn, wait)
 
 
 class NotYet(Exception):
@@ -205,6 +222,11 @@ def _predicate(reason, spec, value):
         if not isinstance(receipt, str) or not d._LAB_RECEIPT_RX.fullmatch(receipt):
             raise d.WorkflowError('lab_receipt needs the id of the laboratory request')
         return {'kind': kind, 'receipt': receipt}
+    if kind == 'route_open':
+        route = {part: value.get(part) for part in ('profile', 'provider', 'model')}
+        if not all(isinstance(part, str) and part for part in route.values()):
+            raise d.WorkflowError('route_open needs the profile, the provider and the model of the route')
+        return {'kind': 'route_open', **route}
     if kind == 'decision_resolved':
         decision_id = value.get('decision_id')
         if not isinstance(decision_id, str) or not decision_id:
@@ -375,6 +397,8 @@ def _withdrawn_because(conn, wait, spec):
         decision = d.get_decision(conn, wait['decision_id']) if wait['decision_id'] else None
         if not decision or decision['status'] != 'pending':
             return 'decision_closed'
+    if spec.get('withdrawn'):  # ROUTE_WALL_20261012: a espera deixou de ser verdade para este card
+        return spec['withdrawn'](conn, wait)
     return None
 
 

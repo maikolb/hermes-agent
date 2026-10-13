@@ -2801,7 +2801,11 @@ class AIAgent:
                 status_code = getattr(error, "status_code", None)
                 prefix = f"HTTP {status_code}: " if status_code else ""
                 msg = AIAgent._coerce_api_error_detail(msg)
-                return AIAgent._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
+                from agent.anthropic_adapter import with_anthropic_workspace_hint
+
+                return AIAgent._decorate_xai_entitlement_error(
+                    with_anthropic_workspace_hint(f"{prefix}{msg[:300]}")
+                )
 
         # SDK may leave body empty while httpx still has the payload (#36109).
         # Redact before returning: the raw provider/proxy error body is
@@ -2832,7 +2836,11 @@ class AIAgent:
         # Fallback: truncate the raw string but give more room than 200 chars
         status_code = getattr(error, "status_code", None)
         prefix = f"HTTP {status_code}: " if status_code else ""
-        return AIAgent._decorate_xai_entitlement_error(f"{prefix}{raw[:500]}")
+        from agent.anthropic_adapter import with_anthropic_workspace_hint
+
+        return AIAgent._decorate_xai_entitlement_error(
+            with_anthropic_workspace_hint(f"{prefix}{raw[:500]}")
+        )
 
     def _mask_api_key_for_logs(self, key: Any) -> Optional[str]:
         # Azure Foundry Entra ID bearer providers are callables — never

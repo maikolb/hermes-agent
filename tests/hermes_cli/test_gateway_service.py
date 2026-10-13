@@ -685,6 +685,8 @@ class TestGatewayServiceDetection:
         monkeypatch.setattr(gateway_cli, "is_linux", lambda: True)
         monkeypatch.setattr(gateway_cli, "is_termux", lambda: False)
         monkeypatch.setattr(gateway_cli, "is_wsl", lambda: False)
+        # A container host takes its own branch (_container_systemd_operational); this test is about a plain Linux host.
+        monkeypatch.setattr(gateway_cli, "is_container", lambda: False)
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda name: "/usr/bin/systemctl")
 
         assert gateway_cli.supports_systemd_services() is True

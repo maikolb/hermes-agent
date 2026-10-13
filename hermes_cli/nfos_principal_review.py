@@ -373,13 +373,30 @@ def escalate_rework(conn, decision, assessment):
 
 
 def escalation_usage(conn, task_id, run_id):
+    """What the escalation lineage has spent of its balance in the runs before ``run_id``.
+
+    PROBE_BALANCE_20261012: a run the worker left on its provider's quota (``rate_limited``) with its last turn
+    refused on that turn's only call spent nothing in that turn. The turn and the call were counted before the
+    provider was asked (``worker_checkpoint``, ``record_worker_iteration``) and are not summed; when that was
+    the run's only turn the provider answered nothing in the whole run, and its seconds, which were the wait for
+    a refusal, are not summed either. Such a run is what the probe of a closed route is (``nfos_route_walls``):
+    one an hour for as long as the wall stands, on the card that probes."""
     escalation = worker_escalation(conn, task_id)
     first = escalation.get('first_run_id', run_id)
-    rows = conn.execute('SELECT started_at,ended_at,metadata FROM task_runs WHERE task_id=? AND id>=? AND id<?',
+    rows = conn.execute('SELECT started_at,ended_at,outcome,metadata FROM task_runs WHERE task_id=? AND id>=? AND id<?',
                         (task_id, first, run_id)).fetchall()
-    return {'seconds': sum(max(0, (r['ended_at'] or r['started_at'])-r['started_at']) for r in rows),
-            'iterations': sum(json.loads(r['metadata'] or '{}').get('escalation_usage', {}).get('iterations', 0) for r in rows),
-            'turns': sum(json.loads(r['metadata'] or '{}').get('escalation_usage', {}).get('turns', 0) for r in rows)}
+    spent = {'seconds': 0, 'iterations': 0, 'turns': 0}
+    for r in rows:
+        usage = json.loads(r['metadata'] or '{}').get('escalation_usage', {})
+        iterations, turns = usage.get('iterations', 0), usage.get('turns', 0)
+        if r['outcome'] == 'rate_limited' and usage.get('turn_calls') == 1:
+            iterations, turns = max(0, iterations - 1), max(0, turns - 1)
+            if not turns:
+                continue
+        spent['seconds'] += max(0, (r['ended_at'] or r['started_at'])-r['started_at'])
+        spent['iterations'] += iterations
+        spent['turns'] += turns
+    return spent
 
 
 def iteration_grants(conn, task_id):
@@ -536,7 +553,11 @@ def worker_checkpoint(agent, turn_id=None):
 
 
 def record_worker_iteration(agent):
-    """Persist consumed allowance before a tool can complete this run."""
+    """Persist consumed allowance before a tool can complete this run.
+
+    With it, which call of its turn the worker is about to make (``turn_calls``): if the provider refuses that
+    call on quota and the worker leaves, the run's record says whether the turn it left on had been answered at
+    all, which is what ``escalation_usage`` asks (PROBE_BALANCE_20261012)."""
     task_id, run_id = os.environ.get('HERMES_KANBAN_TASK'), os.environ.get('HERMES_KANBAN_RUN_ID')
     claim = os.environ.get('HERMES_KANBAN_CLAIM_LOCK')
     budget = getattr(agent, 'iteration_budget', None)
@@ -554,7 +575,11 @@ def record_worker_iteration(agent):
             if row is None:
                 return
             metadata = json.loads(row['metadata'] or '{}')
-            metadata.setdefault('escalation_usage', {})['iterations'] = budget.used
+            usage = metadata.setdefault('escalation_usage', {})
+            usage['iterations'] = budget.used
+            turn_calls = getattr(agent, '_api_call_count', None)
+            if type(turn_calls) is int:
+                usage['turn_calls'] = turn_calls
             conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (d._json(metadata), int(run_id)))
 
 

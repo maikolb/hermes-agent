@@ -467,6 +467,66 @@ def _admission_order(deliveries, now=None):
     return sorted(deliveries, key=key)
 
 
+# WAKE_ONCE_PER_SESSION_20261012: the wake of a decision request is owed to the session it lands in, not to each
+# subscription. A card has the portal subscription (re-routed to the Principal route of its project) and the chat
+# one, and both land in the same Principal session: every request woke that session twice, the second time mostly
+# after the answer was recorded (2026-10-10: 299 wakes for 114 decisions on three cards, 120 after the answer).
+# Among the subscriptions of one card that lead to the same session, the wake of a request is owed by the first,
+# in this order, that has the request in hand in this pass of the notifier. The others keep the notice of their
+# own channel and nothing else. A subscription yields a wake only to one that carries the request now: one held
+# behind an unfinished delivery (its text failing, so its claim stays on older events) or already past the request
+# (it only notified when the request was written) is not going to wake for it, and nothing is yielded to it.
+def _wake_owner_rank(sub):
+    """Order of a card's subscriptions before one session: its own chat before a re-routed one, then the oldest."""
+    return (1 if sub.get("_principal_target") else 0, float(sub.get("created_at") or 0.0),
+            str(sub.get("platform") or ""), str(sub.get("chat_id") or ""), str(sub.get("thread_id") or ""))
+
+
+def _wake_source(plat, platform_str, route, profile, adapter):
+    """The synthetic source of a subscription's wake: it decides which session the turn opens in."""
+    from gateway.session import SessionSource
+    return SessionSource(
+        platform=plat,
+        chat_id=route["chat_id"],
+        chat_type=_sub_chat_type(route, platform_str),  # DM_NEG_CHAT_20260910
+        thread_id=route.get("thread_id") or None,
+        user_id=route.get("user_id"),
+        user_id_alt=route.get("user_id_alt"),
+        profile=profile or None,
+        scope_id=_wake_scope_id(adapter, route),
+    )
+
+
+def _requests_still_asked(board, task_id, events):
+    """WAKE_STILL_ASKED_20261012: of these decision requests, the ones still waiting for what the event asked.
+
+    Checked at delivery: between the request being written and the session being free to take it, the answer
+    may already be on the card. The reminder of a wait on a person (``awaiting: human_reply``) holds while the
+    decision is with that person; every other request, while it is pending. An event with no decision, a
+    decision the board does not know and a read that fails still wake: a lost wake costs more than a repeated one.
+    """
+    asked = [ev for ev in events if (getattr(ev, "payload", None) or {}).get("decision_id")]
+    if not asked:
+        return list(events)
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.connect_closing(board=board) as conn:
+            marks = ",".join("?" * len(asked))
+            status = {row["id"]: row["status"] for row in conn.execute(
+                f"SELECT id, status FROM nfos_decisions WHERE task_id=? AND id IN ({marks})",
+                (task_id, *[ev.payload["decision_id"] for ev in asked]))}
+    except Exception:
+        logger.debug("kanban notifier: decision state unreadable for %s; waking as asked", task_id, exc_info=True)
+        return list(events)
+
+    def still(ev):
+        payload = getattr(ev, "payload", None) or {}
+        state = status.get(payload.get("decision_id"))
+        return state is None or state == ("human" if payload.get("awaiting") == "human_reply" else "pending")
+
+    return [ev for ev in events if still(ev)]
+
+
 WAKE_GROUP_RULE = (  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913: instrução e filtro alinhados
     "Regra do grupo: este turno foi acordado por notificação de kanban. "
     "Resolva pelas ferramentas (decide, kanban_comment, kanban_block). "
@@ -1476,10 +1536,13 @@ class GatewayKanbanWatchersMixin:
 
     def _nfos_receipt_candidates(self, profiles, board=None, request_id=None, limit=20, *, coordination=False):
         """Read pending obligations even when their worker has no card yet."""
-        from hermes_cli import kanban_db as kb
+        from hermes_cli import kanban_db as kb,nfos_route_walls as walls
         from hermes_cli.nfos_delivery import coordinator_retry_at
         boards=[{'slug':board}] if board else kb.list_boards(include_archived=False)
         seen=set();pending=[]
+        # PRINCIPAL_WALL_20261012: an entry whose Principal route a usage window closed is not offered. With a
+        # route closed, the entries of every board are put in arrival order: the oldest is the route's probe.
+        walled=coordination and walls.any_closed();arrived={}
         for meta in boards:
             slug=meta.get('slug') or kb.DEFAULT_BOARD
             path=Path(meta.get('db_path') or kb.kanban_db_path(board=slug)).resolve()
@@ -1490,7 +1553,7 @@ class GatewayKanbanWatchersMixin:
                     conn.row_factory=sqlite3.Row
                     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='nfos_requests'").fetchone():continue
                     condition="status='coordinating'" if coordination else "status<>'coordinating' AND acknowledged_at IS NULL"
-                    sql='SELECT id,payload,source_key FROM nfos_requests WHERE '+condition
+                    sql='SELECT id,payload,source_key,created_at FROM nfos_requests WHERE '+condition
                     rows=conn.execute(sql+(' AND id=?' if request_id else '')+' ORDER BY created_at,id',
                                       (request_id,) if request_id else ()).fetchall()
                 for row in rows:
@@ -1504,11 +1567,18 @@ class GatewayKanbanWatchersMixin:
                     if coordination and receipt.get('wake_accepted'):continue
                     retry_at=coordinator_retry_at(receipt) if coordination else max(receipt.get('claim_until',0),receipt.get('next_attempt_at',0))
                     if retry_at>now:continue
+                    if walled:
+                        route=walls.entry_route(payload,self._nfos_receipt_owner(payload))
+                        if route and walls.entry_held(*route) is not None:continue
                     if coordination:payload['_request_part']=json.loads(row['source_key'])[-1]
                     pending.append((path,row['id'],payload))
-                    if len(pending)>=limit:return pending
+                    if walled:arrived[(path,row['id'])]=row['created_at']
+                    elif len(pending)>=limit:return pending
             except (sqlite3.Error,OSError,ValueError,TypeError):
                 logger.warning('NFOS receipt scan failed for board %s',slug,exc_info=True)
+        if walled:
+            pending.sort(key=lambda item:(arrived[item[:2]],item[1]))
+            del pending[limit:]
         return pending
 
     def _nfos_claim_receipt(self,path,request_id,profiles):
@@ -1719,7 +1789,7 @@ class GatewayKanbanWatchersMixin:
 
     async def _nfos_deliver_coordinator_input(self, path, request_id, payload):
         from hermes_cli import kanban_db as kb,nfos_delivery as delivery
-        from hermes_cli.nfos_runtime import coordinator_intake_instructions
+        from hermes_cli.nfos_runtime import coordinator_intake_instructions,resumed_intake_note
         from gateway.platforms.base import BasePlatformAdapter,Platform,SessionSource
         from gateway.session import build_session_key
         from gateway.wake import deliver_wake
@@ -1742,8 +1812,15 @@ class GatewayKanbanWatchersMixin:
                 profile=adapter._session_key_profile(source))
             adapter._heal_stale_session_lock(key)
             if key in adapter._active_sessions:return
+        # PRINCIPAL_WALL_20261012: not offered while a usage window holds the Principal's route. When the reopening
+        # of that route is due, this offer is its probe, taken here with no await in between: one entry at a time.
+        from hermes_cli import nfos_route_walls as walls
+        turn=walls.entry_turn(payload,owner,request_id)
+        if turn is False:return
         receipt=await _to_thread_process_service(claim)
-        if receipt is None:return
+        if receipt is None:
+            if turn is not True:walls.release_probe(*turn,task_id=request_id)
+            return
         context={'db_path':str(path),'request_id':request_id,
             'reply_to_message_id':(payload.get('coordination') or {}).get('reply_to_message_id'),
             'request':{key:payload[key] for key in ('source','text','project','attachments')}}
@@ -1752,19 +1829,76 @@ class GatewayKanbanWatchersMixin:
         try:
             # The wake's user content is checkpointed before its ACK. A later
             # sidecar alone would lose the exact intake after a crash here.
+            # PRINCIPAL_WALL_20261012: an entry that came back from a turn that died on quota says what that turn did.
+            back=(payload.get('coordination') or {}).get('quota') or {}
             wake_text=('[NFOS: mensagem original preservada para coordenação; não é uma nova mensagem Telegram.]\n'
-                +payload['text']+'\n\n'+coordinator_intake_instructions(context,
-                    reply_to=context['reply_to_message_id']))
+                +payload['text']+'\n\n'+(resumed_intake_note(back.get('answered_calls')) if back.get('turns') else '')
+                +coordinator_intake_instructions(context,reply_to=context['reply_to_message_id']))
             accepted=await deliver_wake(adapter,source=source,
                 text=wake_text,
                 receipt=receipt,metadata={'nfos_coordinator_intake':context})
             if accepted:return
         except Exception as exc:
             error=str(exc)
+            if turn is not True:walls.release_probe(*turn,task_id=request_id)
         def retry():
             with kb.connect_closing(path) as conn:
                 delivery.retry_coordinator_input(conn,receipt,error=error)
         await _to_thread_process_service(retry)
+
+    async def _nfos_turn_ended(self, event, source, agent_result, started_at):
+        """What a finished turn says about the Principal's route (PRINCIPAL_WALL_20261012).
+
+        The turn of a preserved request that ended failed on the provider's quota decided nothing: its inbox entry
+        was marked accepted when the turn started, and is given back so the intake offers it again once the route
+        is open; the route is closed by then, by the window the provider named or, with none named, by this end of
+        the turn. A turn the provider answered is the proof that reopens a closed route. A turn of a request that
+        ended any other way says nothing of the route: if it was the route's probe, the probing is freed. Never
+        raises: the turn's own result is handled by the caller whatever happens here.
+        """
+        try:
+            from hermes_cli import kanban_db as kb,nfos_route_walls as walls
+            if not isinstance(agent_result,dict):return
+            metadata=getattr(event,'metadata',None) or {}
+            receipt=metadata.get('kanban_wake_delivery') if getattr(event,'internal',False) else None
+            if not (isinstance(receipt,dict) and receipt.get('kind')=='nfos_coordinator_input'
+                    and isinstance(metadata.get('nfos_coordinator_intake'),dict)):
+                receipt=None
+            # The profile the session runs as: the entry's owner, as the intake names it, else the source's.
+            profile=(self._nfos_receipt_owner(metadata['nfos_coordinator_intake'].get('request') or {}) if receipt
+                     else str(getattr(source,'profile','') or self._active_profile_name() or 'default'))
+            if walls.quota_failure(agent_result):
+                if receipt is None:return
+                # The refused call is the last one counted: the ones before it the provider answered.
+                answered_calls=max(0,int(agent_result.get('api_calls') or 0)-1)
+                def refused():
+                    with kb.connect_closing(Path(receipt['db_path'])) as conn:
+                        return walls.entry_refused(conn,receipt,reason=agent_result.get('failure_reason'),
+                            profile=profile,answered_calls=answered_calls)
+                if await _to_thread_process_service(refused) is not None:
+                    # The intake offers this entry again. The gateway's own continuation of a rate-limited turn
+                    # would run the same turn a second time: it is not scheduled for it.
+                    agent_result.pop('retry_not_before',None)
+                return
+            if not walls.any_closed():return
+            if agent_result.get('failed') or agent_result.get('interrupted') or not agent_result.get('api_calls'):
+                if receipt is not None:
+                    # Not a word from the provider about quota: a probe that gave no verdict frees the probing.
+                    def no_verdict():
+                        with kb.connect_closing(Path(receipt['db_path'])) as conn:
+                            walls.entry_gave_no_verdict(conn,receipt,profile=profile)
+                    await _to_thread_process_service(no_verdict)
+                return
+            def answered():
+                if receipt is None:
+                    walls.session_answered(profile,agent_result.get('model'),started_at=started_at)
+                    return
+                with kb.connect_closing(Path(receipt['db_path'])) as conn:
+                    walls.session_answered(profile,agent_result.get('model'),started_at=started_at,
+                        conn=conn,request_id=receipt['request_id'])
+            await _to_thread_process_service(answered)
+        except Exception:
+            logger.warning('NFOS could not record what a finished turn says about the Principal route',exc_info=True)
 
     @staticmethod
     def _nfos_coordinator_intake_note(event):
@@ -2330,9 +2464,12 @@ class GatewayKanbanWatchersMixin:
         return len(counted)
 
     def _kanban_board_display_targets(
-        self, notifier_profiles: set
+        self, notifier_profiles: set, management: bool = False
     ) -> dict[str, list[dict]]:
         """``board_slug → display targets`` from persisted topic bindings.
+
+        ``management=True`` answers with the management topics instead of the
+        project ones (ROUTE_WALL_20261012: where a notice about the host goes).
 
         Worker-rotation focus used to be fed exclusively by task-level notify
         subscriptions, so a board whose cards were created outside the
@@ -2381,9 +2518,9 @@ class GatewayKanbanWatchersMixin:
                             "JOIN projects AS p "
                             "  ON p.profile = b.profile "
                             " AND p.project_id = b.project_id "
-                            "WHERE b.profile = ? AND b.is_management = 0 "
+                            "WHERE b.profile = ? AND b.is_management = ? "
                             "  AND b.is_closed = 0",
-                            (profile,),
+                            (profile, int(bool(management))),
                         ).fetchall()
                     finally:
                         conn.close()
@@ -2974,6 +3111,82 @@ class GatewayKanbanWatchersMixin:
             if lane not in all_active_lanes and lane not in states:
                 scopes.pop(lane, None)
 
+    def _kanban_wake_session(self, sub: dict) -> str:
+        """WAKE_ONCE_PER_SESSION_20261012: the session a wake of this subscription lands in.
+
+        Empty when the subscription wakes nobody from this gateway: it only notifies, its platform is unknown
+        or has no adapter here, or its session cannot be named. Such a subscription is never counted with another.
+        """
+        from gateway.config import Platform as _Platform
+        from gateway.wake import adapter_supports_push
+
+        route = sub.get("_principal_target") or sub
+        mode = "wake" if sub.get("_principal_target") else sub.get("delivery_mode") or "notify"
+        if mode not in ("notify+wake", "wake"):
+            return ""
+        platform_str = str(route.get("platform") or "").lower()
+        try:
+            plat = _Platform(platform_str)
+        except ValueError:
+            return ""
+        profile = sub.get("notifier_profile") or ""
+        try:
+            adapter = self._authorization_adapter(plat, profile or None)
+            if adapter is None:
+                return ""
+            if not adapter_supports_push(adapter):
+                # The wake is a self-post to the raw session id the subscriber registered with.
+                raw = str(sub.get("chat_id") or "")
+                return f"{platform_str}:{profile}:{raw}" if raw else ""
+            return str(self._session_key_for_source(
+                _wake_source(plat, platform_str, route, profile, adapter)) or "")
+        except Exception:
+            logger.debug("kanban notifier: wake session of a subscription for %s could not be named",
+                         sub.get("task_id"), exc_info=True)
+            return ""
+
+    async def _kanban_wake_owed(self, delivery: dict, wake_kinds: tuple) -> tuple[set, bool]:
+        """The wake kinds this delivery still owes its session, and whether the wake also speaks for the portal.
+
+        WAKE_ONCE_PER_SESSION_20261012: a decision request that another subscription of the same card carries to
+        the same session in this pass is not woken for again. WAKE_STILL_ASKED_20261012: nor is one whose decision
+        no longer waits. Only decision requests are counted together: of every wake kind, they are the one a claim
+        never coalesces away (``_coalesce_notify_events``), so the subscription that carries one wakes for it.
+
+        The wake speaks for the portal only when it is for the request alone: with a completion or a block in the
+        same wake, the text is the one the chat subscription always had. If any of this cannot be worked out the
+        delivery wakes for everything it carries, as it did before: a lost wake costs more than a repeated one,
+        and an error here must not end the pass for the deliveries that come after.
+        """
+        sub = delivery["sub"]
+        events = [ev for ev in delivery["events"] if ev.kind in wake_kinds]
+        try:
+            requests = [ev for ev in events if ev.kind == "nfos_principal_requested"]
+            if not requests:
+                return {ev.kind for ev in events}, False
+            others = delivery.get("card_subs") or ()
+            session = self._kanban_wake_session(sub) if others else ""
+            peers = [peer for peer in others if session and self._kanban_wake_session(peer) == session]
+            mine = _wake_owner_rank(sub)
+            ahead = [peer for peer in peers if _wake_owner_rank(peer) < mine]
+            owed = [ev for ev in requests if not any(ev.id in peer.get("_wake_carries", ()) for peer in ahead)]
+            asked = await asyncio.to_thread(_requests_still_asked, delivery.get("board"), sub["task_id"], owed)
+            if len(asked) < len(requests):
+                logger.info(
+                    "kanban notifier: %d of %d decision request(s) of %s do not wake from %s/%s: "
+                    "%d carried by another subscription of the same session, %d no longer waiting",
+                    len(requests) - len(asked), len(requests), sub["task_id"], sub.get("platform"),
+                    sub.get("chat_id"), len(requests) - len(owed), len(owed) - len(asked),
+                )
+            kept = {id(ev) for ev in asked}
+            kinds = {ev.kind for ev in events if ev.kind != "nfos_principal_requested" or id(ev) in kept}
+            return kinds, kinds == {"nfos_principal_requested"} and any(
+                peer.get("_principal_target") for peer in peers)
+        except Exception:
+            logger.warning("kanban notifier: what %s still owes its session could not be worked out; waking as asked",
+                           sub.get("task_id"), exc_info=True)
+            return {ev.kind for ev in events}, False
+
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver material lifecycle events.
 
@@ -3334,6 +3547,7 @@ class GatewayKanbanWatchersMixin:
                             )
                             if not subs:
                                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
+                            board_first = len(deliveries)
                             for sub in subs:
                                 try:
                                     owner_profile = sub.get("notifier_profile") or None
@@ -3497,6 +3711,15 @@ class GatewayKanbanWatchersMixin:
                                         "kanban notifier: subscription for %s on board %s failed: %s",
                                         sub.get("task_id"), slug, sub_exc,
                                     )
+                            # WAKE_ONCE_PER_SESSION_20261012: a delivery knows the other subscriptions of its card,
+                            # and each of them says which events it has in hand in this pass.
+                            for delivery in deliveries[board_first:]:
+                                delivery["sub"]["_wake_carries"] = {ev.id for ev in delivery["events"]}
+                                delivery["card_subs"] = [
+                                    other for other in subs
+                                    if other is not delivery["sub"]
+                                    and other.get("task_id") == delivery["sub"]["task_id"]
+                                ]
                         finally:
                             conn.close()
                     return deliveries, focus_rows, rehydrate_complete
@@ -3926,6 +4149,11 @@ class GatewayKanbanWatchersMixin:
                             if wake_agent and agent_wake_on_events
                             else set()
                         )
+                        _wake_for_portal = False
+                        if _wake_kinds:
+                            # WAKE_ONCE_PER_SESSION_20261012, WAKE_STILL_ASKED_20261012: what is still owed
+                            # to the session, read now, at delivery.
+                            _wake_kinds, _wake_for_portal = await self._kanban_wake_owed(d, _WAKE_KINDS)
                         from gateway.wake import adapter_supports_push as _adapter_push_ok
 
                         _is_push_adapter = _adapter_push_ok(adapter)
@@ -3983,7 +4211,7 @@ class GatewayKanbanWatchersMixin:
                             )
                             # WAKE_SILENCE_20260910 (ordem do Maikol): a regra de silêncio vai no próprio wake
                             _synth += "\n\n" + WAKE_GROUP_RULE  # WAKE_SILENCE_MECH_20260910, CLIENT_CHAT_20260913
-                            if principal_target:
+                            if principal_target or _wake_for_portal:
                                 _synth += ("\nOrigem: card do portal/Vigília. Registre a resposta no próprio card por `decide`; "
                                            "não publique mensagem no chat. A rota do projeto serve apenas para acordar o Principal.")
                             if "nfos_principal_requested" in _wake_kinds:
@@ -4042,7 +4270,6 @@ class GatewayKanbanWatchersMixin:
 
                         async def _push_wake() -> bool:
                             """Request a handoff; True means its checkpoint is durable."""
-                            from gateway.session import SessionSource
                             from gateway.wake import deliver_wake
                             # Rebuild the creator's real session scope from
                             # the chat_type persisted on the subscription
@@ -4058,17 +4285,8 @@ class GatewayKanbanWatchersMixin:
                             # handle_message() get_or_create_session's the
                             # target, so a mismatch only ever degrades to a
                             # fresh session, never an exception.
-                            _chat_type = _sub_chat_type(route, platform_str)  # DM_NEG_CHAT_20260910
-                            _source = SessionSource(
-                                platform=plat,
-                                chat_id=route["chat_id"],
-                                chat_type=_chat_type,
-                                thread_id=route.get("thread_id") or None,
-                                user_id=route.get("user_id"),
-                                user_id_alt=route.get("user_id_alt"),
-                                profile=sub_profile or None,
-                                scope_id=_wake_scope_id(adapter, route),
-                            )
+                            # WAKE_ONCE_PER_SESSION_20261012: built where the session of a wake is named.
+                            _source = _wake_source(plat, platform_str, route, sub_profile, adapter)
                             # deliver_wake preserves the synthetic
                             # MessageEvent/handle_message path for
                             # push-capable adapters (the non-push /
@@ -4157,6 +4375,7 @@ class GatewayKanbanWatchersMixin:
                 await self._kanban_refresh_worker_focus()
                 await self._kanban_claim_reaper()
                 await self._kanban_ready_watchdog()
+                await self._kanban_route_wall_notices()
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
             # Sleep with cancellation checks.
@@ -4634,6 +4853,120 @@ class GatewayKanbanWatchersMixin:
                             "ready watchdog: mark failed for %s/%s",
                             board, task_id, exc_info=True,
                         )
+
+    async def _kanban_route_wall_notices(self) -> None:
+        """One notice per provider route a long usage window closed (ROUTE_WALL_20261012).
+
+        A closed route is a fact of one profile of the host (the quota of its
+        credential ran out), not of the card whose worker met the wall, and the
+        notice names that profile. As a ``model_fallback`` event on that card the notice only
+        reached a chat through the card's subscription, and a card born in its
+        project's topic has no other: there the notifier publishes nothing
+        passive (CLIENT_CHAT_20260913), so the route would close in silence
+        (read on the production profile on 2026-10-12: 11 of its 12 project
+        topics are the source of an enabled delivery project). The notice goes to the
+        management topic of the profiles on this host, once per wall: the
+        claim and the receipt live beside the wall (``nfos_route_walls``), so
+        neither a restart nor a second gateway sends it again.
+
+        While the wall stands and a card or an inbox entry waits for its route
+        the notice is repeated once a day, in the same topic and in no other
+        (WALL_DAILY_NOTICE_20261012): how long the route has been closed and
+        how many of each wait for it. It stops when the route reopens or
+        nothing waits for it any more, and its receipt is the same one.
+        """
+        from gateway.config import Platform as _Platform
+        from hermes_cli import nfos_route_walls as _walls
+
+        try:
+            pending = await asyncio.to_thread(_walls.unannounced)
+        except Exception:  # noqa: BLE001
+            logger.warning("route wall notice: walls unreadable", exc_info=True)
+            return
+        if not pending:
+            return
+        # Same profile discovery as the ready watchdog: the bindings live under
+        # the profiles on disk, whatever _active_profile_name() answers here.
+        profiles: set = set()
+        try:
+            profiles.add(str(self._active_profile_name() or "").strip())
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from hermes_cli.profiles import list_profiles
+
+            profiles.update(
+                str(getattr(info, "name", "") or "").strip() for info in list_profiles()
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        profiles.discard("")
+        senders: list = []
+        try:
+            by_board = self._kanban_board_display_targets(profiles, management=True)
+        except Exception:  # noqa: BLE001
+            by_board = {}
+        for targets in by_board.values():
+            for target in targets:
+                try:
+                    platform = _Platform(str(target.get("platform") or "").lower())
+                except ValueError:
+                    continue
+                profile = str(target.get("notifier_profile") or "").strip() or None
+                adapter = self._authorization_adapter(platform, profile)
+                if adapter is not None:
+                    senders.append((adapter, platform, profile, target))
+        warned: set = getattr(self, "_kanban_route_wall_unsent", set())
+        self._kanban_route_wall_unsent = warned
+        for wall in pending:
+            route = _walls.label(wall)  # provider/model@profile: a wall is of one profile's credential
+            key = (route, wall.get("closed_at"))
+            if not senders:
+                if key not in warned:
+                    warned.add(key)
+                    logger.warning(
+                        "route wall notice: route %s is closed and this gateway has no "
+                        "connected management topic to say so", route,
+                    )
+                continue
+            claim = await asyncio.to_thread(_walls.claim_notice, wall)
+            if not claim:
+                continue
+            if claim.get("notices"):  # the wall has had its notice: this is the day's
+                count = await asyncio.to_thread(
+                    _walls.waiting, wall, owner_of=self._nfos_receipt_owner
+                )
+                text = _walls.still_closed(wall, count)
+                if text is None:  # nothing waits for this route: no day's notice of a wall nobody waits behind
+                    continue
+            else:
+                text = _walls.notice(wall)
+            deliveries: list = []
+            for adapter, platform, profile, target in senders:
+                metadata = (
+                    {"thread_id": target["thread_id"]} if target.get("thread_id") else None
+                )
+                try:
+                    result = await adapter.send(target["chat_id"], text, metadata=metadata)
+                except Exception:  # noqa: BLE001
+                    logger.warning("route wall notice: send failed for %s", route, exc_info=True)
+                    continue
+                if bool(getattr(result, "success", True)):
+                    deliveries.append({
+                        "platform": platform.value,
+                        "profile": profile or "",
+                        "chat_id": str(target["chat_id"]),
+                        "thread_id": str(target.get("thread_id") or ""),
+                        "message_id": str(getattr(result, "message_id", "") or ""),
+                    })
+            if deliveries:
+                await asyncio.to_thread(_walls.notice_sent, wall, deliveries)
+                logger.info("route wall notice: route %s announced to %d topic(s)", route, len(deliveries))
+            else:  # the claim lapses on its own and a later tick tries again
+                logger.warning(
+                    "route wall notice: no topic took the notice of %s; next try in %d min",
+                    route, _walls.PROBE_LEASE_SECONDS // 60,
+                )
 
     def _ready_watchdog_collect(
         self, board: str, now: float, settings: dict,

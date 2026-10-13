@@ -128,6 +128,57 @@ def test_loop_stops_when_worker_already_completed(monkeypatch):
     assert turns == []  # no extra turns
 
 
+def test_loop_leaves_without_a_block_when_the_first_turn_met_the_quota_wall(monkeypatch):
+    # The first turn died on the provider's quota wall: nothing to judge,
+    # no further turn, no block. The caller exits with the quota code.
+    monkeypatch.setattr(goals, "judge_goal", lambda *a, **kw: pytest.fail("should not judge"))
+
+    res = goals.run_kanban_goal_loop(
+        task_id="t1",
+        goal_text="do the thing",
+        run_turn=lambda p: pytest.fail("should not run another turn"),
+        task_status_fn=lambda: "running",
+        block_fn=lambda r: pytest.fail("should not block"),
+        quota_wall_fn=lambda: True,
+        first_response="API call failed after 3 retries: HTTP 429",
+    )
+    assert res == {"outcome": "quota_wall", "turns_used": 1, "reason": "provider quota wall"}
+
+
+def test_loop_leaves_when_a_later_turn_meets_the_quota_wall(monkeypatch):
+    # Two turns answer and are judged; the third one dies on the wall.
+    _patch_judge(monkeypatch, ["continue", "continue"])
+    turns = []
+
+    res = goals.run_kanban_goal_loop(
+        task_id="t1",
+        goal_text="do the thing",
+        run_turn=lambda p: turns.append(p) or "still working",
+        task_status_fn=lambda: "running",
+        block_fn=lambda r: pytest.fail("should not block"),
+        quota_wall_fn=lambda: len(turns) == 2,
+        first_response="working",
+    )
+    assert res["outcome"] == "quota_wall"
+    assert res["turns_used"] == 3 and len(turns) == 2
+
+
+def test_worker_terminal_state_wins_over_the_quota_wall(monkeypatch):
+    # The worker closed the card before the wall: that is what the loop reports.
+    _patch_judge(monkeypatch, ["continue"])  # should never be consulted
+
+    res = goals.run_kanban_goal_loop(
+        task_id="t1",
+        goal_text="do the thing",
+        run_turn=lambda p: pytest.fail("should not run another turn"),
+        task_status_fn=lambda: "done",
+        block_fn=lambda r: pytest.fail("should not block"),
+        quota_wall_fn=lambda: True,
+        first_response="done already",
+    )
+    assert res["outcome"] == "completed_by_worker"
+
+
 
 
 

@@ -857,6 +857,8 @@ def coordinator_intake_instructions(context, *, reply_to=None):
     """Preserved dispatch context, not a task classification or a task receipt."""
     command=workflow_command()+' receive --db '+shlex.quote(context['db_path'])+' --input request.json'
     urgent_command=workflow_command()+' urgent --db '+shlex.quote(context['db_path'])+' --task CARD_ID --input urgency.json'  # URGENCY_CONTEXT_20260914
+    if context.get('request_id'):  # PRINCIPAL_WALL_20261012: recorded once for this entry, however often it is offered
+        urgent_command+=' --request '+shlex.quote(str(context['request_id']))
     return ("NFOS preserved-message coordination context. The original is persisted, but has not been dispatched to a worker.\n"
         "Decide its meaning as the Principal. If it requests independent work, including an audit or report, "
         "save the exact request JSON below to request.json and run the exact receive command. "
@@ -875,6 +877,22 @@ def coordinator_intake_instructions(context, *, reply_to=None):
         "front, gives it a slot and records the reason; no approval is needed.\n"
         "Reply context: "+str(reply_to or 'not a reply')+"\n"
         "Command: "+command+"\nUrgency command: "+urgent_command+"\nRequest JSON:\n"+json.dumps(context['request'],ensure_ascii=False))
+
+
+def resumed_intake_note(answered_calls):
+    """PRINCIPAL_WALL_20261012: said before the intake context when this same message was offered before and that
+    turn ended on the provider's quota. The message of that turn is still in the conversation, so the Principal is
+    told what became of it: nothing was decided when the provider answered no call of it, and it may have acted
+    when the provider had answered some."""
+    answered_calls=int(answered_calls or 0)
+    if not answered_calls:
+        return ("NFOS resumed coordination. This same message was offered to you before, and that turn ended on the "
+            "provider's usage limit before any model call of it was answered: nothing was decided or done for it. "
+            "It is not a duplicate and it is still owed. Decide it now, once, as below.\n\n")
+    return ("NFOS resumed coordination. This same message was offered to you before, and that turn ended on the "
+        "provider's usage limit after "+str(answered_calls)+" answered model call(s). Whatever you did for it "
+        "then (a command, a card update, an urgency) is in this conversation and stands. Read it first: a command "
+        "that already ran must not run again. Finish only what is missing, then answer as usual.\n\n")
 
 
 def principal_instructions():

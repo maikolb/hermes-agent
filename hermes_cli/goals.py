@@ -2191,6 +2191,7 @@ def run_kanban_goal_loop(
     log=None,
     pending_decision_fn=None,
     resolved_decision_fn=None,
+    quota_wall_fn=None,
 ) -> Dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
 
@@ -2220,8 +2221,11 @@ def run_kanban_goal_loop(
     ``"changes_requested_by_reviewer"``, ``"blocked_budget"``,
     ``"blocked_by_worker"``, ``"awaiting_decision"`` (IMPEDIMENT_RACE_20260911: a
     decision of this run is still pending with the Principal; ``pending_decision_fn``
-    injects that check and the loop waits one turn, then stops without blocking), or
-    ``"stopped"``.
+    injects that check and the loop waits one turn, then stops without blocking),
+    ``"quota_wall"`` (``quota_wall_fn`` reports that the turn just run, the first one
+    included, ended on the provider's quota wall; the loop stops without judging,
+    without another turn and without blocking, so the caller can exit with the
+    quota code and the dispatcher's respawn guard owns the wait), or ``"stopped"``.
     """
 
     def _log(msg: str) -> None:
@@ -2269,6 +2273,18 @@ def run_kanban_goal_loop(
             # Reclaimed / archived / unexpected — let the dispatcher own it.
             _log(f"kanban goal loop: task {task_id} status={status!r}; stopping")
             return {"outcome": "stopped", "turns_used": turns_used, "reason": f"status={status}"}
+
+        # The turn just run died on the provider's quota wall (retries and the
+        # fallback chain already spent inside it). There is no reply to judge and
+        # another turn meets the same wall: repeating it burns the turn budget and
+        # ends in a block, which on an NFOS card is a consult to the Principal for
+        # something only the quota window can answer. Leave without a block.
+        # Upstream 242244bf68 (#91264) stops this loop on every failed turn, through what
+        # ``run_turn`` returns; it is not in this fork. When it lands this check is its
+        # quota case: drop the hook and keep the caller's exit code from the failed turn.
+        if quota_wall_fn is not None and quota_wall_fn():
+            _log(f"kanban goal loop: task {task_id} on the provider quota wall after {turns_used} turn(s); stopping without a block")
+            return {"outcome": "quota_wall", "turns_used": turns_used, "reason": "provider quota wall"}
 
         # IMPEDIMENT_RACE_20260911: a question of this run is with the Principal. Judging
         # the reply now only produces nudges and duplicate impediments; wait one turn for

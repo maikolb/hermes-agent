@@ -4788,6 +4788,22 @@ def _pool_error_context(exc: Exception) -> Dict[str, Any]:
     return payload
 
 
+def _pool_quota_error_context(exc: Exception) -> Dict[str, Any]:
+    """What the pool is told about an auxiliary call refused on quota: the
+    reason and the reset time the main loop reads from the same answer.  A
+    mark without them forgot the reset time of a usage window and put the
+    exhausted credential back in rotation one hour later.  An answer that
+    cannot be read is told as before."""
+    payload = _pool_error_context(exc)
+    try:
+        from agent.agent_runtime_helpers import extract_api_error_context
+
+        return {**payload, **extract_api_error_context(exc)}
+    except Exception:
+        logger.debug("Auxiliary client: could not read a quota refusal", exc_info=True)
+        return payload
+
+
 def _recoverable_pool_provider(
     resolved_provider: str,
     client: Any,
@@ -4871,7 +4887,7 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
         fallback_status = 402 if _is_payment_error(exc) else 429
         next_entry = pool.mark_exhausted_and_rotate(
             status_code=status_code if status_code is not None else fallback_status,
-            error_context=error_context,
+            error_context=_pool_quota_error_context(exc),
             api_key_hint=hint,
         )
         if next_entry is not None:
