@@ -155,5 +155,6 @@
   {"pr": 328, "file": "hermes_cli/nfos_route_walls.py", "text": "wall, opened = close(*route, limit=quota.get('limit') or reason, reset_at=None,"},
   {"pr": 328, "file": "hermes_cli/nfos_delivery.py", "text": "if request_id and how == 'principal':"},
   {"pr": 328, "file": "hermes_cli/nfos_runtime.py", "text": "urgent_command+=' --request '+shlex.quote(str(context['request_id']))"},
-  {"pr": 332, "file": "tools/mcp_tool.py", "text": "return True  # every tracked child has exited"}
+  {"pr": 332, "file": "tools/mcp_tool.py", "text": "return True  # every tracked child has exited"},
+  {"pr": 333, "file": "tools/mcp_tool.py", "text": "and inspect.iscoroutinefunction(_watch_children)"}
 ]
