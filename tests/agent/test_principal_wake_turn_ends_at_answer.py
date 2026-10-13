@@ -138,3 +138,11 @@ def test_d_wake_reply_without_recording_the_decision_is_unchanged(agent_env, tmp
     assert answered == []
     assert _pending(db, tid) == 1
     assert result['api_calls'] == 1+kanban_stop._PRINCIPAL_MAX_IDLE_NUDGES
+
+
+def test_answer_check_needs_the_turn_checkpoint():
+    from unittest.mock import MagicMock
+    from agent.kanban_stop import principal_wake_answered
+    assert principal_wake_answered(None) is False
+    assert principal_wake_answered(MagicMock()) is False, 'a test double agent is not a wake turn'
+    assert principal_wake_answered({'routing': {'kanban_wake_delivery': {'delivery_id': 'x'}}, 'created_at': 1.0}) is False

@@ -134,11 +134,13 @@ def principal_wake_answered(state) -> bool:
     carries no wake receipt.
     """
     from gateway.wake import current_notify_receipt
-    state = state or {}
-    receipt = current_notify_receipt.get() or (state.get('routing') or {}).get('kanban_wake_delivery') or {}
-    task_id = receipt.get('principal_task_id')
-    started = state.get('created_at')
-    if not task_id or not receipt.get('db_path') or not started:
+    if not isinstance(state, dict):
+        return False  # no turn checkpoint, so no turn start to date the answer by
+    receipt = current_notify_receipt.get() or (state.get('routing') or {}).get('kanban_wake_delivery')
+    if not isinstance(receipt, dict):
+        return False
+    task_id, started = receipt.get('principal_task_id'), state.get('created_at')
+    if not (task_id and isinstance(receipt.get('db_path'), str) and isinstance(started, (int, float))):
         return False
     try:
         conn = sqlite3.connect(Path(receipt['db_path']).resolve().as_uri()+'?mode=ro', uri=True, timeout=5)
