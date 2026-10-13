@@ -356,6 +356,10 @@ def _file_content_hash(path: Path) -> str:
         return ""
 
 
+# Bounded so the probe never stalls gateway startup for long.
+_NODE_PROBE_TIMEOUT_S = 5
+
+
 def check_whatsapp_requirements() -> bool:
     """
     Check if WhatsApp dependencies are available.
@@ -372,11 +376,23 @@ def check_whatsapp_requirements() -> bool:
             [_node, "--version"],
             capture_output=True,
             text=True, encoding='utf-8', errors='replace',
-            timeout=5
+            timeout=_NODE_PROBE_TIMEOUT_S,
         )
-        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        # Node exists and started but answered slowly: a cold start on a
+        # loaded machine, not a missing runtime. Reporting it missing drops
+        # WhatsApp for the gateway's whole life (adapter creation is never
+        # retried, and connect() marks it fatal); a node that really hangs
+        # still fails loudly when the bridge starts, and the reconnection
+        # watcher retries that.
+        logger.warning(
+            "WhatsApp: `%s --version` did not answer within %ss; treating Node.js as present",
+            _node, _NODE_PROBE_TIMEOUT_S,
+        )
+        return True
     except Exception:
         return False
+    return result.returncode == 0
 
 
 class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
