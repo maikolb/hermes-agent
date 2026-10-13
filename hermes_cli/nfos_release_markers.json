@@ -190,5 +190,17 @@
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "if entry_held(*route) is not None:"},
   {"pr": 329, "file": "hermes_cli/nfos_route_walls.py", "text": "resumed = bool(count['entries']) and _awaits_reset(wall, now)"},
   {"pr": 332, "file": "tools/mcp_tool.py", "text": "return True  # every tracked child has exited"},
-  {"pr": 333, "file": "tools/mcp_tool.py", "text": "and inspect.iscoroutinefunction(_watch_children)"}
+  {"pr": 333, "file": "tools/mcp_tool.py", "text": "and inspect.iscoroutinefunction(_watch_children)"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "def _kanban_wake_session(self, sub: dict) -> str:"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "async def _kanban_wake_owed(self, delivery: dict, wake_kinds: tuple) -> tuple[set, bool]:"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "owed = [ev for ev in requests if not any(ev.id in peer.get(\"_wake_carries\", ()) for peer in ahead)]"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "asked = await asyncio.to_thread(_requests_still_asked, delivery.get(\"board\"), sub[\"task_id\"], owed)"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "def _requests_still_asked(board, task_id, events):"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "return state is None or state == (\"human\" if payload.get(\"awaiting\") == \"human_reply\" else \"pending\")"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "delivery[\"sub\"][\"_wake_carries\"] = {ev.id for ev in delivery[\"events\"]}"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "return kinds, kinds == {\"nfos_principal_requested\"} and any("},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "what %s still owes its session could not be worked out; waking as asked"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "_wake_kinds, _wake_for_portal = await self._kanban_wake_owed(d, _WAKE_KINDS)"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "if principal_target or _wake_for_portal:"},
+  {"pr": 331, "file": "gateway/kanban_watchers.py", "text": "delivery[\"card_subs\"] = ["}
 ]
