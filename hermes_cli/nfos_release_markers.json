@@ -208,6 +208,8 @@
   {"pr": 334, "file": "agent/anthropic_adapter.py", "text": "headers = anthropic_workspace_headers(api_key, normalized_base_url)"},
   {"pr": 334, "file": "hermes_cli/models.py", "text": "headers.update(anthropic_workspace_headers(token, resolved_base_url))"},
   {"pr": 334, "file": "run_agent.py", "text": "with_anthropic_workspace_hint(f\"{prefix}{msg[:300]}\")"},
+  {"pr": 335, "file": "plugins/platforms/whatsapp/adapter.py", "text": "_NODE_PROBE_TIMEOUT_S = 5"},
+  {"pr": 335, "file": "plugins/platforms/whatsapp/adapter.py", "text": "\"WhatsApp: `%s --version` did not answer within %ss; treating Node.js as present\","},
   {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "DEPENDENCY_BY_FACT_20261010"},
   {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "def _declare_dependency_wait("},
   {"pr": 319, "file": "hermes_cli/nfos_delivery.py", "text": "LAB_CAPABILITY_PER_CARD_20261010"},
