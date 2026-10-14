@@ -233,6 +233,34 @@ def test_probe_declared_as_the_fact_releases_only_when_it_passes(paused, monkeyp
     assert 'PASS' in ' '.join(_pause(conn, task)['repair_evidence'])
 
 
+def test_database_outage_ends_the_pause_by_itself_when_the_database_answers_again(paused, monkeypatch, tmp_path):
+    """14/10/2026: o banco do Concursa ficou fora das 10:28 às 12:58Z. O card t_ab9ec594 ficou com a obrigação de reparo
+    pendente desde 12:37Z e reconferência marcada para horas depois, porque a dependência era texto e só o Principal a
+    relia. Declarada como sonda sql, a mesma que um critério da spec usa, o runtime confere o banco a cada 5 min e encerra a
+    pausa no tick em que ele responde, sem acordar ninguém. Caminho real da sonda: só o cofre do projeto é trocado."""
+    conn, task, did, advance = paused
+    database = tmp_path / 'banco-do-projeto.db'
+    monkeypatch.setattr(d, '_probe_env_sources', lambda conn_, task_id: ({'PROBE_DATABASE_URL': f'sqlite://{database}'}, set()))
+    _declare(conn, did, {'kind': 'probe', 'probe': {'kind': 'sql', 'query': 'SELECT count(*) FROM alunos', 'expect': {'op': '>=', 'value': 1}}},
+             executor={'kind': 'operator', 'name': 'quem opera o banco do projeto'})
+    before = len(_requests(conn, task, did))
+    for _ in range(30):  # duas horas e meia com o banco fora do ar
+        advance()
+    wait = waits.open_for_decision(conn, did)
+    assert wait['evidence']['probe_state'] == 'INDETERMINADO' and wait['evidence']['unreadable'] >= 30
+    assert repair.maintenance_pause_pending(conn, task.id) and kb.get_task(conn, task.id).status == 'blocked'
+    assert len(_requests(conn, task, did)) == before, 'banco fora do ar não acorda o Principal nem vence a espera'
+    import sqlite3
+    with sqlite3.connect(database) as db:  # o banco volta
+        db.execute('CREATE TABLE alunos(id INTEGER)')
+        db.execute('INSERT INTO alunos VALUES (1)')
+    advance()
+    assert not repair.maintenance_pause_pending(conn, task.id), 'a pausa terminou no primeiro tick com o banco de volta'
+    assert d.get_decision(conn, did)['status'] == 'resolved' and kb.get_task(conn, task.id).status == 'ready'
+    assert len(_requests(conn, task, did)) == before, 'e ninguém foi acordado para isso'
+    assert 'PASS' in ' '.join(_pause(conn, task)['repair_evidence'])
+
+
 def test_laboratory_must_answer_on_the_app_the_card_needs(paused, monkeypatch):
     """LAB_CAPABILITY_PER_CARD_20261010: um app respondendo liberava a espera de todos, mesmo com o app do card fora do ar."""
     conn, task, did, advance = paused
