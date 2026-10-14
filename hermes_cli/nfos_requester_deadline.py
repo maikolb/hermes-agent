@@ -487,7 +487,7 @@ def _continue_partial(conn, wait, decision, context, task, workflow, why, now):
     # O worker relançado lê esta resposta cortada em 600 caracteres (CURRENT_DECISIONS_20261010): o que ele tem de fazer e o
     # critério vêm primeiro; o motivo e a pergunta inteira vêm depois.
     answer = ('CONTINUE (runtime do NFOS): feche como entrega parcial (partial_delivery=true) com o que já está conferido; o card '
-              f'de continuação (continuation) leva o critério obrigatório "{criterion}". Não pergunte de novo. Motivo: {cause}. Em '
+              f'de continuação (continuation) leva este critério obrigatório: {criterion}. Não pergunte de novo. Motivo: {cause}. Em '
               'public_delivery.summary diga a quem pediu o que foi entregue e o que ficou dependendo da resposta. Se ele responder '
               'depois, a resposta chega ao Principal neste card, ou o chamado reabre. Pergunta sem resposta: ' + refused[:700])
     d.resolve_decision(conn, new_id, action='continue', answer=answer, author='Principal')

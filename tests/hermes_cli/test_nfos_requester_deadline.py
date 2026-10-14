@@ -371,7 +371,7 @@ def test_at_the_deadline_nothing_new_reaches_the_client_and_the_card_gets_the_cr
     criterion = f'Concluir o que ficou pendente quando chegar a resposta à pergunta feita a {to}: "{QUESTION}"'
     assert carried["continuation_criterion"] == criterion
     assert successor["answer"].startswith("CONTINUE (runtime do NFOS): feche como entrega parcial (partial_delivery=true) com o "
-                                          f'que já está conferido; o card de continuação (continuation) leva o critério obrigatório "{criterion}".')
+                                          f'que já está conferido; o card de continuação (continuation) leva este critério obrigatório: {criterion}.')
     # O worker relançado recebe a resposta pelo contexto da retomada, cortada em 600 caracteres: o critério chega inteiro.
     (answered, *_) = delivery._current_decisions_context(board, task.id)
     assert f'- {successor["id"]} (continue, ' in answered and criterion in answered
