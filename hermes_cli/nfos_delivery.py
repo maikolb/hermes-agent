@@ -6124,6 +6124,30 @@ def _record_mode_effect_checks(conn, task_id, candidate):
         raise WorkflowError('candidate must be the exact commit SHA being published (hex)')
     return None
 
+def _staging_contains(workspace, candidate):
+    """STAGING_CANDIDATE_BASE_20261014: True só quando o git confirma que a staging (origin/staging, senão staging) já
+    contém a candidata, lida no worktree do card ou, sem ele, no repositório de origem, como o motor lê. Falha do git ou
+    ref ausente devolvem False: a medida do motor decide (sem staging ela recusa)."""
+    import subprocess
+    if not workspace or not candidate:
+        return False
+    repo=Path(str(workspace))
+    if not repo.is_dir():
+        origin=str(workspace).replace('\\','/').split('/.worktrees/')[0]
+        if origin==str(workspace).replace('\\','/') or not Path(origin).is_dir():
+            return False
+        repo=Path(origin)
+    for ref in ('origin/staging','staging'):
+        try:
+            done=subprocess.run(['git','-C',str(repo),'merge-base','--is-ancestor',str(candidate),ref],
+                                capture_output=True,text=True,timeout=20)
+        except (OSError,subprocess.SubprocessError):
+            return False
+        if done.returncode in (0,1):
+            return done.returncode==0
+    return False
+
+
 def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
     if operation not in {'homolog','pr','merge','deploy','staging_pr','staging_merge','repair'} or not target or not candidate:  # RESULT_PROBE_20260911: repair = mutação de dado
         raise WorkflowError('External effect needs operation, destination and exact candidate')
@@ -6143,8 +6167,17 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         preparation=None
         if staging and task.delivery_type!='code':
             raise WorkflowError('Staging preparation applies only to code delivery')
+        # STAGING_CANDIDATE_BASE_20261014: a candidata que a staging já contém não é publicada por este efeito e mediria
+        # zero arquivos contra ela; só a repetição do mesmo efeito, ou a integração de um staging_pr já pedido com ela,
+        # passa daqui.
+        if staging and _staging_contains(task.workspace_path,candidate) and not conn.execute(
+                "SELECT 1 FROM nfos_effects WHERE task_id=? AND candidate=? AND target=? AND operation IN ('staging_pr',?)",
+                (task_id,candidate,target,operation)).fetchone():
+            raise WorkflowError('Staging already contains this candidate: a staging effect publishes the exact new commit, not one already in staging')
         from hermes_cli import nfos_process  # PROJECT_PROCESS_20261006: efeito externo só na etapa do processo que o permite
-        _process=nfos_process.guard(conn,task_id,effect=operation)
+        # STAGING_CANDIDATE_BASE_20261014: no efeito de staging o processo mede a candidata que este efeito publica, a
+        # mesma da chave, da linha do efeito e do evento abaixo; os demais efeitos seguem medindo a candidata do card.
+        _process=nfos_process.guard(conn,task_id,effect=operation,effect_candidate=candidate if staging else None)
         # PROJECT_PROCESS_EFFECT_20261006: o efeito leva o card à etapa como o estágio levaria; a decisão vai no evento
         # do efeito, na mesma transação, e é projetada depois do commit.
         _decided={'process':nfos_process.summary(_process)} if _process else {}
