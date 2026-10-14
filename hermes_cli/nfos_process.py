@@ -239,6 +239,8 @@ def position(conn, task_id) -> dict | None:
         return {"mode": current, "governed": specmod.governs(spec, engine.get("delivery_type")),
                 "title": definition["title"], "version": definition["version"], "current": here,
                 "current_name": steps.get(here, {}).get("name"),
+                # PROCESS_HOLD_20261014: decision/wait steps only the decider leaves (nfos_process_hold).
+                "current_kind": steps.get(here, {}).get("kind"), "current_lane": steps.get(here, {}).get("lane"),
                 "permits": sorted(specmod.permits(spec, here)),
                 "next": [{"step": t["to"], "name": steps[t["to"]]["name"], "when": t.get("when")}
                          for t in specmod.outgoing(spec, here)]}
