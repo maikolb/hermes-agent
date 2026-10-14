@@ -247,5 +247,9 @@
   {"pr": 342, "file": "hermes_cli/nfos_reviewer.py", "text": "state['status']='interrupted';emit('error',error=f'Execução interrompida ({type(exc).__name__})')"},
   {"pr": 342, "file": "hermes_cli/nfos_reviewer.py", "text": "# The mark of a board follows its own collection; only a collection error holds it."},
   {"pr": 342, "file": "hermes_cli/nfos_reviewer.py", "text": "# The retry of a pending write (same card and run) does not repeat its block."},
-  {"pr": 341, "file": "tests/agent/test_vision_routing_31179.py", "text": "with patch(\"agent.models_dev.fetch_models_dev\", return_value=registry):"}
+  {"pr": 341, "file": "tests/agent/test_vision_routing_31179.py", "text": "with patch(\"agent.models_dev.fetch_models_dev\", return_value=registry):"},
+  {"pr": 346, "file": "hermes_cli/nfos_delivery.py", "text": "_process=nfos_process.guard(conn,task_id,effect=operation,effect_candidate=candidate if staging else None)"},
+  {"pr": 346, "file": "hermes_cli/nfos_delivery.py", "text": "raise WorkflowError('Staging already contains this candidate: a staging effect publishes the exact new commit, not one already in staging')"},
+  {"pr": 346, "file": "hermes_cli/nfos_process.py", "text": "if effect_candidate and effect_candidate != (engine.get(\"candidate_sha\") or engine.get(\"integrated_sha\")):"},
+  {"pr": 346, "file": "hermes_cli/nfos_process.py", "text": "engine[\"effect_candidate\"] = effect_candidate"}
 ]
