@@ -236,5 +236,6 @@
   {"pr": 319, "file": "hermes_cli/nfos_workspace_repair.py", "text": "def finish_dependency_pause("},
   {"pr": 319, "file": "hermes_cli/nfos_waits.py", "text": "def card_cycle("},
   {"pr": 319, "file": "hermes_cli/nfos_waits.py", "text": "LAB_COMMANDS = {"},
-  {"pr": 319, "file": "hermes_cli/nfos_runtime.py", "text": "the fact the runtime verifies by itself"}
+  {"pr": 319, "file": "hermes_cli/nfos_runtime.py", "text": "the fact the runtime verifies by itself"},
+  {"pr": 341, "file": "tests/agent/test_vision_routing_31179.py", "text": "with patch(\"agent.models_dev.fetch_models_dev\", return_value=registry):"}
 ]
