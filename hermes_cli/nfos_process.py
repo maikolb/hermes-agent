@@ -89,7 +89,7 @@ def actor() -> str:
     return "worker" if os.environ.get("HERMES_KANBAN_TASK") else "principal"
 
 
-def _engine(conn, task_id, delivery_type=None, spec_revision=None) -> dict:
+def _engine(conn, task_id, delivery_type=None, spec_revision=None, effect_candidate=None) -> dict:
     row = conn.execute("SELECT t.delivery_type, t.status, t.instruction_revision, t.workspace_path, w.stage, w.spec_revision, "
                        "w.state_json FROM tasks t LEFT JOIN nfos_workflows w ON w.task_id=t.id WHERE t.id=?", (task_id,)).fetchone()
     engine = {k: row[k] for k in ("delivery_type", "status", "stage", "spec_revision")} if row else {}
@@ -109,10 +109,14 @@ def _engine(conn, task_id, delivery_type=None, spec_revision=None) -> dict:
         engine["delivery_type"] = delivery_type
     if spec_revision is not None:
         engine["spec_revision"] = spec_revision
+    if effect_candidate:
+        # STAGING_CANDIDATE_BASE_20261014: o SHA que o efeito de staging publica, o mesmo da chave do efeito. O processo
+        # o mede contra o ponto em que ele saiu da staging; sem ele, mede a candidata do card, como antes.
+        engine["effect_candidate"] = effect_candidate
     return engine
 
 
-def evaluate(conn, task_id, *, stage=None, effect=None, delivery_type=None, spec_revision=None):
+def evaluate(conn, task_id, *, stage=None, effect=None, delivery_type=None, spec_revision=None, effect_candidate=None):
     """Julga a troca pelo processo do board: ``(decisão, recusa)``.
 
     A decisão é None quando o processo não governa o card. A recusa só vem em ``enforce``: a mensagem
@@ -130,7 +134,7 @@ def evaluate(conn, task_id, *, stage=None, effect=None, delivery_type=None, spec
         enforce, Store = _module()
         # O andamento é projeção das decisões gravadas nos eventos do card: a que ficou só no evento entra antes.
         decision = enforce.decide(Store(_database()), board, task_id,
-                                  _engine(conn, task_id, delivery_type, spec_revision),
+                                  _engine(conn, task_id, delivery_type, spec_revision, effect_candidate),
                                   stage=stage, effect=effect, actor=actor(), rules=rules,
                                   events=lambda: enforce.motor_events_in(conn, task_id))
     except Exception as exc:  # noqa: BLE001 - qualquer falha da consulta vale como processo indisponível

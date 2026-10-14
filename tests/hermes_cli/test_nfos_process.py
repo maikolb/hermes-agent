@@ -392,3 +392,168 @@ def test_the_effect_moves_the_card_with_its_decision_in_the_effect_event(card):
     moved = kinds(conn, task, 'nfos_process_moved')
     assert len(moved) == 1 and moved[0]['process']['step'] == 'implementar'
     assert store.history('concursa-ai', task.id)[-1]['step_key'] == 'implementar'
+
+
+# STAGING_CANDIDATE_BASE_20261014: caso real do card t_5c97d95d do Concursa (14/10/2026), com os nomes de arquivo reais
+# lidos na VPS (cópia da fixture do nexa-factory-os #294).
+REAL_STAGING = json.loads((Path(__file__).parent / 'fixtures' / 'concursa-staging-candidate-20261014.json')
+                          .read_text(encoding='utf-8'))
+STAGING_TARGET = 'https://github.com/fixture/Concursa_ai/tree/staging'
+EXTRACTION_CITED = 'muda a extração (' + ', '.join(REAL_STAGING['refused_extraction_paths']) + ')'
+
+
+def _staging_repo(tmp_path):
+    """Topologia do Concursa no t_5c97d95d. Na staging: a base do worktree do card (440677b9), a staging (1baddb1b), que
+    recebeu 2 dos 3 arquivos de extração, e a candidata do efeito (43a611b7), que muda 25 arquivos sobre ela. Na main, que
+    recebeu os 3 arquivos de extração, a candidata do card (7356d1ee), que só toca a Sineta."""
+    repo = tmp_path / 'source'
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(paths, message):
+        for path in paths:
+            (repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (repo / path).write_text(message, encoding='utf-8')
+        git('add', '.')
+        git('commit', '-qm', message)
+        return git('rev-parse', 'HEAD')
+
+    git('init', '-q')
+    git('symbolic-ref', 'HEAD', 'refs/heads/main')
+    git('config', 'user.email', 'fixture@example.com')
+    git('config', 'user.name', 'fixture')
+    git('config', 'core.longpaths', 'true')
+    shas = dict(fork_point=commit(['README.md'], 'fork point'))
+    git('checkout', '-qb', 'staging')
+    shas['card_base'] = commit(['apps/web/app/layout.tsx'], 'card base, only on staging')
+    shas['staging'] = commit(REAL_STAGING['staging_extraction_paths'], 'staging received extraction')
+    git('checkout', '-qb', 'wt/staging-pr')
+    shas['staging_candidate'] = commit(REAL_STAGING['staging_candidate_paths'], 'staging candidate')
+    git('checkout', '-q', 'main')
+    shas['main'] = commit(REAL_STAGING['refused_extraction_paths'], 'main received extraction')
+    git('checkout', '-qb', 'wt/t_5c97d95d')
+    shas['card_candidate'] = commit(['apps/web/app/sineta/page.tsx'], 'card candidate')
+    git('update-ref', 'refs/remotes/origin/main', shas['main'])
+    git('update-ref', 'refs/remotes/origin/staging', shas['staging'])
+    return repo, shas
+
+
+@pytest.fixture
+def staging_card(card, tmp_path):
+    """O card do caso real no modo de registro (principal_validation false), o modo em que a candidata do efeito de
+    staging não precisa ser a do card: worktree, base e candidata do card como no t_5c97d95d, processo do Concursa em
+    enforce, plano focal da Sineta e o resultado da cobertura na etapa publicar."""
+    import hashlib
+    from project_workflow import validation
+    conn, task, pw = card
+    home = Path(os.environ['HERMES_HOME'])
+    (home / 'config.yaml').write_text(yaml.safe_dump({'kanban': {'delivery': {
+        'principal_validation': False, 'worker_model': 'gpt-5.6-luna',
+        'worker_provider': 'openai-codex', 'worker_reasoning_effort': 'high'}}}))
+    save_spec(conn, task)
+    repo, shas = _staging_repo(tmp_path)
+    state = json.loads(d.get_workflow(conn, task.id)['state_json'] or '{}')
+    conn.execute('UPDATE tasks SET workspace_path=? WHERE id=?', (str(repo), task.id))
+    conn.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,'worktree_creation_requested',?,1)",
+                 (task.id, json.dumps({'base_sha': shas['card_base']})))
+    conn.execute('UPDATE nfos_workflows SET state_json=? WHERE task_id=?',
+                 (json.dumps(dict(state, candidate_sha=shas['card_candidate'])), task.id))
+    conn.commit()
+    store = seed(pw)
+    current = Path(MODULE_SRC) / 'project_workflow' / 'definitions' / 'concursa-ai.entrega.json'
+    store.add_definition(json.loads(current.read_text(encoding='utf-8')), source_text='Concursa atual',
+                         created_by='fixture', approve_as=('fixture', 'synthetic'))
+    policy(pw, 'enforce')
+    store.bind('concursa-ai', task.id, by='fixture')
+    engine = nfos_process._engine(conn, task.id)
+    proof = tmp_path / 'inspected.txt'
+    proof.write_text('Sineta inspecionada, parser fora', encoding='utf-8')
+    ref = dict(path=str(proof), sha256=hashlib.sha256(proof.read_bytes()).hexdigest())
+    plan = validation.prepare_plan(dict(rationale='Sineta inspecionada', dependencies_complete=True, data_issue=False, impacts=[
+        dict(domain='edital_extraction', relation='excluded', rationale='Sem dependência do parser', evidence=[ref]),
+        dict(domain='sineta', relation='direct', rationale='Sineta afetada', evidence=[ref])]),
+        engine, board='concursa-ai', task_id=task.id)
+    store.record_step('concursa-ai', task.id, 'triagem', source='agent', evidence={'validation_plan': plan})
+    steps(store, task, 'p5', 'p6', 'p7', 'publicar')
+    receipt = validation.prepare_result(dict(plan_digest=plan['digest'], rationale='Prova focal inspecionada',
+        coverage=[dict(requirement='focal:sineta', status='passed', evidence=[ref])]), plan, engine)
+    store.record_step('concursa-ai', task.id, 'publicar', source='agent', evidence={'validation_result': receipt})
+    return conn, task, shas
+
+
+def spy_engine(monkeypatch):
+    """O engine que o motor recebeu em cada julgamento, como o fork o montou."""
+    seen = []
+    original = nfos_process._engine
+
+    def spy(*args, **kwargs):
+        engine = original(*args, **kwargs)
+        seen.append(dict(engine))
+        return engine
+
+    monkeypatch.setattr(nfos_process, '_engine', spy)
+    return seen
+
+
+@needs_module
+@pytest.mark.parametrize('operation', ['staging_pr', 'staging_merge'])
+def test_staging_effect_is_judged_by_the_candidate_it_publishes(staging_card, monkeypatch, operation):
+    """No t_5c97d95d as 5 recusas de staging_pr mediram a candidata do card (7356d1ee, da main) e citaram a extração. O
+    efeito chega ao motor com a candidata que ele publica (43a611b7), que contra a staging muda 25 arquivos, nenhum de
+    extração; é o mesmo SHA da chave, da linha do efeito e do evento."""
+    import hashlib
+    from project_workflow import enforce, validation
+    conn, task, shas = staging_card
+    published = shas['staging_candidate']
+    seen = spy_engine(monkeypatch)
+    result = d.begin_effect(conn, task.id, task.current_run_id, operation=operation, target=STAGING_TARGET,
+                            candidate=published)
+    assert result['execute']
+    judged = seen[-1]
+    assert judged['effect_candidate'] == published and judged['candidate_sha'] == shas['card_candidate']
+    # O SHA medido é o que o efeito grava e publica, pela chave do efeito.
+    assert result['id'] == hashlib.sha256(d._json([task.id, operation, STAGING_TARGET, published]).encode()).hexdigest()
+    row = conn.execute('SELECT operation,target,candidate FROM nfos_effects WHERE id=?', (result['id'],)).fetchone()
+    assert (row['operation'], row['target'], row['candidate']) == (operation, STAGING_TARGET, published)
+    requested = kinds(conn, task, 'nfos_effect_requested')[-1]
+    assert requested['candidate'] == published and requested['process']['allowed']
+    measured = enforce.candidate_paths(judged, operation)
+    assert measured == sorted(REAL_STAGING['staging_candidate_paths'])
+    assert len(measured) == 25 and validation.extraction_touched(measured) == []
+
+
+@needs_module
+def test_without_the_effect_candidate_the_staging_gate_does_not_open(staging_card, monkeypatch):
+    """Sem candidata o efeito é recusado antes do motor; o julgamento sem a candidata do efeito não ganha
+    effect_candidate e mede a candidata do card como hoje, que no caso real toca a extração e segue recusado."""
+    conn, task, shas = staging_card
+    seen = spy_engine(monkeypatch)
+    for missing in ('', None):
+        with pytest.raises(d.WorkflowError, match='exact candidate'):
+            d.begin_effect(conn, task.id, task.current_run_id, operation='staging_pr', target=STAGING_TARGET,
+                           candidate=missing)
+    assert seen == [], 'sem candidata o efeito nem chega ao processo'
+    for operation in ('staging_pr', 'staging_merge'):
+        for missing in ('', None):
+            decision, refusal = nfos_process.evaluate(conn, task.id, effect=operation, effect_candidate=missing)
+            assert 'effect_candidate' not in seen[-1] and seen[-1]['candidate_sha'] == shas['card_candidate']
+            assert refusal and EXTRACTION_CITED in refusal and not decision['allowed']
+    assert kinds(conn, task, 'nfos_effect_requested') == []
+
+
+@needs_module
+@pytest.mark.parametrize('operation', ['pr', 'merge'])
+def test_effects_outside_staging_still_measure_the_card_candidate(staging_card, monkeypatch, operation):
+    """Fora de staging o fork não manda a candidata do efeito e o motor não a usa: a candidata do card segue medida e a
+    recusa de 14/10 continua igual."""
+    conn, task, shas = staging_card
+    seen = spy_engine(monkeypatch)
+    with pytest.raises(nfos_process.ProcessRefusal, match=r'muda a extração \('):
+        d.begin_effect(conn, task.id, task.current_run_id, operation=operation, target='main',
+                       candidate=shas['staging_candidate'])
+    assert 'effect_candidate' not in seen[-1] and seen[-1]['candidate_sha'] == shas['card_candidate']
+    decision, refusal = nfos_process.evaluate(conn, task.id, effect=operation, effect_candidate=shas['staging_candidate'])
+    assert refusal and EXTRACTION_CITED in refusal and not decision['allowed']
+    assert kinds(conn, task, 'nfos_effect_requested') == []

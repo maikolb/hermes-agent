@@ -1,0 +1,46 @@
+{
+  "source": "git diff --name-only no repositório do Concursa na VPS (/srv/projects/Concursa_ai/source), lido em 14/10/2026",
+  "card": "t_5c97d95d",
+  "card_base": "440677b985fbced7646e6f0742ba05c58acca245",
+  "fork_point": "3cb9f3329ad15092f742373a223645b2c0dce0d2",
+  "main": "3d1c1f49551fd2d28d405c612da0abfba14263fe",
+  "staging": "1baddb1b54b76810f3ec922fbc324dd6cdb9567c",
+  "card_candidate": "7356d1ee1df4d34df4324e931aa0a6eae5e0cb44",
+  "staging_candidate": "43a611b7b22084751ee13c913bc9bfcd8cd84249",
+  "staging_candidate_paths": [
+    "packages/drizzle/migrations/0141_question_emphasis_annotation.sql",
+    "packages/drizzle/migrations/meta/0141_snapshot.json",
+    "packages/drizzle/migrations/meta/_journal.json",
+    "packages/drizzle/src/schema/questions.ts",
+    "packages/services/src/content-reuse/questions/reusable-question-selector.interface.ts",
+    "packages/services/src/content-reuse/questions/reusable-question-selector.test.ts",
+    "packages/services/src/content-reuse/questions/reusable-question-selector.ts",
+    "packages/services/src/question-diversity/index.ts",
+    "packages/services/src/question-diversity/lexical.ts",
+    "packages/services/src/question-diversity/similarity.test.ts",
+    "packages/services/src/question-diversity/similarity.ts",
+    "packages/services/src/question-generator/emphasis-contract.test.ts",
+    "packages/services/src/question-generator/emphasis-contract.ts",
+    "packages/services/src/question-generator/emphasis.test.ts",
+    "packages/services/src/question-generator/emphasis.ts",
+    "packages/services/src/question-generator/index.ts",
+    "packages/services/src/question-generator/question-generator.ts",
+    "packages/services/src/question-generator/schemas/zod.ts",
+    "packages/trpc/src/server/routers/simulations/create-by-discipline.failure.test.ts",
+    "packages/trpc/src/server/routers/simulations/create-by-discipline.inactive-topic.test.ts",
+    "packages/trpc/src/server/routers/simulations/create-by-discipline.reuse.test.ts",
+    "packages/trpc/src/server/routers/simulations/create-by-summary.test.ts",
+    "packages/trpc/src/server/routers/simulations/services/reusable-question-selector.test.ts",
+    "packages/trpc/src/server/routers/simulations/services/reusable-question-selector.ts",
+    "packages/trpc/src/server/routers/simulations/shared.ts"
+  ],
+  "refused_extraction_paths": [
+    "packages/lib/src/schemas/notice-extraction-snapshot.ts",
+    "packages/lib/src/schemas/notice-extraction-v5.ts",
+    "packages/lib/src/schemas/notice-extraction.ts"
+  ],
+  "staging_extraction_paths": [
+    "packages/lib/src/schemas/notice-extraction-snapshot.ts",
+    "packages/lib/src/schemas/notice-extraction-v5.ts"
+  ]
+}

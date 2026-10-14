@@ -5973,7 +5973,9 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         if staging and task.delivery_type!='code':
             raise WorkflowError('Staging preparation applies only to code delivery')
         from hermes_cli import nfos_process  # PROJECT_PROCESS_20261006: efeito externo só na etapa do processo que o permite
-        _process=nfos_process.guard(conn,task_id,effect=operation)
+        # STAGING_CANDIDATE_BASE_20261014: no efeito de staging o processo mede a candidata que este efeito publica, a
+        # mesma da chave, da linha do efeito e do evento abaixo; os demais efeitos seguem medindo a candidata do card.
+        _process=nfos_process.guard(conn,task_id,effect=operation,effect_candidate=candidate if staging else None)
         # PROJECT_PROCESS_EFFECT_20261006: o efeito leva o card à etapa como o estágio levaria; a decisão vai no evento
         # do efeito, na mesma transação, e é projetada depois do commit.
         _decided={'process':nfos_process.summary(_process)} if _process else {}
