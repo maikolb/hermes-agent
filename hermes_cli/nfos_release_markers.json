@@ -247,5 +247,8 @@
   {"pr": 342, "file": "hermes_cli/nfos_reviewer.py", "text": "state['status']='interrupted';emit('error',error=f'Execução interrompida ({type(exc).__name__})')"},
   {"pr": 342, "file": "hermes_cli/nfos_reviewer.py", "text": "# The mark of a board follows its own collection; only a collection error holds it."},
   {"pr": 342, "file": "hermes_cli/nfos_reviewer.py", "text": "# The retry of a pending write (same card and run) does not repeat its block."},
-  {"pr": 341, "file": "tests/agent/test_vision_routing_31179.py", "text": "with patch(\"agent.models_dev.fetch_models_dev\", return_value=registry):"}
+  {"pr": 341, "file": "tests/agent/test_vision_routing_31179.py", "text": "with patch(\"agent.models_dev.fetch_models_dev\", return_value=registry):"},
+  {"pr": 344, "file": "hermes_cli/goals.py", "text": "if decision['id'] != finalize_question:"},
+  {"pr": 344, "file": "hermes_cli/goals.py", "text": "return {\"outcome\": \"held_after_finalize\", \"turns_used\": turns_used,"},
+  {"pr": 344, "file": "cli.py", "text": "if outcome['outcome'] in ('awaiting_decision', 'held_after_finalize'):"}
 ]
