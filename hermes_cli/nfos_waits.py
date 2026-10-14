@@ -14,6 +14,7 @@ O que a regra não faz: não fecha card como [CANCELADO], não conta falha como 
 permissão. Prazo e teto vêm de `policy`, igual para todos os projetos.
 """
 import json
+import re
 import time
 import uuid
 
@@ -207,8 +208,11 @@ CARD_UNTIL = ('done', 'effect')
 CARD_EFFECTS = ('pr', 'merge', 'deploy', 'homolog')
 _SERVICE_NAME = set('abcdefghijklmnopqrstuvwxyz0123456789_-')
 # Subcomandos de leitura do concursa-lab que um predicado pode rodar, e quantos identificadores cada um leva. Nenhum deles
-# executa, envia ou cancela nada no laboratório.
-LAB_COMMANDS = {('status',): 0, ('job', 'status'): 1, ('runtime', 'capabilities'): 0, ('runtime', 'result'): 1}
+# executa, envia ou cancela nada no laboratório. `status --task` mede os apps da cópia de uma tarefa (NFOS #292); o que ele
+# leva é o slug da cópia, com a regra do executor, não o ID de um pedido.
+LAB_COMMANDS = {('status',): 0, ('status', '--task'): 1, ('job', 'status'): 1, ('runtime', 'capabilities'): 0,
+                ('runtime', 'result'): 1}
+_LAB_TASK_RX = re.compile(r'[a-z0-9][a-z0-9-]{2,30}\Z')  # o TASK do executor do laboratório (lab_access.py)
 
 
 def _predicate(reason, spec, value):
@@ -246,13 +250,17 @@ def _predicate(reason, spec, value):
         return {'kind': kind, 'probe': value['probe']}
     if kind == 'lab_command':
         command = value.get('command')
-        verb = next((verb for verb in LAB_COMMANDS if isinstance(command, list) and tuple(command[:len(verb)]) == verb), None)
+        # O verbo mais longo que casa: `status --task SLUG` não é `status` com dois identificadores a mais.
+        verb = max((verb for verb in LAB_COMMANDS if isinstance(command, list) and tuple(command[:len(verb)]) == verb),
+                   key=len, default=None)
         ids = command[len(verb):] if verb else None
+        rx = _LAB_TASK_RX if verb == ('status', '--task') else d._LAB_RECEIPT_RX
         # Só o código esperado. "Qualquer código menos X" liberava a espera com o laboratório fora do ar (saída 255).
-        if (verb is None or len(ids) != LAB_COMMANDS[verb] or any(not isinstance(i, str) or not d._LAB_RECEIPT_RX.fullmatch(i) for i in ids)
+        if (verb is None or len(ids) != LAB_COMMANDS[verb] or any(not isinstance(i, str) or not rx.fullmatch(i) for i in ids)
                 or set(value) - {'kind', 'command', 'exit'} or type(value.get('exit')) is not int or not 0 <= value['exit'] <= 255):
-            raise d.WorkflowError('lab_command needs command, one of ' + ', '.join(' '.join(verb) + ' <id>' * count
-                                  for verb, count in LAB_COMMANDS.items()) + ', and exit, the exit code (0 to 255) that proves the fact')
+            raise d.WorkflowError('lab_command needs command, one of ' + ', '.join(
+                ' '.join(verb) + (' <task>' if verb == ('status', '--task') else ' <id>' * count)
+                for verb, count in LAB_COMMANDS.items()) + ', and exit, the exit code (0 to 255) that proves the fact')
         return {'kind': kind, 'command': list(command), 'exit': value['exit']}
     services = value.get('services', [])
     if (not isinstance(services, list) or len(services) > 8 or any(
