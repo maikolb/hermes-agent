@@ -220,5 +220,11 @@
   {"pr": 336, "file": "agent/credential_pool.py", "text": "if synced is not entry and synced.last_status == STATUS_DEAD:"},
   {"pr": 336, "file": "agent/credential_pool.py", "text": "if item.id != updated.id and item.refresh_token == entry.refresh_token"},
   {"pr": 336, "file": "hermes_cli/auth.py", "text": "or (prev_rt and entry.get(\"refresh_token\") == prev_rt)"},
-  {"pr": 336, "file": "agent/auxiliary_client.py", "text": "failed_api_key=retry_key[0] if retry_key and pool_provider == \"openai-codex\" else \"\",", "min": 2}
+  {"pr": 336, "file": "agent/auxiliary_client.py", "text": "failed_api_key=retry_key[0] if retry_key and pool_provider == \"openai-codex\" else \"\",", "min": 2},
+  {"pr": 337, "file": "hermes_cli/auth.py", "text": "def _load_codex_login_state(auth_store: Dict[str, Any]) -> Optional[Dict[str, Any]]:"},
+  {"pr": 337, "file": "hermes_cli/auth.py", "text": "isinstance(row, dict) and row.get(\"source\") != \"device_code\" for row in rows"},
+  {"pr": 337, "file": "hermes_cli/auth.py", "text": "if not owns_pool and not (isinstance(sources, (list, dict)) and \"device_code\" in sources):"},
+  {"pr": 337, "file": "hermes_cli/auth.py", "text": "state = _load_codex_login_state(auth_store)", "min": 2},
+  {"pr": 337, "file": "agent/credential_pool.py", "text": "state = _load_codex_login_state(auth_store)", "min": 3},
+  {"pr": 337, "file": "agent/credential_pool.py", "text": "# No login to clear, nothing to write: a pool profile"}
 ]
