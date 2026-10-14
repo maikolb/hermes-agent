@@ -138,6 +138,10 @@ def test_dependency_on_a_confirmed_effect_of_another_card(paused):
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['job', 'status', '../x'], 'exit': 0}},
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['job', 'status', 'job-abc123'], 'exit_not': 64}},
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['status']}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['status', '--task'], 'exit': 0}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['status', '--task', '../x'], 'exit': 0}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['status', '--task', 'cs0028b', 'x'], 'exit': 0}},
+    {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['status', 'cs0028b'], 'exit': 0}},
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'event', 'name': 'nfos_wait_declared'}},
 ])
 def test_dependency_the_runtime_could_not_check_or_nobody_can_deliver_is_refused(paused, dependency):
@@ -332,6 +336,32 @@ def test_read_only_laboratory_command_with_the_declared_exit_code(paused, monkey
     advance()
     assert runs == [(['job', 'status', 'job-abc123'], False)] * 3, 'o subcomando declarado, em lista e sem shell'
     assert d.get_decision(conn, did)['status'] == 'resolved' and not repair.maintenance_pause_pending(conn, task.id)
+
+
+def test_status_of_a_task_copy_is_a_read_only_laboratory_command(paused, monkeypatch):
+    """t_ab9ec594, 14/10/2026: nenhuma leitura alcançava o app da cópia cs0028b. `status --task` mede os apps dela."""
+    conn, task, did, advance = paused
+    import subprocess
+    runs, code = [], [1]
+
+    def run(argv, **kwargs):
+        runs.append((argv[1:], kwargs.get('shell', False)))
+        return subprocess.CompletedProcess(argv, code[0], stdout='{}', stderr='')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    _declare(conn, did, {'kind': 'lab_command', 'command': ['status', '--task', 'cs0028b'], 'exit': 0}, executor=LAB)
+    advance()
+    assert waits.open_for_decision(conn, did)['evidence']['exit'] == 1, 'app da cópia sem responder mantém a espera'
+    code[0] = 0
+    advance()
+    assert runs == [(['status', '--task', 'cs0028b'], False)] * 2, 'o subcomando declarado, em lista e sem shell'
+    assert d.get_decision(conn, did)['status'] == 'resolved' and not repair.maintenance_pause_pending(conn, task.id)
+
+
+def test_status_of_a_task_takes_the_slug_rule_of_the_laboratory_not_the_request_id_rule():
+    """O slug de uma cópia vai de 3 a 31 caracteres; o ID de pedido começa em 6. `t45` é uma cópia válida."""
+    assert waits._LAB_TASK_RX.fullmatch('t45') and not d._LAB_RECEIPT_RX.fullmatch('t45')
+    assert not waits._LAB_TASK_RX.fullmatch('a' * 32) and not waits._LAB_TASK_RX.fullmatch('-cs0028b')
 
 
 def test_laboratory_out_of_reach_does_not_satisfy_a_command(paused, monkeypatch):
