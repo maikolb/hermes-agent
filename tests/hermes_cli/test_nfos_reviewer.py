@@ -73,8 +73,8 @@ def test_all_boards_full_history_readonly_and_only_a_pointer_in_principal_memory
     assert before=={s:hashlib.sha256(p.read_bytes()).hexdigest() for s,p in boards}
     store=MemoryStore(memory_char_limit=50000);store.load_from_disk()
     # With room, the Principal's memory gets one short pointer per project and no lesson text.
-    assert store.memory_entries==[pointer('one'),pointer('two')]
     assert 'Verify the customer checkout' not in store.format_for_system_prompt('memory')
+    assert store.memory_entries==[pointer('one'),pointer('two')]
     assert 'Verify the customer checkout' in reviewer.lessons_path('one').read_text(encoding='utf-8')
     result=reviewer.status(state['id'])
     assert {'observed','analysed','saved','finished'} <= {e['kind'] for e in result['events']}
@@ -240,6 +240,7 @@ def test_consolidated_summary_lives_in_the_reviewer_file_and_old_entry_becomes_p
     data['memory_summary']='Verify actual checkout; restricted to price propagation.'
     reviewer.save_lessons(case,data,store,noop)
     store.load_from_disk()
+    assert not [e for e in store.memory_entries if 'Verify actual checkout' in e or 'Old long synthesis' in e]
     assert store.memory_entries==['[one] Principal note',pointer('one')]
     assert reviewer.project_summary('one')=='Verify actual checkout; restricted to price propagation.'
     text=reviewer.lessons_path('one').read_text(encoding='utf-8')
