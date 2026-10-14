@@ -9,6 +9,7 @@ import json
 from tests.agent.test_empty_tool_name_loop_dampening import agent_env, _text_resp, _tc_resp  # noqa: F401
 
 DECIDE = 'decide_test_fixture'
+LOOKUP = 'lookup_test_fixture'
 
 
 def _card(agent, tmp_path, monkeypatch, decisions=1):
@@ -34,7 +35,8 @@ def _card(agent, tmp_path, monkeypatch, decisions=1):
     return db, tid, dids
 
 
-def _run(agent, provider, db, tid, dids, responses, *, wake=True, message='[kanban] worker aguardando sua decisão'):
+def _run(agent, provider, db, tid, dids, responses, *, wake=True, message='[kanban] worker aguardando sua decisão',
+         action='continue', answer='Proceed', public_message=None, while_deciding=None):
     """Run one turn; return the result and the call count seen at each recorded answer."""
     from hermes_cli import kanban_db as kb, nfos_delivery as delivery
     import model_tools
@@ -45,15 +47,21 @@ def _run(agent, provider, db, tid, dids, responses, *, wake=True, message='[kanb
     answered = []
 
     def decide(args, **kwargs):
+        if while_deciding:
+            while_deciding()
         with kb.connect_closing(db) as conn:
-            delivery.resolve_decision(conn, dids[len(answered)], action='continue', answer='Proceed', author='Principal')
+            delivery.resolve_decision(conn, dids[len(answered)], action=action, answer=answer, author='Principal',
+                                      public_message=public_message)
         answered.append(len(provider.captured_requests))
         return json.dumps({'resolved': True})
 
     for reg in registries:
         reg.register(DECIDE, 'test_principal_answer', {'name': DECIDE, 'description': 'Resolve the fixture decision',
                                                        'parameters': {'type': 'object', 'properties': {}}}, decide)
-    agent.valid_tool_names.add(DECIDE)
+        reg.register(LOOKUP, 'test_principal_answer', {'name': LOOKUP, 'description': 'Read a fixture fact',
+                                                       'parameters': {'type': 'object', 'properties': {}}},
+                     lambda args, **kwargs: json.dumps({'due': 'amanhã'}))
+    agent.valid_tool_names.update({DECIDE, LOOKUP})
     agent.max_iterations = 10
     provider.response_queue.clear()
     provider.captured_requests.clear()
@@ -66,6 +74,7 @@ def _run(agent, provider, db, tid, dids, responses, *, wake=True, message='[kanb
         current_notify_receipt.reset(token)
         for reg in registries:
             reg._tools.pop(DECIDE, None)
+            reg._tools.pop(LOOKUP, None)
     return result, answered
 
 
@@ -73,6 +82,12 @@ def _pending(db, tid):
     from hermes_cli import kanban_db as kb
     with kb.connect_closing(db) as conn:
         return conn.execute("SELECT COUNT(*) FROM nfos_decisions WHERE task_id=? AND status='pending'", (tid,)).fetchone()[0]
+
+
+def _status(db, did):
+    from hermes_cli import kanban_db as kb
+    with kb.connect_closing(db) as conn:
+        return conn.execute("SELECT status FROM nfos_decisions WHERE id=?", (did,)).fetchone()[0]
 
 
 def test_a_wake_turn_ends_once_the_answer_leaves_the_card_without_pending_decisions(agent_env, tmp_path, monkeypatch,
@@ -121,6 +136,22 @@ def test_b2_wake_turn_continues_to_the_next_decision_and_ends_at_the_last_answer
     assert _pending(db, tid) == 0
 
 
+def test_b3_decide_human_keeps_the_turn_for_the_question_the_group_reads(agent_env, tmp_path, monkeypatch, record_property):
+    agent, provider = agent_env
+    db, tid, dids = _card(agent, tmp_path, monkeypatch)
+    question = 'PERGUNTA para Ana: posso usar o destino de teste?'
+    result, answered = _run(agent, provider, db, tid, dids, [_tc_resp(DECIDE), _text_resp(question)],
+                            action='human', answer=question,
+                            public_message={'kind': 'question', 'text': 'Posso usar o destino de teste?', 'to': 'Ana'})
+    record_property('api_calls', result['api_calls'])
+    record_property('calls_after_answer', result['api_calls'] - answered[-1])
+    record_property('decision_status', _status(db, dids[0]))
+    assert _status(db, dids[0]) == 'human', 'the decision now waits for the requester'
+    # The question is the closing text: in a chat-born card nothing else writes it to the group.
+    assert result['api_calls'] - answered[-1] == 1
+    assert result['final_response'] == question
+
+
 def test_c_turn_opened_by_a_person_is_unchanged(agent_env, tmp_path, monkeypatch, record_property):
     agent, provider = agent_env
     db, tid, dids = _card(agent, tmp_path, monkeypatch)
@@ -132,6 +163,25 @@ def test_c_turn_opened_by_a_person_is_unchanged(agent_env, tmp_path, monkeypatch
     assert _pending(db, tid) == 0
     assert after == 1
     assert result['final_response'] == 'Decidido.'
+
+
+def test_c2_person_message_steered_into_a_wake_turn_gets_its_reply(agent_env, tmp_path, monkeypatch, record_property):
+    agent, provider = agent_env
+    db, tid, dids = _card(agent, tmp_path, monkeypatch)
+    person = 'Pessoa no tópico: e o prazo do relatório?'
+    # busy_input_mode steer: the person writes while the decide batch runs; the batch drain hands it to the model.
+    result, answered = _run(agent, provider, db, tid, dids,
+                            [_tc_resp(DECIDE), _tc_resp(LOOKUP), _text_resp('O prazo é amanhã.')],
+                            while_deciding=lambda: agent.steer(person))
+    seen = [n for n, req in enumerate(provider.captured_requests, 1) if person in json.dumps(req, ensure_ascii=False)]
+    record_property('api_calls', result['api_calls'])
+    record_property('first_call_with_person_text', seen[0] if seen else 0)
+    record_property('final_response', result['final_response'])
+    assert _pending(db, tid) == 0
+    assert seen and seen[0] == answered[-1] + 1, 'the call after the answer reads the person'
+    # The turn now answers the person too: a tool round after reading the message does not end it.
+    assert result['api_calls'] == 3
+    assert result['final_response'] == 'O prazo é amanhã.'
 
 
 def test_d_wake_reply_without_recording_the_decision_is_unchanged(agent_env, tmp_path, monkeypatch, record_property):
@@ -148,6 +198,6 @@ def test_d_wake_reply_without_recording_the_decision_is_unchanged(agent_env, tmp
 def test_answer_check_needs_the_turn_checkpoint():
     from unittest.mock import MagicMock
     from agent.kanban_stop import principal_wake_answered
-    assert principal_wake_answered(None) is False
-    assert principal_wake_answered(MagicMock()) is False, 'a test double agent is not a wake turn'
-    assert principal_wake_answered({'routing': {'kanban_wake_delivery': {'delivery_id': 'x'}}, 'created_at': 1.0}) is False
+    assert principal_wake_answered(None, []) is False
+    assert principal_wake_answered(MagicMock(), []) is False, 'a test double agent is not a wake turn'
+    assert principal_wake_answered({'routing': {'kanban_wake_delivery': {'delivery_id': 'x'}}, 'created_at': 1.0}, []) is False

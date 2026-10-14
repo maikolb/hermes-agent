@@ -125,15 +125,34 @@ def _principal_continuation(receipt):
             'never invent a grant, credential, repaired receipt or broaden scope. Do not end with a future-action promise.]')
 
 
-def principal_wake_answered(state) -> bool:
-    """True once this card wake's turn recorded the answer and the card has no pending decision left.
+def _steered_into_turn(turn_messages) -> bool:
+    """A person's /steer reached this turn: the tool batch drain appends it to a tool result of the turn."""
+    from agent.prompt_builder import STEER_MARKER_OPEN
+    for msg in turn_messages:
+        if not (isinstance(msg, dict) and msg.get('role') == 'tool'):
+            continue
+        content = msg.get('content')
+        if isinstance(content, list):  # multimodal tool result: the steer is appended as a text block
+            content = ' '.join(str(block.get('text') or '') for block in content if isinstance(block, dict))
+        if isinstance(content, str) and STEER_MARKER_OPEN in content:
+            return True
+    return False
+
+
+def principal_wake_answered(state, turn_messages) -> bool:
+    """True once this card wake's turn recorded the answer and the card has no open decision left.
 
     PRINCIPAL_TURN_ENDS_AT_ANSWER_20261013: the call after the answer only wrote the
     closing text, with the whole context (265 to 278 thousand input tokens on 13/10).
-    A card with another pending decision keeps the turn; a turn opened by a person
-    carries no wake receipt.
+    A card with another open decision keeps the turn: 'pending', or 'human' after
+    decide human, whose closing text is the PERGUNTA the group reads (open as in
+    SHOW_DECISIONS_OPEN_20261010). A turn that a person's message reached by /steer
+    also answers that person, so it keeps going. A turn opened by a person carries
+    no wake receipt.
     """
     from gateway.wake import current_notify_receipt
+    if _steered_into_turn(turn_messages):
+        return False
     if not isinstance(state, dict):
         return False  # no turn checkpoint, so no turn start to date the answer by
     receipt = current_notify_receipt.get() or (state.get('routing') or {}).get('kanban_wake_delivery')
@@ -145,7 +164,8 @@ def principal_wake_answered(state) -> bool:
     try:
         conn = sqlite3.connect(Path(receipt['db_path']).resolve().as_uri()+'?mode=ro', uri=True, timeout=5)
         try:
-            if conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='pending'", (task_id,)).fetchone():
+            if conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human')",
+                            (task_id,)).fetchone():
                 return False
             # task_events.created_at is whole seconds: the floor of the turn start keeps an answer of its first second.
             return conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='nfos_principal_resolved' AND created_at>=?",
