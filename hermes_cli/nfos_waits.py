@@ -257,6 +257,10 @@ def _predicate(reason, spec, value):
         decision_id = value.get('decision_id')
         if not isinstance(decision_id, str) or not decision_id:
             raise d.WorkflowError(f'{kind} needs the decision id')
+        if kind == 'decision_resolved' and 'since' in value:  # a resposta a partir da qual a espera conta (principal_answer)
+            if type(value['since']) is not int or value['since'] < 0:
+                raise d.WorkflowError('decision_resolved since is a timestamp')
+            return {'kind': kind, 'decision_id': decision_id, 'since': value['since']}
         return {'kind': kind, 'decision_id': decision_id}
     if kind == 'card':
         target, until = value.get('task_id'), value.get('until', 'done')
