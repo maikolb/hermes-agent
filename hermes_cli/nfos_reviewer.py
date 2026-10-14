@@ -1,9 +1,10 @@
-"""Nightly retrospective of native boards. Reads cards; writes reports and native memory only."""
+"""Nightly retrospective of native boards. Reads cards; writes reports, its own lessons files and,
+when it fits, one short pointer per project in native memory."""
 from __future__ import annotations
 
 import argparse
 import base64
-from datetime import datetime, timedelta, time as daytime
+from datetime import datetime, timedelta, timezone, time as daytime
 import hashlib
 import json
 import os
@@ -26,6 +27,11 @@ DEFAULTS = {'enabled': True, 'frequency': 'daily', 'time': '02:00', 'weekday': 0
 
 def root():
     return get_hermes_home() / 'nfos-reviewer'
+
+
+def lessons_path(project):
+    # The reviewer's own permanent record per project, outside the memory injected into the Principal.
+    return root() / 'lessons' / f'{project}.md'
 
 
 def read(path, default=None):
@@ -245,12 +251,25 @@ def analyse(case, memory, emit):
         response = agent.run_conversation(json.dumps({'project':case['project'],'task':case['task_id'],
             'title':case['title'],'memory':memory,'record_counts':index,'artifacts':list(artifacts),
             'original_task':records[f'{case["project"]}/{case["task_id"]}/task']},ensure_ascii=False))
-        text = response.get('final_response') or response.get('response') or ''
-        if text.strip().startswith('```'):
-            text = text.strip().split('\n',1)[1].rsplit('```',1)[0]
-        result = json.loads(text)
+        corrections = []
+        while True:
+            text = response.get('final_response') or response.get('response') or ''
+            if text.strip().startswith('```'):
+                text = text.strip().split('\n',1)[1].rsplit('```',1)[0]
+            result = json.loads(text)
+            result['inspected_sources'] = sorted(inspected)
+            # The rules save_lessons applies go back to the same agent, at most twice; nothing is cut.
+            errors = problem_list(case, result)
+            if not errors or len(corrections) == MAX_CORRECTIONS:
+                break
+            corrections.append(errors)
+            response = agent.run_conversation(
+                'O JSON não passou na validação e não foi salvo: ' + '; '.join(errors) + '. Corrija exatamente '
+                'esses pontos (leia com read_record a fonte que faltou ou retire-a da lição) e devolva o JSON '
+                'completo de novo, no mesmo formato.', conversation_history=response.get('messages'))
         result['model'] = model
-        result['inspected_sources'] = sorted(inspected)
+        if corrections:
+            result['corrections'] = corrections
         return result
     finally:
         run_agent.handle_function_call = previous
@@ -258,35 +277,127 @@ def analyse(case, memory, emit):
             agent.close()
 
 
-def save_lessons(case, review, store, emit):
+SUMMARY_LIMIT = 1800
+MAX_CORRECTIONS = 2
+KINDS = ('practice', 'failure', 'decision', 'hypothesis')
+SUMMARY_OPEN, SUMMARY_CLOSE = '<!-- nfos-reviewer:summary -->', '<!-- /nfos-reviewer:summary -->'
+HISTORY = '## Histórico'
+
+
+def lesson_problem(lesson, refs, inspected):
+    if not isinstance(lesson, dict):
+        return 'a lição não é um objeto'
+    key = str(lesson.get('key', ''))
+    if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,79}', key):
+        return f'key {key!r} fora do formato [a-z0-9][a-z0-9_-]{{0,79}}'
+    if lesson.get('kind') not in KINDS:
+        return f'kind {lesson.get("kind")!r} fora de practice|failure|decision|hypothesis'
+    empty = [k for k in ['when', 'lesson', 'because', 'limits'] if not str(lesson.get(k, '')).strip()]
+    if empty:
+        return 'campos vazios: ' + ', '.join(empty)
+    sources = lesson.get('sources')
+    if not sources or not isinstance(sources, list):
+        return 'sources vazio; cite a ref exata de um registro lido'
+    unknown = [str(s) for s in sources if not isinstance(s, str) or s not in refs]
+    if unknown:
+        return 'fonte inexistente neste card: ' + ', '.join(unknown)
+    unread = [s for s in sources if s not in inspected]
+    if unread:
+        return 'fonte não lida com read_record: ' + ', '.join(unread) + '; leia ou remova'
+    return None
+
+
+def lesson_name(lesson, index):
+    return repr(lesson['key']) if isinstance(lesson, dict) and lesson.get('key') else f'#{index + 1}'
+
+
+def problems(case, review):
+    """The rules of a saved review: invalid lessons by index, and the summary rule when lessons remain."""
     refs = {r['ref'] for r in case['records']}
-    saved = []
-    # Validate the complete extraction before making any memory mutation.
-    for lesson in review.get('lessons', []):
-        key = lesson.get('key', '')
-        if (not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,79}', key)
-                or lesson.get('kind') not in {'practice','failure','decision','hypothesis'}
-                or not lesson.get('sources') or not set(lesson['sources']) <= refs
-                or not set(lesson['sources']) <= set(review.get('inspected_sources', []))
-                or any(not str(lesson.get(k,'')).strip() for k in ['when','lesson','because','limits'])):
-            raise ValueError('Aprendizado sem estrutura ou fonte válida')
-    if not review.get('lessons'):
-        return saved
-    summary=str(review.get('memory_summary','')).strip()
-    if not summary or len(summary)>1800:
-        raise ValueError('Síntese de memória ausente ou maior que 1800 caracteres')
-    marker=f'[NFOS Revisor:{case["project"]}]'
-    entry=(f'{marker} {summary} Histórico e fontes completos: '
-           f'{root()}/runs (projeto {case["project"]}; última origem {case["task_id"]}).')
+    inspected = set(review.get('inspected_sources', []))
+    lessons = review.get('lessons') or []
+    invalid = [(i, reason) for i, lesson in enumerate(lessons) if (reason := lesson_problem(lesson, refs, inspected))]
+    summary = str(review.get('memory_summary', '')).strip()
+    summary_problem = None
+    if lessons and not summary:
+        summary_problem = 'memory_summary ausente'
+    elif lessons and len(summary) > SUMMARY_LIMIT:
+        summary_problem = f'memory_summary com {len(summary)} caracteres; reescreva com até {SUMMARY_LIMIT}'
+    return invalid, summary_problem
+
+
+def problem_list(case, review):
+    invalid, summary_problem = problems(case, review)
+    lessons = review.get('lessons') or []
+    return ([f'lição {lesson_name(lessons[i], i)}: {reason}' for i, reason in invalid]
+            + ([summary_problem] if summary_problem else []))
+
+
+def screen(case, review):
+    """Drop each invalid lesson with its reason in discarded; the valid lessons of the card stay."""
+    invalid, _ = problems(case, review)
+    if invalid:
+        lessons, dropped = review['lessons'], dict(invalid)
+        review['discarded'] = list(review.get('discarded') or []) + [
+            f'Lição {lesson_name(lessons[i], i)} descartada: {reason}' for i, reason in invalid]
+        review['lessons'] = [lesson for i, lesson in enumerate(lessons) if i not in dropped]
+    summary_problem = problems(case, review)[1]
+    if summary_problem:
+        raise ValueError(summary_problem)
+    return review
+
+
+def project_summary(project):
+    path = lessons_path(project)
+    if not path.exists():
+        return ''
+    _, found, rest = path.read_text(encoding='utf-8').partition(SUMMARY_OPEN + '\n')
+    return rest.partition('\n' + SUMMARY_CLOSE)[0].strip() if found else ''
+
+
+def pointer(store, project, path):
+    """At most one short line in the Principal's memory, and only when the store accepts it."""
+    marker = f'[NFOS Revisor:{project}]'
+    entry = f'{marker} Aprendizados do Revisor neste projeto: {path}'
+    store.reset_consolidation_failures()  # the refusal recorded is the store's own, not a count of this run
     store.load_from_disk()
-    exists=any(marker in e for e in store.memory_entries)
-    result=store.replace('memory',marker,entry) if exists else store.add('memory',entry)
-    emit('consolidated' if result.get('success') else 'memory_pending',project=case['project'],
-         task_id=case['task_id'],summary=summary,error=result.get('error'))
-    for lesson in review.get('lessons', []):
-        saved.append({'lesson':lesson,'memory_result':{'success':result.get('success'),'error':result.get('error')}})
-        emit('saved' if result.get('success') else 'memory_pending', project=case['project'],
-             task_id=case['task_id'], lesson=lesson, error=result.get('error'))
+    current = next((e for e in store.memory_entries if e.startswith(marker)), None)
+    if current == entry:
+        return {'pointer': 'present'}
+    result = store.add('memory', entry) if current is None else store.replace('memory', marker, entry)
+    if result.get('success'):
+        return {'pointer': 'added' if current is None else 'replaced'}
+    return {'pointer': 'not_written', 'pointer_error': result.get('error')}
+
+
+def save_lessons(case, review, store, emit, run_id=None):
+    # Validate the complete extraction before writing anything.
+    errors = problem_list(case, review)
+    if errors:
+        raise ValueError('; '.join(errors))
+    lessons = review.get('lessons') or []
+    if not lessons:
+        return []
+    project, summary = case['project'], str(review['memory_summary']).strip()
+    path = lessons_path(project)
+    previous = path.read_text(encoding='utf-8') if path.exists() else ''
+    history = previous.partition(SUMMARY_CLOSE)[2].partition(HISTORY + '\n')[2]
+    stamp = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    block = [f'### {stamp} · card {case["task_id"]}' + (f' · run {run_id}' if run_id else '')]
+    for lesson in lessons:
+        block += [f'- {lesson["key"]} ({lesson["kind"]}): {lesson["lesson"]}', f'  Quando: {lesson["when"]}',
+                  f'  Base: {lesson["because"]}', f'  Limites: {lesson["limits"]}',
+                  f'  Fontes: {", ".join(lesson["sources"])}']
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, f'# NFOS Revisor: {project}\n\n## Síntese atual ({stamp}, card {case["task_id"]})\n\n'
+                            f'{SUMMARY_OPEN}\n{summary}\n{SUMMARY_CLOSE}\n\n{HISTORY}\n{history}'
+                            + '\n'.join(block) + '\n\n')
+    emit('consolidated', project=project, task_id=case['task_id'], summary=summary, file=str(path),
+         **pointer(store, project, path))
+    saved = []
+    for lesson in lessons:
+        saved.append({'lesson': lesson, 'file': str(path)})
+        emit('saved', project=project, task_id=case['task_id'], lesson=lesson)
     return saved
 
 
@@ -325,51 +436,90 @@ def run(day=None, boards=None, analyzer=analyse):
         if day:
             until = datetime.combine(datetime.fromisoformat(day).date()+timedelta(days=1),daytime(),tz)
         watermark = read(root()/'watermark.json', {})
+        marks = dict(watermark.get('boards') or {})
         initial_days = 7 if settings()['frequency']=='weekly' and not day else 1
-        since = until.timestamp()-86400 if day else watermark.get('until',until.timestamp()-86400*initial_days)
-        state.update(since=since,until=until.timestamp())
-        emit('started',since=since,until=until.timestamp())
+        # A board without its own mark starts from the former global mark, when there is one.
+        floor = until.timestamp()-86400 if day else watermark.get('until',until.timestamp()-86400*initial_days)
+        def since_of(slug):
+            return floor if day else marks.get(slug,floor)
         cfg = load_config().get('memory') or {}
         store = MemoryStore(memory_char_limit=cfg.get('memory_char_limit',2200));store.load_from_disk()
         processed=read(root()/'processed.json',{})
+        reviewed=read(root()/'reviewed.json',{})
+        pending=read(root()/'pending_lessons.json',{})
         selected = boards if boards is not None else [(b['slug'], kb.kanban_db_path(b['slug'])) for b in kb.list_boards()]
+        since = min([since_of(slug) for slug,_ in selected] or [floor])
+        state.update(since=since,until=until.timestamp())
+        emit('started',since=since,until=until.timestamp())
+        def save(identity,case,review,entry):
+            saved=save_lessons(case,review,store,emit,entry['run'])
+            write(folder/'lessons'/f'{identity}.json',saved)
+            state['saved']+=len(saved)
+            processed[identity]=entry['fingerprint'];write(root()/'processed.json',processed)
+            pending.pop(identity,None);write(root()/'pending_lessons.json',pending)
+        # Cards already reviewed whose lessons were not written: only the write is retried, no model call.
+        for identity,entry in list(pending.items()):
+            try:
+                save(identity,read(Path(entry['case'])),read(Path(entry['review'])),entry)
+            except Exception as exc:
+                state['errors']+=1;emit('memory_pending',project=entry.get('project'),task_id=entry.get('task_id'),error=str(exc))
         for slug,db in selected:
             if not Path(db).exists():
                 continue
             state['projects'] += 1
             try:
-                cases=collect(db,slug,since,until.timestamp())
+                cases=collect(db,slug,since_of(slug),until.timestamp())
             except Exception as exc:
+                # The board keeps its mark, so the same window is collected again next time.
                 state['errors']+=1;emit('error',project=slug,error=str(exc));continue
             state['cards']+=len(cases);emit('project',project=slug,cards=len(cases))
+            unreviewed=0
             for case in cases:
                 identity=hashlib.sha256(f'{slug}/{case["task_id"]}'.encode()).hexdigest()[:20]
                 fingerprint=hashlib.sha256(json.dumps(case,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
-                if processed.get(identity)==fingerprint:
+                if fingerprint in ((reviewed.get(identity) or {}).get('fingerprint'),processed.get(identity)):
                     emit('unchanged',project=slug,task_id=case['task_id']);continue
-                write(folder/'cases'/f'{identity}.json',case)
+                case_path=folder/'cases'/f'{identity}.json';write(case_path,case)
                 emit('case',project=slug,task_id=case['task_id'],title=case['title'],records=len(case['records']))
                 try:
-                    store.load_from_disk()
-                    memory=[e for e in store.memory_entries if e.startswith(f'[{slug}]') or e.startswith(f'[NFOS Revisor:{slug}]')]
-                    review=analyzer(case,memory,emit)
-                    write(folder/'reviews'/f'{identity}.json',review)
-                    emit('analysed',project=slug,task_id=case['task_id'],**{k:review.get(k,[]) for k in ['summary','findings','discarded','lessons']})
-                    saved=save_lessons(case,review,store,emit)
-                    state['saved']+=sum(bool(x['memory_result']['success']) for x in saved)
-                    state['errors']+=sum(not x['memory_result']['success'] for x in saved)
-                    write(folder/'memory'/f'{identity}.json',saved)
+                    try:
+                        store.load_from_disk()
+                        memory=[e for e in store.memory_entries if e.startswith(f'[{slug}]') or e.startswith(f'[NFOS Revisor:{slug}]')]
+                        summary=project_summary(slug)
+                        if summary:
+                            memory.append(f'[NFOS Revisor:{slug}] {summary}')
+                        review=screen(case,analyzer(case,memory,emit))
+                    except Exception as exc:
+                        unreviewed+=1;state['errors']+=1;emit('error',project=slug,task_id=case['task_id'],error=str(exc));continue
+                    review_path=folder/'reviews'/f'{identity}.json';write(review_path,review)
+                    entry={'fingerprint':fingerprint,'run':folder.name,'at':time.time(),'project':slug,
+                           'task_id':case['task_id'],'case':str(case_path),'review':str(review_path)}
+                    # Reviewed, and pending until the write succeeds: an interruption loses neither.
+                    pending[identity]=entry;write(root()/'pending_lessons.json',pending)
+                    reviewed[identity]={k:entry[k] for k in ('fingerprint','run','at')};write(root()/'reviewed.json',reviewed)
                     state['reviewed']+=1
-                    if all(x['memory_result']['success'] for x in saved):
-                        processed[identity]=fingerprint;write(root()/'processed.json',processed)
-                except Exception as exc:
-                    state['errors']+=1;emit('error',project=slug,task_id=case['task_id'],error=str(exc))
+                    emit('analysed',project=slug,task_id=case['task_id'],**{k:review.get(k,[]) for k in ['summary','findings','discarded','lessons']})
+                    try:
+                        save(identity,case,review,entry)
+                    except Exception as exc:
+                        state['errors']+=1;emit('memory_pending',project=slug,task_id=case['task_id'],error=str(exc))
+                except BaseException as exc:
+                    emit('error',project=slug,task_id=case['task_id'],interrupted=True,
+                         error=f'Revisão interrompida neste card ({type(exc).__name__})')
+                    raise
+            # The mark of a board follows its own collection; a card that was not reviewed holds it.
+            if not unreviewed:
+                marks[slug]=until.timestamp()
         state['status']='partial' if state['errors'] else 'completed'
-        if not state['errors'] and not day:
-            write(root()/'watermark.json',{'until':until.timestamp(),'run':folder.name})
+        if not day:
+            write(root()/'watermark.json',{**watermark,'boards':marks,'run':folder.name})
         emit('finished',status=state['status'],reviewed=state['reviewed'],saved=state['saved'])
     except Exception as exc:
         state['status']='failed';state['errors']+=1;emit('error',error=str(exc))
+    except BaseException as exc:
+        # KeyboardInterrupt or SystemExit: the state is closed as interrupted, never left running.
+        state['status']='interrupted';emit('error',error=f'Execução interrompida ({type(exc).__name__})')
+        raise
     finally:
         stop.set();thread.join(timeout=2);state['finished_at']=time.time()
         write(folder/'state.json',state);lock.release()

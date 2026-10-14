@@ -236,5 +236,13 @@
   {"pr": 319, "file": "hermes_cli/nfos_workspace_repair.py", "text": "def finish_dependency_pause("},
   {"pr": 319, "file": "hermes_cli/nfos_waits.py", "text": "def card_cycle("},
   {"pr": 319, "file": "hermes_cli/nfos_waits.py", "text": "LAB_COMMANDS = {"},
-  {"pr": 319, "file": "hermes_cli/nfos_runtime.py", "text": "the fact the runtime verifies by itself"}
+  {"pr": 319, "file": "hermes_cli/nfos_runtime.py", "text": "the fact the runtime verifies by itself"},
+  {"pr": 340, "file": "hermes_cli/nfos_reviewer.py", "text": "def pointer(store, project, path):"},
+  {"pr": 340, "file": "hermes_cli/nfos_reviewer.py", "text": "store.reset_consolidation_failures()  # the refusal recorded is the store's own, not a count of this run"},
+  {"pr": 340, "file": "hermes_cli/nfos_reviewer.py", "text": "pending=read(root()/'pending_lessons.json',{})"},
+  {"pr": 340, "file": "hermes_cli/nfos_reviewer.py", "text": "reviewed=read(root()/'reviewed.json',{})"},
+  {"pr": 340, "file": "hermes_cli/nfos_reviewer.py", "text": "write(root()/'watermark.json',{**watermark,'boards':marks,'run':folder.name})"},
+  {"pr": 340, "file": "hermes_cli/nfos_reviewer.py", "text": "def screen(case, review):"},
+  {"pr": 340, "file": "hermes_cli/nfos_reviewer.py", "text": "MAX_CORRECTIONS = 2"},
+  {"pr": 340, "file": "hermes_cli/nfos_reviewer.py", "text": "state['status']='interrupted';emit('error',error=f'Execução interrompida ({type(exc).__name__})')"}
 ]
