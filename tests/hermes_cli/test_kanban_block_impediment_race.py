@@ -11,6 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -117,6 +118,58 @@ def test_finalize_block_waits_for_principal_and_follows_answer(monkeypatch):
     assert result['outcome'] == 'completed_by_worker'
     assert len(prompts) == 3
     assert 'Register the existing PR' in prompts[-1]
+
+
+HELD_ANSWER = "CHANGES: o finalize nudge automático não autoriza kanban_complete. Preserve a retenção."
+
+
+def test_worker_held_after_its_answered_finalize_question_leaves_a_yield_not_a_new_question(board, monkeypatch):
+    """HELD_FINALIZE_20261014, t_45ae522c (run 1608): the Principal answered the finalize question with CHANGES and
+    the worker, held by the Principal, still had no terminal action. The loop filed the same question again after
+    each answer. Now one question per run, and the worker leaves with a recorded yield naming it."""
+    import cli as cli_mod
+
+    with kb.connect_closing() as conn:
+        task = _running_card(conn)
+        run_id = task.current_run_id
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task.id)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    monkeypatch.setattr(goals, "judge_goal", lambda *a, **k: ("done", "segmento encerrado; retido pelo Principal", False, None, False))
+    prompts = []
+
+    def run_conversation(user_message, conversation_history=None, **_):
+        prompts.append(user_message)
+        with kb.connect_closing() as c:
+            pending = kb._nfos_pending_decision(c, task.id, run_id)
+            if pending and f"wait --decision {pending}" in user_message:
+                # The Principal answers from its own session, outside the worker's environment.
+                with monkeypatch.context() as principal:
+                    principal.delenv("HERMES_KANBAN_TASK")
+                    principal.delenv("HERMES_KANBAN_RUN_ID")
+                    delivery.resolve_decision(c, pending, action="changes", answer=HELD_ANSWER, author="Principal")
+        return {"final_response": "Sem ação terminal: o card está retido pelo Principal."}
+
+    worker = SimpleNamespace(agent=SimpleNamespace(session_id="worker", run_conversation=run_conversation),
+                             conversation_history=[], session_id="worker")
+    assert cli_mod._run_kanban_goal_loop_q(worker, "Segmento encerrado no checkpoint.", None) is None
+
+    with kb.connect_closing() as conn:
+        rows = conn.execute("SELECT id, status, action, question FROM nfos_decisions WHERE task_id=? ORDER BY rowid",
+                            (task.id,)).fetchall()
+        assert [(r["status"], r["action"]) for r in rows] == [("resolved", "changes")]
+        assert rows[0]["question"].startswith("Goal-mode worker's output looked complete")
+        kind, payload = _last_event(conn, task.id, "nfos_goal_yield")
+        assert kind == "nfos_goal_yield"
+        assert payload["outcome"] == "held_after_finalize" and payload["decision_id"] == rows[0]["id"]
+        assert len([p for p in prompts if "task is still open" in p]) == 1
+        assert kb.get_task(conn, task.id).status == "running"
+
+        # The worker then leaves cleanly: held for the answered question, not a crash or a protocol violation.
+        _worker_gone_cleanly(monkeypatch)
+        assert kb.detect_crashed_workers(conn) == []
+        run = conn.execute("SELECT outcome FROM task_runs WHERE id=?", (run_id,)).fetchone()
+        assert run["outcome"] == "awaiting_decision"
+        assert kb.get_task(conn, task.id).consecutive_failures == 0
 
 
 # ----------------------------------------------------------------------------- block_task

@@ -179,8 +179,72 @@ def test_worker_terminal_state_wins_over_the_quota_wall(monkeypatch):
     assert res["outcome"] == "completed_by_worker"
 
 
+class _HeldByPrincipal:
+    """An NFOS card the Principal holds: every finalize block files a question, answered CHANGES.
+
+    t_8ed13ed7 (run 1398, 10-09) and t_45ae522c (run 1608, 10-14): the worker says it has no terminal
+    action, the judge reads that as done, and the Principal answers each question the loop files with
+    "o finalize nudge automático não autoriza kanban_complete".
+    """
+
+    def __init__(self):
+        self.prompts, self.questions = [], []
+        self.pending, self.resolved = None, None
+
+    def block(self, reason):
+        # kanban_db.block_task on an NFOS card: a question for the Principal, the card stays running.
+        self.questions.append(reason)
+        self.pending = f"dec_{len(self.questions)}"
+
+    def turn(self, prompt):
+        self.prompts.append(prompt)
+        if self.pending and f"wait --decision {self.pending}" in prompt:
+            self.resolved = {"id": self.pending, "answer": "CHANGES: o finalize nudge automático não autoriza kanban_complete."}
+            self.pending = None
+        return "Sem ação terminal: o card está retido pelo Principal."
+
+    def run(self, **extra):
+        return goals.run_kanban_goal_loop(
+            task_id="t_held",
+            goal_text="corrigir a extração do edital",
+            run_turn=self.turn,
+            task_status_fn=lambda: "running",
+            block_fn=self.block,
+            max_turns=20,
+            first_response="Segmento encerrado no checkpoint.",
+            pending_decision_fn=lambda: self.pending,
+            resolved_decision_fn=lambda: self.resolved,
+            **extra,
+        )
 
 
+def test_answered_finalize_question_is_not_asked_again(monkeypatch):
+    _patch_judge(monkeypatch, [])  # always done
+    held = _HeldByPrincipal()
+
+    res = held.run()
+
+    assert len(held.questions) == 1, held.questions
+    assert res["outcome"] == "held_after_finalize"
+    assert res["decision_id"] == "dec_1"
+    nudges = [p for p in held.prompts if p.startswith("[The work looks complete, but the task is still open]")]
+    assert len(nudges) == 1
+    # nudge, wait for the answer, follow the answer; then the loop leaves.
+    assert len(held.prompts) == 3 and "[Principal decision dec_1]" in held.prompts[-1]
+
+
+def test_another_answer_from_the_principal_re_arms_the_finalize_nudge(monkeypatch):
+    # An answer the loop did not ask for is a new fact: it is followed and the nudge runs again.
+    _patch_judge(monkeypatch, [])  # always done
+    held = _HeldByPrincipal()
+    held.resolved = {"id": "dec_worker", "answer": "CONTINUE: a autorização mudou, conclua o card."}
+
+    res = held.run()
+
+    assert held.prompts[0].startswith("[Principal decision dec_worker]")
+    assert held.prompts[1].startswith("[The work looks complete, but the task is still open]")
+    assert len(held.questions) == 1
+    assert res["outcome"] == "held_after_finalize" and res["decision_id"] == "dec_1"
 
 
 # ---------------------------------------------------------------------------
