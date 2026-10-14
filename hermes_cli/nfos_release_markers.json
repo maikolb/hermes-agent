@@ -257,5 +257,12 @@
   {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "planned = spec['plan'](conn, wait, evidence, now)"},
   {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "def wake(conn, wait_id, now=None):"},
   {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "PREVIOUS_RELEASE_RECORD_20261014"},
-  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def continuation_criterion(recipient, question):"}
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def continuation_criterion(recipient, question):"},
+  {"pr": 347, "file": "hermes_cli/nfos_delivery.py", "text": "REMINDER_BACKOFF_20261014"},
+  {"pr": 347, "file": "hermes_cli/nfos_delivery.py", "text": "def _principal_answer_plan(conn, wait, evidence, now):"},
+  {"pr": 347, "file": "hermes_cli/nfos_delivery.py", "text": "PRINCIPAL_ANSWER_UNBOUND_20261014"},
+  {"pr": 347, "file": "hermes_cli/nfos_delivery.py", "text": "_principal_decided(conn,args.decision)  # REMINDER_BACKOFF_20261014"},
+  {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "if reason == 'principal_answer':"},
+  {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "planned['after'](conn)"},
+  {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "spec.get('closed_states', ('done', 'archived'))"}
 ]

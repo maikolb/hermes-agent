@@ -138,7 +138,7 @@ def test_with_the_principal_active_the_gap_doubles_up_to_two_hours_after_the_sta
     assert kb.get_task(board, task_id).block_kind == "awaiting_principal"
     assert reminders[3:6] == [4200, 7800, 15000]  # 30 min, 60 min, 2 h depois do lembrete anterior
     assert all(b - a == 2 * HOUR for a, b in zip(reminders[5:], reminders[6:]))
-    assert len(reminders) == 3 + 3 + (DAY - 15000) // (2 * HOUR)  # antes: um a cada 15 min depois da retenção, 92 no dia
+    assert len(reminders) == 3 + 3 + (DAY - 15000) // (2 * HOUR)  # antes: 3 e depois um a cada 15 min desde a retenção, 96 no dia
     wait = _wait(board, decision)
     assert wait["status"] == "open" and wait["reason"] == "principal_answer" and wait["executor"] == nfos_waits.PRINCIPAL
     assert wait["predicate"] == {"kind": "decision_resolved", "decision_id": decision, "since": 0}
