@@ -226,5 +226,7 @@
   {"pr": 337, "file": "hermes_cli/auth.py", "text": "if not owns_pool and not (isinstance(sources, (list, dict)) and \"device_code\" in sources):"},
   {"pr": 337, "file": "hermes_cli/auth.py", "text": "state = _load_codex_login_state(auth_store)", "min": 2},
   {"pr": 337, "file": "agent/credential_pool.py", "text": "state = _load_codex_login_state(auth_store)", "min": 3},
-  {"pr": 337, "file": "agent/credential_pool.py", "text": "# No login to clear, nothing to write: a pool profile"}
+  {"pr": 337, "file": "agent/credential_pool.py", "text": "# No login to clear, nothing to write: a pool profile"},
+  {"pr": 338, "file": "acp_adapter/server.py", "text": "final_response = result.get(\"final_response\") or \"\"  # None on an interrupted turn"},
+  {"pr": 338, "file": "acp_adapter/server.py", "text": "# post-turn bookkeeping above must not leave the session \"running\""}
 ]
