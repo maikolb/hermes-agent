@@ -409,6 +409,46 @@ def test_terminal_refresh_cleanup_writes_no_login_block_into_pool_profile(layout
     assert (root / "auth.json").read_bytes() == root_before
 
 
+@pytest.mark.parametrize("store", ["classic", "profile-without-root-login"])
+def test_terminal_refresh_cleanup_writes_no_login_block_into_store_without_login(layout, monkeypatch, tmp_path, store):
+    """A store with its own pool and no Codex login anywhere: a dying row leaves no login block.
+
+    The cleanup used to write ``providers.openai-codex`` with empty tokens and
+    ``last_auth_error`` there, and the next resolution then imported the Codex
+    CLI login instead of answering from the pool.
+    """
+    from agent.credential_pool import load_pool
+
+    _root, profile, endpoint = layout
+    rows, spent = _dying_row(_pool_rows(), "manual")
+    if store == "classic":
+        home = tmp_path / "classic"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        _write(home / "auth.json", _store(pool=rows))
+        assert auth_mod._global_auth_file_path() is None
+    else:
+        home = profile
+        _arrange(layout, pool=rows, suppressed=SUPPRESSED)
+    endpoint.spent.add(spent)
+
+    load_pool("openai-codex").select()
+
+    assert spent in endpoint.refreshed
+    assert _profile_login(home) is None
+
+    cli_home = Path(os.environ["CODEX_HOME"])
+    cli_home.mkdir(parents=True, exist_ok=True)
+    _write(cli_home / "auth.json", {"tokens": {
+        "access_token": _jwt(time.time() + 5 * DAY, "cli"), "refresh_token": "cli-rt-1",
+    }})
+
+    creds = auth_mod.resolve_codex_runtime_credentials()
+
+    assert creds["source"] == "credential_pool"
+    assert _profile_login(home) is None
+
+
 # --------------------------------------------------------------------------
 # The production path end to end: call_llm(task="compression") gets the
 # Codex 400 and walks auxiliary.compression.fallback_chain.
