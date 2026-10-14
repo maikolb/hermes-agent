@@ -258,23 +258,136 @@ def test_question_asked_before_the_rule_is_adopted_warned_and_expires_a_day_late
     assert delivery.get_decision(board, decision)["status"] == "superseded"
 
 
-def test_question_already_warned_by_the_old_clock_keeps_its_deadline(board, worker):
-    """Em 14/10 às 16:08Z o relógio antigo avisou quatro perguntas de produção. A espera adotada não avisa de novo."""
-    task, decision = _card(board, worker, origin=TELEGRAM, message_id="46")
-    _ask(board, decision, to="Jhonatan")
-    asked = _context(board, decision)["requester_deadline"]["asked_at"]
-    due = asked + 30 * HOUR
+def _client_side(conn, task_id, decision):
+    """Tudo o que pode chegar a quem pediu: a mensagem pública da decisão (Balcão) e os pedidos de aviso ao gateway (chat)."""
+    context = _context(conn, decision)
+    return (context.get("public_message"), context.get("public_message_history"),
+            _events(conn, task_id, "nfos_requester_reminder"), _events(conn, task_id, "nfos_requester_reminded"))
 
-    def warned_by_the_old_clock(context):
-        context["requester_deadline"] = {"asked_at": asked - DAY, "hours": 48, "channel": "telegram", "due_at": due,
-                                         "warned_at": asked, "reminder_message_id": "21430",
-                                         "reminder": {"requested_at": asked - 10, "due_at": due, "attempts": 1}}
-    _rewrite(board, decision, warned_by_the_old_clock)
-    _tick(board, asked + HOUR)
+
+@pytest.mark.parametrize("origin", ["portal", "telegram"])
+def test_question_already_warned_by_the_old_clock_is_not_warned_again(board, worker, origin):
+    """Em 14/10 às 16:08Z o relógio antigo avisou quatro perguntas de produção: uma no Balcão (t_ac820bc8) e três no Telegram
+    (t_f7e2059e, t_57b12eeb, t_b52998e4), com o prazo de 15/10 16:08Z. Adotadas, nada mais sai para o cliente até o prazo."""
+    source = PORTAL if origin == "portal" else TELEGRAM
+    task, decision = _card(board, worker, origin=source, message_id="46")
+    _ask(board, decision, to=TO if origin == "portal" else "Lucas")
+    asked = _context(board, decision)["requester_deadline"]["asked_at"]
+    warned, due = asked - 7 * HOUR, asked + 17 * HOUR
+    old = {"asked_at": asked - 5 * DAY, "hours": 48, "channel": origin, "due_at": due, "warned_at": warned}
+    if origin == "portal":  # o formato que o _warn antigo gravou, com a pergunta republicada e a linha do prazo
+        old.update(warn_at=warned, question_text=QUESTION)
+    else:  # o formato que o _topic antigo gravou depois do recibo
+        old.update(reminder={"attempts": 1, "due_at": due, "requested_at": warned - 6}, reminder_message_id="21430")
+    _rewrite(board, decision, lambda context: context.update(requester_deadline=old))
+    before = _client_side(board, task.id, decision)
+    _tick(board, asked + HOUR)  # a release nova entra: a pergunta é adotada
     wait = _wait(board, decision)
-    assert wait["next_check_at"] == due and wait["deadline_at"] == due and wait["evidence"]["warned_at"] == asked
-    assert _tick(board, due - 1) == [] and _events(board, task.id, "nfos_requester_reminder") == []
+    assert wait["next_check_at"] == due and wait["deadline_at"] == due and wait["evidence"]["warned_at"] == warned
+    for now in (asked + 2 * HOUR, asked + 9 * HOUR, due - 1):
+        assert _tick(board, now) == []
+    assert _client_side(board, task.id, decision) == before
     assert _tick(board, due) == [(wait["id"], "expired")]
+    assert _events(board, task.id, "nfos_requester_reminder") == before[2]
+    assert _events(board, task.id, "nfos_requester_reminded") == before[3]
+
+
+def test_question_asked_while_the_key_was_zero_is_warned_once_with_the_deadline_line(board, worker):
+    """t_1f500f9f (concursa-ai, CS Concursa): perguntada em 14/10 08:41Z com a chave em 0, sem linha do prazo e sem registro.
+    Adotada às 16:23Z, ela é avisada uma vez, 24 h antes do prazo de 48 h, com a linha; e não de novo até vencer."""
+    task, decision = _card(board, worker)
+    _ask(board, decision, to="CS Concursa")
+    asked = _context(board, decision)["requester_deadline"]["asked_at"]
+
+    def asked_with_the_key_at_zero(context):
+        context.pop("requester_deadline")
+        context["public_message"].update(text=QUESTION, created_at=asked)
+    _rewrite(board, decision, asked_with_the_key_at_zero)
+    _tick(board, asked + 7 * HOUR + 42 * 60)
+    wait = _wait(board, decision)
+    assert wait["next_check_at"] == asked + DAY and wait["deadline_at"] == asked + 2 * DAY
+    assert _tick(board, asked + DAY - 1) == [] and _events(board, task.id, "nfos_requester_reminded") == []
+    assert _tick(board, asked + DAY) == [(wait["id"], "wait")]
+    context = _context(board, decision)
+    due = asked + 2 * DAY
+    assert context["public_message"]["text"] == QUESTION + "\n\n" + deadline.notice(due, deadline._zone(board, task.id))
+    assert context["public_message"]["created_at"] == asked + DAY
+    assert [m["text"] for m in context["public_message_history"]] == [QUESTION]
+    for now in (asked + DAY + HOUR, asked + DAY + 12 * HOUR, due - 1):
+        assert _tick(board, now) == []
+    assert _events(board, task.id, "nfos_requester_reminded") == [{"decision_id": decision, "due_at": due, "wait_id": wait["id"]}]
+    assert len(_context(board, decision)["public_message_history"]) == 1
+
+
+def test_every_warning_is_kept_where_the_previous_release_reads_it(board, worker):
+    """PREVIOUS_RELEASE_RECORD_20261014: numa volta de pacote, o relógio antigo lê context.requester_deadline. O aviso que a
+    espera deu fica lá, no formato dele, e o relógio antigo não avisa o cliente de novo."""
+    task, decision, wait = _asked(board, worker)
+    _tick(board, wait["next_check_at"])
+    record = _context(board, decision)["requester_deadline"]
+    assert record["warned_at"] == record["warn_at"] == wait["next_check_at"] and record["due_at"] == wait["deadline_at"]
+    assert record["asked_at"] == wait["created_at"] and record["channel"] == "portal" and record["question_text"] == QUESTION
+    chat, asked_chat = _card(board, worker, origin=TELEGRAM, message_id="50")
+    _ask(board, asked_chat, to="Jhonatan")
+    start = _context(board, asked_chat)["requester_deadline"]["asked_at"] + DAY
+    deadline.sweep(board, now=start - 1)
+    _tick(board, start)
+    (requested,) = _events(board, chat.id, "nfos_requester_reminder")
+    pending = _context(board, asked_chat)["requester_deadline"]
+    assert pending["reminder"] == {"requested_at": start, "due_at": requested["due_at"], "attempts": 1} and "warned_at" not in pending
+    _receipt(board, chat.id, asked_chat, requested["due_at"])
+    _tick(board, start + HOUR)
+    delivered = _context(board, asked_chat)["requester_deadline"]
+    assert delivered["warned_at"] and delivered["due_at"] == requested["due_at"] and delivered["reminder_message_id"] == "77"
+
+
+@pytest.mark.parametrize("origin", ["portal", "telegram"])
+def test_at_the_deadline_nothing_new_reaches_the_client_and_the_card_gets_the_criterion(board, worker, origin):
+    """No prazo o motor não escreve ao cliente: o aviso já disse que o pedido segue como entrega parcial. O texto que ele lê
+    depois é a entrega do card (public_delivery), conferida na revisão final. O card leva o critério para a continuação."""
+    source = PORTAL if origin == "portal" else TELEGRAM
+    to = TO if origin == "portal" else "Jhonatan"
+    task, decision = _card(board, worker, origin=source, message_id="51")
+    _ask(board, decision, to=to)
+    if origin == "telegram":
+        start = _context(board, decision)["requester_deadline"]["asked_at"] + DAY
+        deadline.sweep(board, now=start - 1)
+        _tick(board, start)
+        (requested,) = _events(board, task.id, "nfos_requester_reminder")
+        _receipt(board, task.id, decision, requested["due_at"])
+        _tick(board, start + HOUR)
+        due = requested["due_at"]
+    else:
+        _tick(board, _context(board, decision)["requester_deadline"]["asked_at"])
+        wait = _wait(board, decision)
+        _tick(board, wait["next_check_at"])
+        due = wait["deadline_at"]
+    before = _client_side(board, task.id, decision)
+    _tick(board, due)
+    assert _client_side(board, task.id, decision) == before
+    successor = delivery.get_decision(board, _context(board, decision)["superseded_by"])
+    carried = json.loads(successor["context"])
+    assert "public_message" not in carried
+    criterion = f'Concluir o que ficou pendente quando chegar a resposta à pergunta feita a {to}: "{QUESTION}"'
+    assert carried["continuation_criterion"] == criterion
+    assert successor["answer"].startswith("CONTINUE (runtime do NFOS): feche como entrega parcial (partial_delivery=true) com o "
+                                          f'que já está conferido; o card de continuação (continuation) leva o critério obrigatório "{criterion}".')
+    # O worker relançado recebe a resposta pelo contexto da retomada, cortada em 600 caracteres: o critério chega inteiro.
+    (answered, *_) = delivery._current_decisions_context(board, task.id)
+    assert f'- {successor["id"]} (continue, ' in answered and criterion in answered
+
+
+def test_the_criterion_reaches_the_worker_whole_even_for_a_long_question(board, worker):
+    long_question = "Pode confirmar " + "qual disciplina, qual simulado e qual questão apresentam o erro de classificação, " * 6 + "?"
+    task, decision = _card(board, worker)
+    _ask(board, decision, text=long_question, to="solicitante do chamado CS-0021 (Central de Suporte Concursa)")
+    _tick(board, _context(board, decision)["requester_deadline"]["asked_at"])
+    wait = _wait(board, decision)
+    _tick(board, wait["next_check_at"])
+    _tick(board, wait["deadline_at"])
+    successor = json.loads(delivery.get_decision(board, _context(board, decision)["superseded_by"])["context"])
+    (answered, *_) = delivery._current_decisions_context(board, task.id)
+    assert successor["continuation_criterion"] in answered
 
 
 def test_successor_keeps_the_maintenance_pause_obligation_of_the_question_it_replaces(board, worker):

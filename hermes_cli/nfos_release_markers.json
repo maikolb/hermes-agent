@@ -255,5 +255,7 @@
   {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def _give_up(conn, wait, evidence, reason='no_warning_channel'):"},
   {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "'human_reply': (_human_reply, False)"},
   {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "planned = spec['plan'](conn, wait, evidence, now)"},
-  {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "def wake(conn, wait_id, now=None):"}
+  {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "def wake(conn, wait_id, now=None):"},
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "PREVIOUS_RELEASE_RECORD_20261014"},
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def continuation_criterion(recipient, question):"}
 ]
