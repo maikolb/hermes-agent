@@ -452,7 +452,10 @@ def staging_card(card, tmp_path):
     (home / 'config.yaml').write_text(yaml.safe_dump({'kanban': {'delivery': {
         'principal_validation': False, 'worker_model': 'gpt-5.6-luna',
         'worker_provider': 'openai-codex', 'worker_reasoning_effort': 'high'}}}))
-    save_spec(conn, task)
+    d.record_precheck(conn, task.id, task.current_run_id, {
+        'checked': [{'target': 'staging', 'method': 'ui', 'result': 'bug'}], 'verdict': 'not_delivered'})
+    save_spec(conn, task, dict(SPEC, size='P', criteria=[{'id': 'C1', 'text': 'O cargo aparece certo', 'mandatory': True,
+        'probe': {'kind': 'sql', 'query': 'SELECT corrected FROM item_checks', 'expect': {'scalar': 1}}}]))
     repo, shas = _staging_repo(tmp_path)
     state = json.loads(d.get_workflow(conn, task.id)['state_json'] or '{}')
     conn.execute('UPDATE tasks SET workspace_path=? WHERE id=?', (str(repo), task.id))
