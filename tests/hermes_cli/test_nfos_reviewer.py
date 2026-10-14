@@ -147,6 +147,54 @@ def test_mark_per_board_advances_with_write_error_and_holds_on_collection_error(
     assert reviewer.read(reviewer.root()/'watermark.json')['boards']=={'one':until,'two':until}
 
 
+
+def test_mark_of_a_board_advances_when_the_analysis_of_a_card_fails(home):
+    tz=ZoneInfo('America/Sao_Paulo')
+    until=datetime.combine(datetime.now(tz).date(),time(),tz).timestamp()
+    boards=[('one',board(home,'one',int(until)-6*3600))]
+    def refused(case,memory,emit):
+        raise ValueError('memory_summary com 1843 caracteres; reescreva com até 1800')
+    state=reviewer.run(boards=boards,analyzer=refused)
+    assert (state['status'],state['reviewed'],state['errors'])==('partial',0,1)
+    # Spec 5b: only a collection error holds the mark, so the failed card does not reopen the window every night.
+    assert reviewer.read(reviewer.root()/'watermark.json')['boards']=={'one':until}
+    again=reviewer.run(boards=boards,analyzer=lambda *a:pytest.fail('the window of the board already advanced'))
+    assert (again['status'],again['cards'])==('completed',0)
+
+
+def test_failure_after_the_analysis_is_the_card_error_and_the_run_goes_on(home,monkeypatch):
+    write=reviewer.write
+    failed=[]
+    def full_disk(path,data):
+        if path.parent.name=='reviews' and not failed:
+            failed.append(path);raise OSError('No space left on device')
+        return write(path,data)
+    monkeypatch.setattr(reviewer,'write',full_disk)
+    state=reviewer.run('2026-09-15',[(s,board(home,s)) for s in ['one','two']],judgment)
+    # As on the base: the card counts one error and the next board is still reviewed; it is not an interruption.
+    assert (state['status'],state['reviewed'],state['saved'],state['errors'])==('partial',1,1,1)
+    events=reviewer.status(state['id'])['events']
+    assert not [e for e in events if e.get('interrupted')]
+    assert [e['project'] for e in events if e['kind']=='error' and 'No space left' in e['error']]==['one']
+
+
+def test_retried_write_keeps_one_block_of_the_card_in_the_history(home,monkeypatch):
+    boards=[('one',board(home,'one'))]
+    write=reviewer.write
+    def broken(path,data):
+        if path.parent.name=='lessons':
+            raise OSError('No space left on device')
+        return write(path,data)
+    # The lessons file is written, then the run record of the write fails: the write stays pending.
+    monkeypatch.setattr(reviewer,'write',broken)
+    first=reviewer.run('2026-09-15',boards,judgment)
+    assert (first['status'],first['saved'])==('partial',0)
+    assert reviewer.lessons_path('one').read_text(encoding='utf-8').count('checkout-readback (practice)')==1
+    monkeypatch.setattr(reviewer,'write',write)
+    again=reviewer.run('2026-09-15',boards,lambda *a:pytest.fail('a reviewed card must not go back to the model'))
+    assert (again['status'],again['saved'])==('completed',1)
+    assert reviewer.lessons_path('one').read_text(encoding='utf-8').count('checkout-readback (practice)')==1
+
 def test_invalid_lesson_is_discarded_and_the_valid_one_of_the_card_is_saved(home):
     def mixed(case,memory,emit):
         data=judgment(case,memory,emit)

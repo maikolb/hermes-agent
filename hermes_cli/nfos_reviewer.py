@@ -383,7 +383,8 @@ def save_lessons(case, review, store, emit, run_id=None):
     previous = path.read_text(encoding='utf-8') if path.exists() else ''
     history = previous.partition(SUMMARY_CLOSE)[2].partition(HISTORY + '\n')[2]
     stamp = datetime.now(timezone.utc).isoformat(timespec='seconds')
-    block = [f'### {stamp} · card {case["task_id"]}' + (f' · run {run_id}' if run_id else '')]
+    origin = f' · card {case["task_id"]}' + (f' · run {run_id}' if run_id else '')
+    block = [f'### {stamp}{origin}']
     for lesson in lessons:
         block += [f'- {lesson["key"]} ({lesson["kind"]}): {lesson["lesson"]}', f'  Quando: {lesson["when"]}',
                   f'  Base: {lesson["because"]}', f'  Limites: {lesson["limits"]}',
@@ -391,7 +392,8 @@ def save_lessons(case, review, store, emit, run_id=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, f'# NFOS Revisor: {project}\n\n## Síntese atual ({stamp}, card {case["task_id"]})\n\n'
                             f'{SUMMARY_OPEN}\n{summary}\n{SUMMARY_CLOSE}\n\n{HISTORY}\n{history}'
-                            + '\n'.join(block) + '\n\n')
+                            # The retry of a pending write (same card and run) does not repeat its block.
+                            + ('' if run_id and f'{origin}\n' in history else '\n'.join(block) + '\n\n'))
     emit('consolidated', project=project, task_id=case['task_id'], summary=summary, file=str(path),
          **pointer(store, project, path))
     saved = []
@@ -473,7 +475,8 @@ def run(day=None, boards=None, analyzer=analyse):
                 # The board keeps its mark, so the same window is collected again next time.
                 state['errors']+=1;emit('error',project=slug,error=str(exc));continue
             state['cards']+=len(cases);emit('project',project=slug,cards=len(cases))
-            unreviewed=0
+            # The mark of a board follows its own collection; only a collection error holds it.
+            marks[slug]=until.timestamp()
             for case in cases:
                 identity=hashlib.sha256(f'{slug}/{case["task_id"]}'.encode()).hexdigest()[:20]
                 fingerprint=hashlib.sha256(json.dumps(case,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
@@ -482,15 +485,12 @@ def run(day=None, boards=None, analyzer=analyse):
                 case_path=folder/'cases'/f'{identity}.json';write(case_path,case)
                 emit('case',project=slug,task_id=case['task_id'],title=case['title'],records=len(case['records']))
                 try:
-                    try:
-                        store.load_from_disk()
-                        memory=[e for e in store.memory_entries if e.startswith(f'[{slug}]') or e.startswith(f'[NFOS Revisor:{slug}]')]
-                        summary=project_summary(slug)
-                        if summary:
-                            memory.append(f'[NFOS Revisor:{slug}] {summary}')
-                        review=screen(case,analyzer(case,memory,emit))
-                    except Exception as exc:
-                        unreviewed+=1;state['errors']+=1;emit('error',project=slug,task_id=case['task_id'],error=str(exc));continue
+                    store.load_from_disk()
+                    memory=[e for e in store.memory_entries if e.startswith(f'[{slug}]') or e.startswith(f'[NFOS Revisor:{slug}]')]
+                    summary=project_summary(slug)
+                    if summary:
+                        memory.append(f'[NFOS Revisor:{slug}] {summary}')
+                    review=screen(case,analyzer(case,memory,emit))
                     review_path=folder/'reviews'/f'{identity}.json';write(review_path,review)
                     entry={'fingerprint':fingerprint,'run':folder.name,'at':time.time(),'project':slug,
                            'task_id':case['task_id'],'case':str(case_path),'review':str(review_path)}
@@ -503,13 +503,12 @@ def run(day=None, boards=None, analyzer=analyse):
                         save(identity,case,review,entry)
                     except Exception as exc:
                         state['errors']+=1;emit('memory_pending',project=slug,task_id=case['task_id'],error=str(exc))
+                except Exception as exc:
+                    state['errors']+=1;emit('error',project=slug,task_id=case['task_id'],error=str(exc))
                 except BaseException as exc:
                     emit('error',project=slug,task_id=case['task_id'],interrupted=True,
                          error=f'Revisão interrompida neste card ({type(exc).__name__})')
                     raise
-            # The mark of a board follows its own collection; a card that was not reviewed holds it.
-            if not unreviewed:
-                marks[slug]=until.timestamp()
         state['status']='partial' if state['errors'] else 'completed'
         if not day:
             write(root()/'watermark.json',{**watermark,'boards':marks,'run':folder.name})
