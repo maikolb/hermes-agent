@@ -109,9 +109,11 @@ def _engine(conn, task_id, delivery_type=None, spec_revision=None, effect_candid
         engine["delivery_type"] = delivery_type
     if spec_revision is not None:
         engine["spec_revision"] = spec_revision
-    if effect_candidate:
+    if effect_candidate and effect_candidate != (engine.get("candidate_sha") or engine.get("integrated_sha")):
         # STAGING_CANDIDATE_BASE_20261014: o SHA que o efeito de staging publica, o mesmo da chave do efeito. O processo
-        # o mede contra o ponto em que ele saiu da staging; sem ele, mede a candidata do card, como antes.
+        # o mede contra o ponto em que ele saiu da staging; sem ele, mede a candidata do card, como antes. Quando ele é a
+        # própria candidata do card (sempre, no modo conduzido), já é o SHA medido e segue medido como antes, contra a
+        # base do card ou a saída da main: contra a staging traria o que a main tem e a staging não.
         engine["effect_candidate"] = effect_candidate
     return engine
 

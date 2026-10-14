@@ -562,3 +562,57 @@ def test_effects_outside_staging_still_measure_the_card_candidate(staging_card, 
                        candidate=shas['staging_candidate'])
     assert 'effect_candidate' not in seen[-1] and seen[-1]['candidate_sha'] == shas['card_candidate']
     assert kinds(conn, task, 'nfos_effect_requested') == []
+
+
+@needs_module
+@pytest.mark.parametrize('operation', ['staging_pr', 'staging_merge'])
+def test_a_candidate_already_in_staging_does_not_open_the_gate(staging_card, monkeypatch, operation):
+    """Achado 1 da revisão do par (14/10): no modo de registro o worker declara a candidata do efeito. A staging
+    (1baddb1b) e a base do card (440677b9) já estão na staging: mediriam zero arquivos contra ela e liberariam o efeito
+    sem que ele publique nenhuma delas. São recusadas antes do processo."""
+    conn, task, shas = staging_card
+    seen = spy_engine(monkeypatch)
+    for declared in (shas['staging'], shas['card_base']):
+        with pytest.raises(d.WorkflowError, match='Staging already contains this candidate'):
+            d.begin_effect(conn, task.id, task.current_run_id, operation=operation, target=STAGING_TARGET,
+                           candidate=declared)
+    assert seen == [] and kinds(conn, task, 'nfos_effect_requested') == []
+
+
+@needs_module
+def test_the_requested_staging_pr_still_repeats_and_integrates_once_staging_contains_it(staging_card):
+    """A recusa não alcança o efeito já pedido: depois que a staging recebe a candidata do staging_pr, a repetição dele
+    devolve o mesmo efeito e o staging_merge da mesma candidata segue."""
+    conn, task, shas = staging_card
+    published = shas['staging_candidate']
+    first = d.begin_effect(conn, task.id, task.current_run_id, operation='staging_pr', target=STAGING_TARGET,
+                           candidate=published)
+    assert first['execute']
+    repo = conn.execute('SELECT workspace_path FROM tasks WHERE id=?', (task.id,)).fetchone()[0]
+    subprocess.run(['git', '-C', repo, 'update-ref', 'refs/remotes/origin/staging', published], check=True)
+    again = d.begin_effect(conn, task.id, task.current_run_id, operation='staging_pr', target=STAGING_TARGET,
+                           candidate=published)
+    assert again['id'] == first['id'] and not again['execute']
+    merged = d.begin_effect(conn, task.id, task.current_run_id, operation='staging_merge', target=STAGING_TARGET,
+                            candidate=published)
+    assert merged['execute'] and merged['id'] != first['id']
+
+
+@needs_module
+def test_the_card_candidate_published_to_staging_is_measured_as_the_card_candidate(staging_card, monkeypatch):
+    """Achado 2 da revisão do par (14/10): no modo conduzido a candidata do efeito é sempre a do card (a preparação
+    exige). Num card nascido da main, com a staging atrás dela, medir essa candidata contra a staging traria a extração
+    que a main recebeu e a staging não, e recusaria o staging_pr que hoje passa. A candidata do card segue medida como
+    hoje, contra a base do card."""
+    conn, task, shas = staging_card
+    conn.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,'worktree_creation_requested',?,2)",
+                 (task.id, json.dumps({'base_sha': shas['main']})))
+    conn.commit()
+    seen = spy_engine(monkeypatch)
+    today = nfos_process.evaluate(conn, task.id, effect='staging_pr')
+    assert today[1] is None and today[0]['allowed']
+    result = d.begin_effect(conn, task.id, task.current_run_id, operation='staging_pr', target=STAGING_TARGET,
+                            candidate=shas['card_candidate'])
+    assert result['execute'] and 'effect_candidate' not in seen[-1]
+    requested = kinds(conn, task, 'nfos_effect_requested')[-1]
+    assert requested['candidate'] == shas['card_candidate'] and requested['process']['allowed']
