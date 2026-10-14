@@ -48,7 +48,7 @@ def test_principal_final_continues_to_execution_without_new_turn_budget(agent_en
             assert receipt_file.read_text()=='Actual fixture operation completed'
             assert delivery.get_decision(conn,did)['status']=='resolved'
             assert kb.get_task(conn,tid).status=='ready'
-            assert result['api_calls']==3
+            assert result['api_calls']==2, 'the recorded answer ends the wake turn without a closing call'
         else:
             assert not receipt_file.exists()
             assert delivery.get_decision(conn,did)['status']=='pending'

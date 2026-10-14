@@ -7628,6 +7628,16 @@ def run_conversation(
                                 pass
                     break
 
+                # NFOS card wake: once this turn recorded the answer and the
+                # card has no open decision left, the turn ends here instead
+                # of paying another full-context call for a closing text.
+                from agent.kanban_stop import principal_wake_answered
+                if principal_wake_answered(getattr(agent, "_turn_checkpoint_state", None),
+                                           messages[current_turn_user_idx + 1:]):
+                    _turn_exit_reason = "nfos_principal_wake_answered"
+                    final_response = "[SILENT]"
+                    break
+
                 # Reset per-turn retry counters after successful tool
                 # execution so a single truncation doesn't poison the
                 # entire conversation.
