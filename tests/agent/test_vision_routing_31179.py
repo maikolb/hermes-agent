@@ -180,8 +180,18 @@ model:
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
         _fresh_modules()
 
+        # The guard learns "text-only" from the models.dev catalog. Give it the
+        # catalog entry instead of fetching it: offline and with an empty
+        # HERMES_HOME the capability is unknown, and unknown is permissive by
+        # design (test_unknown_capability_does_not_block below).
+        from unittest.mock import patch
+        registry = {"deepseek": {"models": {"deepseek-v4-pro": {
+            "modalities": {"input": ["text"], "output": ["text"]},
+        }}}}
+
         from agent.auxiliary_client import resolve_vision_provider_client
-        provider, client, _model = resolve_vision_provider_client(provider="auto")
+        with patch("agent.models_dev.fetch_models_dev", return_value=registry):
+            provider, client, _model = resolve_vision_provider_client(provider="auto")
         assert client is None, (
             f"Vision auto-detect must skip text-only main {provider!r} when "
             "no vision-capable aggregator is available, not return a client "
