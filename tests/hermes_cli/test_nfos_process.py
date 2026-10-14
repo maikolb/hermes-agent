@@ -547,16 +547,18 @@ def test_without_the_effect_candidate_the_staging_gate_does_not_open(staging_car
 
 
 @needs_module
-@pytest.mark.parametrize('operation', ['pr', 'merge'])
-def test_effects_outside_staging_still_measure_the_card_candidate(staging_card, monkeypatch, operation):
-    """Fora de staging o fork não manda a candidata do efeito e o motor não a usa: a candidata do card segue medida e a
-    recusa de 14/10 continua igual."""
+def test_effects_outside_staging_still_measure_the_card_candidate(staging_card, monkeypatch):
+    """Fora de staging o fork não manda a candidata do efeito e o motor não a usa: o julgamento de pr, merge e deploy é o
+    mesmo com ou sem ela, e o merge segue recusado pela extração da candidata do card, como em 14/10."""
     conn, task, shas = staging_card
     seen = spy_engine(monkeypatch)
+    for operation in ('pr', 'merge', 'deploy'):
+        before = nfos_process.evaluate(conn, task.id, effect=operation)
+        given = nfos_process.evaluate(conn, task.id, effect=operation, effect_candidate=shas['staging_candidate'])
+        assert ((given[0]['allowed'], given[0]['message'], given[1])
+                == (before[0]['allowed'], before[0]['message'], before[1])), operation
     with pytest.raises(nfos_process.ProcessRefusal, match=r'muda a extração \('):
-        d.begin_effect(conn, task.id, task.current_run_id, operation=operation, target='main',
+        d.begin_effect(conn, task.id, task.current_run_id, operation='merge', target='main',
                        candidate=shas['staging_candidate'])
     assert 'effect_candidate' not in seen[-1] and seen[-1]['candidate_sha'] == shas['card_candidate']
-    decision, refusal = nfos_process.evaluate(conn, task.id, effect=operation, effect_candidate=shas['staging_candidate'])
-    assert refusal and EXTRACTION_CITED in refusal and not decision['allowed']
     assert kinds(conn, task, 'nfos_effect_requested') == []
