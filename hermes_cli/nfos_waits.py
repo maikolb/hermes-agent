@@ -61,7 +61,8 @@ def policy(reason):
 
     Ganchos opcionais: withdrawn diz por que a espera deixou de valer; plan decide o passo seguinte enquanto o predicado
     segue falso (próxima conferência, prazo e o que gravar, ou o motivo do vencimento) e é dono do prazo do motivo;
-    outcomes troca o desfecho gravado conforme o motivo do vencimento. 'still_pending' só grava o desfecho: a decisão segue
+    outcomes troca o desfecho gravado conforme o motivo do vencimento; closed_states diz em que estado do card a espera
+    perde o objeto (concluído ou arquivado, se o motivo não disser outro). 'still_pending' só grava o desfecho: a decisão segue
     pendente e visível, sem resposta inventada pelo motor (REMINDER_BACKOFF_20261014)."""
     d = _delivery()
     if reason == 'lab_queue':
@@ -97,6 +98,7 @@ def policy(reason):
     if reason == 'principal_answer':  # REMINDER_BACKOFF_20261014: a decisão pendente do Principal, com lembretes contados
         return dict(executors=('principal',), predicates=('decision_resolved',), holds_decision=False,
                     on_expire='still_pending', first_check=0, recheck=d.DECISION_REMINDER_GAP,
+                    closed_states=('archived',),  # orientação do dono num card concluído ainda é do Principal
                     deadline=d.PRINCIPAL_ANSWER_DEADLINE, max_attempts=d.PRINCIPAL_ANSWER_MAX_CHECKS,
                     withdrawn=d._principal_answer_withdrawn, plan=d._principal_answer_plan,
                     expired=d._principal_answer_expired)
@@ -420,7 +422,7 @@ def _move(conn, wait, **fields):
 def _withdrawn_because(conn, wait, spec):
     d = _delivery()
     task = d._kb().get_task(conn, wait['task_id'])
-    if not task or task.status in ('done', 'archived'):
+    if not task or task.status in spec.get('closed_states', ('done', 'archived')):
         return 'card_closed'
     if spec['holds_decision']:
         decision = d.get_decision(conn, wait['decision_id']) if wait['decision_id'] else None

@@ -2,8 +2,10 @@
 
 Maikol, 10/10/2026: "O NFOS tem que ser autonomo, eu não quero ser babá de IA." Até 14/10 o lembrete de uma decisão retida
 saía de 15 em 15 min, sem teto: em 7 dias, 42 decisões retidas levaram 252 lembretes, com intervalo mediano de 15,9 min. Agora
-os três primeiros lembretes e a retenção mantêm a hora de sempre; depois o intervalo dobra até 2 h. O motor não responde pelo
-Principal: no prazo final de 7 dias a decisão segue pendente e visível.
+os três primeiros lembretes e a retenção mantêm a hora de sempre; depois, com o Principal ativo (respondeu outra decisão do
+quadro desde o lembrete anterior), o intervalo dobra até 2 h. Sem resposta nenhuma dele (parede de cota, sessão parada) o
+lembrete segue a cada 15 min, e o card retoma num intervalo quando ele volta. O motor não responde pelo Principal: no prazo
+final de 7 dias a decisão segue pendente e visível.
 """
 import json
 import subprocess
@@ -84,10 +86,22 @@ def _rewind_creation(conn, decision, to):
     conn.commit()
 
 
-def _drive(conn, clock, task_id, until, every=300):
-    """O despacho chama o lembrete a cada passada (aqui a cada 5 min) para o card com decisão aberta."""
+def _answer_another(conn, task_id, at):
+    """O Principal responde outra decisão do quadro: está ativo."""
+    run_id = conn.execute("SELECT max(id) FROM task_runs WHERE task_id=?", (task_id,)).fetchone()[0]
+    conn.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status,action,answer,author,"
+                 "resolved_at) VALUES(?,?,?,'impediment','Outra pergunta?','{}',0,?,'resolved','continue','CONTINUE: outra.','Principal',?)",
+                 (f"dec_other_{at}", task_id, run_id, at - 1, at))
+    conn.commit()
+
+
+def _drive(conn, clock, task_id, until, every=300, active=False):
+    """O despacho chama o lembrete a cada passada (aqui a cada 5 min) para o card com decisão aberta. Com `active`, o
+    Principal responde outra decisão do quadro a cada passada."""
     while clock.now < until:
         clock.now += every
+        if active:
+            _answer_another(conn, task_id, clock.now - 1)
         delivery.nudge_open_decisions(conn, task_id)
 
 
@@ -97,12 +111,12 @@ def _wait(conn, decision):
     return nfos_waits.get(conn, row[0]) if row else None
 
 
-def test_the_first_reminders_and_the_stall_keep_their_times_and_then_the_gap_doubles_up_to_two_hours(board, monkeypatch):
+def test_with_the_principal_active_the_gap_doubles_up_to_two_hours_after_the_stall(board, monkeypatch):
     task_id, decision = _card(board)
     start = int(time.time())
     clock = Clock(monkeypatch, start)
     _rewind_creation(board, decision, start)
-    _drive(board, clock, task_id, start + DAY)
+    _drive(board, clock, task_id, start + DAY, active=True)
     reminders = _reminders(board, task_id, start)
     assert reminders[:3] == [600, 1500, 2400]
     assert _at(board, task_id, "nfos_decision_stalled", start) == [3300]
@@ -120,6 +134,22 @@ def test_the_first_reminders_and_the_stall_keep_their_times_and_then_the_gap_dou
     assert [t - start for t in context["reminders"]] == reminders and context["stalled_at"] == start + 3300  # a release anterior lê
     assert all(p["wait_id"] == wait["id"] for p in (json.loads(r[0]) for r in board.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_principal_requested' AND created_at>?", (task_id, start))))
+
+
+def test_with_no_answer_at_all_the_reminder_keeps_every_15_minutes(board, monkeypatch):
+    """Parede de cota ou sessão parada: o despertar é recusado e não custa. O lembrete segue a cada 15 min, como antes, e
+    quando o Principal volta o card retoma num intervalo."""
+    task_id, decision = _card(board, "17")
+    start = int(time.time())
+    clock = Clock(monkeypatch, start)
+    _rewind_creation(board, decision, start)
+    _drive(board, clock, task_id, start + 4 * HOUR)
+    assert _reminders(board, task_id, start) == [600, 1500, 2400] + list(range(3600, 4 * HOUR + 1, 900))
+    assert _at(board, task_id, "nfos_decision_stalled", start) == [3300]
+    _answer_another(board, task_id, clock.now + 1)  # o Principal volta e responde outra decisão
+    _drive(board, clock, task_id, start + 6 * HOUR)
+    after = [t for t in _reminders(board, task_id, start) if t > 4 * HOUR]
+    assert after[0] == 4 * HOUR + 2 * HOUR  # ativo de novo: o lembrete seguinte espera o recuo (2 h depois de 16 lembretes)
 
 
 def test_the_registry_reminds_by_itself_without_the_dispatcher(board, monkeypatch):
@@ -147,12 +177,12 @@ def test_a_decision_only_the_principal_resolves_is_never_answered_by_the_runtime
     start = int(time.time())
     clock = Clock(monkeypatch, start)
     _rewind_creation(board, decision, start)
-    _drive(board, clock, task_id, start + 4 * HOUR)
+    _drive(board, clock, task_id, start + 4 * HOUR, active=True)
     assert _reminders(board, task_id, start)[:5] == [600, 1500, 2400, 4200, 7800]
     assert _at(board, task_id, "nfos_decision_stalled", start) == []
     deadline = _wait(board, decision)["deadline_at"]
     assert deadline == start + 600 + 7 * DAY
-    _drive(board, clock, task_id, deadline + DAY, every=2 * HOUR)
+    _drive(board, clock, task_id, deadline + DAY, every=2 * HOUR, active=True)
     expired = _wait(board, decision)
     assert expired["status"] == "expired" and expired["outcome"] == "still_pending"
     (unanswered,) = [json.loads(r[0]) for r in board.execute(
@@ -197,8 +227,8 @@ def test_a_human_question_on_the_card_takes_the_decision_out_of_the_reminders(bo
 
 
 def test_reminders_given_before_this_rule_are_counted(board, monkeypatch):
-    """O caso do #267: três lembretes e a retenção já dados, o card em awaiting_principal. O quarto sai 30 min depois do
-    terceiro, e o seguinte 60 min depois do quarto (antes: 15 min)."""
+    """O caso do #267: três lembretes e a retenção já dados, o card em awaiting_principal. O quarto sai na hora (não houve
+    resposta nenhuma desde o terceiro) e, com o Principal ativo depois dele, o quinto 60 min depois (antes: 15 min)."""
     task_id, decision = _card(board, "16")
     now = int(time.time())
     clock = Clock(monkeypatch, now)
@@ -209,6 +239,7 @@ def test_reminders_given_before_this_rule_are_counted(board, monkeypatch):
     board.commit()
     assert delivery.nudge_open_decisions(board, task_id) == [(decision, "reminder 4")]
     assert _wait(board, decision)["origin"]["reminders_before"] == 3
+    _answer_another(board, task_id, now + 60)  # o Principal está ativo depois do quarto
     for step in range(1, 13):
         clock.now = now + step * 300
         delivery.nudge_open_decisions(board, task_id)

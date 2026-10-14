@@ -2395,12 +2395,15 @@ _MAINTENANCE_RX = re.compile(r'contrato git|git delivery|delivery_contract|polic
 # alcançava (preparo do laboratório, portão do processo) eram de 40 a 70% dos pedidos a ele, com 31 respostas devolvidas em 3 h.
 MAINTENANCE_REMINDER_MAX_GAP = 8 * DECISION_REMINDER_GAP
 # REMINDER_BACKOFF_20261014: a decisão pendente do Principal é uma espera do registro (principal_answer). Até a retenção nada
-# muda: lembretes aos 10, 25 e 40 min e a decisão comum retida aos 55 min. Depois do terceiro lembrete o intervalo dobra (30 e
+# muda: lembretes aos 10, 25 e 40 min e a decisão comum retida aos 55 min. Depois do terceiro lembrete, quando o Principal
+# respondeu outra decisão do quadro desde o lembrete anterior (está ativo e não respondeu esta), o intervalo dobra (30 e
 # 60 min) até 2 h; antes era 15 min sem teto. Em 7 dias até 14/10/2026, 42 decisões retidas levaram 252 lembretes, com
-# intervalo mediano de 15,9 min. Prazo final de 7 dias, sem resposta inventada pelo motor: a decisão segue pendente e visível.
+# intervalo mediano de 15,9 min. Sem resposta nenhuma dele (parede de cota, sessão parada), o lembrete segue a cada 15 min:
+# o despertar recusado não custa e, quando a cota volta, o card retoma num intervalo. Prazo final de 7 dias, sem resposta
+# inventada pelo motor: a decisão segue pendente e visível.
 PRINCIPAL_REMINDER_MAX_GAP = MAINTENANCE_REMINDER_MAX_GAP
 PRINCIPAL_ANSWER_DEADLINE = 7 * 86400
-PRINCIPAL_ANSWER_MAX_CHECKS = 128
+PRINCIPAL_ANSWER_MAX_CHECKS = 2 * 7 * 96  # teto de segurança: até duas conferências por lembrete de 15 min em 7 dias
 # DEPENDENCY_RECHECK_20261010: sem prazo dito pelo Principal, a primeira reconferência vem em 1 h e as seguintes da mesma
 # pausa em 2, 4 e 6 h. Com 6 h fixas (o exemplo da instrução dizia 6 e ele copiava), em 10/10/2026 seis cards do Concursa
 # ficaram de 1 a 6 h parados depois de a dependência ter sido entregue.
@@ -2469,6 +2472,15 @@ def _needs_principal(conn, task_id, ctx):
                 or ((ctx.get('human_reply') or {}).get('source') or {}).get('platform') == 'portal')
 
 
+def _principal_answered_since(conn, decision_id, since):
+    """O Principal respondeu outra decisão deste quadro depois de `since`? A resposta que o motor grava sozinho (espera
+    vencida, fila do laboratório) não conta."""
+    return conn.execute(
+        "SELECT 1 FROM nfos_decisions WHERE id<>? AND status='resolved' AND author='Principal' AND resolved_at>? "
+        "AND NOT (json_valid(context) AND (json_extract(context,'$.wait_rule.resolved_by') IS NOT NULL "
+        "OR json_extract(context,'$.lab_wait.released_at') IS NOT NULL)) LIMIT 1", (decision_id, since)).fetchone() is not None
+
+
 def _principal_reminder_gap(ctx, given):
     """REMINDER_BACKOFF_20261014: intervalo depois do lembrete número `given`. 15 min nos três primeiros, depois 30 e 60 min e
     então 2 h. O recuo do reparo de pausa respondido sem reparar (_reminder_gap) vale quando é maior."""
@@ -2501,18 +2513,22 @@ def _principal_answer_plan(conn, wait, evidence, now):
                   f"{'manutenção do runtime (executor responsável)' if _MAINTENANCE_RX.search(str(row.get('question') or '')) else 'Principal (sessão coordenadora)'}. "
                   f"Retomada: `decide --decision {row['id']} --resolution continue|changes` na sessão coordenadora, ou resposta humana "
                   "registrada no card (`resume`). O card sai deste estado sozinho quando a decisão for resolvida.")
-        return dict(later(last + _principal_reminder_gap(ctx, len(reminders)),
-                          dict(evidence, last={'action': 'stalled', 'n': len(reminders), 'at': now})),
+        return dict(later(last + _reminder_gap(ctx), dict(evidence, last={'action': 'stalled', 'n': len(reminders), 'at': now})),
                     act=lambda c: _stall_principal_answer(c, wait, row, ctx, reason, now),
                     after=lambda c: _kb().block_task(c, wait['task_id'], reason=reason, kind='awaiting_principal'))
-    due = last + _principal_reminder_gap(ctx, len(reminders)) if reminders else created + DECISION_REMINDER_AFTER
+    if not reminders:
+        due = created + DECISION_REMINDER_AFTER
+    elif _principal_answered_since(conn, row['id'], last):
+        due = last + _principal_reminder_gap(ctx, len(reminders))  # ativo e sem responder esta: recuo
+    else:
+        due = last + _reminder_gap(ctx)  # sem resposta nenhuma: o despertar pode estar sendo recusado
     if now < due:
         return later(due)
     given = reminders + [now]
     # A decisão comum que chega ao terceiro lembrete é retida 15 min depois dele; o recuo vale para os lembretes seguintes.
     stalls_next = (len(given) >= DECISION_MAX_REMINDERS and not ctx.get('stalled_at')
                    and not _needs_principal(conn, wait['task_id'], ctx))
-    following = now + (DECISION_REMINDER_GAP if stalls_next else _principal_reminder_gap(ctx, len(given)))
+    following = now + (DECISION_REMINDER_GAP if stalls_next else _reminder_gap(ctx))  # o recuo é conferido nessa hora
     return dict(later(following, dict(evidence, last={'action': 'reminder', 'n': len(given), 'at': now})),
                 act=lambda c: _remind_principal_answer(c, wait, row, ctx, given, now))
 
@@ -2610,10 +2626,8 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
             ctx = {}
         if isinstance(ctx.get('lab_wait'), dict) and ctx['lab_wait'].get('hold'):
             continue  # LAB_WAIT_20261008: espera da fila do laboratório; sweep_lab_waits responde, sem lembrete nem awaiting_principal
-        if nfos_waits._table(conn) and conn.execute(
-                "SELECT 1 FROM nfos_waits WHERE decision_id=? AND status='open' AND reason<>'principal_answer' LIMIT 1",
-                (row['id'],)).fetchone():
-            continue  # WAIT_RULE_20261010: lembrete, teto e saída desta decisão são de outra espera do registro
+        if nfos_waits.open_for_decision(conn, row['id']):
+            continue  # WAIT_RULE_20261010: lembrete, teto e saída desta decisão são de outra espera do registro (a do lembrete não tem decision_id)
         if human_wait and not (ctx.get('owner_guidance') or ctx.get('human_reply')):
             continue
         needs_principal = bool(internal_hold or ctx.get('owner_guidance') or ctx.get('maintenance_recovery')
