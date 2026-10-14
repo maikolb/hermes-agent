@@ -15,7 +15,10 @@ from hermes_cli import nfos_workspace_repair as repair
 from tests.hermes_cli.test_nfos_maintenance_pause import _paused_and_exited, running  # noqa: F401
 from tests.hermes_cli.test_nfos_principal_acceptance import assessment, task_context  # noqa: F401
 
-DEPENDENCY = {'owner': 'laboratório (Codex)', 'need': 'importar o PDF do caso de produção para o corpus', 'recheck_hours': 6}
+# DEPENDENCY_BY_FACT_20261010: quem entrega vai em campo tipado, e o 6 que o exemplo antigo ensinava é aceito e ignorado.
+OWNER = 'laboratório (Codex)'
+DEPENDENCY = {'executor': {'kind': 'lab', 'name': OWNER}, 'need': 'importar o PDF do caso de produção para o corpus',
+              'recheck_hours': 6}
 ANSWER = 'O caso de produção não está no laboratório; o preparo depende de capacidade nova do broker.'
 
 
@@ -79,19 +82,20 @@ def test_declared_dependency_holds_the_pause_without_reminders_until_its_recheck
     row, context = d.get_decision(conn, did), _context(conn, did)
     assert row['status'] == 'pending' and context['maintenance_recovery']['pause_run_id'] == task.current_run_id
     wait = context['lab_wait']
-    assert wait['kind'] == 'dependency' and wait['hold'] is True and wait['until'] == start + 6 * 3600
-    assert wait['owner'] == DEPENDENCY['owner'] and wait['need'] == DEPENDENCY['need']
+    assert wait['kind'] == 'dependency' and wait['hold'] is True
+    assert wait['until'] == start + 3600, 'o prazo é do código: 1 h na primeira declaração, e o 6 declarado não vale'
+    assert wait['owner'] == OWNER and wait['executor'] == DEPENDENCY['executor'] and wait['need'] == DEPENDENCY['need']
     assert did not in [x['id'] for x in d.pending_decisions(conn)], 'fora da fila do Principal enquanto espera'
     action = d.get_workflow(conn, task.id)['next_action']
-    assert DEPENDENCY['need'] in action and DEPENDENCY['owner'] in action
+    assert DEPENDENCY['need'] in action and OWNER in action
     declared = [json.loads(r[0]) for r in conn.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_maintenance_dependency_declared'", (task.id,))]
-    assert len(declared) == 1 and declared[0]['until'] == start + 6 * 3600
+    assert len(declared) == 1 and declared[0]['until'] == start + 3600 and declared[0]['executor'] == DEPENDENCY['executor']
     before = len(_requests(conn, task, did))
-    clock[0] = start + 5 * 3600
+    clock[0] = start + 50 * 60
     runtime.reconcile_runtime(conn)
     runtime.reconcile_runtime(conn)
-    assert len(_requests(conn, task, did)) == before, 'cinco horas sem um pedido ao Principal'
+    assert len(_requests(conn, task, did)) == before, 'cinquenta minutos sem um pedido ao Principal'
     assert repair.maintenance_pause_pending(conn, task.id) and kb.get_task(conn, task.id).status == 'blocked'
     token = current_notify_receipt.set({'db_path': conn.execute('PRAGMA database_list').fetchone()[2],
                                         'principal_task_id': task.id, 'delivery_id': 'wake-dependencia'})
@@ -99,16 +103,17 @@ def test_declared_dependency_holds_the_pause_without_reminders_until_its_recheck
         assert kanban_stop._principal_continuation(None) is None, 'a espera não segura o turno do Principal'
     finally:
         current_notify_receipt.reset(token)
-    clock[0] = start + 6 * 3600 + 1
+    clock[0] = start + 3600 + 1
     runtime.reconcile_runtime(conn)
     runtime.reconcile_runtime(conn)
     assert len(_requests(conn, task, did)) == before + 1, 'no prazo, volta ao Principal uma vez'
     recheck = _requests(conn, task, did)[-1]['question']
     assert recheck.startswith('Reconferência de dependência declarada em '), 'o pedido abre com a dependência, não com o reparo'
     # RECHECK_WITHOUT_SIX_20261010: a orientação vem antes da necessidade e cabe no corte de 500 caracteres do aviso.
-    assert 'Confira por fato' in recheck[:120] and 'não informe recheck_hours: sem ele a pausa volta em 1 h' in recheck[:330]
-    assert DEPENDENCY['need'] in recheck[:500] and DEPENDENCY['owner'] in recheck[:500]
-    assert recheck.index('não informe recheck_hours') < recheck.index(DEPENDENCY['need'])
+    # DEPENDENCY_BY_FACT_20261010: ela agora manda declarar o fato que o runtime confere; o prazo deixou de ser do Principal.
+    assert 'Confira por fato' in recheck[:120] and '"check"' in recheck[:330] and 'recheck_hours é ignorado' in recheck[:330]
+    assert DEPENDENCY['need'] in recheck[:500] and OWNER in recheck[:500]
+    assert recheck.index('"check"') < recheck.index(DEPENDENCY['need'])
     assert recheck.endswith(d.get_decision(conn, did)['question']), 'a pergunta gravada segue inteira depois da abertura'
     assert not d.get_decision(conn, did)['question'].startswith('Reconferência'), 'a pergunta gravada não muda'
     assert _context(conn, did)['lab_wait']['hold'] is False
@@ -118,7 +123,7 @@ def test_declared_dependency_holds_the_pause_without_reminders_until_its_recheck
     assert len(_requests(conn, task, did)) == before + 1, 'o lembrete seguinte respeita o recuo'
     # Ainda sem a capacidade: declara de novo e a pausa volta a esperar.
     d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=dict(DEPENDENCY, recheck_hours=1))
-    assert _context(conn, did)['lab_wait']['hold'] is True and _context(conn, did)['lab_wait']['until'] == clock[0] + 3600
+    assert _context(conn, did)['lab_wait']['hold'] is True and _context(conn, did)['lab_wait']['until'] == clock[0] + 2 * 3600
     # O reparo real fecha a obrigação e o card volta à fila.
     _resume(conn, task)
     assert d.sweep_awaiting_principal(conn) == [task.id]
@@ -127,8 +132,11 @@ def test_declared_dependency_holds_the_pause_without_reminders_until_its_recheck
 
 
 @pytest.mark.parametrize('dependency', [
-    {'owner': 'laboratório'}, {'owner': ' ', 'need': 'capacidade'}, {'owner': 'laboratório', 'need': 'capacidade', 'recheck_hours': 0},
-    {'owner': 'laboratório', 'need': 'capacidade', 'recheck_hours': 48}, {'owner': 'laboratório', 'need': 'capacidade', 'recheck_hours': '6'},
+    {'executor': {'kind': 'lab', 'name': 'laboratório'}}, {'executor': {'kind': 'lab', 'name': ' '}, 'need': 'capacidade'},
+    {'executor': {'kind': 'principal', 'name': 'Principal / engenharia Concursa'}, 'need': 'autorização fora da faixa'},
+    {'executor': {'kind': 'runtime', 'name': 'Manutenção NFOS / project_workflow'}, 'need': 'rota de processo'},
+    {'executor': {'kind': 'owner', 'name': 'Maikol'}, 'need': 'credencial corporativa'},
+    {'owner': 'laboratório', 'need': 'capacidade'}, {'executor': 'laboratório', 'need': 'capacidade'},
     'laboratório'])
 def test_invalid_dependency_is_refused_and_the_obligation_stays_as_it_was(running, monkeypatch, dependency):
     conn, task, artifact, process, args = running
@@ -194,30 +202,32 @@ def test_principal_instructions_say_who_can_own_a_dependency_and_how_to_recheck_
 
 
 def test_dependency_without_hours_returns_in_one_hour_and_backs_off_on_the_same_pause(running, monkeypatch):
-    """DEPENDENCY_RECHECK_20261010: sem prazo dito, a pausa volta em 1 h; declarada de novo, em 2, 4 e 6 h. O prazo dito pelo
-    Principal vale como dito e não reinicia o recuo."""
+    """DEPENDENCY_RECHECK_20261010: a pausa volta em 1 h; declarada de novo, em 2, 4 e 6 h. DEPENDENCY_BY_FACT_20261010: o
+    prazo é do código, a hora que o Principal escreve é ignorada, e a quinta declaração sem fato conferível é recusada."""
     conn, task, artifact, process, args = running
     _paused_and_exited(conn, task, artifact, process, args, monkeypatch)
     did = _obligation(conn, task)
     assert '"recheck_hours":6' not in d.get_decision(conn, did)['question'], 'o exemplo não ensina mais as 6 h'
     clock = [int(time.time())]
     monkeypatch.setattr(d.time, 'time', lambda: clock[0])
-    bare = {k: DEPENDENCY[k] for k in ('owner', 'need')}
-    for hours in (1, 2, 4, 6, 6):
-        d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=bare)
+    bare = {k: DEPENDENCY[k] for k in ('executor', 'need')}
+    for hours in (1, 2, 4, 6):
+        d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=dict(bare, recheck_hours=24))
         wait = _context(conn, did)['lab_wait']
         assert wait['hold'] is True and wait['until'] == clock[0] + hours * 3600, hours
         clock[0] = wait['until'] + 1
         runtime.reconcile_runtime(conn)
         runtime.reconcile_runtime(conn)
         assert _context(conn, did)['lab_wait']['hold'] is False, 'no prazo volta ao Principal'
-    d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=dict(bare, recheck_hours=3))
-    assert _context(conn, did)['lab_wait']['until'] == clock[0] + 3 * 3600
+    saved = _context(conn, did)
+    with pytest.raises(d.WorkflowError, match='does not wait a fifth time'):
+        d.resolve_decision(conn, did, action='continue', answer=ANSWER, author='Principal', dependency=bare)
+    assert _context(conn, did) == saved and repair.maintenance_pause_pending(conn, task.id), 'a pausa segue, sem mais relógio'
 
 
 def test_principal_instructions_no_longer_teach_a_fixed_six_hours():
     text = ' '.join(runtime.principal_instructions().split())
     assert '"recheck_hours":6' not in text
-    assert 'returns to you in 1 hour, then 2, 4 and 6 for the same pause' in text
-    assert 'add "recheck_hours" (1 to 24) only when you know the hour that fact can change' in text
+    assert 'returns to you in 1 hour, then 2, 4 and 6 for the same pause, four times at most' in text
+    assert '"recheck_hours" is ignored' in text and '"owner" as free text is refused' in text
 
