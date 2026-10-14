@@ -228,5 +228,13 @@
   {"pr": 337, "file": "agent/credential_pool.py", "text": "state = _load_codex_login_state(auth_store)", "min": 3},
   {"pr": 337, "file": "agent/credential_pool.py", "text": "# No login to clear, nothing to write: a pool profile"},
   {"pr": 338, "file": "acp_adapter/server.py", "text": "final_response = result.get(\"final_response\") or \"\"  # None on an interrupted turn"},
-  {"pr": 338, "file": "acp_adapter/server.py", "text": "# post-turn bookkeeping above must not leave the session \"running\""}
+  {"pr": 338, "file": "acp_adapter/server.py", "text": "# post-turn bookkeeping above must not leave the session \"running\""},
+  {"pr": 339, "file": "agent/kanban_stop.py", "text": "def principal_wake_answered(state, turn_messages) -> bool:"},
+  {"pr": 339, "file": "agent/kanban_stop.py", "text": "def _steered_into_turn(turn_messages) -> bool:"},
+  {"pr": 339, "file": "agent/kanban_stop.py", "text": "if _steered_into_turn(turn_messages):"},
+  {"pr": 339, "file": "agent/kanban_stop.py", "text": "if conn.execute(\"SELECT 1 FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human')\","},
+  {"pr": 339, "file": "agent/kanban_stop.py", "text": "return conn.execute(\"SELECT 1 FROM task_events WHERE task_id=? AND kind='nfos_principal_resolved' AND created_at>=?\","},
+  {"pr": 339, "file": "agent/conversation_loop.py", "text": "if principal_wake_answered(getattr(agent, \"_turn_checkpoint_state\", None),"},
+  {"pr": 339, "file": "agent/conversation_loop.py", "text": "messages[current_turn_user_idx + 1:]):"},
+  {"pr": 339, "file": "agent/conversation_loop.py", "text": "_turn_exit_reason = \"nfos_principal_wake_answered\""}
 ]
