@@ -4789,10 +4789,11 @@ def _pool_error_context(exc: Exception) -> Dict[str, Any]:
 
 
 def _pool_quota_error_context(exc: Exception) -> Dict[str, Any]:
-    """What the pool is told about an auxiliary call refused on quota: the
-    reason and the reset time the main loop reads from the same answer.  A
-    mark without them forgot the reset time of a usage window and put the
-    exhausted credential back in rotation one hour later.  An answer that
+    """What the pool is told about an auxiliary call the provider refused (quota
+    or auth): the reason and the reset time the main loop reads from the same
+    answer.  A quota mark without them forgot the reset time of a usage window
+    and put the exhausted credential back in rotation one hour later; an auth
+    mark without the reason never wrote a revoked login off.  An answer that
     cannot be read is told as before."""
     payload = _pool_error_context(exc)
     try:
@@ -4847,6 +4848,39 @@ def _recoverable_pool_provider(
     return None
 
 
+def _provider_refresh_serves_key(provider: str, api_key: str) -> bool:
+    """Whether the provider-level refresh may answer a 401 met with ``api_key``.
+
+    For openai-codex that refresh (``_refresh_provider_credentials``) rotates the
+    auth.json login, so it follows the main loop's rule
+    (``recover_with_credential_pool``, then ``_try_refresh_codex_client_credentials``
+    only while the agent holds that login's own access token). A key a pool entry
+    holds goes to the pool recovery, which refreshes the entry or marks it. So does
+    any other key while that login is another one, or absent beside a pool: a pool
+    pair another process has rotated since this client was built. Refreshing the
+    auth.json login then rotated another chain (or the root's login, read into the
+    profile), or refreshed nothing, and never reached the pool entry.
+    """
+    if _normalize_aux_provider(provider) != "openai-codex":
+        return True
+    key = str(api_key or "").strip()
+    if not key:
+        return True
+    try:
+        entries = load_pool("openai-codex").entries()
+    except Exception:
+        entries = []
+    if any(entry.runtime_api_key == key for entry in entries):
+        return False
+    try:
+        from hermes_cli.auth import _read_codex_tokens
+
+        singleton_key = str((_read_codex_tokens().get("tokens") or {}).get("access_token") or "").strip()
+    except Exception:
+        return not entries
+    return singleton_key == key
+
+
 def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str = "") -> bool:
     """Try same-provider credential-pool recovery for auxiliary calls.
 
@@ -4865,17 +4899,23 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
         return False
 
     status_code = getattr(exc, "status_code", None)
-    error_context = _pool_error_context(exc)
     hint = failed_api_key or None
 
     if _is_auth_error(exc):
-        refreshed = pool.try_refresh_current()
+        # A Codex login follows the main loop's rule (recover_with_credential_pool):
+        # refresh the entry that made the failed call, else mark it with the
+        # provider's reason, which writes a revoked login off (STATUS_DEAD).
+        codex_login = normalized == "openai-codex" and hint is not None
+        if codex_login:
+            refreshed = pool.try_refresh_matching(api_key_hint=hint)
+        else:
+            refreshed = pool.try_refresh_current()
         if refreshed is not None:
             _evict_cached_clients(normalized)
             return True
         next_entry = pool.mark_exhausted_and_rotate(
             status_code=status_code if status_code is not None else 401,
-            error_context=error_context,
+            error_context=_pool_quota_error_context(exc) if codex_login else _pool_error_context(exc),
             api_key_hint=hint,
         )
         if next_entry is not None:
@@ -4914,6 +4954,7 @@ def _retry_same_provider_sync(
     effective_extra_body: dict,
     reasoning_config: Optional[dict],
     extra_headers: Optional[Dict[str, str]] = None,
+    sent_with_key: Optional[List[str]] = None,
 ) -> Any:
     if task == "vision":
         effective_provider, retry_client, retry_model = resolve_vision_provider_client(
@@ -4939,6 +4980,10 @@ def _retry_same_provider_sync(
         raise RuntimeError(
             f"Auxiliary {task or 'call'}: provider {resolved_provider} could not be rebuilt after recovery"
         )
+    if sent_with_key is not None:
+        # The key this retry is sent with: a second refusal is the pool's to
+        # attribute to the entry that holds it, as the first one was.
+        sent_with_key.append(str(getattr(retry_client, "api_key", "") or ""))
 
     retry_base = str(getattr(retry_client, "base_url", "") or "")
     retry_kwargs = _build_call_kwargs(
@@ -4989,6 +5034,7 @@ async def _retry_same_provider_async(
     effective_extra_body: dict,
     reasoning_config: Optional[dict],
     extra_headers: Optional[Dict[str, str]] = None,
+    sent_with_key: Optional[List[str]] = None,
 ) -> Any:
     if task == "vision":
         effective_provider, retry_client, retry_model = resolve_vision_provider_client(
@@ -5014,6 +5060,10 @@ async def _retry_same_provider_async(
         raise RuntimeError(
             f"Auxiliary {task or 'call'}: provider {resolved_provider} could not be rebuilt after recovery"
         )
+    if sent_with_key is not None:
+        # The key this retry is sent with: a second refusal is the pool's to
+        # attribute to the entry that holds it, as the first one was.
+        sent_with_key.append(str(getattr(retry_client, "api_key", "") or ""))
 
     retry_base = str(getattr(retry_client, "base_url", "") or "")
     retry_kwargs = _build_call_kwargs(
@@ -10016,7 +10066,8 @@ def _call_llm_impl(
             resolved_provider, _base_info)
         if (_is_auth_error(first_err)
                 and auth_refresh_provider not in {"auto", "", None}
-                and not client_is_nous):
+                and not client_is_nous
+                and _provider_refresh_serves_key(auth_refresh_provider, str(getattr(client, "api_key", "") or ""))):
             if _refresh_provider_credentials(auth_refresh_provider):
                 if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
                     # The stale client is cached under the route label
@@ -10074,6 +10125,7 @@ def _call_llm_impl(
                     "Auxiliary %s: recovered %s via credential-pool rotation after %s",
                     task or "call", pool_provider, type(recovery_err).__name__,
                 )
+                retry_key: List[str] = []
                 try:
                     return _retry_same_provider_sync(
                         task=task,
@@ -10092,6 +10144,7 @@ def _call_llm_impl(
                         effective_extra_body=effective_extra_body,
                         reasoning_config=reasoning_config,
                         extra_headers=extra_headers,
+                        sent_with_key=retry_key,
                     )
                 except Exception as retry2_err:
                     # The rotated key also hit a quota/auth wall.  Mark it
@@ -10101,7 +10154,12 @@ def _call_llm_impl(
                     # alternative providers can still serve the request.
                     if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
                             or _is_rate_limit_error(retry2_err)):
-                        _recover_provider_pool(pool_provider, retry2_err)
+                        # A Codex login refused on the retry is attributed to the key
+                        # the retry was sent with, as the first refusal was (R2).
+                        _recover_provider_pool(
+                            pool_provider, retry2_err,
+                            failed_api_key=retry_key[0] if retry_key and pool_provider == "openai-codex" else "",
+                        )
                         first_err = retry2_err
                     else:
                         raise
@@ -10759,7 +10817,8 @@ async def _async_call_llm_impl(
             resolved_provider, _client_base)
         if (_is_auth_error(first_err)
                 and auth_refresh_provider not in {"auto", "", None}
-                and not client_is_nous):
+                and not client_is_nous
+                and _provider_refresh_serves_key(auth_refresh_provider, str(getattr(client, "api_key", "") or ""))):
             if _refresh_provider_credentials(auth_refresh_provider):
                 if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
                     # The stale client is cached under the route label
@@ -10811,6 +10870,7 @@ async def _async_call_llm_impl(
                     "Auxiliary %s (async): recovered %s via credential-pool rotation after %s",
                     task or "call", pool_provider, type(recovery_err).__name__,
                 )
+                retry_key: List[str] = []
                 try:
                     return await _retry_same_provider_async(
                         task=task,
@@ -10827,11 +10887,17 @@ async def _async_call_llm_impl(
                         effective_timeout=effective_timeout,
                         effective_extra_body=effective_extra_body,
                         reasoning_config=reasoning_config,
+                        sent_with_key=retry_key,
                     )
                 except Exception as retry2_err:
                     if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
                             or _is_rate_limit_error(retry2_err)):
-                        _recover_provider_pool(pool_provider, retry2_err)
+                        # A Codex login refused on the retry is attributed to the key
+                        # the retry was sent with, as the first refusal was (R2).
+                        _recover_provider_pool(
+                            pool_provider, retry2_err,
+                            failed_api_key=retry_key[0] if retry_key and pool_provider == "openai-codex" else "",
+                        )
                         first_err = retry2_err
                     else:
                         raise
