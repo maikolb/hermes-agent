@@ -2484,7 +2484,7 @@ def _principal_answer_plan(conn, wait, evidence, now):
     Principal, e que a release anterior lê: o intervalo conta do último pedido, qualquer que seja o caminho que pediu."""
     if now >= wait['deadline_at']:
         return {'expire': 'deadline'}
-    row = dict(get_decision(conn, wait['decision_id']))
+    row = dict(get_decision(conn, wait['predicate']['decision_id']))
     ctx = _decision_context(row)
     reminders = _given_reminders(ctx)
     created = int(row.get('created_at') or now)
@@ -2539,7 +2539,7 @@ def _stall_principal_answer(conn, wait, row, ctx, reason, now):
 def _principal_answer_withdrawn(conn, wait):
     """O que tira a decisão dos lembretes sem resposta do Principal: a espera do laboratório, outra espera do registro na
     mesma decisão ou uma pergunta a humano aberta no card (o card espera a pessoa), como o nudge sempre pulou."""
-    row = get_decision(conn, wait['decision_id'])
+    row = get_decision(conn, wait['predicate']['decision_id'])
     if not row:
         return 'decision_missing'
     if row['status'] != 'pending':
@@ -2559,7 +2559,7 @@ def _principal_answer_withdrawn(conn, wait):
 def _principal_answer_expired(conn, wait, why, now):
     """Prazo final sem resposta: o desfecho gravado é still_pending. A decisão segue pendente e visível; o motor não responde
     pelo Principal (o desfecho final é o fechamento "não entregue", quando existir)."""
-    row = get_decision(conn, wait['decision_id'])
+    row = get_decision(conn, wait['predicate']['decision_id'])
     if not row or row['status'] != 'pending':
         return
     given = len(_given_reminders(_decision_context(dict(row))))
@@ -2578,8 +2578,12 @@ def _principal_answer_wait(conn, task_id, row, now):
     predicate = {'kind': 'decision_resolved', 'decision_id': row['id']}
     if nfos_waits.refusal(conn, task_id, reason='principal_answer', predicate=predicate):
         return None
+    # PRINCIPAL_ANSWER_UNBOUND_20261014: decision_id fica vazio; a decisão vai só no predicado. A release anterior pula no
+    # lembrete toda decisão com espera aberta (open_for_decision) e não sabe dar o passo desta: numa volta de pacote a decisão
+    # ficaria sem lembrete nenhum. Assim ela volta ao lembrete de antes, e a adoção da fila do laboratório (known_decision)
+    # não confunde esta espera com a dela.
     return nfos_waits.declare(conn, task_id, row.get('run_id'), reason='principal_answer', executor=nfos_waits.PRINCIPAL,
-                              predicate=predicate, decision_id=row['id'], subject=f"decisão {row.get('kind')} do Principal",
+                              predicate=predicate, decision_id=None, subject=f"decisão {row.get('kind')} do Principal",
                               now=now, next_check_at=now,
                               origin={'reminders_before': len(_given_reminders(_decision_context(row)))})
 

@@ -92,8 +92,8 @@ def _drive(conn, clock, task_id, until, every=300):
 
 
 def _wait(conn, decision):
-    row = conn.execute("SELECT id FROM nfos_waits WHERE decision_id=? AND reason='principal_answer' ORDER BY created_at DESC,id LIMIT 1",
-                       (decision,)).fetchone()
+    row = conn.execute("SELECT id FROM nfos_waits WHERE reason='principal_answer' AND json_extract(predicate,'$.decision_id')=? "
+                       "ORDER BY created_at DESC,id LIMIT 1", (decision,)).fetchone()
     return nfos_waits.get(conn, row[0]) if row else None
 
 
@@ -113,6 +113,9 @@ def test_the_first_reminders_and_the_stall_keep_their_times_and_then_the_gap_dou
     wait = _wait(board, decision)
     assert wait["status"] == "open" and wait["reason"] == "principal_answer"
     assert wait["executor"] == nfos_waits.PRINCIPAL and wait["predicate"] == {"kind": "decision_resolved", "decision_id": decision}
+    # A release anterior pula no lembrete a decisão com espera aberta; esta espera não se liga à decisão por decision_id.
+    assert wait["decision_id"] is None and nfos_waits.open_for_decision(board, decision) is None
+    assert not nfos_waits.known_decision(board, decision)
     context = json.loads(delivery.get_decision(board, decision)["context"])
     assert [t - start for t in context["reminders"]] == reminders and context["stalled_at"] == start + 3300  # a release anterior lê
     assert all(p["wait_id"] == wait["id"] for p in (json.loads(r[0]) for r in board.execute(
