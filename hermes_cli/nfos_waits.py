@@ -36,9 +36,9 @@ CREATE INDEX IF NOT EXISTS nfos_waits_task ON nfos_waits(task_id,status);
 OPEN, SATISFIED, EXPIRED, WITHDRAWN = 'open', 'satisfied', 'expired', 'withdrawn'
 # Quem pode tornar o predicado verdadeiro. requester, operator e external são pessoas ou terceiros; os demais são internos.
 EXECUTOR_KINDS = ('requester', 'operator', 'external', 'lab', 'card', 'runtime', 'principal')
-REASONS = ('lab_queue', 'principal_decision', 'external_dependency', 'provider_quota', 'requester_answer')
+REASONS = ('lab_queue', 'principal_decision', 'external_dependency', 'provider_quota', 'requester_answer', 'principal_answer')
 OUTCOMES = {'principal': 'principal_handoff', 'worker': 'returned_to_worker', 'obligation': 'returned_to_obligation',
-            'still_closed': 'still_closed'}
+            'still_closed': 'still_closed', 'still_pending': 'still_pending'}
 PRINCIPAL = {'kind': 'principal', 'name': 'Principal (sessão coordenadora)'}
 _JSON_FIELDS = ('executor', 'predicate', 'evidence', 'origin')
 
@@ -61,7 +61,8 @@ def policy(reason):
 
     Ganchos opcionais: withdrawn diz por que a espera deixou de valer; plan decide o passo seguinte enquanto o predicado
     segue falso (próxima conferência, prazo e o que gravar, ou o motivo do vencimento) e é dono do prazo do motivo;
-    outcomes troca o desfecho gravado conforme o motivo do vencimento."""
+    outcomes troca o desfecho gravado conforme o motivo do vencimento. 'still_pending' só grava o desfecho: a decisão segue
+    pendente e visível, sem resposta inventada pelo motor (REMINDER_BACKOFF_20261014)."""
     d = _delivery()
     if reason == 'lab_queue':
         return dict(executors=('lab',), predicates=('lab_receipt',), holds_decision=True, on_expire='principal',
@@ -93,6 +94,12 @@ def policy(reason):
     if reason == 'requester_answer':  # REQUESTER_WAIT_20261014: a pergunta ao solicitante, com aviso e prazo
         from hermes_cli import nfos_requester_deadline
         return nfos_requester_deadline.wait_policy()
+    if reason == 'principal_answer':  # REMINDER_BACKOFF_20261014: a decisão pendente do Principal, com lembretes contados
+        return dict(executors=('principal',), predicates=('decision_resolved',), holds_decision=False,
+                    on_expire='still_pending', first_check=0, recheck=d.DECISION_REMINDER_GAP,
+                    deadline=d.PRINCIPAL_ANSWER_DEADLINE, max_attempts=d.PRINCIPAL_ANSWER_MAX_CHECKS,
+                    withdrawn=d._principal_answer_withdrawn, plan=d._principal_answer_plan,
+                    expired=d._principal_answer_expired)
     raise _delivery().WorkflowError('Unknown wait reason; use one of: ' + ', '.join(REASONS))
 
 
@@ -470,8 +477,8 @@ def step(conn, wait_id, *, now=None, budget=None):
                     _move(conn, wait, evidence=dict(evidence, not_ready=True), next_check_at=max(later, now + 1), updated_at=now)
                 return 'not_ready'
             final = 'not_ready'
+    planned = None
     with d._kb().write_txn(conn, allow_nested=True):
-        planned = None
         if spec.get('plan') and state is False and not final:
             # O motivo com plano é dono do próprio prazo: avisa antes de vencer e o empurra quando o aviso sai tarde.
             if wait['attempts'] >= wait['max_attempts']:
@@ -494,18 +501,27 @@ def step(conn, wait_id, *, now=None, budget=None):
                 planned['act'](conn)
             if spec.get('retry'):
                 spec['retry'](conn, dict(wait, attempts=wait['attempts'] + 1), now)
-            return 'wait' if state is False else 'unreadable'
-        outcome = (spec.get('outcomes') or {}).get(why) or OUTCOMES[spec['on_expire']]
-        evidence = dict(evidence, expired_because=why)
-        if not _move(conn, wait, status=EXPIRED, outcome=outcome, evidence=evidence, closed_at=now, updated_at=now):
-            return None
-        d._event(conn, wait['task_id'], wait['run_id'], 'nfos_wait_expired',
-                 {'wait_id': wait['id'], 'reason': wait['reason'], 'why': why, 'attempts': wait['attempts'],
-                  'deadline_at': wait['deadline_at'], 'outcome': outcome, 'decision_id': wait['decision_id']})
-        spec['expired'](conn, dict(wait, evidence=evidence), why, now)
-        if spec['on_expire'] == 'principal':
-            hand_to_principal(conn, wait, now)
-        return 'expired'
+            done = 'wait' if state is False else 'unreadable'
+        else:
+            outcome = (spec.get('outcomes') or {}).get(why) or OUTCOMES[spec['on_expire']]
+            evidence = dict(evidence, expired_because=why)
+            if not _move(conn, wait, status=EXPIRED, outcome=outcome, evidence=evidence, closed_at=now, updated_at=now):
+                return None
+            d._event(conn, wait['task_id'], wait['run_id'], 'nfos_wait_expired',
+                     {'wait_id': wait['id'], 'reason': wait['reason'], 'why': why, 'attempts': wait['attempts'],
+                      'deadline_at': wait['deadline_at'], 'outcome': outcome, 'decision_id': wait['decision_id']})
+            spec['expired'](conn, dict(wait, evidence=evidence), why, now)
+            if spec['on_expire'] == 'principal':
+                hand_to_principal(conn, wait, now)
+            done = 'expired'
+    # O que o plano faz depois de gravar, fora da transação: bloquear o card abre a transação dele.
+    if done != 'expired' and planned and planned.get('after'):
+        try:
+            planned['after'](conn)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning('WAIT_RULE_20261010 after-step failed for %s', wait['id'], exc_info=True)
+    return done
 
 
 def sweep(conn, *, now=None, budget=None):

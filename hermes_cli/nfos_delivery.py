@@ -2394,6 +2394,13 @@ _MAINTENANCE_RX = re.compile(r'contrato git|git delivery|delivery_contract|polic
 # reparo depende: a pausa espera sem lembrete e volta para ele reconferir no prazo. Em 09/10/2026, cinco pausas que ele não
 # alcançava (preparo do laboratório, portão do processo) eram de 40 a 70% dos pedidos a ele, com 31 respostas devolvidas em 3 h.
 MAINTENANCE_REMINDER_MAX_GAP = 8 * DECISION_REMINDER_GAP
+# REMINDER_BACKOFF_20261014: a decisão pendente do Principal é uma espera do registro (principal_answer). Até a retenção nada
+# muda: lembretes aos 10, 25 e 40 min e a decisão comum retida aos 55 min. Depois do terceiro lembrete o intervalo dobra (30 e
+# 60 min) até 2 h; antes era 15 min sem teto. Em 7 dias até 14/10/2026, 42 decisões retidas levaram 252 lembretes, com
+# intervalo mediano de 15,9 min. Prazo final de 7 dias, sem resposta inventada pelo motor: a decisão segue pendente e visível.
+PRINCIPAL_REMINDER_MAX_GAP = MAINTENANCE_REMINDER_MAX_GAP
+PRINCIPAL_ANSWER_DEADLINE = 7 * 86400
+PRINCIPAL_ANSWER_MAX_CHECKS = 128
 # DEPENDENCY_RECHECK_20261010: sem prazo dito pelo Principal, a primeira reconferência vem em 1 h e as seguintes da mesma
 # pausa em 2, 4 e 6 h. Com 6 h fixas (o exemplo da instrução dizia 6 e ele copiava), em 10/10/2026 seis cards do Concursa
 # ficaram de 1 a 6 h parados depois de a dependência ter sido entregue.
@@ -2441,10 +2448,148 @@ def _dependency_recheck_hours(earlier):
     return MAINTENANCE_DEPENDENCY_DEFAULT_HOURS[min(earlier, len(MAINTENANCE_DEPENDENCY_DEFAULT_HOURS) - 1)]
 
 
+def _decision_context(row):
+    try:
+        ctx = json.loads((row or {}).get('context') or '{}') or {}
+    except Exception:
+        ctx = {}
+    return ctx if isinstance(ctx, dict) else {}
+
+
+def _given_reminders(ctx):
+    return [int(x) for x in (ctx.get('reminders') or []) if str(x).isdigit()]
+
+
+def _needs_principal(conn, task_id, ctx):
+    """Decisão que só o Principal resolve: card já retido em awaiting_principal, orientação do dono, reparo de pausa ou
+    resposta do portal. Ela não tem continue automático por classe nem é retida de novo."""
+    internal_hold = conn.execute("SELECT 1 FROM tasks WHERE id=? AND status='blocked' AND block_kind='awaiting_principal'",
+                                 (task_id,)).fetchone() is not None
+    return bool(internal_hold or ctx.get('owner_guidance') or ctx.get('maintenance_recovery')
+                or ((ctx.get('human_reply') or {}).get('source') or {}).get('platform') == 'portal')
+
+
+def _principal_reminder_gap(ctx, given):
+    """REMINDER_BACKOFF_20261014: intervalo depois do lembrete número `given`. 15 min nos três primeiros, depois 30 e 60 min e
+    então 2 h. O recuo do reparo de pausa respondido sem reparar (_reminder_gap) vale quando é maior."""
+    gap = _reminder_gap(ctx)
+    if given < DECISION_MAX_REMINDERS:
+        return gap
+    return max(gap, min(DECISION_REMINDER_GAP * 2 ** (given - DECISION_MAX_REMINDERS + 1), PRINCIPAL_REMINDER_MAX_GAP))
+
+
+def _principal_answer_plan(conn, wait, evidence, now):
+    """REMINDER_BACKOFF_20261014: o passo seguinte da decisão pendente do Principal (espera principal_answer). Os lembretes
+    ficam em context.reminders, que o reparo de pausa e a espera do laboratório também gravam quando acabam de pedir ao
+    Principal, e que a release anterior lê: o intervalo conta do último pedido, qualquer que seja o caminho que pediu."""
+    if now >= wait['deadline_at']:
+        return {'expire': 'deadline'}
+    row = dict(get_decision(conn, wait['decision_id']))
+    ctx = _decision_context(row)
+    reminders = _given_reminders(ctx)
+    created = int(row.get('created_at') or now)
+    last = reminders[-1] if reminders else created
+
+    def later(due, seen=evidence):
+        return {'evidence': seen, 'next_check_at': int(min(due, wait['deadline_at'])), 'deadline_at': wait['deadline_at']}
+    if (len(reminders) >= DECISION_MAX_REMINDERS and not ctx.get('stalled_at')
+            and not _needs_principal(conn, wait['task_id'], ctx)):
+        if now < last + DECISION_REMINDER_GAP:
+            return later(last + DECISION_REMINDER_GAP)
+        reason = (f"Aguardando o Principal há {(now - created) // 60} min ({DECISION_MAX_REMINDERS} lembretes sem resposta). "
+                  f"Pergunta: {str(row.get('question') or '')[:400]} Responsável: "
+                  f"{'manutenção do runtime (executor responsável)' if _MAINTENANCE_RX.search(str(row.get('question') or '')) else 'Principal (sessão coordenadora)'}. "
+                  f"Retomada: `decide --decision {row['id']} --resolution continue|changes` na sessão coordenadora, ou resposta humana "
+                  "registrada no card (`resume`). O card sai deste estado sozinho quando a decisão for resolvida.")
+        return dict(later(last + _principal_reminder_gap(ctx, len(reminders)),
+                          dict(evidence, last={'action': 'stalled', 'n': len(reminders), 'at': now})),
+                    act=lambda c: _stall_principal_answer(c, wait, row, ctx, reason, now),
+                    after=lambda c: _kb().block_task(c, wait['task_id'], reason=reason, kind='awaiting_principal'))
+    due = last + _principal_reminder_gap(ctx, len(reminders)) if reminders else created + DECISION_REMINDER_AFTER
+    if now < due:
+        return later(due)
+    given = reminders + [now]
+    # A decisão comum que chega ao terceiro lembrete é retida 15 min depois dele; o recuo vale para os lembretes seguintes.
+    stalls_next = (len(given) >= DECISION_MAX_REMINDERS and not ctx.get('stalled_at')
+                   and not _needs_principal(conn, wait['task_id'], ctx))
+    following = now + (DECISION_REMINDER_GAP if stalls_next else _principal_reminder_gap(ctx, len(given)))
+    return dict(later(following, dict(evidence, last={'action': 'reminder', 'n': len(given), 'at': now})),
+                act=lambda c: _remind_principal_answer(c, wait, row, ctx, given, now))
+
+
+def _remind_principal_answer(conn, wait, row, ctx, reminders, now):
+    ctx['reminders'] = reminders
+    conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(ctx), row['id']))
+    _event(conn, wait['task_id'], row.get('run_id'), 'nfos_principal_requested',
+           {'decision_id': row['id'], 'kind': row.get('kind'), 'question': row.get('question'), 'reminder': len(reminders),
+            'waiting_minutes': (now - int(row.get('created_at') or now)) // 60, 'wait_id': wait['id']})
+
+
+def _stall_principal_answer(conn, wait, row, ctx, reason, now):
+    """A decisão comum que três lembretes não resolveram fica visível: o card vai a awaiting_principal (depois do passo) com
+    o responsável e a retomada no next_action."""
+    ctx['stalled_at'] = now
+    conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(ctx), row['id']))
+    conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (reason[:400], now, wait['task_id']))
+    _event(conn, wait['task_id'], row.get('run_id'), 'nfos_decision_stalled',
+           {'decision_id': row['id'], 'maintenance': bool(_MAINTENANCE_RX.search(str(row.get('question') or ''))),
+            'reason': reason[:600], 'wait_id': wait['id']})
+
+
+def _principal_answer_withdrawn(conn, wait):
+    """O que tira a decisão dos lembretes sem resposta do Principal: a espera do laboratório, outra espera do registro na
+    mesma decisão ou uma pergunta a humano aberta no card (o card espera a pessoa), como o nudge sempre pulou."""
+    row = get_decision(conn, wait['decision_id'])
+    if not row:
+        return 'decision_missing'
+    if row['status'] != 'pending':
+        return None  # respondida: o predicado satisfaz a espera
+    ctx = _decision_context(dict(row))
+    if isinstance(ctx.get('lab_wait'), dict) and ctx['lab_wait'].get('hold'):
+        return 'lab_wait'
+    if conn.execute("SELECT 1 FROM nfos_waits WHERE decision_id=? AND status='open' AND reason<>? LIMIT 1",
+                    (row['id'], wait['reason'])).fetchone():
+        return 'other_wait'
+    if (conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='human' LIMIT 1", (wait['task_id'],)).fetchone()
+            and not (ctx.get('owner_guidance') or ctx.get('human_reply'))):
+        return 'human_question'
+    return None
+
+
+def _principal_answer_expired(conn, wait, why, now):
+    """Prazo final sem resposta: o desfecho gravado é still_pending. A decisão segue pendente e visível; o motor não responde
+    pelo Principal (o desfecho final é o fechamento "não entregue", quando existir)."""
+    row = get_decision(conn, wait['decision_id'])
+    if not row or row['status'] != 'pending':
+        return
+    given = len(_given_reminders(_decision_context(dict(row))))
+    note = (f"Decisão {row['id']} sem resposta do Principal há {(now - int(wait['created_at'])) // 86400} dias, com {given} "
+            "lembretes (REMINDER_BACKOFF_20261014). Segue pendente e visível; o motor não responde por ele. Retomada: "
+            f"`decide --decision {row['id']} --resolution continue|changes` na sessão coordenadora.")
+    conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (note[:400], now, wait['task_id']))
+    _event(conn, wait['task_id'], row['run_id'], 'nfos_decision_unanswered',
+           {'decision_id': row['id'], 'wait_id': wait['id'], 'why': why, 'reminders': given})
+
+
+def _principal_answer_wait(conn, task_id, row, now):
+    """A espera da decisão pendente do Principal: a aberta, ou uma nova com os lembretes que a decisão já teve. None quando
+    ela já venceu nesta rodada do card: a decisão segue pendente e visível, sem lembrete."""
+    from hermes_cli import nfos_waits
+    predicate = {'kind': 'decision_resolved', 'decision_id': row['id']}
+    if nfos_waits.refusal(conn, task_id, reason='principal_answer', predicate=predicate):
+        return None
+    return nfos_waits.declare(conn, task_id, row.get('run_id'), reason='principal_answer', executor=nfos_waits.PRINCIPAL,
+                              predicate=predicate, decision_id=row['id'], subject=f"decisão {row.get('kind')} do Principal",
+                              now=now, next_check_at=now,
+                              origin={'reminders_before': len(_given_reminders(_decision_context(row)))})
+
+
 def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
-    """Chamado pelo dispatcher para card com decisão pendente: auto-continue por classe, lembretes idempotentes ao Principal
-    (evento nfos_principal_requested, que o acorda) e, esgotados, estado visível awaiting_principal com responsável e retomada.
-    Orientações do proprietário continuam recebendo lembretes até a decisão, sem autorização automática."""
+    """Chamado pelo dispatcher para card com decisão pendente: auto-continue por classe e, sem ele, a espera do registro
+    (principal_answer) com lembretes contados ao Principal (evento nfos_principal_requested, que o acorda), o estado visível
+    awaiting_principal depois do terceiro e o recuo até 2 h (REMINDER_BACKOFF_20261014). O registro dá os passos sozinho a cada
+    tick; aqui o passo é dado na hora, para o despacho ver o lembrete no mesmo ciclo. Orientações do proprietário e resposta
+    do portal nunca têm resposta automática."""
     from hermes_cli import nfos_waits
     rows = [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status='pending' ORDER BY created_at", (task_id,))]
     out = []
@@ -2461,8 +2606,10 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
             ctx = {}
         if isinstance(ctx.get('lab_wait'), dict) and ctx['lab_wait'].get('hold'):
             continue  # LAB_WAIT_20261008: espera da fila do laboratório; sweep_lab_waits responde, sem lembrete nem awaiting_principal
-        if nfos_waits.open_for_decision(conn, row['id']):
-            continue  # WAIT_RULE_20261010: lembrete, teto e saída desta decisão são do registro de espera
+        if nfos_waits._table(conn) and conn.execute(
+                "SELECT 1 FROM nfos_waits WHERE decision_id=? AND status='open' AND reason<>'principal_answer' LIMIT 1",
+                (row['id'],)).fetchone():
+            continue  # WAIT_RULE_20261010: lembrete, teto e saída desta decisão são de outra espera do registro
         if human_wait and not (ctx.get('owner_guidance') or ctx.get('human_reply')):
             continue
         needs_principal = bool(internal_hold or ctx.get('owner_guidance') or ctx.get('maintenance_recovery')
@@ -2479,35 +2626,13 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
                 out.append((row['id'], 'auto_continue')); continue
             except Exception:
                 pass
-        reminders = [int(x) for x in (ctx.get('reminders') or []) if str(x).isdigit()]
-        last = reminders[-1] if reminders else int(row.get('created_at') or now)
-        # Transport acceptance is not a Principal decision. An authenticated
-        # owner's instruction remains retryable until it is actually resolved.
-        if needs_principal or len(reminders) < DECISION_MAX_REMINDERS:
-            if now - last >= _reminder_gap(ctx) or not reminders:
-                reminders.append(now); ctx['reminders'] = reminders
-                with _kb().write_txn(conn, allow_nested=True):
-                    conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(ctx), row['id']))
-                    _event(conn, task_id, row.get('run_id'), 'nfos_principal_requested', {'decision_id': row['id'], 'kind': row.get('kind'), 'question': row.get('question'), 'reminder': len(reminders), 'waiting_minutes': age // 60})
-                out.append((row['id'], f'reminder {len(reminders)}'))
+        wait = _principal_answer_wait(conn, task_id, row, now)
+        if not wait:
             continue
-        if ctx.get('stalled_at') or now - last < DECISION_REMINDER_GAP:
-            continue
-        ctx['stalled_at'] = now
-        maintenance = bool(_MAINTENANCE_RX.search(str(row.get('question') or '')))
-        reason = (f"Aguardando o Principal há {age // 60} min ({DECISION_MAX_REMINDERS} lembretes sem resposta). Pergunta: {str(row.get('question') or '')[:400]} "
-                  f"Responsável: {'manutenção do runtime (executor responsável)' if maintenance else 'Principal (sessão coordenadora)'}. "
-                  f"Retomada: `decide --decision {row['id']} --resolution continue|changes` na sessão coordenadora, ou resposta humana registrada no card (`resume`). "
-                  "O card sai deste estado sozinho quando a decisão for resolvida.")
-        with _kb().write_txn(conn, allow_nested=True):
-            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(ctx), row['id']))
-            conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?', (reason[:400], now, task_id))
-            _event(conn, task_id, row.get('run_id'), 'nfos_decision_stalled', {'decision_id': row['id'], 'maintenance': maintenance, 'reason': reason[:600]})
-        try:
-            _kb().block_task(conn, task_id, reason=reason, kind='awaiting_principal')
-        except Exception:
-            pass
-        out.append((row['id'], 'stalled'))
+        if nfos_waits.step(conn, wait['id'], now=now) == 'wait':
+            last = (nfos_waits.get(conn, wait['id'])['evidence'].get('last') or {})
+            if last.get('at') == now:
+                out.append((row['id'], f"reminder {last['n']}" if last['action'] == 'reminder' else 'stalled'))
     return out
 
 
