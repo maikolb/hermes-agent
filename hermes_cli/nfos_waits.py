@@ -36,7 +36,7 @@ CREATE INDEX IF NOT EXISTS nfos_waits_task ON nfos_waits(task_id,status);
 OPEN, SATISFIED, EXPIRED, WITHDRAWN = 'open', 'satisfied', 'expired', 'withdrawn'
 # Quem pode tornar o predicado verdadeiro. requester, operator e external são pessoas ou terceiros; os demais são internos.
 EXECUTOR_KINDS = ('requester', 'operator', 'external', 'lab', 'card', 'runtime', 'principal')
-REASONS = ('lab_queue', 'principal_decision', 'external_dependency', 'provider_quota', 'requester_answer')
+REASONS = ('lab_queue', 'principal_decision', 'external_dependency', 'provider_quota', 'requester_answer', 'process_hold')
 OUTCOMES = {'principal': 'principal_handoff', 'worker': 'returned_to_worker', 'obligation': 'returned_to_obligation',
             'still_closed': 'still_closed'}
 PRINCIPAL = {'kind': 'principal', 'name': 'Principal (sessão coordenadora)'}
@@ -61,7 +61,8 @@ def policy(reason):
 
     Ganchos opcionais: withdrawn diz por que a espera deixou de valer; plan decide o passo seguinte enquanto o predicado
     segue falso (próxima conferência, prazo e o que gravar, ou o motivo do vencimento) e é dono do prazo do motivo;
-    outcomes troca o desfecho gravado conforme o motivo do vencimento."""
+    outcomes troca o desfecho gravado conforme o motivo do vencimento. holds_card (PROCESS_HOLD_20261014): enquanto a
+    espera está aberta, a reivindicação do card é recusada (`card_held`, lido por `kanban_db.claim_task`)."""
     d = _delivery()
     if reason == 'lab_queue':
         return dict(executors=('lab',), predicates=('lab_receipt',), holds_decision=True, on_expire='principal',
@@ -93,6 +94,9 @@ def policy(reason):
     if reason == 'requester_answer':  # REQUESTER_WAIT_20261014: a pergunta ao solicitante, com aviso e prazo
         from hermes_cli import nfos_requester_deadline
         return nfos_requester_deadline.wait_policy()
+    if reason == 'process_hold':  # PROCESS_HOLD_20261014: a etapa do processo que só quem decide deixa
+        from hermes_cli import nfos_process_hold
+        return nfos_process_hold.wait_policy()
     raise _delivery().WorkflowError('Unknown wait reason; use one of: ' + ', '.join(REASONS))
 
 
@@ -104,7 +108,8 @@ def _checker(kind):
     return {'lab_receipt': (d._lab_queue_check, True), 'decision_resolved': (_decision_resolved, False),
             'card': (_card_delivered, False), 'probe': (d._dependency_probe_check, True),
             'lab_status': (d._lab_status_check, True), 'lab_command': (d._lab_command_check, True),
-            'route_open': (_route_open, False), 'human_reply': (_human_reply, False)}[kind]
+            'route_open': (_route_open, False), 'human_reply': (_human_reply, False),
+            'process_step': (_process_step, False)}[kind]
 
 
 def _route_open(conn, wait, budget=None):
@@ -117,6 +122,12 @@ def _human_reply(conn, wait, budget=None):
     """Predicado human_reply (REQUESTER_WAIT_20261014): a resposta de quem pediu está gravada na decisão."""
     from hermes_cli import nfos_requester_deadline
     return nfos_requester_deadline.answered(conn, wait)
+
+
+def _process_step(conn, wait, budget=None):
+    """Predicado process_step (PROCESS_HOLD_20261014): o card saiu da etapa do processo que o retinha."""
+    from hermes_cli import nfos_process_hold
+    return nfos_process_hold.left_step(conn, wait, budget)
 
 
 class NotYet(Exception):
@@ -200,6 +211,17 @@ def public_evidence(evidence):
     return {key: evidence[key] for key in PUBLIC_EVIDENCE if key in evidence}
 
 
+def card_held(conn, task_id):
+    """O motivo da espera aberta que segura a reivindicação do card (`holds_card` na policy), ou None."""
+    if not _table(conn):
+        return None
+    for (reason,) in conn.execute("SELECT DISTINCT reason FROM nfos_waits WHERE task_id=? AND status='open' ORDER BY reason",
+                                  (task_id,)).fetchall():
+        if reason in REASONS and policy(reason).get('holds_card'):
+            return reason
+    return None
+
+
 def card_waits(conn, task_id, closed=5):
     """Esperas do card para o `show`: todas as abertas e as últimas encerradas, com o predicado e a evidência públicos."""
     if not _table(conn):
@@ -244,6 +266,11 @@ def _predicate(reason, spec, value):
         if not all(isinstance(part, str) and part for part in route.values()):
             raise d.WorkflowError('route_open needs the profile, the provider and the model of the route')
         return {'kind': 'route_open', **route}
+    if kind == 'process_step':
+        step = value.get('step')
+        if not isinstance(step, str) or not step:
+            raise d.WorkflowError('process_step needs the key of the process step that holds the card')
+        return {'kind': kind, 'step': step}
     if kind in ('decision_resolved', 'human_reply'):
         decision_id = value.get('decision_id')
         if not isinstance(decision_id, str) or not decision_id:

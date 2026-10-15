@@ -261,5 +261,10 @@
   {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "planned = spec['plan'](conn, wait, evidence, now)"},
   {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "def wake(conn, wait_id, now=None):"},
   {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "PREVIOUS_RELEASE_RECORD_20261014"},
-  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def continuation_criterion(recipient, question):"}
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def continuation_criterion(recipient, question):"},
+  {"pr": 345, "file": "hermes_cli/nfos_process_hold.py", "text": "def claim_hold(conn, task):"},
+  {"pr": 345, "file": "hermes_cli/nfos_waits.py", "text": "def card_held(conn, task_id):"},
+  {"pr": 345, "file": "hermes_cli/kanban_db.py", "text": "hold = nfos_waits.card_held(conn, task_id) or nfos_process_hold.claim_hold(conn, task)"},
+  {"pr": 345, "file": "hermes_cli/kanban_db.py", "text": "_GOAL_LOOP_QUESTIONS = ("},
+  {"pr": 345, "file": "hermes_cli/nfos_process.py", "text": "\"current_kind\": steps.get(here, {}).get(\"kind\"), \"current_lane\": steps.get(here, {}).get(\"lane\"),"}
 ]
