@@ -482,9 +482,15 @@ def _wake_owner_rank(sub):
             str(sub.get("platform") or ""), str(sub.get("chat_id") or ""), str(sub.get("thread_id") or ""))
 
 
+# KANBAN_WAKE_OWN_SESSION_20261015: measured on 2026-10-15 in the Principal's topic session 20261015_070252_4124bff0,
+# 136 wake turns made 1,199 of its 1,237 provider calls up to 20:22 UTC (agent.log), and in the history that survives
+# compression the wakes and their tool calls were 811 of 946 thousand characters; the 35 wake messages there were sent
+# with 220 thousand characters of per-turn context on top of their own 116 thousand. Every decision paid for the whole
+# day's topic history (241 thousand input tokens per call on average). A wake now opens a session of its own, in a lane
+# of the same chat/thread: its reply still goes to the topic, its prompt starts from the profile and the card.
 def _wake_source(plat, platform_str, route, profile, adapter):
     """The synthetic source of a subscription's wake: it decides which session the turn opens in."""
-    from gateway.session import SessionSource
+    from gateway.session import KANBAN_WAKE_LANE, SessionSource
     return SessionSource(
         platform=plat,
         chat_id=route["chat_id"],
@@ -494,6 +500,7 @@ def _wake_source(plat, platform_str, route, profile, adapter):
         user_id_alt=route.get("user_id_alt"),
         profile=profile or None,
         scope_id=_wake_scope_id(adapter, route),
+        session_lane=KANBAN_WAKE_LANE,
     )
 
 

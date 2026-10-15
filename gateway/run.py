@@ -3640,6 +3640,7 @@ from gateway.session import (
     build_session_key,
     is_shared_multi_user_session,
     neutralize_untrusted_inline_text,
+    SESSION_LANE_MARK,
 )
 from gateway.delivery import (
     DeliveryRouter,
@@ -4845,6 +4846,22 @@ def _resolve_hermes_bin() -> Optional[list[str]]:
     return None
 
 
+def _is_kanban_lane_wake(event: Any, source: Any) -> bool:
+    """KANBAN_WAKE_OWN_SESSION_20261015: a kanban notifier wake addressed to a lane.
+
+    Only the wake itself opens a new lane session: it is internal, carries the
+    notifier's delivery receipt and a lane on its source. Any other event that
+    reaches the lane (a background process ending, a retry) continues it.
+    """
+    metadata = getattr(event, "metadata", None) or {}
+    return bool(
+        getattr(event, "internal", False)
+        and getattr(source, "session_lane", None)
+        and isinstance(metadata, dict)
+        and metadata.get("kanban_wake_delivery")
+    )
+
+
 def _parse_session_key(session_key: str) -> "dict | None":
     """Parse a session key into its component parts.
 
@@ -4857,8 +4874,11 @@ def _parse_session_key(session_key: str) -> "dict | None":
     it is unambiguous (``dm`` and ``thread``).  For group/channel sessions
     the suffix may be a user_id (per-user isolation) rather than a
     thread_id, so we leave ``thread_id`` out to avoid mis-routing.
+
+    A lane suffix (``SESSION_LANE_MARK``) names a session of the same chat, so
+    it is left out of the parts.
     """
-    parts = session_key.split(":")
+    parts = session_key.split(SESSION_LANE_MARK, 1)[0].split(":")
     if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main":
         result = {
             "platform": parts[2],
@@ -9034,6 +9054,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     @property
     def exit_code(self) -> Optional[int]:
         return self._exit_code
+
+    async def _kanban_lane_note(self, source: SessionSource) -> str:
+        """KANBAN_WAKE_OWN_SESSION_20261015: the note a lane turn gets from its topic.
+
+        Names the session of the same chat/thread without the lane (the
+        people's conversation) and quotes its latest messages of people,
+        through :func:`gateway.session.build_kanban_lane_note`.
+        """
+        from gateway.session import build_kanban_lane_note
+
+        topic_key = self._session_key_for_source(dataclasses.replace(source, session_lane=None))
+        topic_entry = await self.async_session_store.lookup_by_session_key(topic_key)
+        db = getattr(self, "_session_db", None)
+        return await asyncio.to_thread(
+            build_kanban_lane_note,
+            getattr(db, "_db", db),
+            getattr(topic_entry, "session_id", None),
+        )
 
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
@@ -21122,6 +21160,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         strict_session = bool(event_metadata.get("gateway_session_strict"))
         pinned_session_id = str(event_metadata.get("gateway_session_id") or "").strip()
+        # KANBAN_WAKE_OWN_SESSION_20261015: a kanban wake on a lane opens a new
+        # session for its turn instead of riding the topic's conversation.
+        _lane_wake = _is_kanban_lane_wake(event, source)
         if strict_session:
             session_entry = await self.async_session_store.lookup_by_session_key(
                 expected_session_key
@@ -21143,9 +21184,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # activity themselves. Otherwise periodic Kanban/process
             # notifications keep the stable routing key alive across every
             # daily/idle boundary.
+            _lookup_kwargs = {"touch_activity": not bool(getattr(event, "internal", False))}
+            if _lane_wake:
+                _lookup_kwargs["fresh_lane_turn"] = True
             session_entry = await self.async_session_store.get_or_create_session(
                 source,
-                touch_activity=not bool(getattr(event, "internal", False)),
+                **_lookup_kwargs,
             )
         session_key = session_entry.session_key
         if not strict_session and pinned_session_id:
@@ -21352,6 +21396,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         intake_note = self._nfos_coordinator_intake_note(event)
         if intake_note:
             turn_sidecar_notes.append(intake_note)
+
+        if _lane_wake:
+            # KANBAN_WAKE_OWN_SESSION_20261015: what the wake's own session takes
+            # from the topic it was woken for.
+            turn_sidecar_notes.append(await self._kanban_lane_note(source))
+            if _was_auto_reset:
+                # A lane turn starts fresh by design (LANE_TURN_RESET_REASON or
+                # the daily/idle boundary): no reset notice to the agent or chat.
+                _was_auto_reset = False
+                session_entry.auto_reset_reason = None
 
         # If the previous session expired and was auto-reset, deliver a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).
