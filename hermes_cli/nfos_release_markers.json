@@ -273,5 +273,8 @@
   {"pr": 347, "file": "hermes_cli/nfos_delivery.py", "text": "_principal_decided(conn,args.decision)  # REMINDER_BACKOFF_20261014"},
   {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "if reason == 'principal_answer':"},
   {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "planned['after'](conn)"},
-  {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "spec.get('closed_states', ('done', 'archived'))"}
+  {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "spec.get('closed_states', ('done', 'archived'))"},
+  {"pr": 344, "file": "hermes_cli/goals.py", "text": "if decision['id'] != finalize_question:"},
+  {"pr": 344, "file": "hermes_cli/goals.py", "text": "return {\"outcome\": \"held_after_finalize\", \"turns_used\": turns_used,"},
+  {"pr": 344, "file": "cli.py", "text": "if outcome['outcome'] in ('awaiting_decision', 'held_after_finalize'):"}
 ]

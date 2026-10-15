@@ -2225,7 +2225,11 @@ def run_kanban_goal_loop(
     ``"quota_wall"`` (``quota_wall_fn`` reports that the turn just run, the first one
     included, ended on the provider's quota wall; the loop stops without judging,
     without another turn and without blocking, so the caller can exit with the
-    quota code and the dispatcher's respawn guard owns the wait), or ``"stopped"``.
+    quota code and the dispatcher's respawn guard owns the wait),
+    ``"held_after_finalize"`` (HELD_FINALIZE_20261014: the finalize nudge was refused,
+    the question ``block_fn`` filed for it was answered and followed, and the worker
+    still does not finalize; ``decision_id`` names that question and the loop stops
+    without another nudge, block or question), or ``"stopped"``.
     """
 
     def _log(msg: str) -> None:
@@ -2245,6 +2249,9 @@ def run_kanban_goal_loop(
     nudged_to_finalize = False
     waited_decision_id = None  # IMPEDIMENT_RACE_20260911
     followed_decisions = set()
+    # HELD_FINALIZE_20261014: the question block_fn filed after the finalize nudge. Its answer is
+    # not a new fact, so following it does not re-arm the nudge.
+    finalize_question = None
 
     while True:
         # Did the worker terminate the task itself this turn?
@@ -2316,7 +2323,10 @@ def run_kanban_goal_loop(
             decision = resolved_decision_fn()
             if decision and decision['id'] not in followed_decisions:
                 followed_decisions.add(decision['id'])
-                nudged_to_finalize = False
+                if decision['id'] != finalize_question:
+                    # Any other answer is a new fact from the Principal: it re-arms the nudge.
+                    nudged_to_finalize = False
+                    finalize_question = None
                 last_response = run_turn(
                     "[Principal decision " + str(decision['id']) + "]\n"
                     + str(decision['answer'])
@@ -2336,6 +2346,15 @@ def run_kanban_goal_loop(
 
         if verdict == "done":
             if nudged_to_finalize:
+                if finalize_question is not None:
+                    # HELD_FINALIZE_20261014: the Principal already answered the question this
+                    # loop filed for the refused nudge, and the worker followed the answer
+                    # without finalizing. Asking again only repeats the same question (t_45ae522c
+                    # and t_8ed13ed7, three each): stop here and let the caller record the yield.
+                    _log(f"kanban goal loop: task {task_id} held after the answered finalize question {finalize_question}; stopping without a block")
+                    return {"outcome": "held_after_finalize", "turns_used": turns_used,
+                            "reason": f"finalize question {finalize_question} answered; no new fact",
+                            "decision_id": finalize_question}
                 # Already asked once to call kanban_complete and it still
                 # didn't — block for review rather than spin.
                 _log(f"kanban goal loop: task {task_id} judged done but worker won't finalize; blocking")
@@ -2346,13 +2365,17 @@ def run_kanban_goal_loop(
                     )
                 except Exception as exc:
                     _log(f"kanban goal loop: block_fn failed ({exc})")
-                if pending_decision_fn is not None and pending_decision_fn():
+                asked = pending_decision_fn() if pending_decision_fn is not None else None
+                if asked:
                     # NFOS block files a question; it does not terminate the run.
                     # Re-enter the decision wait instead of silently exiting.
+                    finalize_question = asked
                     continue
                 if resolved_decision_fn is not None and turns_used < max_turns:
                     decision = resolved_decision_fn()
                     if decision and decision['id'] not in followed_decisions:
+                        # Answered before the wait began: still the answer to this question.
+                        finalize_question = decision['id']
                         continue
                 return {"outcome": "blocked_budget", "turns_used": turns_used, "reason": "judged done, never finalized"}
             prompt = KANBAN_GOAL_FINALIZE_TEMPLATE.format(reason=_truncate(reason, 400))

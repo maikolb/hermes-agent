@@ -21117,7 +21117,9 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, first_result=
         first_response=first_response or "",
         log=lambda m: logger.info("%s", m),
     )
-    if outcome['outcome'] == 'awaiting_decision':
+    # HELD_FINALIZE_20261014: a worker held after its answered finalize question leaves the same
+    # durable yield, naming that question, so the card shows why the worker left.
+    if outcome['outcome'] in ('awaiting_decision', 'held_after_finalize'):
         with _kb.connect_closing() as c, _kb.write_txn(c):
             current = _kb.get_task(c, task_id)
             if current and current.current_run_id == worker_run_id:
