@@ -1,38 +1,55 @@
-"""Prazo da pergunta ao solicitante (REQUESTER_DEADLINE_20261010).
+"""Prazo da pergunta ao solicitante (REQUESTER_DEADLINE_20261010), espera do registro desde REQUESTER_WAIT_20261014.
 
 Maikol, 10/10/2026, na sessão que coordena as PRs do NFOS: "3. Mande colocar um prazo" e "As correções no NFOS são pra tudo.
 Todos os projetos." Pergunta ao solicitante sem resposta deixava o card bloqueado para sempre: em 10/10 havia card parado há 17 dias.
 
-O relógio vale para a decisão em `human` cuja pergunta vai a quem pediu, não ao dono. O solicitante é avisado antes: a pergunta
-já sai com a linha do prazo e é republicada 24 h antes de vencer. No vencimento o motor não fecha nada: a pergunta volta ao
-Principal como decisão pendente, com a instrução de seguir com o que já está conferido e fechar como entrega parcial. A revisão
-final continua valendo.
+A pergunta ao solicitante em `human` é uma espera de `nfos_waits` (motivo requester_answer): quem entrega é quem pediu, o
+predicado é a resposta gravada na decisão e o passo único do registro avisa, confere e vence. Este módulo dá a linha da
+tabela (`wait_policy`), o passo seguinte enquanto a resposta não vem (`_plan`) e o desfecho (`_expired`). A varredura
+(`sweep`) só adota a pergunta que ainda não tem espera, inclusive a feita antes desta regra, com o aviso que ela já teve.
 
-O prazo só vence onde o aviso chega ao solicitante por caminho que o motor controla. No Balcão é a mensagem pública da
-decisão. Em card que nasceu num chat (REQUESTER_REMINDER_20261010), o motor pede o aviso com o evento
+O solicitante é avisado antes de vencer, por caminho que o motor controla. No Balcão a pergunta já sai com a linha do prazo e
+é republicada 24 h antes. Em card que nasceu num chat (REQUESTER_REMINDER_20261010), o motor pede o aviso com o evento
 nfos_requester_reminder, o notificador do gateway o publica como mensagem nova no tópico de origem e grava o recibo
-nfos_requester_reminder_delivered; só com esse recibo o prazo passa a contar. Card sem um dos dois caminhos fica sem prazo, com
-o motivo registrado. Aviso sem recibo é pedido de novo depois de uma hora, no máximo três vezes por pergunta
-(REMINDER_LIMIT_20261010); depois disso a pergunta fica sem prazo, com o motivo reminder_undelivered.
+nfos_requester_reminder_delivered; só com esse recibo o prazo passa a contar. Aviso sem recibo é pedido de novo depois de uma
+hora, no máximo três vezes por pergunta (REMINDER_LIMIT_20261010). Card sem nenhum dos dois caminhos não pergunta: o decide é
+recusado.
+
+No prazo, com o aviso entregue, o motor responde a decisão sozinho (continue, wait_rule.resolved_by=runtime): o card entrega
+o que dá para verificar como entrega parcial e o que dependia da resposta vira critério do card de continuação. O Principal
+não é acordado; a revisão final continua valendo. Sem aviso entregue, a pergunta vai ao Principal uma vez por rodada do card,
+com lembretes contados; na segunda vez o motor segue sozinho, como no prazo.
 """
 import json
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
+REASON = 'requester_answer'
 DEFAULT_HOURS = 48
 WARNING_HOURS = 24
 DEFAULT_TIMEZONE = 'America/Sao_Paulo'
 REMINDER_RETRY_SECONDS = 3600  # aviso pedido e não entregue pelo gateway é pedido de novo, com data nova
 # REMINDER_LIMIT_20261010: sem recibo o motor não sabe se a mensagem saiu. Pedir de hora em hora para sempre viraria a
-# mesma mensagem repetida no grupo de quem pediu; depois do terceiro pedido a pergunta fica sem prazo, com o motivo.
+# mesma mensagem repetida no grupo de quem pediu; depois do terceiro pedido a pergunta vai ao Principal.
 MAX_REMINDER_REQUESTS = 3
+BUSY_RECHECK_SECONDS = 600  # no vencimento, o executor anterior ainda saindo: confere de novo em 10 min
+# Conferências falsas que a espera aguenta: aviso, pedidos de aviso, recibo e o card ocupado no vencimento.
+MAX_CHECKS = 48
+# Vencimento sem aviso entregue: a pergunta vai ao Principal, uma vez por rodada do card.
+_UNREACHED = ('no_warning_channel', 'reminder_undelivered', 'attempts')
 _GAP = '\n\n'
 
 SILENCE_REFUSAL = (
-    'O solicitante já deixou uma pergunta deste card sem resposta até o prazo (REQUESTER_DEADLINE_20261010). Não pergunte de novo: '
-    'decida com continue ou changes, siga com o que já está conferido e feche como entrega parcial, dizendo no public_delivery o que '
-    'ficou dependendo dele. Se ele responder, a resposta chega a você neste card.')
+    'Uma pergunta deste card ao solicitante já foi encerrada pelo motor sem resposta (REQUESTER_DEADLINE_20261010): venceu o '
+    'prazo, ou o aviso não chegou a ele pela segunda vez. Não pergunte de novo: decida com continue ou changes, siga com o que já '
+    'está conferido e feche como entrega parcial, dizendo no public_delivery o que ficou dependendo dele. Se ele responder, a '
+    'resposta chega a você neste card.')
+NO_CHANNEL_REFUSAL = (
+    'Este card não tem por onde perguntar ao solicitante (REQUESTER_WAIT_20261014): não nasceu num chamado do Balcão nem num chat '
+    'com tópico de origem, então o motor não consegue avisar quem pediu nem contar prazo. Decida com continue ou changes: siga com '
+    'o que já está conferido e feche como entrega parcial, dizendo no public_delivery o que ficaria dependendo de quem pediu.')
 
 # O que é da pergunta antiga e não passa para a decisão que a substitui. O resto vai junto: uma obrigação de reparo de pausa
 # (maintenance_recovery) respondida com pergunta ao solicitante continua tendo dono depois do vencimento.
@@ -56,18 +73,17 @@ def _settings():
 
 
 def hours():
-    """Prazo em horas, da chave global kanban.delivery.requester_answer_hours. Zero desliga o relógio.
+    """Prazo em horas, da chave global kanban.delivery.requester_answer_hours, de mais de 0 a 720. Fora disso, ou ausente,
+    vale o padrão de 48 h.
 
-    DEADLINE_KEY_FAILS_OFF_20261010: a chave é o que segura aviso e vencimento para cliente. Presente e ilegível (false,
-    "0" entre aspas, vazia, fora de 0 a 720) desliga o relógio; antes caía no padrão e ligava o prazo sozinha. Só a chave
-    ausente vale o padrão."""
-    settings = _settings()
-    if 'requester_answer_hours' not in settings:
-        return DEFAULT_HOURS
-    value = settings['requester_answer_hours']
-    if type(value) in (int, float) and 0 <= value <= 720:
+    DEADLINE_KEY_FAILS_OFF_20261010 (histórico): a chave ilegível ou em zero desligava o relógio. Em 10/10 uma sessão pôs a
+    chave em 0 antes de uma ativação, para nenhum aviso sair, e ninguém a tirou: até 14/10 cinco perguntas a solicitante
+    ficaram sem aviso nem prazo, sem um evento sequer. Decisão da coordenação em 14/10 (REQUESTER_WAIT_20261014): não há
+    desligador do prazo. Se um dia for preciso, ele será um estado registrado, com evento a cada tick, nunca uma chave."""
+    value = _settings().get('requester_answer_hours')
+    if type(value) in (int, float) and 0 < value <= 720:
         return value
-    return 0
+    return DEFAULT_HOURS
 
 
 def _lead(limit_hours):
@@ -140,24 +156,31 @@ def requester(context, answer):
     return addressee if addressee and d._asked_to_requester(context if isinstance(context, dict) else {}, answer) else ''
 
 
+def _context(decision):
+    try:
+        context = json.loads((decision or {})['context'] or '{}') if decision else {}
+    except (ValueError, TypeError):
+        context = {}
+    return context if isinstance(context, dict) else {}
+
+
 def arm(conn, task_id, context, *, now=None):
-    """Na publicação da pergunta ao solicitante: grava o prazo e acrescenta a linha dele ao texto que o Balcão mostra."""
-    limit = hours()
+    """Na publicação da pergunta ao solicitante: recusa a pergunta que o motor não consegue avisar, grava o início e, no
+    Balcão, acrescenta a linha do prazo ao texto. A espera do registro é declarada pela varredura do tick (`sweep`)."""
+    d = _delivery()
     public = context.get('public_message')
-    if not limit or not isinstance(public, dict) or not _delivery()._requester_question(public):
+    if not isinstance(public, dict) or not d._requester_question(public):
         return
-    now = int(now or time.time())
     route = channel(conn, task_id)
-    deadline = {'asked_at': now, 'hours': limit, 'channel': route, 'question_text': public['text']}
+    if route != 'portal' and not origin(conn, task_id):
+        raise d.WorkflowError(NO_CHANNEL_REFUSAL)
+    limit = hours()
+    now = int(now or time.time())
+    seed = {'asked_at': now, 'hours': limit, 'channel': route, 'question_text': public['text']}
     if route == 'portal':
-        due = now + int(limit * 3600)
-        deadline.update(due_at=due, warn_at=due - _lead(limit), warned_at=None)
-        public['text'] = public['text'].rstrip() + '\n\n' + notice(due, _zone(conn, task_id))
-    elif origin(conn, task_id):
-        deadline['warn_at'] = now + int(limit * 3600) - _lead(limit)  # o prazo conta do recibo do aviso no tópico
-    else:
-        deadline['unarmed'] = 'no_warning_channel'
-    context['requester_deadline'] = deadline
+        seed['due_at'] = now + int(limit * 3600)
+        public['text'] = public['text'].rstrip() + _GAP + notice(seed['due_at'], _zone(conn, task_id))
+    context['requester_deadline'] = seed
 
 
 def refusal_after_silence(conn, task_id):
@@ -165,208 +188,343 @@ def refusal_after_silence(conn, task_id):
     silence = conn.execute("SELECT max(id) FROM task_events WHERE task_id=? AND kind='nfos_requester_silence'", (task_id,)).fetchone()[0]
     if not silence:
         return None
-    answered = conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND id>? AND kind IN "
-                            "('nfos_human_answer_received','nfos_late_requester_answer') LIMIT 1", (task_id, silence)).fetchone()
-    return None if answered else SILENCE_REFUSAL
+    answered_after = conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND id>? AND kind IN "
+                                  "('nfos_human_answer_received','nfos_late_requester_answer') LIMIT 1", (task_id, silence)).fetchone()
+    return None if answered_after else SILENCE_REFUSAL
+
+
+def wait_policy():
+    """A linha de `nfos_waits.policy` da pergunta ao solicitante: prazo e aviso da chave global, iguais em todo projeto."""
+    limit = hours()
+    return dict(executors=('requester',), predicates=('human_reply',), holds_decision=False, on_expire='worker',
+                outcomes={why: 'principal_handoff' for why in _UNREACHED},
+                first_check=int(limit * 3600) - _lead(limit), recheck=REMINDER_RETRY_SECONDS, deadline=int(limit * 3600),
+                max_attempts=MAX_CHECKS, withdrawn=_withdrawn, plan=_plan, expired=_expired)
+
+
+def answered(conn, wait):
+    """Predicado human_reply: a resposta de quem pediu está gravada na decisão."""
+    context = _context(_delivery().get_decision(conn, wait['predicate']['decision_id']))
+    return bool(context.get('human_reply')), {'answered': bool(context.get('human_reply'))}
+
+
+def _withdrawn(conn, wait):
+    """A pergunta deixou de esperar resposta sem que ela viesse: outra rota respondeu ou substituiu a decisão."""
+    decision = _delivery().get_decision(conn, wait['decision_id'])
+    if not decision:
+        return 'decision_missing'
+    if decision['status'] != 'human' and not _context(decision).get('human_reply'):
+        return 'decision_closed'
+    return None
 
 
 def sweep(conn, *, now=None, dry_run=False):
-    """Avisa, vence e devolve ao Principal as perguntas ao solicitante sem resposta. Devolve o que fez (ou faria, em dry_run)."""
+    """Toda pergunta ao solicitante em `human`, sem resposta, tem a sua espera no registro. A feita antes desta regra é
+    adotada com o que já teve (aviso, recibo e prazo). A espera aberta cuja decisão já tem resposta, ou saiu de `human`, é
+    conferida no próximo passo do registro, sem esperar a hora marcada. Devolve o que fez (ou faria, em dry_run)."""
+    from hermes_cli import nfos_waits
     d = _delivery()
-    limit = hours()
-    out = []
-    if not limit:
-        return out
-    from hermes_cli.nfos_runtime import run_termination_pending
     now = int(now or time.time())
+    out = []
     for row in [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE status='human' ORDER BY created_at,id").fetchall()]:
         try:
-            context = json.loads(row.get('context') or '{}') or {}
-        except Exception:
-            context = {}
-        if not isinstance(context, dict) or context.get('human_reply'):
-            continue
-        recipient = requester(context, row.get('answer'))
-        if not recipient:
-            continue
-        task = d._kb().get_task(conn, row['task_id'])
-        workflow = d.get_workflow(conn, row['task_id'])
-        if not task or not workflow or task.status not in ('blocked', 'ready'):
-            continue
-        if d._run_process_alive(conn, task.id, row['run_id']) or run_termination_pending(conn, task.id, row['run_id']):
-            continue
-        public = context.get('public_message') if isinstance(context.get('public_message'), dict) else None
-        deadline = context.get('requester_deadline') if isinstance(context.get('requester_deadline'), dict) else {}
-        asked = int(deadline.get('asked_at') or (public or {}).get('created_at') or row.get('resolved_at') or row['created_at'])
-        route = channel(conn, task.id)
-        base = {'decision_id': row['id'], 'task_id': task.id, 'recipient': recipient[:80], 'channel': route, 'asked_at': asked}
-        if route != 'portal':
-            out.append(_topic(conn, row, task, workflow, context, deadline, recipient, asked, limit, now, base, dry_run))
-            continue
-        if not public or public.get('kind') != 'question':
-            out.append(dict(base, action='no_warning_channel'))
-            if not dry_run and deadline.get('unarmed') != 'no_warning_channel':
-                _unarmed(conn, row, asked, limit, route)
-            continue
-        due = int(deadline.get('due_at') or asked + int(limit * 3600))
-        if not deadline.get('warned_at'):
-            warn_at = int(deadline.get('warn_at') or due - _lead(limit))
-            if now < warn_at:
-                out.append(dict(base, action='waiting', warn_at=warn_at, due_at=due))
+            context = _context(row)
+            if context.get('human_reply'):
                 continue
-            due = max(due, now + _lead(limit))  # ninguém vence sem aviso
-            text = (deadline.get('question_text') or public['text']).rstrip() + '\n\n' + notice(due, _zone(conn, task.id))
-            out.append(dict(base, action='warn', due_at=due, text=text))
+            recipient = requester(context, row.get('answer'))
+            # Só a espera da resposta conta: a decisão que voltou ao Principal tem a espera dele e pode virar pergunta de novo.
+            if not recipient or (nfos_waits._table(conn) and conn.execute(
+                    'SELECT 1 FROM nfos_waits WHERE decision_id=? AND reason=? LIMIT 1', (row['id'], REASON)).fetchone()):
+                continue
+            task = d._kb().get_task(conn, row['task_id'])
+            if not task or task.status in ('done', 'archived'):
+                continue
+            adopted = _adoption(conn, row, context, recipient, now)
+            out.append({'action': 'adopt', 'decision_id': row['id'], 'task_id': task.id, 'recipient': recipient[:80],
+                        'channel': adopted['evidence']['channel'], 'next_check_at': adopted['next_check_at'],
+                        'deadline_at': adopted['deadline_at']})
             if not dry_run:
-                _warn(conn, row, asked, limit, due, text, now)
-            continue
-        if now < due:
-            out.append(dict(base, action='waiting', due_at=due, warned_at=deadline['warned_at']))
-            continue
-        out.append(dict(base, action='expire', due_at=due, warned_at=deadline['warned_at']))
-        if not dry_run:
-            _expire(conn, row, task, workflow, asked, limit, due, now)
+                nfos_waits.declare(conn, task.id, row['run_id'], reason=REASON, executor={'kind': 'requester', 'name': recipient},
+                                   predicate={'kind': 'human_reply', 'decision_id': row['id']}, decision_id=row['id'],
+                                   subject=f'resposta de {recipient[:80]}', **adopted)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning('REQUESTER_WAIT_20261014 adoption failed for %s', row.get('id'), exc_info=True)
+    if nfos_waits._table(conn):
+        moved = conn.execute("SELECT w.id, w.decision_id FROM nfos_waits w LEFT JOIN nfos_decisions d ON d.id=w.decision_id "
+                             "WHERE w.status='open' AND w.reason=? AND w.next_check_at>? AND (d.id IS NULL OR d.status<>'human' "
+                             "OR (json_valid(d.context) AND json_extract(d.context,'$.human_reply') IS NOT NULL))",
+                             (REASON, now)).fetchall()
+        for wait_id, decision_id in moved:
+            out.append({'action': 'wake', 'wait_id': wait_id, 'decision_id': decision_id})
+            if not dry_run:
+                nfos_waits.wake(conn, wait_id, now)
     return out
 
 
-def _topic(conn, row, task, workflow, context, deadline, recipient, asked, limit, now, base, dry_run):
-    """Card que nasceu num chat: pede o aviso ao gateway, espera o recibo e só então conta o prazo."""
+def _adoption(conn, row, context, recipient, now):
+    """Início, evidência, próxima conferência e prazo da espera de uma pergunta: o registro gravado na publicação e, na
+    pergunta de antes desta regra, o aviso, o pedido de aviso e o prazo que a varredura antiga já tinha gravado."""
     d = _delivery()
-    where = origin(conn, task.id)
-    if not where:
-        if not dry_run and deadline.get('unarmed') != 'no_warning_channel':
-            _unarmed(conn, row, asked, limit, base['channel'])
-        return dict(base, action='no_warning_channel')
-    if deadline.get('unarmed') == 'reminder_undelivered':
-        return dict(base, action='reminder_undelivered')
-    if deadline.get('warned_at'):
-        due = int(deadline['due_at'])
+    seed = context.get('requester_deadline') if isinstance(context.get('requester_deadline'), dict) else {}
+    public = context.get('public_message') if d._requester_question(context.get('public_message')) else None
+    asked = int(seed.get('asked_at') or (public or {}).get('created_at') or row.get('resolved_at') or row['created_at'])
+    limit = seed['hours'] if type(seed.get('hours')) in (int, float) and 0 < seed['hours'] <= 720 else hours()
+    evidence = {'asked_at': asked, 'hours': limit, 'channel': channel(conn, row['task_id']), 'recipient': recipient[:160]}
+    question = seed.get('question_text') or (public or {}).get('text')
+    if question:
+        evidence['question_text'] = question
+    for key in ('warned_at', 'due_at', 'reminder', 'reminder_message_id', 'unarmed'):
+        if seed.get(key):
+            evidence[key] = seed[key]
+    due = int(evidence.get('due_at') or asked + int(limit * 3600))
+    reminder = evidence.get('reminder') if isinstance(evidence.get('reminder'), dict) else None
+    if evidence.get('unarmed'):
+        first = now
+    elif evidence.get('warned_at'):
+        first = due
+    elif reminder:
+        first = int(reminder.get('requested_at') or now) + REMINDER_RETRY_SECONDS
+        due = max(due, int(reminder.get('due_at') or 0))
+    else:
+        first = due - _lead(limit)
+    return dict(now=asked, evidence=evidence, next_check_at=first, deadline_at=max(due, first, asked + 1))
+
+
+def _later(wait, evidence, next_check_at, due):
+    return {'evidence': evidence, 'next_check_at': int(next_check_at), 'deadline_at': int(max(due, next_check_at))}
+
+
+def _give_up(conn, wait, evidence, reason='no_warning_channel'):
+    """O aviso não chega a quem pediu. A pergunta vai ao Principal uma vez por rodada do card; na segunda, o motor segue
+    sozinho como no prazo vencido, sem acordar ninguém."""
+    again = conn.execute("SELECT 1 FROM nfos_waits WHERE task_id=? AND reason=? AND episode=? AND outcome='principal_handoff' "
+                         'AND id<>? LIMIT 1', (wait['task_id'], REASON, wait['episode'], wait['id'])).fetchone()
+    return {'expire': 'unreached_again' if again else reason, 'evidence': dict(evidence, unarmed=reason)}
+
+
+def _busy(conn, task, run_id):
+    from hermes_cli.nfos_runtime import run_termination_pending
+    d = _delivery()
+    return (task.status not in ('blocked', 'ready') or d._run_process_alive(conn, task.id, run_id)
+            or run_termination_pending(conn, task.id, run_id))
+
+
+def _plan(conn, wait, evidence, now):
+    """O passo seguinte enquanto a resposta não vem: a próxima conferência, o prazo e o que gravar ao aplicá-los (`act`), ou
+    o motivo do vencimento (`expire`). Ninguém vence sem aviso: o prazo fica a 24 h, no mínimo, do aviso que saiu."""
+    d = _delivery()
+    if evidence.get('unarmed'):
+        return _give_up(conn, wait, evidence, evidence['unarmed'])
+    decision = d.get_decision(conn, wait['decision_id'])
+    context = _context(decision)
+    limit = evidence.get('hours') or hours()
+    lead = _lead(limit)
+    asked = int(evidence['asked_at'])
+    if evidence.get('warned_at'):
+        due = int(evidence['due_at'])
         if now < due:
-            return dict(base, action='waiting', due_at=due, warned_at=deadline['warned_at'])
-        if not dry_run:
-            _expire(conn, row, task, workflow, asked, limit, due, now)
-        return dict(base, action='expire', due_at=due, warned_at=deadline['warned_at'])
-    requested = deadline.get('reminder') if isinstance(deadline.get('reminder'), dict) else None
-    if requested:
+            return _later(wait, evidence, due, due)
+        task = d._kb().get_task(conn, wait['task_id'])
+        if task and _busy(conn, task, decision['run_id']):
+            return _later(wait, evidence, now + BUSY_RECHECK_SECONDS, due)
+        return {'expire': 'deadline'}
+    if evidence['channel'] == 'portal':
+        public = context.get('public_message')
+        if not d._requester_question(public):
+            return _give_up(conn, wait, evidence)
+        due = int(evidence.get('due_at') or asked + int(limit * 3600))
+        if now < due - lead:
+            return _later(wait, evidence, due - lead, due)
+        due = max(due, now + lead)  # ninguém vence sem aviso
+        text = (evidence.get('question_text') or public['text']).rstrip() + _GAP + notice(due, _zone(conn, wait['task_id']))
+        warned = dict(evidence, warned_at=now, due_at=due)
+        return dict(_later(wait, warned, due, due), act=lambda c: _warn(c, wait, warned, text, now))
+    where = origin(conn, wait['task_id'])
+    if not where:
+        return _give_up(conn, wait, evidence)
+    reminder = evidence.get('reminder') if isinstance(evidence.get('reminder'), dict) else None
+    if reminder:
         receipt = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id=? AND kind='nfos_requester_reminder_delivered' "
                                "AND json_extract(payload,'$.decision_id')=? AND json_extract(payload,'$.due_at')=? ORDER BY id DESC LIMIT 1",
-                               (task.id, row['id'], requested['due_at'])).fetchone()
+                               (wait['task_id'], wait['decision_id'], reminder['due_at'])).fetchone()
         if receipt:
-            if not dry_run:
-                _topic_warned(conn, row, int(receipt['created_at']), json.loads(receipt['payload']).get('message_id'))
-            return dict(base, action='warned', due_at=requested['due_at'], warned_at=int(receipt['created_at']))
-        if now - int(requested['requested_at']) < REMINDER_RETRY_SECONDS:
-            return dict(base, action='waiting_delivery', due_at=requested['due_at'])
-        if int(requested.get('attempts') or 1) >= MAX_REMINDER_REQUESTS:
-            if not dry_run:
-                _unarmed(conn, row, asked, limit, base['channel'], reason='reminder_undelivered')
-            return dict(base, action='reminder_undelivered')
+            warned = dict(evidence, warned_at=int(receipt['created_at']), due_at=int(reminder['due_at']),
+                          reminder_message_id=json.loads(receipt['payload']).get('message_id'))
+            return dict(_later(wait, warned, max(warned['due_at'], now), warned['due_at']), act=lambda c: _topic_warned(c, wait, warned))
+        if now - int(reminder['requested_at']) < REMINDER_RETRY_SECONDS:
+            return _later(wait, evidence, int(reminder['requested_at']) + REMINDER_RETRY_SECONDS, reminder['due_at'])
+        if int(reminder.get('attempts') or 1) >= MAX_REMINDER_REQUESTS:
+            return _give_up(conn, wait, evidence, reason='reminder_undelivered')
+    elif now < asked + int(limit * 3600) - lead:
+        return _later(wait, evidence, asked + int(limit * 3600) - lead, asked + int(limit * 3600))
+    due = max(asked + int(limit * 3600), now + lead)  # ninguém vence sem aviso
+    recipient = evidence.get('recipient') or requester(context, decision['answer'])
+    question = (evidence.get('question_text') or (context.get('public_message') or {}).get('text')
+                or d._human_question_part(decision['answer']))
+    text = topic_reminder(recipient, question, due, _zone(conn, wait['task_id']))
+    attempts = int(reminder.get('attempts') or 1) + 1 if reminder else 1  # pedido gravado antes da contagem vale por um
+    asking = dict(evidence, reminder={'requested_at': now, 'due_at': due, 'attempts': attempts})
+    return dict(_later(wait, asking, now + REMINDER_RETRY_SECONDS, due),
+                act=lambda c: _request_reminder(c, wait, asking, text, where, recipient))
+
+
+# PREVIOUS_RELEASE_RECORD_20261014: a release anterior lê o prazo em context.requester_deadline. Todo aviso que esta espera dá
+# fica gravado também lá, no formato dela: numa volta de pacote o relógio antigo vê o aviso já dado (ou pedido) e não avisa o
+# cliente de novo. Quem decide é a linha do registro; este registro só é lido pela release anterior e pela adoção.
+_PREVIOUS_RELEASE_KEYS = ('asked_at', 'hours', 'channel', 'question_text', 'warned_at', 'due_at', 'reminder', 'reminder_message_id')
+
+
+def _keep_for_previous_release(conn, decision_id, evidence, context=None):
+    d = _delivery()
+    if context is None:
+        context = _context(d.get_decision(conn, decision_id))
+    record = {key: evidence[key] for key in _PREVIOUS_RELEASE_KEYS if evidence.get(key) is not None}
+    if record.get('warned_at') and record.get('channel') == 'portal':
+        record['warn_at'] = record['warned_at']
+    context['requester_deadline'] = record
+    conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (d._json(context), decision_id))
+
+
+def _request_reminder(conn, wait, asking, text, where, recipient):
+    """Pede ao notificador do gateway o aviso no tópico de origem. O prazo só conta do recibo que ele grava."""
+    _keep_for_previous_release(conn, wait['decision_id'], asking)
+    _delivery()._event(conn, wait['task_id'], wait['run_id'], 'nfos_requester_reminder',
+                       {'decision_id': wait['decision_id'], 'due_at': asking['reminder']['due_at'], 'text': text,
+                        'recipient': recipient[:80], 'origin': where, 'wait_id': wait['id']})
+
+
+def _topic_warned(conn, wait, warned):
+    _keep_for_previous_release(conn, wait['decision_id'], warned)
+    _delivery()._event(conn, wait['task_id'], wait['run_id'], 'nfos_requester_reminded',
+                       {'decision_id': wait['decision_id'], 'due_at': warned['due_at'], 'message_id': warned.get('reminder_message_id'),
+                        'wait_id': wait['id']})
+
+
+def _warn(conn, wait, warned, text, now):
+    """No Balcão o aviso é a própria pergunta republicada, com a linha do prazo e hora nova: o Balcão a mostra como nova."""
+    d = _delivery()
+    decision = d.get_decision(conn, wait['decision_id'])
+    context = _context(decision)
+    public = context['public_message']
+    context.setdefault('public_message_history', []).append(dict(public))
+    context['public_message'] = dict(public, text=text, created_at=now)
+    _keep_for_previous_release(conn, decision['id'], warned, context)
+    d._event(conn, wait['task_id'], wait['run_id'], 'nfos_requester_reminded',
+             {'decision_id': decision['id'], 'due_at': warned['due_at'], 'wait_id': wait['id']})
+
+
+def continuation_criterion(recipient, question):
+    """O critério que o card de continuação leva quando a pergunta ao solicitante se encerra sem resposta."""
+    return (f'Concluir o que ficou pendente quando chegar a resposta à pergunta feita a {str(recipient)[:60]}: '
+            f'"{" ".join(str(question or "").split())[:240]}"')
+
+
+def _when(at):
+    return time.strftime('%d/%m %H:%MZ', time.gmtime(int(at)))
+
+
+def _expired(conn, wait, why, now):
+    """Desfecho da espera vencida. No prazo, com aviso entregue (ou sem aviso pela segunda vez na rodada): o motor responde
+    a decisão e o card segue como entrega parcial. Sem aviso entregue, a primeira vez: a pergunta vai ao Principal."""
+    d = _delivery()
+    decision = d.get_decision(conn, wait['decision_id'])
+    context = _context(decision)
+    if not decision or decision['status'] != 'human' or context.get('human_reply'):
+        return
+    task = d._kb().get_task(conn, wait['task_id'])
+    workflow = d.get_workflow(conn, wait['task_id'])
+    if not task or not workflow:
+        return
+    if why in _UNREACHED:
+        _hand_over(conn, wait, decision, context, task, workflow, why, now)
     else:
-        warn_at = int(deadline.get('warn_at') or asked + int(limit * 3600) - _lead(limit))
-        if now < warn_at:
-            return dict(base, action='waiting', warn_at=warn_at)
-    due = max(asked + int(limit * 3600), now + _lead(limit))  # ninguém vence sem aviso
-    public = context.get('public_message') if isinstance(context.get('public_message'), dict) else None
-    question = deadline.get('question_text') or (public or {}).get('text') or d._human_question_part(row.get('answer'))
-    text = topic_reminder(recipient, question, due, _zone(conn, task.id))
-    if not dry_run:
-        _request_reminder(conn, row, asked, limit, due, text, where, recipient, now)
-    return dict(base, action='request_reminder', due_at=due, text=text, origin=where)
+        _continue_partial(conn, wait, decision, context, task, workflow, why, now)
 
 
-def _request_reminder(conn, row, asked, limit, due, text, where, recipient, now):
+def _supersede(conn, decision, context, task, workflow, question, carried, reason, now):
     d = _delivery()
-    with d._kb().write_txn(conn, allow_nested=True):
-        context = _still_waiting(conn, row['id'])
-        if context is None:
-            return
-        previous = context.get('requester_deadline') if isinstance(context.get('requester_deadline'), dict) else {}
-        before = previous.get('reminder') if isinstance(previous.get('reminder'), dict) else None
-        attempts = int(before.get('attempts') or 1) + 1 if before else 1  # pedido gravado antes da contagem vale por um
-        context['requester_deadline'] = {'asked_at': asked, 'hours': limit, 'channel': where['platform'],
-                                         'reminder': {'requested_at': now, 'due_at': due, 'attempts': attempts}}
-        if previous.get('question_text'):
-            context['requester_deadline']['question_text'] = previous['question_text']
-        conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (d._json(context), row['id']))
-        d._event(conn, row['task_id'], row['run_id'], 'nfos_requester_reminder',
-                 {'decision_id': row['id'], 'due_at': due, 'text': text, 'recipient': recipient[:80], 'origin': where})
-
-
-def _topic_warned(conn, row, delivered_at, message_id):
-    d = _delivery()
-    with d._kb().write_txn(conn, allow_nested=True):
-        context = _still_waiting(conn, row['id'])
-        if context is None:
-            return
-        deadline = context['requester_deadline']
-        deadline.update(warned_at=delivered_at, due_at=deadline['reminder']['due_at'], reminder_message_id=message_id)
-        conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (d._json(context), row['id']))
-        d._event(conn, row['task_id'], row['run_id'], 'nfos_requester_reminded',
-                 {'decision_id': row['id'], 'due_at': deadline['due_at'], 'message_id': message_id})
-
-
-def _still_waiting(conn, decision_id):
-    current = _delivery().get_decision(conn, decision_id)
-    if not current or current['status'] != 'human':
-        return None
-    context = json.loads(current['context'] or '{}') or {}
-    return None if context.get('human_reply') else context
-
-
-def _unarmed(conn, row, asked, limit, route, reason='no_warning_channel'):
-    d = _delivery()
-    with d._kb().write_txn(conn, allow_nested=True):
-        context = _still_waiting(conn, row['id'])
-        if context is None:
-            return
-        context['requester_deadline'] = {'asked_at': asked, 'hours': limit, 'channel': route, 'unarmed': reason}
-        conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (d._json(context), row['id']))
-        d._event(conn, row['task_id'], row['run_id'], 'nfos_requester_deadline_unarmed',
-                 {'decision_id': row['id'], 'channel': route, 'reason': reason})
-
-
-def _warn(conn, row, asked, limit, due, text, now):
-    d = _delivery()
-    with d._kb().write_txn(conn, allow_nested=True):
-        context = _still_waiting(conn, row['id'])
-        if context is None:
-            return
-        public = context['public_message']
-        question = (context.get('requester_deadline') or {}).get('question_text') or public['text']
-        context.setdefault('public_message_history', []).append(dict(public))
-        context['public_message'] = dict(public, text=text, created_at=now)  # hora nova: o Balcão mostra como mensagem nova
-        context['requester_deadline'] = {'asked_at': asked, 'hours': limit, 'channel': 'portal', 'question_text': question,
-                                         'warn_at': now, 'warned_at': now, 'due_at': due}
-        conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (d._json(context), row['id']))
-        d._event(conn, row['task_id'], row['run_id'], 'nfos_requester_reminded', {'decision_id': row['id'], 'due_at': due})
-
-
-def _expire(conn, row, task, workflow, asked, limit, due, now):
-    d = _delivery()
-    import uuid
-    refused = d._human_question_part(row.get('answer'))
-    question = ('O solicitante não respondeu à pergunta deste card até o prazo (REQUESTER_DEADLINE_20261010): ' + f'{limit:g}' + ' h, com '
-                'aviso antes de vencer. O card voltou para você. Decida com continue ou changes, sem perguntar de novo: siga com o que já '
-                'está conferido, entregue o que dá para verificar sem a resposta e feche como entrega parcial (partial_delivery=true), '
-                'dizendo em public_delivery.summary o que ficou dependendo do solicitante. Se ele responder depois, a resposta chega a '
-                'você neste card; se o card já estiver fechado, o chamado reabre. Pergunta sem resposta: ' + refused[:700])
     new_id = 'dec_' + uuid.uuid4().hex[:20]
-    with d._kb().write_txn(conn, allow_nested=True):
-        context = _still_waiting(conn, row['id'])
-        if context is None:
-            return
-        carried = {key: value for key, value in context.items() if key not in _NOT_CARRIED}
-        carried.update(supersedes=row['id'], requester_silence={'asked_at': asked, 'due_at': due, 'hours': limit,
-                                                               'warned_at': (context.get('requester_deadline') or {}).get('warned_at')})
-        context.update(superseded_by=new_id, superseded_reason='requester_silence')
-        conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?", (d._json(context), row['id']))
-        conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
-                     (new_id, task.id, row['run_id'], 'impediment', question, d._json(carried), workflow['spec_revision'], now))
-        d._event(conn, task.id, row['run_id'], 'nfos_requester_silence',
-                 {'decision_id': row['id'], 'new_decision_id': new_id, 'asked_at': asked, 'due_at': due, 'question': refused[:400]})
-        d._event(conn, task.id, row['run_id'], 'nfos_principal_requested', {'decision_id': new_id, 'kind': 'impediment', 'question': question})
-    if task.status == 'blocked':
+    successor = {key: value for key, value in context.items() if key not in _NOT_CARRIED}
+    successor.update(supersedes=decision['id'], **carried)
+    context.update(superseded_by=new_id, superseded_reason=reason)
+    conn.execute("UPDATE nfos_decisions SET status='superseded',context=? WHERE id=?", (d._json(context), decision['id']))
+    conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) VALUES(?,?,?,?,?,?,?,?)',
+                 (new_id, task.id, decision['run_id'], 'impediment', question, d._json(successor), workflow['spec_revision'], now))
+    return new_id
+
+
+def _release(conn, task, context):
+    """O card sai do bloqueio da pergunta. Card em pausa de manutenção segue bloqueado: espera o reparo, não a resposta."""
+    d = _delivery()
+    if task.status == 'blocked' and not d._carried_pause(context):
         d._kb().unblock_task(conn, task.id)
+
+
+def _continue_partial(conn, wait, decision, context, task, workflow, why, now):
+    d = _delivery()
+    evidence = wait['evidence']
+    refused = d._human_question_part(decision['answer'])
+    recipient = evidence.get('recipient') or 'O solicitante'
+    limit = evidence.get('hours') or hours()
+    if why == 'deadline':
+        cause = (f'{recipient} não respondeu à pergunta deste card até {_when(evidence["due_at"])} ({limit:g} h, com aviso '
+                 'antes de vencer)')
+        record = {'requester_silence': {'asked_at': evidence['asked_at'], 'due_at': evidence['due_at'], 'hours': limit,
+                                        'warned_at': evidence.get('warned_at')}}
+    else:
+        cause = f'o aviso da pergunta deste card não chegou a {recipient}, pela segunda vez nesta rodada'
+        record = {'requester_unreached': {'asked_at': evidence['asked_at'], 'why': evidence.get('unarmed') or why}}
+    question = (f'Pergunta ao solicitante encerrada pelo motor (REQUESTER_DEADLINE_20261010): {cause}. Pergunta sem resposta: '
+                + refused[:700])
+    criterion = continuation_criterion(recipient, evidence.get('question_text') or refused)
+    record['continuation_criterion'] = criterion
+    record['wait_rule'] = {'wait_id': wait['id'], 'resolved_by': 'runtime', 'outcome': 'returned_to_worker', 'at': now}
+    new_id = _supersede(conn, decision, context, task, workflow, question, record, 'requester_silence', now)
+    d._event(conn, task.id, decision['run_id'], 'nfos_requester_silence',
+             {'decision_id': decision['id'], 'new_decision_id': new_id, 'asked_at': evidence['asked_at'],
+              'due_at': evidence.get('due_at'), 'why': why, 'wait_id': wait['id'], 'question': refused[:400]})
+    # O worker relançado lê esta resposta cortada em 600 caracteres (CURRENT_DECISIONS_20261010): o que ele tem de fazer e o
+    # critério vêm primeiro; o motivo e a pergunta inteira vêm depois.
+    answer = ('CONTINUE (runtime do NFOS): feche como entrega parcial (partial_delivery=true) com o que já está conferido; o card '
+              f'de continuação (continuation) leva este critério obrigatório: {criterion}. Não pergunte de novo. Motivo: {cause}. Em '
+              'public_delivery.summary diga a quem pediu o que foi entregue e o que ficou dependendo da resposta. Se ele responder '
+              'depois, a resposta chega ao Principal neste card, ou o chamado reabre. Pergunta sem resposta: ' + refused[:700])
+    d.resolve_decision(conn, new_id, action='continue', answer=answer, author='Principal')
+    _release(conn, d._kb().get_task(conn, task.id), context)
+
+
+def _hand_over(conn, wait, decision, context, task, workflow, why, now):
+    from hermes_cli import nfos_waits
+    d = _delivery()
+    evidence = wait['evidence']
+    refused = d._human_question_part(decision['answer'])
+    if why == 'no_warning_channel':
+        cause = ('a pergunta deste card ao solicitante não tem caminho de aviso: no Balcão ela não saiu como public_message '
+                 '{kind: "question"}, ou o card não tem chat de origem')
+        retry = ('Num chamado do Balcão, perguntar de novo com public_message {kind: "question"} é permitido uma vez: o motor '
+                 'avisa e conta o prazo. ')
+    elif why == 'reminder_undelivered':
+        cause = (f'o aviso do prazo não chegou ao tópico de origem: o gateway não gravou o recibo depois de '
+                 f'{MAX_REMINDER_REQUESTS} pedidos, um por hora (REQUESTER_REMINDER_20261010)')
+        retry = 'Perguntar de novo é permitido uma vez: se o aviso falhar de novo, o motor segue sozinho como entrega parcial. '
+    else:
+        cause = 'a espera pela resposta gastou o teto de conferências sem chegar ao prazo (o card ficou ocupado no vencimento)'
+        retry = ''
+    question = (f'Pergunta ao solicitante sem aviso entregue (REQUESTER_WAIT_20261014): {cause}. O prazo não correu, porque '
+                'ninguém vence sem aviso. Decida com continue ou changes: siga com o que já está conferido e feche como entrega '
+                'parcial, dizendo em public_delivery.summary o que ficou dependendo de quem pediu. ' + retry
+                + 'Pergunta sem aviso: ' + refused[:700])
+    carried = {'requester_unreached': {'asked_at': evidence['asked_at'], 'why': why, 'channel': evidence.get('channel'),
+                                       'wait_id': wait['id']}}
+    new_id = _supersede(conn, decision, context, task, workflow, question, carried, 'requester_unreached', now)
+    d._event(conn, task.id, decision['run_id'], 'nfos_requester_unreached',
+             {'decision_id': decision['id'], 'new_decision_id': new_id, 'why': why, 'channel': evidence.get('channel'),
+              'wait_id': wait['id'], 'question': refused[:400]})
+    d._event(conn, task.id, decision['run_id'], 'nfos_principal_requested', {'decision_id': new_id, 'kind': 'impediment', 'question': question})
+    if not d._carried_pause(context):  # a obrigação de reparo da pausa já tem dono e lembrete próprios
+        nfos_waits.hand_to_principal(conn, dict(wait, decision_id=new_id), now)
+    _release(conn, task, context)
 
 
 def late_answer(conn, task_id, *, answer, source):
@@ -395,7 +553,6 @@ def late_answer(conn, task_id, *, answer, source):
         conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (d._json(context), target))
         question = successor['question']
     else:
-        import uuid
         target = 'dec_' + uuid.uuid4().hex[:20]
         question = ('O solicitante respondeu depois do prazo da pergunta (REQUESTER_DEADLINE_20261010). A resposta está em human_reply. '
                     'Decida com continue ou changes o que ela muda no que já foi feito; não pergunte de novo a mesma coisa.')

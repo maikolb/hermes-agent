@@ -36,7 +36,7 @@ CREATE INDEX IF NOT EXISTS nfos_waits_task ON nfos_waits(task_id,status);
 OPEN, SATISFIED, EXPIRED, WITHDRAWN = 'open', 'satisfied', 'expired', 'withdrawn'
 # Quem pode tornar o predicado verdadeiro. requester, operator e external são pessoas ou terceiros; os demais são internos.
 EXECUTOR_KINDS = ('requester', 'operator', 'external', 'lab', 'card', 'runtime', 'principal')
-REASONS = ('lab_queue', 'principal_decision', 'external_dependency', 'provider_quota')
+REASONS = ('lab_queue', 'principal_decision', 'external_dependency', 'provider_quota', 'requester_answer', 'process_hold')
 OUTCOMES = {'principal': 'principal_handoff', 'worker': 'returned_to_worker', 'obligation': 'returned_to_obligation',
             'still_closed': 'still_closed'}
 PRINCIPAL = {'kind': 'principal', 'name': 'Principal (sessão coordenadora)'}
@@ -57,7 +57,12 @@ def policy(reason):
     contados (o reparo interno limitado); 'worker' responde a decisão e devolve o card ao executor sem a dependência;
     'obligation' devolve a decisão à obrigação de reparo da pausa, que é de onde a espera saiu; 'still_closed' só grava o
     desfecho (ROUTE_WALL_20261012: a rota do provedor não é dependência que o card dispense, o despacho segue segurando o
-    card e ele deixa de contar como espera saudável)."""
+    card e ele deixa de contar como espera saudável).
+
+    Ganchos opcionais: withdrawn diz por que a espera deixou de valer; plan decide o passo seguinte enquanto o predicado
+    segue falso (próxima conferência, prazo e o que gravar, ou o motivo do vencimento) e é dono do prazo do motivo;
+    outcomes troca o desfecho gravado conforme o motivo do vencimento. holds_card (PROCESS_HOLD_20261014): enquanto a
+    espera está aberta, a reivindicação do card é recusada (`card_held`, lido por `kanban_db.claim_task`)."""
     d = _delivery()
     if reason == 'lab_queue':
         return dict(executors=('lab',), predicates=('lab_receipt',), holds_decision=True, on_expire='principal',
@@ -86,6 +91,12 @@ def policy(reason):
                     deadline=walls.WAIT_DEADLINE_SECONDS,
                     max_attempts=max(1, walls.WAIT_DEADLINE_SECONDS // walls.WAIT_RECHECK_SECONDS),
                     withdrawn=walls.wait_withdrawn, expired=walls.wait_expired)
+    if reason == 'requester_answer':  # REQUESTER_WAIT_20261014: a pergunta ao solicitante, com aviso e prazo
+        from hermes_cli import nfos_requester_deadline
+        return nfos_requester_deadline.wait_policy()
+    if reason == 'process_hold':  # PROCESS_HOLD_20261014: a etapa do processo que só quem decide deixa
+        from hermes_cli import nfos_process_hold
+        return nfos_process_hold.wait_policy()
     raise _delivery().WorkflowError('Unknown wait reason; use one of: ' + ', '.join(REASONS))
 
 
@@ -97,13 +108,26 @@ def _checker(kind):
     return {'lab_receipt': (d._lab_queue_check, True), 'decision_resolved': (_decision_resolved, False),
             'card': (_card_delivered, False), 'probe': (d._dependency_probe_check, True),
             'lab_status': (d._lab_status_check, True), 'lab_command': (d._lab_command_check, True),
-            'route_open': (_route_open, False)}[kind]
+            'route_open': (_route_open, False), 'human_reply': (_human_reply, False),
+            'process_step': (_process_step, False)}[kind]
 
 
 def _route_open(conn, wait, budget=None):
     """Predicado route_open (ROUTE_WALL_20261012): a conferência é da parede de cota, que lê o arquivo da rota."""
     from hermes_cli import nfos_route_walls as walls
     return walls.wait_check(conn, wait)
+
+
+def _human_reply(conn, wait, budget=None):
+    """Predicado human_reply (REQUESTER_WAIT_20261014): a resposta de quem pediu está gravada na decisão."""
+    from hermes_cli import nfos_requester_deadline
+    return nfos_requester_deadline.answered(conn, wait)
+
+
+def _process_step(conn, wait, budget=None):
+    """Predicado process_step (PROCESS_HOLD_20261014): o card saiu da etapa do processo que o retinha."""
+    from hermes_cli import nfos_process_hold
+    return nfos_process_hold.left_step(conn, wait, budget)
 
 
 class NotYet(Exception):
@@ -187,6 +211,17 @@ def public_evidence(evidence):
     return {key: evidence[key] for key in PUBLIC_EVIDENCE if key in evidence}
 
 
+def card_held(conn, task_id):
+    """O motivo da espera aberta que segura a reivindicação do card (`holds_card` na policy), ou None."""
+    if not _table(conn):
+        return None
+    for (reason,) in conn.execute("SELECT DISTINCT reason FROM nfos_waits WHERE task_id=? AND status='open' ORDER BY reason",
+                                  (task_id,)).fetchall():
+        if reason in REASONS and policy(reason).get('holds_card'):
+            return reason
+    return None
+
+
 def card_waits(conn, task_id, closed=5):
     """Esperas do card para o `show`: todas as abertas e as últimas encerradas, com o predicado e a evidência públicos."""
     if not _table(conn):
@@ -231,10 +266,15 @@ def _predicate(reason, spec, value):
         if not all(isinstance(part, str) and part for part in route.values()):
             raise d.WorkflowError('route_open needs the profile, the provider and the model of the route')
         return {'kind': 'route_open', **route}
-    if kind == 'decision_resolved':
+    if kind == 'process_step':
+        step = value.get('step')
+        if not isinstance(step, str) or not step:
+            raise d.WorkflowError('process_step needs the key of the process step that holds the card')
+        return {'kind': kind, 'step': step}
+    if kind in ('decision_resolved', 'human_reply'):
         decision_id = value.get('decision_id')
         if not isinstance(decision_id, str) or not decision_id:
-            raise d.WorkflowError('decision_resolved needs the decision id')
+            raise d.WorkflowError(f'{kind} needs the decision id')
         return {'kind': kind, 'decision_id': decision_id}
     if kind == 'card':
         target, until = value.get('task_id'), value.get('until', 'done')
@@ -334,12 +374,13 @@ def refusal(conn, task_id, *, reason, predicate):
 
 
 def declare(conn, task_id, run_id, *, reason, executor, predicate, decision_id=None, subject=None, origin=None, now=None,
-            next_check_at=None, attempts=0, evidence=None):
+            next_check_at=None, attempts=0, evidence=None, deadline_at=None):
     """Grava a espera. Motivo fora da tabela, executor que o motivo não admite ou predicado de outro tipo: recusada.
     O prazo final e o teto de tentativas saem de `policy`; quem declara não os omite nem os estica. A mesma espera
     declarada de novo devolve a que está aberta; a que já venceu nesta rodada do card é recusada.
 
-    `now` é o início da espera. Um registro antigo adotado traz o início, a conferência e as tentativas que já tinha."""
+    `now` é o início da espera. Um registro antigo adotado traz o início, a conferência, as tentativas e o prazo que já
+    tinha."""
     d = _delivery()
     spec = policy(reason)
     executor = _executor(reason, spec, executor)
@@ -372,7 +413,7 @@ def declare(conn, task_id, run_id, *, reason, executor, predicate, decision_id=N
         workflow = d.get_workflow(conn, task_id)
         saved.setdefault('instruction_revision', task.instruction_revision)
         saved.setdefault('spec_revision', workflow['spec_revision'] if workflow else None)
-        deadline = started + int(spec['deadline'])
+        deadline = int(deadline_at) if deadline_at is not None else started + int(spec['deadline'])
         first = int(next_check_at) if next_check_at is not None else started + int(spec['first_check'])
         conn.execute('INSERT INTO nfos_waits(id,task_id,run_id,episode,reason,executor,predicate,evidence,next_check_at,'
                      'deadline_at,attempts,max_attempts,decision_id,origin,created_at,updated_at) '
@@ -457,23 +498,38 @@ def step(conn, wait_id, *, now=None, budget=None):
                 return 'not_ready'
             final = 'not_ready'
     with d._kb().write_txn(conn, allow_nested=True):
-        why = (final or ('deadline' if now >= wait['deadline_at'] else 'attempts' if wait['attempts'] >= wait['max_attempts']
-                         else 'unreadable' if state is None and evidence['unreadable'] >= spec.get('max_unreadable', wait['max_attempts'] + 1)
-                         else None))
+        planned = None
+        if spec.get('plan') and state is False and not final:
+            # O motivo com plano é dono do próprio prazo: avisa antes de vencer e o empurra quando o aviso sai tarde.
+            if wait['attempts'] >= wait['max_attempts']:
+                why = 'attempts'
+            else:
+                planned = spec['plan'](conn, wait, evidence, now)
+                evidence = planned.get('evidence', evidence)
+                why = planned.get('expire')
+        else:
+            why = (final or ('deadline' if now >= wait['deadline_at'] else 'attempts' if wait['attempts'] >= wait['max_attempts']
+                             else 'unreadable' if state is None and evidence['unreadable'] >= spec.get('max_unreadable', wait['max_attempts'] + 1)
+                             else None))
         if why is None:
-            if not _move(conn, wait, attempts=wait['attempts'] + 1, evidence=evidence, next_check_at=later, updated_at=now):
+            fields = dict(attempts=wait['attempts'] + 1, evidence=evidence, next_check_at=later, updated_at=now)
+            if planned:
+                fields.update(next_check_at=planned['next_check_at'], deadline_at=planned['deadline_at'])
+            if not _move(conn, wait, **fields):
                 return None
+            if planned and planned.get('act'):
+                planned['act'](conn)
             if spec.get('retry'):
                 spec['retry'](conn, dict(wait, attempts=wait['attempts'] + 1), now)
             return 'wait' if state is False else 'unreadable'
-        outcome = OUTCOMES[spec['on_expire']]
-        if not _move(conn, wait, status=EXPIRED, outcome=outcome, evidence=dict(evidence, expired_because=why),
-                     closed_at=now, updated_at=now):
+        outcome = (spec.get('outcomes') or {}).get(why) or OUTCOMES[spec['on_expire']]
+        evidence = dict(evidence, expired_because=why)
+        if not _move(conn, wait, status=EXPIRED, outcome=outcome, evidence=evidence, closed_at=now, updated_at=now):
             return None
         d._event(conn, wait['task_id'], wait['run_id'], 'nfos_wait_expired',
                  {'wait_id': wait['id'], 'reason': wait['reason'], 'why': why, 'attempts': wait['attempts'],
                   'deadline_at': wait['deadline_at'], 'outcome': outcome, 'decision_id': wait['decision_id']})
-        spec['expired'](conn, wait, why, now)
+        spec['expired'](conn, dict(wait, evidence=evidence), why, now)
         if spec['on_expire'] == 'principal':
             hand_to_principal(conn, wait, now)
         return 'expired'
@@ -497,6 +553,15 @@ def sweep(conn, *, now=None, budget=None):
         if done:
             out.append((wait_id, done))
     return out
+
+
+def wake(conn, wait_id, now=None):
+    """O fato pode ter mudado antes da hora marcada (chegou a resposta, a decisão saiu do estado esperado): a espera é
+    conferida no próximo passo, sem esperar a conferência agendada."""
+    now = int(now or time.time())
+    with _delivery()._kb().write_txn(conn, allow_nested=True):
+        conn.execute("UPDATE nfos_waits SET next_check_at=?,revision=revision+1 WHERE id=? AND status='open' AND next_check_at>?",
+                     (now, wait_id, now))
 
 
 def hand_to_principal(conn, wait, now):
