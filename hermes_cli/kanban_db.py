@@ -13049,6 +13049,24 @@ def _interrupted_by_gateway_restart(row, kind: str, gateway_started) -> bool:
 
 URGENT_PRIORITY = 100  # URGENT_20260910
 
+# CAUSE_URGENCY_20261015: o card de causa (code) herda a maior prioridade dos casos (operation) ligados a ele
+# (task_links: o caso é o pai). Espelha project_workflow.enforce._effective_priority; caso arquivado não conta.
+_EFFECTIVE_PRIORITY_SQL = (
+    "MAX(COALESCE(priority, 0), COALESCE((SELECT MAX(p.priority) FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+    "WHERE l.child_id = tasks.id AND tasks.delivery_type = 'code' AND p.delivery_type = 'operation' "
+    "AND p.status != 'archived'), 0))"
+)
+
+
+def effective_priority(conn: sqlite3.Connection, task_id: str) -> int:
+    """Prioridade com que o despachante enfileira o card: a própria, ou a do caso urgente ligado à causa."""
+    try:
+        row = conn.execute(f"SELECT {_EFFECTIVE_PRIORITY_SQL} FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception:
+        row = conn.execute("SELECT priority FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return int(row[0] or 0) if row else 0
+
 
 def _urgent_burst_slots(conn: sqlite3.Connection) -> int:
     """URGENT_20260910 (ordem do Maikol): uma vaga extra por board enquanto houver card ready/review com
@@ -13057,7 +13075,7 @@ def _urgent_burst_slots(conn: sqlite3.Connection) -> int:
     try:
         rows = conn.execute(
             "SELECT id FROM tasks WHERE status IN ('ready', 'review') AND task_role = 'work' "
-            "AND claim_lock IS NULL AND priority >= ?", (URGENT_PRIORITY,),
+            f"AND claim_lock IS NULL AND {_EFFECTIVE_PRIORITY_SQL} >= ?", (URGENT_PRIORITY,),
         ).fetchall()
         # URGENT2_20260910: urgente com decisão aberta não é despachável (OPEN_DECISION_SKIP); não gera vaga
         _open = globals().get("_nfos_decision_open")
@@ -13065,7 +13083,7 @@ def _urgent_burst_slots(conn: sqlite3.Connection) -> int:
         if not waiting:
             return 0
         running = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'running' AND priority >= ?", (URGENT_PRIORITY,),
+            f"SELECT COUNT(*) FROM tasks WHERE status = 'running' AND {_EFFECTIVE_PRIORITY_SQL} >= ?", (URGENT_PRIORITY,),
         ).fetchone()[0]
         return 1 if running == 0 else 0
     except Exception:
@@ -13087,7 +13105,7 @@ def _resume_first(conn: sqlite3.Connection, rows: list) -> list:
         return rows
     def _rank(r):  # URGENT_20260910: urgente antes de tudo, depois interrompidos, depois a ordem normal
         try:
-            if "priority" in r.keys() and int(r["priority"] or 0) >= URGENT_PRIORITY:
+            if "priority" in r.keys() and max(int(r["priority"] or 0), effective_priority(conn, r["id"])) >= URGENT_PRIORITY:
                 return 0
         except Exception:
             pass
