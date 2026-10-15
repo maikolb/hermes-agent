@@ -5752,6 +5752,12 @@ def claim_task(
         from hermes_cli.nfos_workspace_repair import maintenance_pause_pending, execution_budget, request_execution_budget_review
         if maintenance_pause_pending(conn, task_id):
             return held("maintenance_pause")
+        # PROCESS_HOLD_20261014: an open wait that holds the card, or a process step only the decider leaves. The relaunch
+        # after a CONTINUE/CHANGES answer and the return of a timed-out run's continuation both pass here.
+        from hermes_cli import nfos_process_hold, nfos_waits
+        hold = nfos_waits.card_held(conn, task_id) or nfos_process_hold.claim_hold(conn, task)
+        if hold:
+            return held(hold)
         balance = execution_budget(conn, task)
         if balance and any(balance[k] is not None and balance[k] <= 0 for k in
                            ('remaining_iterations', 'remaining_runtime_seconds', 'remaining_goal_turns')):
@@ -11362,7 +11368,7 @@ class DispatchResult:
     """Ready tasks whose claim a hold refused this tick, as ``(task_id, reason)``:
     principal_suspension, support_approval_pending, maintenance_pause,
     execution_budget_exhausted, retained_workspace, previous_run_termination,
-    parents_not_done, open_decision, and ``route_closed:<provider>/<model>@<profile>``
+    parents_not_done, open_decision, process_hold (PROCESS_HOLD_20261014), and ``route_closed:<provider>/<model>@<profile>``
     (ROUTE_WALL_20261012: the provider closed the route of the profile the card
     is launched as with a long usage window, or another launch is that route's
     probe). The card waits for that resolution, not for the dispatcher."""
@@ -13506,6 +13512,11 @@ _BUDGET_PROGRESS_KINDS = (
     "nfos_effect_requested", "nfos_effect_reconciled", "nfos_principal_requested",
     "nfos_homologation_bound",
 )
+# The questions hermes_cli.goals.run_kanban_goal_loop files through block_fn: products of the loop, not of the worker.
+_GOAL_LOOP_QUESTIONS = (
+    "Goal-mode worker's output looked complete but it never called kanban_complete after a finalize nudge",
+    "Goal-mode worker exhausted its turn budget",
+)
 
 
 def _budget_continuation_cap() -> int:
@@ -13555,9 +13566,14 @@ def _budget_continuation(
     if run_id is None:
         return False
     marks = ",".join("?" for _ in _BUDGET_PROGRESS_KINDS)
+    # PROCESS_HOLD_20261014: the goal loop's own questions (its finalize and budget blocks) are not the worker's
+    # progress; t_45ae522c's timed-out run was continued on them.
+    own = " OR ".join("substr(coalesce(json_extract(payload, '$.question'), ''), 1, ?) = ?" for _ in _GOAL_LOOP_QUESTIONS)
     progress = conn.execute(
-        f"SELECT COUNT(*) FROM task_events WHERE task_id = ? AND run_id = ? AND kind IN ({marks})",
-        (task_id, int(run_id), *_BUDGET_PROGRESS_KINDS),
+        f"SELECT COUNT(*) FROM task_events WHERE task_id = ? AND run_id = ? AND kind IN ({marks}) "
+        f"AND NOT (kind = 'nfos_principal_requested' AND json_valid(payload) AND ({own}))",
+        (task_id, int(run_id), *_BUDGET_PROGRESS_KINDS,
+         *(part for text in _GOAL_LOOP_QUESTIONS for part in (len(text), text))),
     ).fetchone()[0]
     if not progress:
         return False
