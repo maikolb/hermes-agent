@@ -524,6 +524,7 @@ def test_merged_pull_request_ends_the_pause_and_the_card_checks_the_merged_code(
     assert (done['status'], done['evidence']['merged'], done['evidence']['merge_commit']) == ('satisfied', True, MERGE_SHA)
     row = d.get_decision(conn, did)
     assert row['status'] == 'resolved' and MERGE_SHA in row['answer'] and 'confira o caso no código mesclado' in row['answer']
+    assert 'este PR já mesclado não é impedimento' in row['answer']
     assert not repair.maintenance_pause_pending(conn, task.id) and kb.get_task(conn, task.id).status == 'ready'
     assert 'git_merged' in ' '.join(_pause(conn, task)['repair_evidence'])
     assert len(_requests(conn, task, did)) == before, 'ninguém foi acordado para isso'
@@ -544,24 +545,95 @@ def test_commit_already_in_the_base_ends_the_pause(paused, monkeypatch):
     assert d.get_decision(conn, did)['status'] == 'resolved' and not repair.maintenance_pause_pending(conn, task.id)
 
 
-@pytest.mark.parametrize('answer, cause', [
-    (_pr('closed', False), 'o PR esperado foi fechado sem merge'),
-    (_pr('closed', True, base='develop'), 'o PR esperado foi mesclado em outra base'),
+@pytest.mark.parametrize('answers, cause', [
+    ([_pr('closed', False), _pr('closed', False)], 'o PR esperado foi fechado sem merge em duas leituras seguidas'),
+    ([_pr('closed', True, base='develop')], 'o PR esperado foi mesclado em outra base'),
 ])
-def test_pull_request_that_will_not_reach_the_base_returns_the_decision_at_once(paused, monkeypatch, answer, cause):
+def test_pull_request_that_will_not_reach_the_base_returns_the_decision(paused, monkeypatch, answers, cause):
     conn, task, did, advance = paused
-    _github(monkeypatch, [answer])
+    _github(monkeypatch, answers)
     _declare(conn, did, {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main'}, executor=SESSION)
     wait = waits.open_for_decision(conn, did)
     before = len(_requests(conn, task, did))
+    for _ in answers[:-1]:
+        advance()
+        assert waits.get(conn, wait['id'])['status'] == 'open', 'uma leitura fechada só não vence a espera'
     advance()
     closed = waits.get(conn, wait['id'])
     assert (closed['status'], closed['outcome']) == ('expired', 'returned_to_obligation')
-    assert len(_requests(conn, task, did)) == before + 1 and cause in _requests(conn, task, did)[-1]['question']
+    question = _requests(conn, task, did)[-1]['question']
+    assert len(_requests(conn, task, did)) == before + 1 and cause in question
     assert repair.maintenance_pause_pending(conn, task.id), 'a pausa segue: o conserto não chegou à base'
+    if answers[-1]['merged']:  # o commit mesclado na outra base é o fato que ainda pode chegar à declarada
+        assert json.dumps({'base': 'main', 'commit': MERGE_SHA, 'kind': 'git_merged', 'repo': REPO},
+                          separators=(',', ':')) in question
 
 
-@pytest.mark.parametrize('check', [
+def test_pull_request_closed_and_reopened_keeps_the_wait(paused, monkeypatch):
+    """Fechar e reabrir o PR (para rodar a CI de novo, por exemplo) não derruba a espera: vence só fechado duas vezes seguidas."""
+    conn, task, did, advance = paused
+    _github(monkeypatch, [_pr('closed', False), _pr('open', False), _pr('closed', False), 1, _pr('closed', False)])
+    _declare(conn, did, {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main'}, executor=SESSION)
+    for _ in range(5):
+        advance()
+    wait = waits.open_for_decision(conn, did)
+    assert wait['status'] == 'open' and wait['evidence']['pr_state'] == 'closed' and wait['attempts'] == 5
+    assert repair.maintenance_pause_pending(conn, task.id)
+
+
+def test_unreadable_pull_request_expires_saying_it_could_not_read(paused, monkeypatch):
+    conn, task, did, advance = paused
+    _github(monkeypatch, [1])
+    _declare(conn, did, {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main'}, executor=SESSION)
+    wait = waits.open_for_decision(conn, did)
+    advance()
+    shown = waits.card_waits(conn, task.id)[0]['evidence']
+    assert shown['gh_error'] == 'gh: Not Found (HTTP 404)' and shown['unreadable'] == 1, 'o erro do gh sai no show'
+    advance(d.MAINTENANCE_DEPENDENCY_HOURS[1] * HOUR)
+    closed = waits.get(conn, wait['id'])
+    assert closed['status'] == 'expired' and closed['evidence']['expired_because'] == 'deadline'
+    question = _requests(conn, task, did)[-1]['question']
+    assert 'não consegui ler o fato nas últimas 2 conferências (último erro: gh: Not Found (HTTP 404))' in question
+    assert 'sem o fato ficar verdadeiro' not in question
+
+
+def test_pull_request_answer_whose_base_is_not_an_object_is_unreadable(paused, monkeypatch):
+    conn, task, did, advance = paused
+    _github(monkeypatch, [{'state': 'closed', 'merged': True, 'base': 'main', 'merge_commit_sha': MERGE_SHA}])
+    _declare(conn, did, {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main'}, executor=SESSION)
+    advance()
+    wait = waits.open_for_decision(conn, did)
+    assert wait['evidence']['unreadable'] == 1 and 'base' in wait['evidence']['gh_error']
+    assert repair.maintenance_pause_pending(conn, task.id), 'resposta fora do formato não libera'
+
+
+def test_one_read_of_the_same_pull_request_serves_every_wait_of_the_sweep(monkeypatch):
+    calls = _github(monkeypatch, [_pr('open', False)])
+    wait = {'predicate': {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main'}, 'evidence': {}}
+    budget = waits.Budget(3, time.monotonic() + 60)
+    assert d._git_merged_check(None, wait, budget)[0] is False and d._git_merged_check(None, wait, budget)[0] is False
+    assert len(calls) == 1
+    d._git_merged_check(None, wait)
+    assert len(calls) == 2, 'sem a varredura, cada conferência lê de novo'
+
+
+REFUSED_FACTS = [
+    {'kind': 'git_merged', 'repo': REPO, 'base': 'main'},
+    {'kind': 'git_merged', 'repo': REPO, 'base': 'main', 'pr': 555, 'commit': MERGE_SHA},
+    {'kind': 'git_merged', 'repo': REPO + '; rm -rf /', 'base': 'main', 'pr': 555},
+    {'kind': 'git_merged', 'repo': REPO, 'base': 'main', 'commit': 'cb4c6cc'},
+]
+
+
+@pytest.mark.parametrize('check', REFUSED_FACTS)
+def test_malformed_pull_request_fact_is_refused_by_its_shape_on_the_decide(paused, check):
+    conn, task, did, _ = paused
+    with pytest.raises(d.WorkflowError, match='git_merged needs repo'):
+        _declare(conn, did, check, executor=SESSION)
+    assert waits.open_for_decision(conn, did) is None and repair.maintenance_pause_pending(conn, task.id)
+
+
+@pytest.mark.parametrize('check', REFUSED_FACTS + [
     {'kind': 'git_merged', 'repo': REPO, 'pr': '555', 'base': 'main'},
     {'kind': 'git_merged', 'repo': REPO, 'pr': True, 'base': 'main'},
     {'kind': 'git_merged', 'repo': REPO, 'pr': 0, 'base': 'main'},
@@ -583,7 +655,14 @@ def test_pull_request_fact_takes_only_a_repository_a_base_and_one_pr_or_commit(c
 def test_principal_and_worker_are_told_how_a_merged_pull_request_holds_the_card():
     principal = ' '.join(runtime.principal_instructions().split())
     assert '{"kind":"git_merged","repo":"owner/name","pr":123, "base":"main"}' in principal
-    assert 'pause the card with pause-for-repair and declare it on the repair' in principal
+    assert 'Check it first: `gh pr view <n> --repo <owner/name> --json state,baseRefName,files`' in principal
+    assert ('Only an open pull request on the base of the repository the card delivers, changing the code of the defect, '
+            'holds the card: pause it with pause-for-repair and declare it on the repair') in principal
+    assert 'Already merged: no pause, answer continue' in principal
+    assert 'A comment whose pull request fails that check does not stop the card' in principal
     worker = ' '.join(runtime.worker_instructions().split())
-    assert 'do not build a parallel candidate: raise an impediment naming the repository' in worker
+    assert 'check that pull request first: `gh pr view <n> --repo <owner/name> --json state,baseRefName,files`' in worker
+    assert 'Already merged into the base this card delivers to: it is no impediment' in worker
+    assert 'do not build a parallel candidate; raise an impediment naming the repository' in worker
+    assert 'A comment whose pull request fails that check does not stop the card' in worker
     assert 'git_merged' in d.DEPENDENCY_SHAPE

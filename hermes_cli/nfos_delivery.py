@@ -3875,7 +3875,8 @@ def _dependency_delivered(conn, wait, evidence, now):
     row = get_decision(conn, wait['decision_id'])
     context = json.loads(row['context'] or '{}') or {}
     stamp = time.strftime('%d/%m %H:%MZ', time.gmtime(now))
-    seen = {key: value for key, value in nfos_waits.public_evidence(evidence).items() if key not in ('checked_at', 'unreadable')}
+    seen = {key: value for key, value in nfos_waits.public_evidence(evidence).items()
+            if key not in ('checked_at', 'unreadable', 'gh_error')}
     proof = [f"dependência conferida pelo runtime em {stamp}: {_json(nfos_waits.public(wait['predicate']))[:300]} -> {_json(seen)[:300]}",
              f"espera {wait['id']}, decisão {row['id']}"]
     if not finish_dependency_pause(conn, wait['task_id'], wait['origin'].get('pause_run_id'), wait_id=wait['id'], evidence=proof):
@@ -3887,8 +3888,8 @@ def _dependency_delivered(conn, wait, evidence, now):
     if wait['predicate'].get('kind') == 'git_merged':  # GIT_MERGED_20261015: onde está o conserto que o card confere
         fix = wait['predicate']
         where = seen.get('merge_commit') or fix.get('commit')
-        merged = (f" O conserto está em {fix['repo']} {fix['base']}" + (f' (commit {where})' if where else '')
-                  + ': confira o caso no código mesclado antes de construir candidata própria.')
+        merged = (f" O conserto já está mesclado em {fix['repo']} {fix['base']}" + (f' (commit {where})' if where else '')
+                  + ': confira o caso no código mesclado e siga a partir dele; este PR já mesclado não é impedimento.')
     answer = (f"CONTINUE (runtime do NFOS, dependência entregue): {subject} O fato declarado foi conferido em {stamp}.{merged} "
               'Retome do checkpoint preservado, sem repetir o que já foi feito.')
     resolve_decision(conn, row['id'], action='continue', answer=answer, author='Principal')
@@ -3903,7 +3904,7 @@ _DEPENDENCY_EXPIRED = {
     'dependency_closed_without_effect': 'o card esperado fechou sem o efeito pedido',
     'dependency_missing': 'o card esperado não existe mais',
     'not_ready': 'o fato ficou verdadeiro, mas o executor anterior deste card não terminou de sair',
-    'pr_closed_unmerged': 'o PR esperado foi fechado sem merge',  # GIT_MERGED_20261015
+    'pr_closed_unmerged': 'o PR esperado foi fechado sem merge em duas leituras seguidas',  # GIT_MERGED_20261015
     'merged_into_other_base': 'o PR esperado foi mesclado em outra base, não na declarada',
 }
 
@@ -3915,10 +3916,24 @@ def _dependency_expired(conn, wait, why, now):
     context = json.loads(row['context'] or '{}') or {}
     context['reminders'] = [now]  # o pedido desta volta já é o aviso; o lembrete seguinte respeita o recuo
     since = time.strftime('%d/%m %H:%MZ', time.gmtime(int(wait['created_at'])))
-    cause = _DEPENDENCY_EXPIRED.get(why, f"{wait['attempts']} conferências sem o fato ficar verdadeiro")
-    lead = (f"Dependência declarada em {since} não foi entregue ({cause}): {wait['origin'].get('subject')} (quem entrega: "
-            f"{wait['executor']['name']}). O runtime não espera mais por ela e a mesma dependência não é aceita de novo neste "
-            'card. Decida o que o card entrega sem ela. ')
+    evidence = wait.get('evidence') or {}
+    unread = int(evidence.get('unreadable') or 0)
+    if why not in _DEPENDENCY_EXPIRED and unread:
+        # GIT_MERGED_20261015: a última leitura falhou; dizer "sem o fato ficar verdadeiro" afirmava o que não foi lido.
+        error = evidence.get('gh_error')
+        state = (f"não consegui ler o fato nas últimas {unread} conferências" + (f' (último erro: {error})' if error else '')
+                 + ', então não sei se ela foi entregue')
+        lead = f"Dependência declarada em {since}: {state}. "
+    else:
+        cause = _DEPENDENCY_EXPIRED.get(why, f"{wait['attempts']} conferências sem o fato ficar verdadeiro")
+        lead = f"Dependência declarada em {since} não foi entregue ({cause}). "
+    lead += (f"{wait['origin'].get('subject')} (quem entrega: {wait['executor']['name']}). O runtime não espera mais por ela e "
+             'a mesma dependência não é aceita de novo neste card. Decida o que o card entrega sem ela. ')
+    fix = wait['predicate']
+    if why == 'merged_into_other_base' and evidence.get('merge_commit'):
+        # O commit mesclado na outra base chega à declarada pelo merge seguinte: é outro fato, e esse a regra aceita.
+        lead += ('Se o conserto ainda chega a essa base por outro merge, declare o commit: '
+                 + _json({'kind': 'git_merged', 'repo': fix['repo'], 'base': fix['base'], 'commit': evidence['merge_commit']}) + '. ')
     _lab_wait_to_principal(conn, dict(row), context, 'dependência não entregue no prazo', now, lead=lead)
 
 
@@ -3939,50 +3954,64 @@ def _lab_command_check(conn, wait, budget=None):
 # para defeitos que PRs do repositório do Concursa já consertavam (t_45ae522c com 17 execuções e 10,6 h, t_cc5e5d09 com
 # 16 e 12,9 h). A pausa passa a esperar o merge desses PRs. A leitura é do `gh` do processo do despacho, o mesmo que o
 # guarda de PR ativo já usa (kanban_db._gh_pr_json), só GET e sem shell.
-def _gh_api(path):
+def _gh_api(path, memo=None):
     """GET na API do GitHub. (dados, None) ou (None, o que impediu a leitura): sem rede, sem acesso, 404 ou resposta que
-    não é um objeto JSON."""
+    não é um objeto JSON. Com `memo` (o da varredura), o mesmo caminho é lido uma vez por passada, para todas as esperas."""
     import subprocess
+    if memo is not None and ('gh_api', path) in memo:
+        return memo[('gh_api', path)]
     try:
         done = subprocess.run(['gh', 'api', '--method', 'GET', path], capture_output=True, text=True,
                               timeout=LAB_WAIT_READ_TIMEOUT_SECONDS)
     except (OSError, subprocess.SubprocessError) as exc:
-        return None, type(exc).__name__
-    if done.returncode != 0:
+        read = None, type(exc).__name__
+    else:
         lines = (done.stderr or done.stdout or '').strip().splitlines()
-        return None, (lines[-1] if lines else f'gh exited {done.returncode}')[:160]
-    try:
-        data = json.loads(done.stdout or '')
-    except ValueError:
-        return None, 'gh answered without JSON'
-    return (data, None) if isinstance(data, dict) else (None, 'gh answered without a JSON object')
+        try:
+            data = json.loads(done.stdout or '') if done.returncode == 0 else None
+        except ValueError:
+            data = None
+        if done.returncode != 0:
+            read = None, (lines[-1] if lines else f'gh exited {done.returncode}')[:160]
+        elif not isinstance(data, dict):
+            read = None, 'gh answered without a JSON object'
+        else:
+            read = data, None
+    if memo is not None:
+        memo[('gh_api', path)] = read
+    return read
 
 
 def _git_merged_check(conn, wait, budget=None):
-    """O PR declarado está mesclado na base declarada, ou o commit declarado já está nela? Leitura que falhou é None: a
-    espera conta ilegível e segue até o prazo, nunca libera. PR fechado sem merge, ou mesclado em outra base, não fica
-    mais verdadeiro: a espera vence na hora e a decisão volta ao Principal."""
+    """O PR declarado está mesclado na base declarada, ou o commit declarado já está nela? Leitura que falhou, ou resposta
+    sem os campos esperados, é None: a espera conta ilegível e segue até o prazo, nunca libera. PR mesclado em outra base
+    não fica mais verdadeiro: a espera vence na hora. PR fechado sem merge vence na segunda leitura seguida fechada (PR
+    fechado e reaberto, para rodar a CI de novo, não derruba a espera)."""
     predicate = wait['predicate']
     repo, base = predicate['repo'], predicate['base']
+    memo = budget.memo if budget is not None else None
     if 'pr' in predicate:
-        data, error = _gh_api(f"repos/{repo}/pulls/{predicate['pr']}")
-        if data is None or not isinstance(data.get('merged'), bool):
-            return None, {'gh_error': error or 'pull request without merged state'}
+        data, error = _gh_api(f"repos/{repo}/pulls/{predicate['pr']}", memo)
+        if data is None or not isinstance(data.get('merged'), bool) or not isinstance(data.get('base'), dict):
+            return None, {'gh_error': error or 'pull request without merged state or base'}
         seen = {'pr_state': str(data.get('state') or ''), 'merged': data['merged'],
-                'base_ref': str((data.get('base') or {}).get('ref') or '')}
+                'base_ref': str(data['base'].get('ref') or ''), 'gh_error': None}
         if data['merged'] and data.get('merge_commit_sha'):
             seen['merge_commit'] = str(data['merge_commit_sha'])[:40]
         if not data['merged']:
-            return False, dict(seen, **({'final': 'pr_closed_unmerged'} if seen['pr_state'] == 'closed' else {}))
+            before = wait.get('evidence') or {}
+            again = (seen['pr_state'] == 'closed' and before.get('pr_state') == 'closed' and before.get('merged') is False
+                     and not before.get('unreadable'))
+            return False, dict(seen, **({'final': 'pr_closed_unmerged'} if again else {}))
         if seen['base_ref'] != base:
             return False, dict(seen, final='merged_into_other_base')
         return True, seen
-    data, error = _gh_api(f"repos/{repo}/compare/{base}...{predicate['commit']}")
+    data, error = _gh_api(f"repos/{repo}/compare/{base}...{predicate['commit']}", memo)
     status = str((data or {}).get('status') or '')
     if status not in ('identical', 'behind', 'ahead', 'diverged'):
         return None, {'gh_error': error or 'compare without a known status'}
     # behind: a base já contém o commit e foi além; identical: a base é o próprio commit.
-    return status in ('identical', 'behind'), {'compare_status': status}
+    return status in ('identical', 'behind'), {'compare_status': status, 'gh_error': None}
 
 
 def _lab_queue_check(conn, wait, budget=None):

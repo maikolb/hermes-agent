@@ -210,10 +210,11 @@ def public(predicate):
     return {'kind': 'probe', 'probe': {'kind': probe.get('kind'), 'target': target}}
 
 
-# O que a conferência observou e pode sair da tabela. Texto de erro de sonda fica só na linha da espera.
+# O que a conferência observou e pode sair da tabela. Texto de erro de sonda fica só na linha da espera; o do `gh` sai,
+# porque o vencimento por leitura ilegível o mostra ao Principal (GIT_MERGED_20261015).
 PUBLIC_EVIDENCE = ('card_status', 'completed_at', 'effect_id', 'candidate', 'probe_state', 'http_status', 'lab', 'answered',
                    'status', 'queue_reason', 'decision_status', 'action', 'expired_because', 'unreadable', 'checked_at',
-                   'exit', 'pr_state', 'merged', 'base_ref', 'merge_commit', 'compare_status')
+                   'exit', 'pr_state', 'merged', 'base_ref', 'merge_commit', 'compare_status', 'gh_error')
 
 
 def public_evidence(evidence):
