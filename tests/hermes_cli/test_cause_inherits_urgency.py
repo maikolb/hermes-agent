@@ -54,3 +54,33 @@ def test_cancelled_case_does_not_lend_priority(tmp_path):
     assert kb.effective_priority(conn, "causa_t_c1") == 0, "título [CANCELADO]"
     assert kb.effective_priority(conn, "causa_t_c2") == 0, "estágio cancelled"
     assert kb.effective_priority(conn, "causa_t_c3") == 100, "caso vivo (done) continua emprestando"
+
+
+def test_same_rule_as_the_workflow_module_for_chamado_parents(tmp_path):
+    """Pai é caso (chamado do portal mesmo sendo code, ou operation); filho é causa (code sem chamado)."""
+    import json
+    conn = kb.connect(tmp_path / "k.db")
+
+    def request(tid, chamado):
+        payload = {"origin": {"portal": {"chamado": "CS-1"}}} if chamado else {"origin": {"topic": 41}}
+        conn.execute("INSERT INTO nfos_requests (id, source_key, payload, created_at) VALUES (?, ?, ?, 1)",
+                     ("r_" + tid, "k_" + tid, json.dumps(payload)))
+        conn.execute("INSERT INTO nfos_workflows (task_id, request_id, stage, spec_revision, next_action, state_json, updated_at) "
+                     "VALUES (?, ?, 'analysis', 0, '', '{}', 1)", (tid, "r_" + tid))
+
+    _card(conn, "chamado_code", "code", 100)
+    _card(conn, "code_puro", "code", 90)
+    _card(conn, "causa", "code", 0)
+    _card(conn, "causa_de_chamado", "code", 0)
+    for tid, chamado in (("chamado_code", True), ("code_puro", False), ("causa", False), ("causa_de_chamado", True)):
+        request(tid, chamado)
+    for parent, child in (("chamado_code", "causa"), ("code_puro", "causa"), ("chamado_code", "causa_de_chamado")):
+        conn.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (parent, child))
+    conn.commit()
+    assert kb.effective_priority(conn, "causa") == 100, "chamado code é caso e empresta"
+    conn.execute("UPDATE tasks SET priority=0 WHERE id='chamado_code'")
+    conn.commit()
+    assert kb.effective_priority(conn, "causa") == 0, "code sem chamado não é caso"
+    conn.execute("UPDATE tasks SET priority=100 WHERE id='chamado_code'")
+    conn.commit()
+    assert kb.effective_priority(conn, "causa_de_chamado") == 0, "filho que é chamado não é causa"

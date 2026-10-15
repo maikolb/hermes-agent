@@ -13052,18 +13052,31 @@ URGENT_PRIORITY = 100  # URGENT_20260910
 # CAUSE_URGENCY_20261015: o card de causa (code) herda a maior prioridade dos casos (operation) ligados a ele
 # (task_links: o caso é o pai). Espelha project_workflow.enforce._effective_priority; caso arquivado não conta.
 def _effective_priority_sql(conn: sqlite3.Connection) -> str:
-    """Expressão SQL da prioridade efetiva. Caso cancelado ([CANCELADO] no título ou estágio cancelled) não empresta."""
-    cancelled = "AND p.title NOT LIKE '[CANCELADO]%'"
+    """Expressão SQL da prioridade efetiva, a mesma regra de project_workflow.enforce._effective_priority: o pai é caso
+    (chamado do portal, de qualquer delivery_type, ou operation); o filho é causa (code sem chamado); arquivado e
+    cancelado ([CANCELADO] no título ou estágio cancelled) não emprestam."""
+    tables = set()
     try:
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_workflows'").fetchone():
-            cancelled += (" AND NOT EXISTS (SELECT 1 FROM nfos_workflows w WHERE w.task_id = p.id "
-                          "AND w.stage = 'cancelled')")
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     except Exception:
         pass
+    has_requests = {"nfos_workflows", "nfos_requests"} <= tables
+
+    def chamado(alias: str) -> str:
+        if not has_requests:
+            return "0"
+        return ("EXISTS (SELECT 1 FROM nfos_workflows w JOIN nfos_requests r ON r.id = w.request_id "
+                f"WHERE w.task_id = {alias}.id AND COALESCE(json_extract(r.payload, '$.origin.portal.chamado'), '') != '')")
+
+    cancelled = "AND p.title NOT LIKE '[CANCELADO]%'"
+    if "nfos_workflows" in tables:
+        cancelled += " AND NOT EXISTS (SELECT 1 FROM nfos_workflows wc WHERE wc.task_id = p.id AND wc.stage = 'cancelled')"
     return (
-        "MAX(COALESCE(priority, 0), COALESCE((SELECT MAX(p.priority) FROM task_links l JOIN tasks p ON p.id = l.parent_id "
-        "WHERE l.child_id = tasks.id AND tasks.delivery_type = 'code' AND p.delivery_type = 'operation' "
-        f"AND p.status != 'archived' {cancelled}), 0))"
+        "MAX(COALESCE(priority, 0), CASE WHEN tasks.delivery_type = 'code' AND NOT "
+        + chamado("tasks")
+        + " THEN COALESCE((SELECT MAX(p.priority) FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+        "WHERE l.child_id = tasks.id AND p.status != 'archived' "
+        f"AND (p.delivery_type = 'operation' OR {chamado('p')}) {cancelled}), 0) ELSE 0 END)"
     )
 
 
