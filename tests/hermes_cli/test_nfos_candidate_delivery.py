@@ -16,9 +16,6 @@ TREE='c'*40
 def delivery(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path/'kanban.db'))
-    # Repositório fixture sem Git real: a candidata é um SHA sintético, então o HEAD do worktree é fixado.
-    # A checagem de HEAD tem testes próprios com repositório Git real (test_nfos_effect_candidate_head.py).
-    monkeypatch.setattr(d,'_worktree_head',lambda workspace: A)
     with kb.connect_closing() as conn:
         rid=d.receive_request(conn, source={'platform':'telegram','chat_id':'1','thread_id':'2','message_id':'3'},
             text='Fix accepted layout',project={'board':'pilot','profile':'default','delivery_type':'code','repo_path':str(tmp_path)})
