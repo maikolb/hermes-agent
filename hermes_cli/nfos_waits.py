@@ -82,7 +82,7 @@ def policy(reason):
         # Quem entrega nunca é o Principal nem o motor: o que só eles fariam não é dependência, é trabalho de um card.
         deadline = int(d.MAINTENANCE_DEPENDENCY_HOURS[1] * 3600)
         return dict(executors=('lab', 'card', 'external', 'operator'),
-                    predicates=('card', 'probe', 'lab_receipt', 'lab_status', 'lab_command'),
+                    predicates=('card', 'probe', 'lab_receipt', 'lab_status', 'lab_command', 'git_merged'),
                     holds_decision=True, on_expire='obligation', first_check=0, recheck=d.LAB_WAIT_RECHECK_SECONDS,
                     deadline=deadline, max_attempts=max(1, deadline // d.LAB_WAIT_RECHECK_SECONDS),
                     satisfied=d._dependency_delivered, expired=d._dependency_expired)
@@ -118,7 +118,7 @@ def _checker(kind):
             'card': (_card_delivered, False), 'probe': (d._dependency_probe_check, True),
             'lab_status': (d._lab_status_check, True), 'lab_command': (d._lab_command_check, True),
             'route_open': (_route_open, False), 'human_reply': (_human_reply, False),
-            'process_step': (_process_step, False)}[kind]
+            'process_step': (_process_step, False), 'git_merged': (d._git_merged_check, True)}[kind]
 
 
 def _route_open(conn, wait, budget=None):
@@ -213,7 +213,7 @@ def public(predicate):
 # O que a conferência observou e pode sair da tabela. Texto de erro de sonda fica só na linha da espera.
 PUBLIC_EVIDENCE = ('card_status', 'completed_at', 'effect_id', 'candidate', 'probe_state', 'http_status', 'lab', 'answered',
                    'status', 'queue_reason', 'decision_status', 'action', 'expired_because', 'unreadable', 'checked_at',
-                   'exit')
+                   'exit', 'pr_state', 'merged', 'base_ref', 'merge_commit', 'compare_status')
 
 
 def public_evidence(evidence):
@@ -257,6 +257,13 @@ _SERVICE_NAME = set('abcdefghijklmnopqrstuvwxyz0123456789_-')
 LAB_COMMANDS = {('status',): 0, ('status', '--task'): 1, ('job', 'status'): 1, ('runtime', 'capabilities'): 0,
                 ('runtime', 'result'): 1}
 _LAB_TASK_RX = re.compile(r'[a-z0-9][a-z0-9-]{2,30}\Z')  # o TASK do executor do laboratório (lab_access.py)
+# GIT_MERGED_20261015: o PR (ou o commit) de outro repositório que já conserta o defeito do card. Dono e nome do
+# repositório no formato do GitHub, a base como nome de branch, o commit pelo SHA inteiro: nada disso passa por shell.
+_GIT_REPO_RX = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}/(?!\.\.?\Z)[A-Za-z0-9._-]{1,100}\Z')
+_GIT_BASE_RX = re.compile(r'(?!.*\.\.)(?!.*//)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}\Z')
+_GIT_SHA_RX = re.compile(r'[0-9a-f]{40}\Z')
+GIT_MERGED_SHAPE = ('git_merged needs repo (owner/name), base (the branch the fix must be in) and exactly one of pr (the '
+                    'pull request number) or commit (the full 40-character sha)')
 
 
 def _predicate(reason, spec, value):
@@ -301,6 +308,17 @@ def _predicate(reason, spec, value):
     if kind == 'probe':
         d._validate_probe('dependency', value.get('probe'))
         return {'kind': kind, 'probe': value['probe']}
+    if kind == 'git_merged':
+        repo, base = value.get('repo'), value.get('base')
+        commit = value['commit'].lower() if isinstance(value.get('commit'), str) else value.get('commit')
+        pr = value.get('pr')
+        if (set(value) - {'kind', 'repo', 'base', 'pr', 'commit'} or not isinstance(repo, str) or not _GIT_REPO_RX.fullmatch(repo)
+                or not isinstance(base, str) or not _GIT_BASE_RX.fullmatch(base) or base.endswith(('/', '.', '.lock'))
+                or ('pr' in value) == ('commit' in value)
+                or ('pr' in value and (type(pr) is not int or not 0 < pr < 10 ** 9))
+                or ('commit' in value and (not isinstance(commit, str) or not _GIT_SHA_RX.fullmatch(commit)))):
+            raise d.WorkflowError(GIT_MERGED_SHAPE)
+        return dict({'kind': kind, 'repo': repo, 'base': base}, **({'pr': pr} if 'pr' in value else {'commit': commit}))
     if kind == 'lab_command':
         command = value.get('command')
         # O verbo mais longo que casa: `status --task SLUG` não é `status` com dois identificadores a mais.

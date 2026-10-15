@@ -2421,7 +2421,7 @@ def _reminder_gap(ctx):
 
 DEPENDENCY_SHAPE = (
     'dependency needs executor {"kind": "lab|card|external|operator", "name": "who delivers it"}, need (what is missing) and, '
-    'whenever a fact can be checked by code, check (card, probe, lab_status, lab_receipt or lab_command): the runtime '
+    'whenever a fact can be checked by code, check (card, probe, lab_status, lab_receipt, lab_command or git_merged): the runtime '
     'verifies it by itself and ends the pause. "owner" as free text is no longer a dependency: it did not say who delivers. '
     'What only the Principal, this runtime or the project owner would deliver is not a dependency at all: the card delivers '
     'what fits and closes as a partial delivery, the remainder a mandatory criterion of the follow-up card.')
@@ -3883,8 +3883,14 @@ def _dependency_delivered(conn, wait, evidence, now):
     context['lab_wait'] = dict(context.get('lab_wait') or {}, hold=False, status='entregue', released_at=now)
     conn.execute("UPDATE nfos_decisions SET context=? WHERE id=? AND status='pending'", (_json(context), row['id']))
     subject = str(wait['origin'].get('subject') or '')
-    answer = (f"CONTINUE (runtime do NFOS, dependência entregue): {subject} O fato declarado foi conferido em {stamp}. Retome do "
-              'checkpoint preservado, sem repetir o que já foi feito.')
+    merged = ''
+    if wait['predicate'].get('kind') == 'git_merged':  # GIT_MERGED_20261015: onde está o conserto que o card confere
+        fix = wait['predicate']
+        where = seen.get('merge_commit') or fix.get('commit')
+        merged = (f" O conserto está em {fix['repo']} {fix['base']}" + (f' (commit {where})' if where else '')
+                  + ': confira o caso no código mesclado antes de construir candidata própria.')
+    answer = (f"CONTINUE (runtime do NFOS, dependência entregue): {subject} O fato declarado foi conferido em {stamp}.{merged} "
+              'Retome do checkpoint preservado, sem repetir o que já foi feito.')
     resolve_decision(conn, row['id'], action='continue', answer=answer, author='Principal')
     conn.execute('UPDATE nfos_workflows SET next_action=?,updated_at=? WHERE task_id=?',
                  (f'Dependência entregue em {stamp}: {subject} Retome do checkpoint preservado.'[:400], now, wait['task_id']))
@@ -3897,6 +3903,8 @@ _DEPENDENCY_EXPIRED = {
     'dependency_closed_without_effect': 'o card esperado fechou sem o efeito pedido',
     'dependency_missing': 'o card esperado não existe mais',
     'not_ready': 'o fato ficou verdadeiro, mas o executor anterior deste card não terminou de sair',
+    'pr_closed_unmerged': 'o PR esperado foi fechado sem merge',  # GIT_MERGED_20261015
+    'merged_into_other_base': 'o PR esperado foi mesclado em outra base, não na declarada',
 }
 
 
@@ -3925,6 +3933,56 @@ def _lab_command_check(conn, wait, budget=None):
     except (OSError, subprocess.SubprocessError):
         return None, {}
     return done.returncode == predicate['exit'], {'exit': done.returncode}
+
+
+# GIT_MERGED_20261015: em 15/10/2026 cards de causa do concursa-ai ocupavam as duas vagas de worker construindo candidata
+# para defeitos que PRs do repositório do Concursa já consertavam (t_45ae522c com 17 execuções e 10,6 h, t_cc5e5d09 com
+# 16 e 12,9 h). A pausa passa a esperar o merge desses PRs. A leitura é do `gh` do processo do despacho, o mesmo que o
+# guarda de PR ativo já usa (kanban_db._gh_pr_json), só GET e sem shell.
+def _gh_api(path):
+    """GET na API do GitHub. (dados, None) ou (None, o que impediu a leitura): sem rede, sem acesso, 404 ou resposta que
+    não é um objeto JSON."""
+    import subprocess
+    try:
+        done = subprocess.run(['gh', 'api', '--method', 'GET', path], capture_output=True, text=True,
+                              timeout=LAB_WAIT_READ_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, type(exc).__name__
+    if done.returncode != 0:
+        lines = (done.stderr or done.stdout or '').strip().splitlines()
+        return None, (lines[-1] if lines else f'gh exited {done.returncode}')[:160]
+    try:
+        data = json.loads(done.stdout or '')
+    except ValueError:
+        return None, 'gh answered without JSON'
+    return (data, None) if isinstance(data, dict) else (None, 'gh answered without a JSON object')
+
+
+def _git_merged_check(conn, wait, budget=None):
+    """O PR declarado está mesclado na base declarada, ou o commit declarado já está nela? Leitura que falhou é None: a
+    espera conta ilegível e segue até o prazo, nunca libera. PR fechado sem merge, ou mesclado em outra base, não fica
+    mais verdadeiro: a espera vence na hora e a decisão volta ao Principal."""
+    predicate = wait['predicate']
+    repo, base = predicate['repo'], predicate['base']
+    if 'pr' in predicate:
+        data, error = _gh_api(f"repos/{repo}/pulls/{predicate['pr']}")
+        if data is None or not isinstance(data.get('merged'), bool):
+            return None, {'gh_error': error or 'pull request without merged state'}
+        seen = {'pr_state': str(data.get('state') or ''), 'merged': data['merged'],
+                'base_ref': str((data.get('base') or {}).get('ref') or '')}
+        if data['merged'] and data.get('merge_commit_sha'):
+            seen['merge_commit'] = str(data['merge_commit_sha'])[:40]
+        if not data['merged']:
+            return False, dict(seen, **({'final': 'pr_closed_unmerged'} if seen['pr_state'] == 'closed' else {}))
+        if seen['base_ref'] != base:
+            return False, dict(seen, final='merged_into_other_base')
+        return True, seen
+    data, error = _gh_api(f"repos/{repo}/compare/{base}...{predicate['commit']}")
+    status = str((data or {}).get('status') or '')
+    if status not in ('identical', 'behind', 'ahead', 'diverged'):
+        return None, {'gh_error': error or 'compare without a known status'}
+    # behind: a base já contém o commit e foi além; identical: a base é o próprio commit.
+    return status in ('identical', 'behind'), {'compare_status': status}
 
 
 def _lab_queue_check(conn, wait, budget=None):

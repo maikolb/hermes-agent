@@ -579,6 +579,10 @@ Progress discipline applies to normal and urgent cards:
   performed by an authorized operator. Attribute that execution to its real actor.
   Repeat only the missing or contradicted check, never a mutation merely to obtain
   your own copy of an existing proof. Existing useful work keeps the card's urgency.
+- When a comment or decision says a pull request already fixes what this card builds,
+  do not build a parallel candidate: raise an impediment naming the repository, the
+  pull request and its base. The Principal holds the card until that merge and the
+  card resumes to check the case in the merged code (GIT_MERGED_20261015).
 - Run `probe --criterion` only when that criterion has a configured probe in the
   saved spec. Otherwise attach the actual behavioral evidence to the report;
   absence of a configured probe does not call for an unrelated probe or a new spec.
@@ -982,7 +986,13 @@ criterion, {"kind":"lab_status","services":["web"]} for the laboratory apps this
 needs, {"kind":"lab_receipt","receipt":"<request id>"} for a laboratory request,
 {"kind":"lab_command","command":["job","status","<job id>"],"exit":0} for a read-only
 laboratory command (status, job status, runtime capabilities, runtime result) and the
-exit code that proves the fact. When the fact becomes true the runtime ends the pause
+exit code that proves the fact, {"kind":"git_merged","repo":"owner/name","pr":123,
+"base":"main"} for a pull request merged into that base ("commit":"<full sha>" instead
+of "pr" for a commit the base must contain). A pull request of the project repository
+that already fixes what a card is building is such a dependency (GIT_MERGED_20261015):
+pause the card with pause-for-repair and declare it on the repair; the card resumes
+when the merge is confirmed and checks the case in the merged code instead of
+building a parallel candidate. When the fact becomes true the runtime ends the pause
 and returns the card to the queue without waking you; after 24 hours without it the
 decision comes back to you once, and the same dependency is not accepted again on that
 card.

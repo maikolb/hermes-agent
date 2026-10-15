@@ -143,6 +143,11 @@ def test_dependency_on_a_confirmed_effect_of_another_card(paused):
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['status', '--task', 'cs0028b', 'x'], 'exit': 0}},
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'lab_command', 'command': ['status', 'cs0028b'], 'exit': 0}},
     {'executor': LAB, 'need': NEED, 'check': {'kind': 'event', 'name': 'nfos_wait_declared'}},
+    {'executor': CARD, 'need': NEED, 'check': {'kind': 'git_merged', 'repo': 'concursa-ai/concursa.ai', 'base': 'main'}},
+    {'executor': CARD, 'need': NEED, 'check': {'kind': 'git_merged', 'repo': 'concursa-ai/concursa.ai', 'base': 'main',
+                                               'pr': 555, 'commit': 'cb4c6ccbc1347957aa7978739dbe280a09fd6e88'}},
+    {'executor': CARD, 'need': NEED, 'check': {'kind': 'git_merged', 'repo': 'concursa-ai/concursa.ai; rm -rf /', 'base': 'main', 'pr': 555}},
+    {'executor': CARD, 'need': NEED, 'check': {'kind': 'git_merged', 'repo': 'concursa-ai/concursa.ai', 'base': 'main', 'commit': 'cb4c6cc'}},
 ])
 def test_dependency_the_runtime_could_not_check_or_nobody_can_deliver_is_refused(paused, dependency):
     conn, task, did, _ = paused
@@ -465,3 +470,120 @@ def test_principal_is_told_how_to_declare_a_fact_the_runtime_checks():
     assert '"check"' in text and 'the fact the runtime verifies by itself' in text
     assert '{"kind":"card","task_id":"t_..."}' in text and '"kind":"lab_status","services":["web"]' in text
     assert 'ends the pause and returns the card to the queue without waking you' in text
+
+
+# GIT_MERGED_20261015: em 15/10/2026 cards de causa do concursa-ai construíam candidata em paralelo a PRs do repositório do
+# Concursa que já consertavam o mesmo defeito (t_45ae522c com 17 execuções e 10,6 h, t_cc5e5d09 com 16 e 12,9 h). A pausa
+# espera o merge do PR e o card volta para conferir o caso no código mesclado.
+REPO = 'concursa-ai/concursa.ai'
+MERGE_SHA = 'cb4c6ccbc1347957aa7978739dbe280a09fd6e88'
+SESSION = {'kind': 'external', 'name': 'sessão mestra do Concursa'}
+
+
+def _github(monkeypatch, answers):
+    """O `gh api` do processo do despacho, roteirizado: cada leitura consome a próxima resposta (dict é o JSON que o GitHub
+    devolve; int é a saída do gh sem JSON; None é o gh que não terminou no tempo)."""
+    import subprocess
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((list(argv), kwargs.get('shell', False)))
+        answer = answers[min(len(calls), len(answers)) - 1]
+        if answer is None:
+            raise subprocess.TimeoutExpired(argv, kwargs.get('timeout'))
+        if isinstance(answer, int):
+            return subprocess.CompletedProcess(argv, answer, stdout='', stderr='gh: Not Found (HTTP 404)')
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(answer), stderr='')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    return calls
+
+
+def _pr(state, merged, base='main'):
+    return {'state': state, 'merged': merged, 'base': {'ref': base}, 'merge_commit_sha': MERGE_SHA if merged else None}
+
+
+def test_merged_pull_request_ends_the_pause_and_the_card_checks_the_merged_code(paused, monkeypatch):
+    conn, task, did, advance = paused
+    calls = _github(monkeypatch, [_pr('open', False), 1, None, _pr('closed', True)])
+    _declare(conn, did, {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main'}, executor=SESSION)
+    wait = waits.open_for_decision(conn, did)
+    assert wait['predicate'] == {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main'} and wait['executor'] == SESSION
+    before = len(_requests(conn, task, did))
+    advance()
+    wait = waits.open_for_decision(conn, did)
+    assert (wait['evidence']['pr_state'], wait['evidence']['merged']) == ('open', False) and wait['attempts'] == 1
+    advance()
+    advance()
+    wait = waits.open_for_decision(conn, did)
+    assert wait['evidence']['unreadable'] == 2, 'gh sem resposta (404, tempo esgotado) é ilegível, não verdadeiro'
+    assert repair.maintenance_pause_pending(conn, task.id) and kb.get_task(conn, task.id).status == 'blocked'
+    advance()
+    assert calls == [(['gh', 'api', '--method', 'GET', f'repos/{REPO}/pulls/555'], False)] * 4, 'só GET, em lista e sem shell'
+    done = waits.get(conn, wait['id'])
+    assert (done['status'], done['evidence']['merged'], done['evidence']['merge_commit']) == ('satisfied', True, MERGE_SHA)
+    row = d.get_decision(conn, did)
+    assert row['status'] == 'resolved' and MERGE_SHA in row['answer'] and 'confira o caso no código mesclado' in row['answer']
+    assert not repair.maintenance_pause_pending(conn, task.id) and kb.get_task(conn, task.id).status == 'ready'
+    assert 'git_merged' in ' '.join(_pause(conn, task)['repair_evidence'])
+    assert len(_requests(conn, task, did)) == before, 'ninguém foi acordado para isso'
+
+
+def test_commit_already_in_the_base_ends_the_pause(paused, monkeypatch):
+    conn, task, did, advance = paused
+    calls = _github(monkeypatch, [{'status': 'ahead'}, {'status': 'diverged'}, {'message': 'Not Found'}, {'status': 'behind'}])
+    _declare(conn, did, {'kind': 'git_merged', 'repo': REPO, 'commit': MERGE_SHA.upper(), 'base': 'main'}, executor=SESSION)
+    assert waits.open_for_decision(conn, did)['predicate']['commit'] == MERGE_SHA
+    for _ in range(3):
+        advance()
+    wait = waits.open_for_decision(conn, did)
+    assert wait['evidence']['compare_status'] == 'diverged' and wait['evidence']['unreadable'] == 1
+    assert repair.maintenance_pause_pending(conn, task.id), 'commit fora da base, ou resposta sem status, não libera'
+    advance()
+    assert calls[-1] == (['gh', 'api', '--method', 'GET', f'repos/{REPO}/compare/main...{MERGE_SHA}'], False)
+    assert d.get_decision(conn, did)['status'] == 'resolved' and not repair.maintenance_pause_pending(conn, task.id)
+
+
+@pytest.mark.parametrize('answer, cause', [
+    (_pr('closed', False), 'o PR esperado foi fechado sem merge'),
+    (_pr('closed', True, base='develop'), 'o PR esperado foi mesclado em outra base'),
+])
+def test_pull_request_that_will_not_reach_the_base_returns_the_decision_at_once(paused, monkeypatch, answer, cause):
+    conn, task, did, advance = paused
+    _github(monkeypatch, [answer])
+    _declare(conn, did, {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main'}, executor=SESSION)
+    wait = waits.open_for_decision(conn, did)
+    before = len(_requests(conn, task, did))
+    advance()
+    closed = waits.get(conn, wait['id'])
+    assert (closed['status'], closed['outcome']) == ('expired', 'returned_to_obligation')
+    assert len(_requests(conn, task, did)) == before + 1 and cause in _requests(conn, task, did)[-1]['question']
+    assert repair.maintenance_pause_pending(conn, task.id), 'a pausa segue: o conserto não chegou à base'
+
+
+@pytest.mark.parametrize('check', [
+    {'kind': 'git_merged', 'repo': REPO, 'pr': '555', 'base': 'main'},
+    {'kind': 'git_merged', 'repo': REPO, 'pr': True, 'base': 'main'},
+    {'kind': 'git_merged', 'repo': REPO, 'pr': 0, 'base': 'main'},
+    {'kind': 'git_merged', 'repo': REPO, 'pr': 555},
+    {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main...x'},
+    {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': '-main'},
+    {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main.lock'},
+    {'kind': 'git_merged', 'repo': '../concursa.ai', 'pr': 555, 'base': 'main'},
+    {'kind': 'git_merged', 'repo': 'concursa-ai/..', 'pr': 555, 'base': 'main'},
+    {'kind': 'git_merged', 'repo': 'https://github.com/concursa-ai/concursa.ai', 'pr': 555, 'base': 'main'},
+    {'kind': 'git_merged', 'repo': REPO, 'pr': 555, 'base': 'main', 'state': 'merged'},
+    {'kind': 'git_merged', 'repo': REPO, 'commit': 'g' * 40, 'base': 'main'},
+])
+def test_pull_request_fact_takes_only_a_repository_a_base_and_one_pr_or_commit(check):
+    with pytest.raises(d.WorkflowError, match='git_merged needs repo'):
+        waits._predicate('external_dependency', waits.policy('external_dependency'), check)
+
+
+def test_principal_and_worker_are_told_how_a_merged_pull_request_holds_the_card():
+    principal = ' '.join(runtime.principal_instructions().split())
+    assert '{"kind":"git_merged","repo":"owner/name","pr":123, "base":"main"}' in principal
+    assert 'pause the card with pause-for-repair and declare it on the repair' in principal
+    worker = ' '.join(runtime.worker_instructions().split())
+    assert 'do not build a parallel candidate: raise an impediment naming the repository' in worker
+    assert 'git_merged' in d.DEPENDENCY_SHAPE
