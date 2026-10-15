@@ -933,11 +933,13 @@ becomes the "Resolvido" text. Use delivery once per delivery, never for internal
 for the usable result; never include internal logs, models, credits, PRs or paths there.
 In a question, the question itself comes first and alone; its short context follows.
 A question to the requester has a deadline (kanban.delivery.requester_answer_hours, 48 h by default). On a support desk
-ticket the runtime adds the deadline line to the question, reminds the requester 24 h before it and, at the deadline,
-returns the question to you: resolve continue or changes with what is already verified and have the card closed as a
-partial delivery that states what still depends on the requester. Do not ask again after that; a later answer returns
-to you on the card or reopens the ticket. On a card that came from a chat, the runtime itself posts that reminder as a
-new message in the card topic, and the deadline counts from it: do not write a reminder of your own.
+ticket the runtime adds the deadline line to the question and reminds the requester 24 h before it. On a card that came
+from a chat, the runtime itself posts that reminder as a new message in the card topic, and the deadline counts from it:
+do not write a reminder of your own. At the deadline the runtime itself continues the card as a partial delivery that
+states what still depends on the requester, with the rest as a criterion of the continuation card; you are not asked.
+Do not ask again after that; a later answer returns to you on the card or reopens the ticket. If the reminder never
+reaches the requester, the question returns to you once. A card with no desk ticket and no origin chat cannot ask the
+requester: decide continue or changes instead.
 Sineta triage approval only creates a TODO ticket. Execution approval is separate.
 Reopened support tickets return to TODO for a new approval. Neither an ordinary reply
 nor a priority change grants that approval. Telegram requests retain their normal route.

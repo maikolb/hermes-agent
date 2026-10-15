@@ -251,5 +251,15 @@
   {"pr": 346, "file": "hermes_cli/nfos_delivery.py", "text": "_process=nfos_process.guard(conn,task_id,effect=operation,effect_candidate=candidate if staging else None)"},
   {"pr": 346, "file": "hermes_cli/nfos_delivery.py", "text": "raise WorkflowError('Staging already contains this candidate: a staging effect publishes the exact new commit, not one already in staging')"},
   {"pr": 346, "file": "hermes_cli/nfos_process.py", "text": "if effect_candidate and effect_candidate != (engine.get(\"candidate_sha\") or engine.get(\"integrated_sha\")):"},
-  {"pr": 346, "file": "hermes_cli/nfos_process.py", "text": "engine[\"effect_candidate\"] = effect_candidate"}
+  {"pr": 346, "file": "hermes_cli/nfos_process.py", "text": "engine[\"effect_candidate\"] = effect_candidate"},
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "REQUESTER_WAIT_20261014"},
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def wait_policy():"},
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def _continue_partial("},
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "raise d.WorkflowError(NO_CHANNEL_REFUSAL)"},
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def _give_up(conn, wait, evidence, reason='no_warning_channel'):"},
+  {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "'human_reply': (_human_reply, False)"},
+  {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "planned = spec['plan'](conn, wait, evidence, now)"},
+  {"pr": 343, "file": "hermes_cli/nfos_waits.py", "text": "def wake(conn, wait_id, now=None):"},
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "PREVIOUS_RELEASE_RECORD_20261014"},
+  {"pr": 343, "file": "hermes_cli/nfos_requester_deadline.py", "text": "def continuation_criterion(recipient, question):"}
 ]
