@@ -13049,8 +13049,9 @@ def _interrupted_by_gateway_restart(row, kind: str, gateway_started) -> bool:
 
 URGENT_PRIORITY = 100  # URGENT_20260910
 
-# CAUSE_URGENCY_20261015: o card de causa (code) herda a maior prioridade dos casos (operation) ligados a ele
-# (task_links: o caso é o pai). Espelha project_workflow.enforce._effective_priority; caso arquivado não conta.
+# CAUSE_URGENCY_20261015: o card de causa (code sem chamado) herda a maior prioridade dos casos (chamado do portal ou operation)
+# ligados a ele
+# (task_links: o caso é o pai). Espelha project_workflow.enforce._effective_priority; arquivado e cancelado não contam.
 def _effective_priority_sql(conn: sqlite3.Connection) -> str:
     """Expressão SQL da prioridade efetiva, a mesma regra de project_workflow.enforce._effective_priority: o pai é caso
     (chamado do portal, de qualquer delivery_type, ou operation); o filho é causa (code sem chamado); arquivado e
