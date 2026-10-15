@@ -39,3 +39,18 @@ def test_archived_case_or_a_case_card_does_not_lend_priority(tmp_path):
     conn.execute("UPDATE tasks SET status='archived' WHERE id='t_caso'")
     conn.commit()
     assert kb.effective_priority(conn, "t_causa") == 0
+
+
+def test_cancelled_case_does_not_lend_priority(tmp_path):
+    conn = kb.connect(tmp_path / "k.db")
+    for tid in ("t_c1", "t_c2", "t_c3"):
+        _card(conn, tid, "operation", 100, status="done")
+        _card(conn, "causa_" + tid, "code", 0)
+        conn.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (tid, "causa_" + tid))
+    conn.execute("UPDATE tasks SET title='[CANCELADO] pedido' WHERE id='t_c1'")
+    conn.execute("INSERT INTO nfos_workflows (task_id, request_id, stage, spec_revision, next_action, state_json, updated_at) "
+                 "VALUES ('t_c2', NULL, 'cancelled', 0, '', '{}', 1)")
+    conn.commit()
+    assert kb.effective_priority(conn, "causa_t_c1") == 0, "título [CANCELADO]"
+    assert kb.effective_priority(conn, "causa_t_c2") == 0, "estágio cancelled"
+    assert kb.effective_priority(conn, "causa_t_c3") == 100, "caso vivo (done) continua emprestando"

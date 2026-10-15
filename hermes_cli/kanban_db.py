@@ -13051,17 +13051,26 @@ URGENT_PRIORITY = 100  # URGENT_20260910
 
 # CAUSE_URGENCY_20261015: o card de causa (code) herda a maior prioridade dos casos (operation) ligados a ele
 # (task_links: o caso é o pai). Espelha project_workflow.enforce._effective_priority; caso arquivado não conta.
-_EFFECTIVE_PRIORITY_SQL = (
-    "MAX(COALESCE(priority, 0), COALESCE((SELECT MAX(p.priority) FROM task_links l JOIN tasks p ON p.id = l.parent_id "
-    "WHERE l.child_id = tasks.id AND tasks.delivery_type = 'code' AND p.delivery_type = 'operation' "
-    "AND p.status != 'archived'), 0))"
-)
+def _effective_priority_sql(conn: sqlite3.Connection) -> str:
+    """Expressão SQL da prioridade efetiva. Caso cancelado ([CANCELADO] no título ou estágio cancelled) não empresta."""
+    cancelled = "AND p.title NOT LIKE '[CANCELADO]%'"
+    try:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nfos_workflows'").fetchone():
+            cancelled += (" AND NOT EXISTS (SELECT 1 FROM nfos_workflows w WHERE w.task_id = p.id "
+                          "AND w.stage = 'cancelled')")
+    except Exception:
+        pass
+    return (
+        "MAX(COALESCE(priority, 0), COALESCE((SELECT MAX(p.priority) FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+        "WHERE l.child_id = tasks.id AND tasks.delivery_type = 'code' AND p.delivery_type = 'operation' "
+        f"AND p.status != 'archived' {cancelled}), 0))"
+    )
 
 
 def effective_priority(conn: sqlite3.Connection, task_id: str) -> int:
     """Prioridade com que o despachante enfileira o card: a própria, ou a do caso urgente ligado à causa."""
     try:
-        row = conn.execute(f"SELECT {_EFFECTIVE_PRIORITY_SQL} FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        row = conn.execute(f"SELECT {_effective_priority_sql(conn)} FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return int(row[0] or 0) if row else 0
     except Exception:
         row = conn.execute("SELECT priority FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -13075,7 +13084,7 @@ def _urgent_burst_slots(conn: sqlite3.Connection) -> int:
     try:
         rows = conn.execute(
             "SELECT id FROM tasks WHERE status IN ('ready', 'review') AND task_role = 'work' "
-            f"AND claim_lock IS NULL AND {_EFFECTIVE_PRIORITY_SQL} >= ?", (URGENT_PRIORITY,),
+            f"AND claim_lock IS NULL AND {_effective_priority_sql(conn)} >= ?", (URGENT_PRIORITY,),
         ).fetchall()
         # URGENT2_20260910: urgente com decisão aberta não é despachável (OPEN_DECISION_SKIP); não gera vaga
         _open = globals().get("_nfos_decision_open")
@@ -13083,7 +13092,7 @@ def _urgent_burst_slots(conn: sqlite3.Connection) -> int:
         if not waiting:
             return 0
         running = conn.execute(
-            f"SELECT COUNT(*) FROM tasks WHERE status = 'running' AND {_EFFECTIVE_PRIORITY_SQL} >= ?", (URGENT_PRIORITY,),
+            f"SELECT COUNT(*) FROM tasks WHERE status = 'running' AND {_effective_priority_sql(conn)} >= ?", (URGENT_PRIORITY,),
         ).fetchone()[0]
         return 1 if running == 0 else 0
     except Exception:
