@@ -276,5 +276,11 @@
   {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "spec.get('closed_states', ('done', 'archived'))"},
   {"pr": 344, "file": "hermes_cli/goals.py", "text": "if decision['id'] != finalize_question:"},
   {"pr": 344, "file": "hermes_cli/goals.py", "text": "return {\"outcome\": \"held_after_finalize\", \"turns_used\": turns_used,"},
-  {"pr": 344, "file": "cli.py", "text": "if outcome['outcome'] in ('awaiting_decision', 'held_after_finalize'):"}
+  {"pr": 344, "file": "cli.py", "text": "if outcome['outcome'] in ('awaiting_decision', 'held_after_finalize'):"},
+  {"pr": 351, "file": "hermes_cli/nfos_waits.py", "text": "'git_merged': (d._git_merged_check, True)"},
+  {"pr": 351, "file": "hermes_cli/nfos_delivery.py", "text": "def _git_merged_check(conn, wait, budget=None):"},
+  {"pr": 351, "file": "hermes_cli/nfos_runtime.py", "text": "GIT_MERGED_20261015"},
+  {"pr": 351, "file": "hermes_cli/nfos_runtime.py", "text": "check that pull request first: `gh pr view <n> --repo <owner/name> --json"},
+  {"pr": 351, "file": "hermes_cli/nfos_workspace_repair.py", "text": "{\"kind\":\"git_merged\",\"repo\":\"dono/nome\",\"pr\":123,\"base\":\"main\"} para o PR que já conserta o que o "},
+  {"pr": 351, "file": "hermes_cli/nfos_delivery.py", "text": "não consegui ler o fato nas últimas {unread} conferências"}
 ]
