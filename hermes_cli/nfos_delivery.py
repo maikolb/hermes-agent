@@ -5977,6 +5977,30 @@ def _staging_contains(workspace, candidate):
     return False
 
 
+# EFFECT_CANDIDATE_HEAD_20261015: efeito que publica o worktree do card declara a candidata que está no HEAD dele.
+PUBLISHES_CARD_WORKTREE={'pr','homolog','staging_pr'}
+
+
+def _worktree_head(workspace):
+    """HEAD do worktree do card; '' quando o git não responde. Sem HEAD o efeito é recusado."""
+    import subprocess
+    try:
+        done=subprocess.run(['git','-C',str(workspace),'rev-parse','--verify','--quiet','HEAD'],capture_output=True,text=True,timeout=12,check=False)
+    except (OSError,subprocess.SubprocessError):
+        return ''
+    return done.stdout.strip() if done.returncode==0 else ''
+
+
+def _require_candidate_is_worktree_head(task, operation, candidate):
+    if operation not in PUBLISHES_CARD_WORKTREE or not task.workspace_path:
+        return
+    head=_worktree_head(Path(str(task.workspace_path)))
+    if not head:
+        raise WorkflowError('Effect publishes the card worktree, but its HEAD cannot be read: no candidate is proven')
+    if candidate!=head:
+        raise WorkflowError('Effect candidate must be the exact HEAD of the card worktree (%s); it publishes that worktree, not %s' % (head,candidate))
+
+
 def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
     if operation not in {'homolog','pr','merge','deploy','staging_pr','staging_merge','repair'} or not target or not candidate:  # RESULT_PROBE_20260911: repair = mutação de dado
         raise WorkflowError('External effect needs operation, destination and exact candidate')
@@ -6012,6 +6036,7 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
         _decided={'process':nfos_process.summary(_process)} if _process else {}
         _process_event=None
         if task.delivery_type=='code' and operation!='repair':
+            _require_candidate_is_worktree_head(task,operation,candidate)
             from hermes_cli.nfos_destination import destination, review_only
             scope=destination(conn,task_id)
             if review_only(scope) and operation != 'pr':
