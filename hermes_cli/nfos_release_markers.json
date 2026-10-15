@@ -267,6 +267,13 @@
   {"pr": 345, "file": "hermes_cli/kanban_db.py", "text": "hold = nfos_waits.card_held(conn, task_id) or nfos_process_hold.claim_hold(conn, task)"},
   {"pr": 345, "file": "hermes_cli/kanban_db.py", "text": "_GOAL_LOOP_QUESTIONS = ("},
   {"pr": 345, "file": "hermes_cli/nfos_process.py", "text": "\"current_kind\": steps.get(here, {}).get(\"kind\"), \"current_lane\": steps.get(here, {}).get(\"lane\"),"},
+  {"pr": 347, "file": "hermes_cli/nfos_delivery.py", "text": "REMINDER_BACKOFF_20261014"},
+  {"pr": 347, "file": "hermes_cli/nfos_delivery.py", "text": "def _principal_answer_plan(conn, wait, evidence, now):"},
+  {"pr": 347, "file": "hermes_cli/nfos_delivery.py", "text": "PRINCIPAL_ANSWER_UNBOUND_20261014"},
+  {"pr": 347, "file": "hermes_cli/nfos_delivery.py", "text": "_principal_decided(conn,args.decision)  # REMINDER_BACKOFF_20261014"},
+  {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "if reason == 'principal_answer':"},
+  {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "planned['after'](conn)"},
+  {"pr": 347, "file": "hermes_cli/nfos_waits.py", "text": "spec.get('closed_states', ('done', 'archived'))"},
   {"pr": 344, "file": "hermes_cli/goals.py", "text": "if decision['id'] != finalize_question:"},
   {"pr": 344, "file": "hermes_cli/goals.py", "text": "return {\"outcome\": \"held_after_finalize\", \"turns_used\": turns_used,"},
   {"pr": 344, "file": "cli.py", "text": "if outcome['outcome'] in ('awaiting_decision', 'held_after_finalize'):"}
