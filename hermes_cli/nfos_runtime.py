@@ -419,10 +419,35 @@ def reconcile_runtime(conn, *, worker_exit_grace_seconds=15, lab_sweep=True):
                      'saved_output':'nfos_tool_chunks in this same board','retry':'Read partial output and external destination before repeating'})
 
 
+def _profile_ready_or_requeue(conn, request_id, token):
+    """SPAWN_GUARD_20261016: the launch guard runs BEFORE the card is attached. A refusal puts the request back to
+    pending with the reason in last_error (tried again next tick); nothing is attached, no card is claimed."""
+    row=delivery.get_request(conn,request_id)
+    if not row or row['claim_token']!=token or row['task_id']:
+        return True  # not a fresh start: bootstrap_card owns the ownership checks
+    try:
+        project=json.loads(row['payload'])['project']
+        profile=project['profile']
+        if project.get('existing_task_id'):
+            profile=kb._resolve_executable_assignee(profile)
+        from hermes_cli.profiles import normalize_profile_name
+        kb._assert_worker_profile_ready(normalize_profile_name(profile))
+    except kb.WorkerProfileRefused as exc:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE nfos_requests SET status='pending',claim_token=NULL,worker_pid=NULL,last_error=? WHERE id=? AND status='starting' AND claim_token=?",
+                         (str(exc)[:500],request_id,token))
+        return False
+    except Exception:  # noqa: BLE001 — a malformed payload is bootstrap_card's error to report
+        return True
+    return True
+
+
 def bootstrap(*, db, board, request, token):
     os.environ['HERMES_KANBAN_DB']=str(db)
     os.environ['HERMES_KANBAN_BOARD']=board
     with kb.connect_closing(Path(db)) as conn:
+        if not _profile_ready_or_requeue(conn,request,token):
+            return
         task=delivery.bootstrap_card(conn,request,token,pid=os.getpid())
         if task.workspace_kind=='worktree':
             workspace,branch=kb._resolve_worktree_workspace(task,board=board,conn=conn)

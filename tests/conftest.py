@@ -605,9 +605,9 @@ def _isolate_hermes_home(_hermetic_environment):
 def _skip_spawn_profile_guard(request, monkeypatch):
     """SPAWN_GUARD_20261016: tests that fake a worker launch do not build a full profile (config.yaml, plugins).
 
-    The guard itself is exercised for real by tests/hermes_cli/test_kanban_spawn_guard.py.
+    The guard itself is exercised for real (inside dispatch_once too) by tests marked real_spawn_guard.
     """
-    if "spawn_guard" in request.module.__name__:
+    if request.node.get_closest_marker("real_spawn_guard"):
         return
     try:
         from hermes_cli import kanban_db

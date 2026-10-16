@@ -15337,6 +15337,14 @@ def _dispatch_once_locked(
                         {"reason": guard_reason},
                     )
             continue
+        if not dry_run and spawn_fn is None:  # SPAWN_GUARD_20261016: a refusal is a hold, not a spawn failure
+            try:
+                from hermes_cli.profiles import normalize_profile_name
+                _assert_worker_profile_ready(normalize_profile_name(row_assignee))
+            except WorkerProfileRefused as exc:
+                _note_launch_refusal(conn, row["id"], str(exc))
+                result.claim_held.append((row["id"], "profile_refused"))
+                continue
         if dry_run:
             result.spawned.append((row["id"], row_assignee, ""))
             spawned += 1
@@ -15559,6 +15567,14 @@ def _dispatch_once_locked(
                         {"reason": guard_reason},
                     )
             continue
+        if not dry_run and spawn_fn is None:  # SPAWN_GUARD_20261016: a refusal is a hold, not a spawn failure
+            try:
+                from hermes_cli.profiles import normalize_profile_name
+                _assert_worker_profile_ready(normalize_profile_name(review_assignee))
+            except WorkerProfileRefused as exc:
+                _note_launch_refusal(conn, row["id"], str(exc))
+                result.claim_held.append((row["id"], "profile_refused"))
+                continue
         if dry_run:
             result.spawned.append((row["id"], review_assignee, ""))
             spawned += 1
@@ -16021,8 +16037,9 @@ def _worker_resume_context(task: Task, home: str, *, board=None) -> tuple[Option
 
 
 _PLUGIN_PROBE = """
-import json
+import json, sys
 from hermes_cli.plugins import discover_plugins, get_plugin_manager, _get_enabled_plugins
+skip = set(json.loads(sys.argv[1]))
 discover_plugins()
 rows = {}
 for p in get_plugin_manager().list_plugins():
@@ -16031,17 +16048,39 @@ for p in get_plugin_manager().list_plugins():
 def ok(n):
     p = rows.get(n)
     return bool(p) and (p['enabled'] or str(p['error'] or '').startswith('exclusive plugin'))
-print(json.dumps([n for n in sorted(_get_enabled_plugins() or ()) if not ok(n)]))
+print(json.dumps([n for n in sorted(_get_enabled_plugins() or ()) if n not in skip and not ok(n)]))
 """
-_PROFILE_READY_CACHE: dict[tuple, float] = {}
+_PROFILE_REFUSED: dict[tuple, tuple[float, str]] = {}
+_PROBE_TIMEOUT_SECONDS = 30  # measured 5.6-8 s cold per probe on Windows; 4x headroom
+
+
+class WorkerProfileRefused(ValueError):
+    """The launch guard refused a worker. A precondition, not a spawn failure: it never counts toward
+    ``failure_limit`` and never blocks the card; the card stays in its lane and is tried again."""
+
+
+def _profile_state_key(home: Path, cfg_bytes: bytes) -> str:
+    """Hash of the profile config and of its own plugin files (path + mtime), so a plugin edit invalidates too."""
+    import hashlib
+
+    h = hashlib.sha256(cfg_bytes)
+    plugins = home / "plugins"
+    if plugins.is_dir():
+        for f in sorted(plugins.rglob("*")):
+            if f.is_file() and "__pycache__" not in f.parts and f.suffix in {".py", ".yaml", ".yml", ".json"}:
+                h.update(f"{f.relative_to(plugins)}:{f.stat().st_mtime_ns}".encode())
+    return h.hexdigest()
 
 
 def _assert_worker_profile_ready(profile: str) -> None:
     """SPAWN_GUARD_20261016: refuse to launch a worker whose profile cannot run its own contract.
 
-    Single launch point (``_default_spawn``), so the dispatcher and every other launcher share it. The profile must
-    be on ``kanban.executor_profiles`` when that list is set, have a readable ``config.yaml``, and every entry of its
-    ``plugins.enabled`` must load (probed in a child process with the profile's home, so the caller registers nothing).
+    Single launch point (``_default_spawn``), plus a pre-claim check in ``dispatch_once`` and in the request
+    bootstrap. The profile must be on ``kanban.executor_profiles`` when that list is set, have a readable
+    ``config.yaml``, and every entry of its ``plugins.enabled`` must load (probed in a child process with the
+    profile's home). The probe result is cached in ``<profile>/.spawn_guard_ok.json`` so separate processes
+    (start-approved, bootstrap) share it. Plugins also in ``plugins.disabled``, and every plugin under
+    ``HERMES_SAFE_MODE=1``, are deliberately off and are not probed. Raises ``WorkerProfileRefused``.
     """
     import subprocess
 
@@ -16050,37 +16089,67 @@ def _assert_worker_profile_ready(profile: str) -> None:
 
     allowlist = _configured_executor_profiles()
     if allowlist is not None and profile not in allowlist:
-        raise ValueError(f"Profile {profile!r} is not an executor on this host (kanban.executor_profiles); worker not started")
+        raise WorkerProfileRefused(f"Profile {profile!r} is not an executor on this host (kanban.executor_profiles); worker not started")
     try:
         home = Path(resolve_profile_env(profile))
     except FileNotFoundError:
-        raise ValueError(f"Profile {profile!r} has no directory on this host; worker not started") from None
+        raise WorkerProfileRefused(f"Profile {profile!r} has no directory on this host; worker not started") from None
     cfg_path = home / "config.yaml"
     try:
-        cfg = fast_safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        cfg_bytes = cfg_path.read_bytes()
+        cfg = fast_safe_load(cfg_bytes.decode("utf-8")) or {}
     except Exception as exc:
-        raise ValueError(f"Profile {profile!r} has no readable config.yaml ({cfg_path}): {exc}; worker not started") from None
+        raise WorkerProfileRefused(f"Profile {profile!r} has no readable config.yaml ({cfg_path}): {exc}; worker not started") from None
     plugins_cfg = cfg.get("plugins") if isinstance(cfg, dict) else None
-    enabled = plugins_cfg.get("enabled") if isinstance(plugins_cfg, dict) else None
-    if not enabled:
+    plugins_cfg = plugins_cfg if isinstance(plugins_cfg, dict) else {}
+    if not plugins_cfg.get("enabled") or os.environ.get("HERMES_SAFE_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
         return
-    stamp = cfg_path.stat().st_mtime_ns
-    key = (str(home), stamp)
-    if time.time() - _PROFILE_READY_CACHE.get(key, 0.0) < 300:
-        return
+    key = _profile_state_key(home, cfg_bytes)
+    cache_file = home / ".spawn_guard_ok.json"
+    try:
+        hit = json.loads(cache_file.read_text(encoding="utf-8"))
+        if hit.get("key") == key and time.time() - float(hit.get("at", 0)) < 600:
+            return
+    except Exception:  # noqa: BLE001 — no cache, probe
+        pass
+    memo = _PROFILE_REFUSED.get((str(home), key))
+    if memo and time.time() - memo[0] < 30:  # many ready cards of one profile in one tick: one probe
+        raise WorkerProfileRefused(memo[1])
+    skip = sorted(str(n) for n in (plugins_cfg.get("disabled") or ()))
     env = dict(os.environ, HERMES_HOME=str(home))
     try:
-        done = subprocess.run([sys.executable, "-c", _PLUGIN_PROBE], env=env, cwd=str(Path(__file__).resolve().parents[1]),
-                              capture_output=True, text=True, timeout=120)
+        done = subprocess.run([sys.executable, "-c", _PLUGIN_PROBE, json.dumps(skip)], env=env,
+                              cwd=str(Path(__file__).resolve().parents[1]), capture_output=True, text=True,
+                              timeout=_PROBE_TIMEOUT_SECONDS)
         bad = json.loads(done.stdout.strip().splitlines()[-1]) if done.returncode == 0 else None
         detail = done.stderr.strip()[-300:]
     except Exception as exc:
         bad, detail = None, str(exc)
     if bad is None:
-        raise ValueError(f"Could not verify the plugins enabled for profile {profile!r}: {detail}; worker not started")
-    if bad:
-        raise ValueError(f"Plugins enabled for profile {profile!r} do not load: {', '.join(bad)}; worker not started")
-    _PROFILE_READY_CACHE[key] = time.time()
+        msg = f"Could not verify the plugins enabled for profile {profile!r}: {detail}; worker not started"
+    elif bad:
+        msg = f"Plugins enabled for profile {profile!r} do not load: {', '.join(bad)}; worker not started"
+    else:
+        _PROFILE_REFUSED.pop((str(home), key), None)
+        try:
+            cache_file.write_text(json.dumps({"key": key, "at": time.time()}), encoding="utf-8")
+        except OSError:
+            pass
+        return
+    _PROFILE_REFUSED[(str(home), key)] = (time.time(), msg)
+    raise WorkerProfileRefused(msg)
+
+
+def _note_launch_refusal(conn: sqlite3.Connection, task_id: str, reason: str) -> None:
+    """One ``spawn_refused`` event per distinct reason: the same refusal on later ticks adds nothing."""
+    last = conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind != 'heartbeat' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if last and last["kind"] == "spawn_refused" and (json.loads(last["payload"] or "{}")).get("reason") == reason:
+        return
+    with write_txn(conn):
+        _append_event(conn, task_id, "spawn_refused", {"reason": reason})
 
 
 def _default_spawn(

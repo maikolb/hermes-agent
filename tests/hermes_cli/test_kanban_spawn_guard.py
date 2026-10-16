@@ -7,6 +7,8 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 
+pytestmark = pytest.mark.real_spawn_guard
+
 
 def _task(assignee):
     return kb.Task(
@@ -23,7 +25,7 @@ def host(tmp_path, monkeypatch):
     root.joinpath("config.yaml").write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(root))
     monkeypatch.delenv("HERMES_MANAGED_DIR", raising=False)
-    kb._PROFILE_READY_CACHE.clear()
+    kb._PROFILE_REFUSED.clear()
     monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
     launched = []
 
@@ -57,7 +59,7 @@ def test_normal_profile_still_launches(host):
 def test_profile_without_config_is_refused(host):
     spawn, profile, launched, _ = host
     profile("bare", None)
-    with pytest.raises(ValueError, match="no readable config.yaml"):
+    with pytest.raises(kb.WorkerProfileRefused, match="no readable config.yaml"):
         spawn("bare")
     assert not launched
 
@@ -85,3 +87,107 @@ def test_enabled_plugin_that_does_not_load_is_refused(host):
     plugin.joinpath("__init__.py").write_text("def register(ctx):\n    pass\n", encoding="utf-8")
     home.joinpath("config.yaml").write_text("plugins:\n  enabled: [present-plugin]\n", encoding="utf-8")
     assert spawn("plug") == 4242 and len(launched) == 1
+
+
+def _cfg(*lines):
+    return "\n".join(lines) + "\n"
+
+
+PLUG = _cfg("plugins:", "  enabled: [absent-plugin]")
+PRESENT = _cfg("plugins:", "  enabled: [present-plugin]")
+
+
+def _count_probes(monkeypatch):
+    calls = []
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run", lambda cmd, *a, **k: (calls.append(cmd), real_run(cmd, *a, **k))[1])
+    return calls
+
+
+def _present_plugin(home, extra=""):
+    plugin = home / "plugins" / "present-plugin"
+    plugin.mkdir(parents=True, exist_ok=True)
+    plugin.joinpath("plugin.yaml").write_text(_cfg("name: present-plugin", "version: '1'"), encoding="utf-8")
+    plugin.joinpath("__init__.py").write_text(_cfg("def register(ctx):", "    pass") + extra, encoding="utf-8")
+
+
+def test_probe_that_cannot_run_is_refused_fail_closed(host, monkeypatch):
+    spawn, profile, launched, _ = host
+    profile("plug", PRESENT)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("x", 1)))
+    with pytest.raises(kb.WorkerProfileRefused, match="Could not verify"):
+        spawn("plug")
+    assert not launched
+
+
+def test_success_is_cached_across_processes_and_invalidated_by_changes(host, monkeypatch):
+    spawn, profile, launched, _ = host
+    home = profile("plug", PRESENT)
+    _present_plugin(home)
+    calls = _count_probes(monkeypatch)
+    assert spawn("plug") == 4242 and len(calls) == 1
+    kb._PROFILE_REFUSED.clear()  # a new process keeps nothing in memory; only the file persists
+    assert spawn("plug") == 4242 and len(calls) == 1  # file cache hit
+    home.joinpath("config.yaml").write_text(_cfg("plugins:", "  enabled: [present-plugin, absent-plugin]"), encoding="utf-8")
+    with pytest.raises(kb.WorkerProfileRefused, match="absent-plugin"):
+        spawn("plug")
+    assert len(calls) == 2  # config change invalidated it
+    home.joinpath("config.yaml").write_text(PRESENT, encoding="utf-8")
+    kb._PROFILE_REFUSED.clear()
+    assert spawn("plug") == 4242 and len(calls) == 2  # same state as the cached success: still a hit
+    _present_plugin(home, extra="# edit\n")
+    assert spawn("plug") == 4242 and len(calls) == 3  # plugin file change invalidated it
+
+
+def test_safe_mode_and_disabled_plugin_are_not_probed(host, monkeypatch):
+    spawn, profile, launched, _ = host
+    profile("plug", PLUG)
+    profile("off", _cfg("plugins:", "  enabled: [absent-plugin]", "  disabled: [absent-plugin]"))
+    calls = _count_probes(monkeypatch)
+    assert spawn("off") == 4242  # disabled on purpose: off, not broken
+    monkeypatch.setenv("HERMES_SAFE_MODE", "1")
+    assert spawn("plug") == 4242  # operator turned plugins off for this process
+    assert len(launched) == 2 and len(calls) == 1
+
+
+def test_dispatch_once_refusal_keeps_the_card_ready_with_one_event(host, tmp_path):
+    spawn, profile, launched, root = host
+    home = profile("plug", PLUG)
+    kb.init_db()
+    conn = kb.connect()
+    tid = kb.create_task(conn, title="t", assignee="plug")
+    for _ in range(5):
+        res = kb.dispatch_once(conn, failure_limit=2)
+        assert not res.spawned and not res.auto_blocked
+    task = kb.get_task(conn, tid)
+    assert task.status == "ready" and task.consecutive_failures == 0
+    kinds = [r["kind"] for r in conn.execute("SELECT kind FROM task_events WHERE task_id=?", (tid,))]
+    assert kinds.count("spawn_refused") == 1 and "gave_up" not in kinds and "spawn_failed" not in kinds
+    assert not launched
+    # the profile gets fixed: the very next tick launches it
+    _present_plugin(home)
+    home.joinpath("config.yaml").write_text(PRESENT, encoding="utf-8")
+    res = kb.dispatch_once(conn, failure_limit=2)
+    assert [s[0] for s in res.spawned] == [tid] and launched
+
+
+def test_request_bootstrap_refusal_runs_before_the_attach_and_requeues_the_request(host):
+    import json
+
+    from hermes_cli import nfos_runtime
+
+    spawn, profile, launched, _ = host
+    profile("plug", PLUG)
+    kb.init_db()
+    payload = {"project": {"profile": "plug", "delivery_type": "code"}, "source": {}, "text": "do it", "attachments": []}
+    with kb.connect_closing() as conn:
+        conn.execute("INSERT INTO nfos_requests(id,source_key,payload,status,claim_token,created_at) VALUES('r1','s1',?,'starting','tok',1)",
+                     (json.dumps(payload),))
+        conn.commit()
+    nfos_runtime.bootstrap(db=kb.kanban_db_path(), board="default", request="r1", token="tok")
+    with kb.connect_closing() as conn:
+        row = conn.execute("SELECT status, task_id, claim_token, last_error FROM nfos_requests WHERE id='r1'").fetchone()
+        assert (row["status"], row["task_id"], row["claim_token"]) == ("pending", None, None)
+        assert "absent-plugin" in row["last_error"]
+        assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0  # nothing attached, no card claimed
+    assert not launched
