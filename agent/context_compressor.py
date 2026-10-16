@@ -1490,6 +1490,32 @@ def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -
     return tokens
 
 
+def _reasoning_details_are_signed(details: Any) -> bool:
+    """True when ``reasoning_details`` holds anything besides plain unsigned thinking text.
+
+    Plain text is a bare string or ``reasoning.text`` items without a signature.
+    Any other item type (``reasoning.encrypted``, ``reasoning.summary``, redacted
+    blocks) or any ``signature`` / ``data`` field makes the whole envelope
+    non-strippable: the provider validates it as a unit.
+    """
+    if isinstance(details, str):
+        return False
+    if isinstance(details, dict):
+        details = [details]
+    if not isinstance(details, list):
+        return True
+    for part in details:
+        if isinstance(part, str):
+            continue
+        if not isinstance(part, dict):
+            return True
+        if part.get("type") not in (None, "reasoning.text", "thinking"):
+            return True
+        if part.get("signature") or part.get("data"):
+            return True
+    return False
+
+
 def _last_assistant_index(messages: "List[Dict[str, Any]]") -> int:
     """Index of the newest assistant message, or -1.
 
@@ -4156,16 +4182,29 @@ class ContextCompressor(ContextEngine):
         Returns how many messages were padded.
         """
         boundary = len(messages) - max(0, int(protect_tail_count))
+        # The tail is counted in MESSAGES: a parallel fan-out of N tool calls puts
+        # N tool results after the assistant message that made them, so with
+        # N >= protect_tail_count that message falls outside the tail. The newest
+        # assistant message is the one whose thinking the provider may still need
+        # for the in-flight tool round, so it is never padded.
+        newest_assistant = _last_assistant_index(messages)
         padded = 0
         for i in range(max(0, boundary)):
+            if i == newest_assistant:
+                continue
             msg = messages[i]
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
                 continue
             rc = msg.get("reasoning_content")
+            details = msg.get("reasoning_details")
+            if details and _reasoning_details_are_signed(details):
+                # Signed / encrypted thinking envelopes (Anthropic, Gemini) are only
+                # valid together with their signature; never half-strip them.
+                continue
             has_text = (
                 (isinstance(rc, str) and rc.strip())
                 or (isinstance(msg.get("reasoning"), str) and msg["reasoning"].strip())
-                or msg.get("reasoning_details")
+                or details
             )
             if not has_text:
                 continue

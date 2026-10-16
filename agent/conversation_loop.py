@@ -7782,6 +7782,9 @@ def run_conversation(
                                 bool(_echo_flag()) if callable(_echo_flag) else False
                             )
                         except Exception:
+                            # Fail closed: a stale True from an earlier iteration
+                            # must not pad when the provider can no longer be read.
+                            _compressor.stale_reasoning_pad = False
                             logger.debug("stale-reasoning pad flag unavailable", exc_info=True)
                         try:
                             _pruned_msgs, _pruned_n = _prune(

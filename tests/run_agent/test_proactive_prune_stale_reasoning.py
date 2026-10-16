@@ -10,11 +10,16 @@ compression only fires at 0.85 x 1M.
 These tests drive ``run_conversation()`` with a REAL ``ContextCompressor`` and a REAL
 ``SessionDB``: the assertions read the payload the loop hands the provider and the
 rows the prune persisted, not a helper called in isolation.
+
+Round 2 (review of PR 353) added: the newest assistant message is never padded (parallel
+fan-out), the no-echo guard is judged by the stored rows, signed thinking envelopes are
+not half-stripped, and a failing provider read fails closed.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +31,8 @@ PAD = " "
 N_TOOL_ITERATIONS = 12
 PROTECT_LAST_N = 6
 SESSION_ID = "worker-ctx-test"
+SIGNED = [{"type": "reasoning.text", "text": "t", "signature": "sig-abc", "index": 0}]
+PLAIN = [{"type": "reasoning.text", "text": "t", "index": 0}]
 
 
 def _think(i: int) -> str:
@@ -33,13 +40,22 @@ def _think(i: int) -> str:
     return f"THINK-{i:02d} " + ("raciocinio " * 110)
 
 
-def _tool_response(i: int):
-    call = SimpleNamespace(
-        id=f"call_{i}",
-        type="function",
-        function=SimpleNamespace(name="web_search", arguments=json.dumps({"query": f"q{i}"})),
+def _tool_response(i: int, n_calls: int = 1, details=None):
+    calls = [
+        SimpleNamespace(
+            id=f"call_{i}" if n_calls == 1 else f"call_{i}_{k}",
+            type="function",
+            function=SimpleNamespace(name="web_search", arguments=json.dumps({"query": f"q{i}_{k}"})),
+        )
+        for k in range(n_calls)
+    ]
+    msg = SimpleNamespace(
+        content=None,
+        reasoning_content=_think(i),
+        reasoning=_think(i),
+        reasoning_details=details,
+        tool_calls=calls,
     )
-    msg = SimpleNamespace(content=None, reasoning_content=_think(i), reasoning=_think(i), tool_calls=[call])
     return SimpleNamespace(
         choices=[SimpleNamespace(message=msg, finish_reason="tool_calls")], model="test/model", usage=None
     )
@@ -103,8 +119,9 @@ def _build_agent(tmp_path, *, provider: str, model: str, base_url: str, stale_re
     return agent, db
 
 
-def _run(agent):
-    responses = [_tool_response(i) for i in range(N_TOOL_ITERATIONS)] + [_stop_response()]
+def _run(agent, responses=None):
+    if responses is None:
+        responses = [_tool_response(i) for i in range(N_TOOL_ITERATIONS)] + [_stop_response()]
     agent.client.chat.completions.create.side_effect = responses
     with (
         patch.object(agent, "_save_trajectory"),
@@ -135,6 +152,15 @@ def _worker(tmp_path, **kw):
         base_url="https://openrouter.ai/api/v1",
         **kw,
     )
+
+
+def _details(row):
+    raw = row.get("reasoning_details")
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+def _active_assistants(db):
+    return [r for r in db.get_messages(SESSION_ID) if r.get("role") == "assistant"]
 
 
 class TestStaleReasoningPadThroughTheRealLoop:
@@ -174,8 +200,7 @@ class TestStaleReasoningPadThroughTheRealLoop:
     def test_padded_rows_are_persisted_and_the_originals_stay_archived(self, tmp_path):
         agent, db = _worker(tmp_path)
         _run(agent)
-        active = [r for r in db.get_messages(SESSION_ID) if r.get("role") == "assistant"]
-        assert [r for r in active if (r.get("reasoning_content") or "") == PAD], (
+        assert [r for r in _active_assistants(db) if (r.get("reasoning_content") or "") == PAD], (
             "a resumed session would bring the old thinking back"
         )
         everything = db.get_messages(SESSION_ID, include_inactive=True)
@@ -183,16 +208,69 @@ class TestStaleReasoningPadThroughTheRealLoop:
             "the pre-prune rows must stay recoverable for audit"
         )
 
-    def test_provider_without_echo_is_untouched(self, tmp_path):
-        agent, _db = _build_agent(
+    def test_provider_without_echo_keeps_everything_stored(self, tmp_path):
+        """Judged by what stays WRITTEN: the wire policy already drops reasoning_content for
+        providers without echo, so only the stored rows prove the guard."""
+        agent, db = _build_agent(
             tmp_path,
             provider="openrouter",
             model="anthropic/claude-sonnet-4",
             base_url="https://openrouter.ai/api/v1",
         )
         assert agent._needs_thinking_reasoning_pad() is False
+        responses = [_tool_response(i, details=PLAIN) for i in range(N_TOOL_ITERATIONS)] + [_stop_response()]
+        _run(agent, responses)
+        rows = _active_assistants(db)
+        assert len(rows) == N_TOOL_ITERATIONS + 1
+        for r in rows[:-1]:
+            assert (r.get("reasoning_content") or "").startswith("THINK-"), r.get("reasoning_content")
+            assert (r.get("reasoning") or "").startswith("THINK-")
+            assert _details(r) == PLAIN
+        # no pad commit archived anything
+        assert len(db.get_messages(SESSION_ID, include_inactive=True)) == len(db.get_messages(SESSION_ID))
+
+    def test_parallel_fan_out_keeps_the_newest_assistant_thinking(self, tmp_path):
+        """20 parallel tool calls put 20 tool results after their assistant message, so the
+        message-counted tail no longer contains it. It is still the newest assistant message."""
+        agent, db = _worker(tmp_path)
+        responses = [_tool_response(i) for i in range(6)] + [_tool_response(50, n_calls=20)] + [_stop_response()]
+        _run(agent, responses)
+        asst = [m for m in _last_payload(agent) if m.get("role") == "assistant"]
+        fan_out = asst[-1]
+        assert len(fan_out["tool_calls"]) == 20
+        assert fan_out["reasoning_content"].startswith("THINK-50")
+        assert PAD in [m.get("reasoning_content") for m in asst[:-1]]  # older ones were still padded
+        stored = [r for r in _active_assistants(db) if (r.get("reasoning_content") or "").startswith("THINK-50")]
+        assert stored, "the fan-out assistant row must keep its thinking in the store too"
+
+    def test_signed_thinking_envelope_is_not_half_stripped(self, tmp_path):
+        agent, db = _worker(tmp_path)
+        responses = [
+            _tool_response(i, details=SIGNED if i == 1 else PLAIN if i == 2 else None) for i in range(N_TOOL_ITERATIONS)
+        ] + [_stop_response()]
+        _run(agent, responses)
+        rows = _active_assistants(db)
+        signed_row = next(r for r in rows if (r.get("reasoning_content") or "").startswith("THINK-01"))
+        assert _details(signed_row) == SIGNED  # envelope intact, text intact
+        plain_rows = [r for r in rows if r.get("reasoning_content") == PAD]
+        assert plain_rows, "unsigned history should still have been padded"
+        assert all(not r.get("reasoning_details") for r in plain_rows)
+
+    def test_flag_read_failure_fails_closed(self, tmp_path):
+        agent, db = _worker(tmp_path)
+        agent.context_compressor.stale_reasoning_pad = True  # stale value from an earlier iteration
+        real = agent._needs_thinking_reasoning_pad
+
+        def flaky():
+            if sys._getframe(1).f_code.co_name == "run_conversation":
+                raise RuntimeError("provider unreadable")
+            return real()
+
+        agent._needs_thinking_reasoning_pad = flaky
         _run(agent)
+        assert agent.context_compressor.stale_reasoning_pad is False
         assert PAD not in _wire_reasoning(agent)
+        assert all((r.get("reasoning_content") or "").startswith("THINK-") for r in _active_assistants(db))
 
     def test_switch_off_keeps_the_old_behaviour(self, tmp_path):
         agent, _db = _worker(tmp_path, stale_reasoning=False)
@@ -213,6 +291,32 @@ class TestPadUnit:
         assert n == 1
         assert msgs[2]["reasoning_content"] == PAD and "reasoning" not in msgs[2]
         assert msgs[4]["reasoning_content"] == "cauda"
+
+    def test_newest_assistant_is_never_padded_even_outside_the_tail(self):
+        msgs = [{"role": "assistant", "content": "", "reasoning_content": "velho"}]
+        msgs.append({"role": "assistant", "content": "", "reasoning_content": "fanout", "tool_calls": [{}] * 20})
+        msgs += [{"role": "tool", "tool_call_id": str(k), "content": "ok"} for k in range(20)]
+        n = ContextCompressor._pad_stale_reasoning(msgs, protect_tail_count=20)
+        assert n == 1 and msgs[0]["reasoning_content"] == PAD
+        assert msgs[1]["reasoning_content"] == "fanout"
+
+    def test_only_plain_thinking_text_details_are_dropped(self):
+        cases = [
+            ("texto", True),
+            ([{"type": "reasoning.text", "text": "x"}], True),
+            ([{"type": "reasoning.text", "text": "x", "signature": "s"}], False),
+            ([{"type": "reasoning.encrypted", "data": "blob"}], False),
+            ([{"type": "reasoning.summary", "summary": "x"}], False),
+        ]
+        for details, dropped in cases:
+            msgs = [
+                {"role": "assistant", "content": "", "reasoning_content": "a", "reasoning_details": details},
+                {"role": "assistant", "content": "", "reasoning_content": "fim"},  # newest: never padded
+            ]
+            n = ContextCompressor._pad_stale_reasoning(msgs, protect_tail_count=0)
+            assert n == (1 if dropped else 0), (details, n)
+            assert (msgs[0].get("reasoning_details") is None) is dropped, details
+            assert msgs[0]["reasoning_content"] == (PAD if dropped else "a")
 
     def test_short_history_pads_nothing(self):
         msgs = [{"role": "assistant", "content": "", "reasoning_content": "x"}]
