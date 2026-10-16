@@ -22885,10 +22885,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Normalize empty responses: surface errors, partial failures, and
             # the case where agent did work but returned no text. Fix for #18765.
+            # The text the agent's turn produced, after the marker strip above. The
+            # normalizer changes it only when it substitutes a gateway notice for an
+            # empty answer; the lane publication below is the agent's text, not that notice.
+            _text_before_normalize = response
+            _gateway_notice = False
             if not _intentional_silence:
                 response = _normalize_empty_agent_response(
                     agent_result, response, history_len=len(history),
                 )
+                _gateway_notice = response != _text_before_normalize
                 response = _sanitize_gateway_final_response(source.platform, response)
 
             # Ordering contract: the agent thread already updated the contextvar
@@ -23362,7 +23368,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_entry.session_id,
                 )
                 response = ""
-            elif _lane_wake and response and response == str(agent_result.get("final_response") or ""):
+            elif _lane_wake and response and not _gateway_notice:
                 # KANBAN_WAKE_OWN_SESSION_20261015: what a lane turn publishes in
                 # the topic is also written in the topic's session, with its card,
                 # so an answer given there later finds the question. Only the

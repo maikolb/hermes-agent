@@ -631,5 +631,62 @@ async def test_the_gateway_notice_for_an_empty_agent_answer_is_not_mirrored(monk
     assert not any("[Publicado neste tópico" in c for c in contents)
 
 
+_SECRET = "sk" + "-proj-" + "Q" * 24 + "7" * 20  # synthetic, built at runtime
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "final, expected",
+    [
+        ("Pronto: relatório enviado. [SILENT]", "Pronto: relatório enviado."),
+        (f"Pronto: chave {_SECRET} configurada.", "Pronto: chave"),
+        ("Pronto: relatório enviado.\n", "Pronto: relatório enviado."),
+    ],
+    ids=["marcador_no_fim", "segredo_mascarado", "quebra_no_fim"],
+)
+async def test_a_lane_answer_the_gateway_transforms_is_mirrored_transformed(monkeypatch, tmp_path, final, expected):
+    """The chat and the topic get the same answer: the transformed text (without the marker, masked, stripped)."""
+    from gateway.session import lane_publication_mirror_text
+
+    runner, store, chat, notes, _ = _lane_runner(monkeypatch, tmp_path)
+    topic = store.get_or_create_session(_topic_source(user_id="u1"))
+    runner._run_agent = AsyncMock(return_value={"final_response": final, "messages": [], "tools": [],
+                                                "history_offset": 0, "last_prompt_tokens": 1, "api_calls": 1})
+
+    delivered = await runner._handle_message(_wake_event())
+
+    contents = [r["content"] or "" for r in _rows(store, topic.session_id)]
+    mirrored = [c for c in contents if c.startswith("[Publicado neste tópico")]
+    assert len(mirrored) == 1
+    # The topic gets what the chat gets: the marker-free, masked, stripped answer.
+    assert isinstance(delivered, str) and delivered.strip()
+    assert mirrored[0] == lane_publication_mirror_text(CARD, delivered.strip())
+    assert expected in mirrored[0]
+    assert "[SILENT]" not in mirrored[0] and _SECRET not in mirrored[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "agent_result",
+    [
+        {"final_response": "", "api_calls": 0},
+        {"final_response": "", "api_calls": 3},
+        {"final_response": "", "failed": True, "error": "429 Too Many Requests", "api_calls": 1},
+    ],
+    ids=["sem_trabalho", "trabalho_sem_texto", "erro_do_provedor"],
+)
+async def test_gateway_notices_for_an_empty_answer_are_not_mirrored(monkeypatch, tmp_path, agent_result):
+    """The gateway's own notice (empty answer, provider error) goes to the chat only, never to the topic."""
+    runner, store, chat, notes, _ = _lane_runner(monkeypatch, tmp_path)
+    topic = store.get_or_create_session(_topic_source(user_id="u1"))
+    runner._run_agent = AsyncMock(return_value={"messages": [], "tools": [], "history_offset": 0,
+                                                "last_prompt_tokens": 1, **agent_result})
+
+    await runner._handle_message(_wake_event())
+
+    contents = [r["content"] or "" for r in _rows(store, topic.session_id)]
+    assert not any(c.startswith("[Publicado neste tópico") for c in contents)
+
+
 # The notifier test requires a configured host with real executor profiles, as the wake scope tests do.
 pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")
