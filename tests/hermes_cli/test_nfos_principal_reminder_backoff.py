@@ -301,3 +301,38 @@ def test_reminders_given_before_this_rule_are_counted(board, monkeypatch, tmp_pa
         session.now = now + step * 300
         delivery.nudge_open_decisions(board, task_id)
     assert _reminders(board, task_id, now, decision) == [0, 3600]
+
+
+ROUTE = ("default", "openrouter", "deepseek/v4")
+
+
+def _wall(monkeypatch, start, closed=True):
+    """REMINDER_ROUTE_WALL_20261016: a rota do card fechada pelo limite de crédito, como em 16/10 (CS-0045 e CS-0061)."""
+    from hermes_cli import nfos_route_walls as walls
+    monkeypatch.setattr(walls, "card_route", lambda conn, task: walls._key(*ROUTE))
+    if closed:
+        walls.close(*ROUTE, limit="credits", reset_at=start + 10 * DAY, now=start)
+    return walls
+
+
+def test_reminders_do_not_count_while_the_route_wall_is_closed(board, monkeypatch, tmp_path):
+    task_id, decision = _card(board, "21")
+    session, start = _start(board, monkeypatch, tmp_path, decision)
+    _wall(monkeypatch, start)
+    _drive(board, session, task_id, start + 3 * HOUR)
+    assert _reminders(board, task_id, start) == [] and _at(board, task_id, "nfos_decision_stalled", start) == []
+    assert kb.get_task(board, task_id).status != "blocked"
+
+
+def test_the_count_restarts_when_the_route_wall_opens(board, monkeypatch, tmp_path):
+    task_id, decision = _card(board, "22")
+    session, start = _start(board, monkeypatch, tmp_path, decision)
+    walls = _wall(monkeypatch, start)
+    _drive(board, session, task_id, start + HOUR)
+    opened = session.now
+    walls.reopen(*ROUTE, now=opened)
+    _drive(board, session, task_id, opened + 2 * HOUR)
+    assert len(_reminders(board, task_id, start)) >= 3  # aberta, a conta é a de sempre
+    stalled = _at(board, task_id, "nfos_decision_stalled", start)
+    assert len(stalled) == 1 and stalled[0] > opened - start
+    assert kb.get_task(board, task_id).block_kind == "awaiting_principal"

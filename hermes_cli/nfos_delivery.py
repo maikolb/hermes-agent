@@ -2512,6 +2512,11 @@ def _principal_answer_plan(conn, wait, evidence, now):
         return {'evidence': seen, 'next_check_at': int(min(due, wait['deadline_at'])), 'deadline_at': wait['deadline_at']}
     if row['status'] != 'pending':
         return later(now + 1)  # respondida entre a conferência e a transação: o passo seguinte a satisfaz
+    if _route_wall_closed(conn, wait['task_id']):
+        # REMINDER_ROUTE_WALL_20261016: com a parede de rota do card fechada nenhum worker responde; lembrete não conta nem retém.
+        # A conta zera e recomeça quando a parede abre (já retido em awaiting_principal fica como está).
+        return dict(later(now + _reminder_gap(ctx), dict(evidence, last={'action': 'route_closed', 'at': now})),
+                    act=lambda c: _forget_principal_reminders(c, row, ctx) if reminders else None)
     if (len(reminders) >= DECISION_MAX_REMINDERS and not ctx.get('stalled_at')
             and not _needs_principal(conn, wait['task_id'], ctx)):
         if now < last + DECISION_REMINDER_GAP:
@@ -2541,6 +2546,25 @@ def _principal_answer_plan(conn, wait, evidence, now):
     following = now + (DECISION_REMINDER_GAP if stalls_next else _reminder_gap(ctx))  # o recuo é conferido nessa hora
     return dict(later(following, dict(evidence, last={'action': 'reminder', 'n': len(given), 'at': now})),
                 act=lambda c: _remind_principal_answer(c, wait, row, ctx, given, now))
+
+
+def _route_wall_closed(conn, task_id):
+    """REMINDER_ROUTE_WALL_20261016: existe parede da rota deste card (a mesma rota que nfos_route_walls.hold consulta).
+    Leitura sem efeito; parede ilegível não segura nada, como no despacho."""
+    try:
+        from hermes_cli import nfos_route_walls as walls
+        if not walls.any_closed():
+            return False
+        task = _kb().get_task(conn, task_id)
+        route = walls.card_route(conn, task) if task is not None else None
+        return bool(route and walls.read(*route))  # read, não closed: entre uma sonda e outra a parede segue de pé
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _forget_principal_reminders(conn, row, ctx):
+    ctx['reminders'] = []
+    conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(ctx), row['id']))
 
 
 def _hold_for_principal(conn, task_id, reason):
