@@ -30,7 +30,8 @@ from hermes_cli import kanban_db as kb, nfos_principal_review as review, nfos_ro
 from tests.hermes_cli.nfos_quota_wall import (  # noqa: F401
     PROFILE_CONFIG, Clock, GoUsageLimit, enrol, launcher, option, quota_board,
 )
-from tests.hermes_cli.test_nfos_route_walls import PROFILE, DAY, refusing, run_card, spawned
+from tests.hermes_cli.test_nfos_route_walls import (
+    CONTINUE, DAY, PROFILE, answered_once, go_window, refusing, run_card, spawned)
 
 PRIMARY = ('opencode-go-plus', 'deepseek-v4.1-flash')
 SECOND = ('opencode-go', 'deepseek-v4.1-flash')  # the older OpenCode Go account, out of quota until its month renews
@@ -225,3 +226,31 @@ def test_the_card_that_takes_the_probe_of_a_due_route_is_launched_on_that_route(
         assert walls.take_probe(PROFILE, *SECOND, task_id='t_other') is not None
         mine = review.worker_routes(task, config['kanban']['delivery'])
         assert mine in (PRIMARY, RESERVE) and mine != SECOND
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='the dispatcher reaps a worker exit status only on POSIX')
+def test_the_probe_card_runs_on_the_due_route_and_the_answer_reopens_it(board, launcher, monkeypatch):
+    """End to end with the real dispatcher and worker: the first route closes on a week-long window, an hour later
+    the card that takes its probe is launched ON that route (argv and route environment), the provider answers it,
+    the wall goes away and the next launch is on the first route again."""
+    config = dict(PROFILE_CONFIG, kanban={'delivery': dict(PROFILE_CONFIG['kanban']['delivery'], **_policy())})
+    (board / 'config.yaml').write_text(yaml.safe_dump(config), encoding='utf-8')
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        card = enrol(conn, launcher)
+        run_card(conn, launcher, monkeypatch, card.id, refusing(go_window(7 * DAY)))
+        assert walls.read(PROFILE, *PRIMARY)['reset_at'] == clock.now + 7 * DAY
+        kb.dispatch_once(conn)  # reaps the exit
+        clock.advance(3600)  # the hour of the probe, long before the reset time the provider gave
+        tick = kb.dispatch_once(conn)
+        assert spawned(tick) == [card.id], tick
+        argv, env = launcher.launches[-1]
+        assert (option(argv, '--provider'), option(argv, '-m')) == PRIMARY, 'the probe card runs on the probed route'
+        assert json.loads(env[walls.ROUTE_ENV]) == [PROFILE, *PRIMARY]
+        assert walls.read(PROFILE, *PRIMARY)['probe']['task_id'] == card.id
+
+        run = run_card(conn, launcher, monkeypatch, card.id, answered_once, judge_reply=CONTINUE)
+        assert not run.results[0].get('failed')
+        assert walls.read(PROFILE, *PRIMARY) is None, 'the provider answered the probe: the route reopens'
+        assert review.worker_model_args(kb.get_task(conn, card.id))[:4] == ['-m', PRIMARY[1], '--provider',
+                                                                           PRIMARY[0]]
