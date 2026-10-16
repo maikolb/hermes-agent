@@ -611,9 +611,20 @@ def task_support_approval_pending(conn, task_id):
     return bool(row and support_approval_pending(json.loads(row['payload'])))
 
 
+# SPAWN_GUARD_20261016: the launch guard put this request back; it steps aside so the requests behind it get the slot
+LAUNCH_REFUSED_PREFIX='launch_guard_refused: '
+LAUNCH_REFUSED_HOLD_SECONDS=300  # as long as the guard remembers a refusal; a config or plugin edit lifts it for the card path at once
+
+
+def _launch_held(row, now):
+    return (str(row['last_error'] or '').startswith(LAUNCH_REFUSED_PREFIX)
+            and now-int(row['claimed_at'] or 0)<LAUNCH_REFUSED_HOLD_SECONDS)
+
+
 def reserve_request(conn, *, capacity):
     if capacity<1:
         return None
+    now=int(time.time())
     with _kb().write_txn(conn):
         running=conn.execute("SELECT count(*) FROM tasks WHERE status='running' AND task_role='work'").fetchone()[0]
         starting=conn.execute("SELECT count(*) FROM nfos_requests WHERE status='starting'").fetchone()[0]
@@ -625,12 +636,12 @@ def reserve_request(conn, *, capacity):
             busy+=conn.execute("SELECT count(*) FROM nfos_requests WHERE status='starting' AND json_extract(payload,'$.urgent') IS 1").fetchone()[0]
             if busy:
                 return None
-            rows=conn.execute("SELECT id,payload FROM nfos_requests WHERE status='pending' AND json_extract(payload,'$.urgent') IS 1 "
+            rows=conn.execute("SELECT id,payload,last_error,claimed_at FROM nfos_requests WHERE status='pending' AND json_extract(payload,'$.urgent') IS 1 "
                               "ORDER BY created_at,id")
         else:
-            rows=conn.execute("SELECT id,payload FROM nfos_requests WHERE status='pending' "
+            rows=conn.execute("SELECT id,payload,last_error,claimed_at FROM nfos_requests WHERE status='pending' "
                               "ORDER BY (json_extract(payload,'$.urgent') IS 1) DESC,created_at,id")
-        row=next((row for row in rows if not support_approval_pending(json.loads(row['payload']))), None)
+        row=next((row for row in rows if not support_approval_pending(json.loads(row['payload'])) and not _launch_held(row,now)), None)
         if row is None:
             return None
         conn.execute("UPDATE nfos_requests SET status='starting',claim_token=?,claimed_at=? WHERE id=?",
