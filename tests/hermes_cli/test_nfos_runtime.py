@@ -250,3 +250,52 @@ def test_worker_prompt_starts_with_locations(tmp_path, monkeypatch):
     assert prompt.index('Where things are') < prompt.index('Exact workflow CLI prefix')
     assert 'Your workspace and cwd: ' + str(workspace) in prompt
     assert runtime.workflow_command() in prompt.split('Exact workflow CLI prefix')[0]
+
+
+def _probe_card(tmp_path, monkeypatch, **project):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'kanban.db'))
+    monkeypatch.setattr(runtime, 'project_config', lambda key, config=None: dict({'project_id': 'pilot'}, **project))
+    with kb.connect_closing() as conn:
+        rid = request(conn)
+        reservation = delivery.reserve_request(conn, capacity=2)
+        task = delivery.bootstrap_card(conn, rid, reservation['claim_token'], pid=os.getpid())
+        return kb.get_task(conn, task.id)
+
+
+def test_worker_locations_names_the_declared_probe_session_without_its_content(tmp_path, monkeypatch):
+    # A worker ran `find / -name probe.env` for the project's probe session; the config already declares where it is.
+    state = tmp_path / 'browser-auth' / 'storage-state.json'
+    state.parent.mkdir()
+    state.write_text('{"cookies": [{"name": "sid", "value": "SECRET-COOKIE-VALUE"}]}', encoding='utf-8')
+    task = _probe_card(tmp_path, monkeypatch, probe_session=str(state))
+    with kb.connect_closing() as conn:
+        block = runtime.worker_locations(task, str(tmp_path), None, hermes_home=str(tmp_path), conn=conn)
+    line = next(l for l in block.splitlines() if 'Project probe session' in l)
+    assert str(state) in line and 'never print' in line
+    assert 'SECRET-COOKIE-VALUE' not in block
+
+    # The same block built without the caller's connection (the board's own).
+    assert str(state) in runtime.worker_locations(task, str(tmp_path), None, hermes_home=str(tmp_path))
+
+
+def test_worker_locations_says_when_the_project_declares_no_probe(tmp_path, monkeypatch):
+    task = _probe_card(tmp_path, monkeypatch)
+    block = runtime.worker_locations(task, str(tmp_path), None, hermes_home=str(tmp_path))
+    line = next(l for l in block.splitlines() if 'Project probe session' in l)
+    assert 'none declared' in line
+
+
+def test_worker_locations_probe_session_declared_but_missing_and_relative_to_secrets(tmp_path, monkeypatch):
+    task = _probe_card(tmp_path, monkeypatch, probe_session='pilot/state.json')
+    block = runtime.worker_locations(task, str(tmp_path), None, hermes_home=str(tmp_path))
+    expected = tmp_path / 'secrets' / 'pilot' / 'state.json'
+    line = next(l for l in block.splitlines() if 'Project probe session' in l)
+    assert 'declared as pilot/state.json' in line and 'does not exist' in line and str(expected) in line
+    (tmp_path / 'secrets' / 'pilot').mkdir(parents=True)
+    expected.write_text('{}', encoding='utf-8')
+    (tmp_path / 'secrets' / 'pilot' / 'probe.env').write_text('TOKEN=SECRET-ENV-VALUE\n', encoding='utf-8')
+    block = runtime.worker_locations(task, str(tmp_path), None, hermes_home=str(tmp_path))
+    assert any(str(expected) in l and 'does not exist' not in l for l in block.splitlines())
+    assert str(tmp_path / 'secrets' / 'pilot' / 'probe.env') in block
+    assert 'SECRET-ENV-VALUE' not in block

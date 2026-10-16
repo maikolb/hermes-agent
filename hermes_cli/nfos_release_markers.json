@@ -328,5 +328,6 @@
   {"pr": 358, "file": "hermes_cli/nfos_process.py", "text": "def _engine_source_note("},
   {"pr": 358, "file": "tools/mcp_tool.py", "text": "def _worker_cwd_note("},
   {"pr": 358, "file": "tools/code_execution_tool.py", "text": "def _reap_leftover_process_group("},
-  {"pr": 358, "file": "hermes_cli/kanban_db.py", "text": "worker_locations(task, workspace, board, hermes_home=worker_home)"}
+  {"pr": 358, "file": "hermes_cli/kanban_db.py", "text": "worker_locations(task, workspace, board, hermes_home=worker_home"},
+  {"pr": 358, "file": "hermes_cli/nfos_delivery.py", "text": "def probe_locations(conn, task_id, home=None):"}
 ]

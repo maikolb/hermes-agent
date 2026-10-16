@@ -16022,7 +16022,7 @@ def _default_spawn(
                     worker_home = resolve_profile_env(profile_arg)
                 except FileNotFoundError:
                     worker_home = None
-                prompt += "\n\n" + worker_locations(task, workspace, board, hermes_home=worker_home)
+                prompt += "\n\n" + worker_locations(task, workspace, board, hermes_home=worker_home, conn=delivery_conn)
             except Exception as exc:
                 _log.warning("kanban worker: locations block skipped for %s (%s: %s)", task.id, type(exc).__name__, exc)
             prompt += "\n\n" + worker_instructions()

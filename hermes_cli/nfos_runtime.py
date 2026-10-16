@@ -456,7 +456,7 @@ def wait_decision_command(decision_id, timeout=300):
     return workflow_command() + ' wait --decision ' + shlex.quote(str(decision_id)) + ' --timeout ' + str(int(timeout))
 
 
-def worker_locations(task, workspace, board=None, hermes_home=None):
+def worker_locations(task, workspace, board=None, hermes_home=None, conn=None):
     """Where things are, as absolute paths, at the top of the worker prompt (NFOS_CAMINHO_NO_PONTO_DE_USO_20261016).
 
     Workers ran ``find /`` for files the runtime already knew: the workflow CLI, the project-workflow engine source,
@@ -488,10 +488,39 @@ def worker_locations(task, workspace, board=None, hermes_home=None):
     lines.append("- Truncated terminal output: the result's full_output_path, also printed at the cut mark"
                  + ('; files live in ' + str(spill) + '/' if spill.is_dir() else ''))
     lines.append('- Native tool call output: ' + workflow_command() + ' call --call <call_id>')
+    lines.extend(_probe_lines(task, board, home, conn))
     logs = kb.worker_logs_dir(slug)
     if logs.is_dir():
         lines.append('- Your worker log: ' + str(logs / (str(task.id) + '.log')))
     return '\n'.join(lines)
+
+
+def _probe_lines(task, board, home, conn):
+    """The probe files the project's config declares: paths only, never contents (see ``delivery.probe_locations``)."""
+    try:
+        if conn is not None:
+            found = delivery.probe_locations(conn, task.id, home=str(home))
+        else:
+            with kb.connect_closing(board=board) as own:
+                found = delivery.probe_locations(own, task.id, home=str(home))
+    except Exception as exc:
+        kb._log.warning('worker locations: probe paths unavailable for %s (%s: %s)', task.id, type(exc).__name__, exc)
+        return []
+    lines = []
+    if not found['declared']:
+        lines.append('- Project probe session: none declared in the project config (probe_session); do not look for one.')
+    elif found['session'] is not None and Path(found['session']).is_file():
+        lines.append('- Project probe session (browser storage state; use the path, never print the file): '
+                     + str(found['session']))
+    else:
+        lines.append('- Project probe session: declared as ' + found['declared'] + ' but the file does not exist'
+                     + (' at ' + str(found['session']) if found['session'] is not None else '') + '.')
+    env_files = [str(found[k]) for k in ('env_file', 'vault') if found[k] is not None and Path(found[k]).is_file()]
+    if env_files:
+        lines.append('- Project probe credentials (variable files; never print them): ' + ', '.join(env_files))
+    elif found['vault'] is not None:
+        lines.append('- Project probe credentials: none yet; the probe-env command writes ' + str(found['vault']) + '.')
+    return lines
 
 
 def process_engine_source():
