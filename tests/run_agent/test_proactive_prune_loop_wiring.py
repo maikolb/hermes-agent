@@ -12,7 +12,9 @@ These tests drive ``run_conversation()`` through real tool iterations and pin:
 - a no-op (input object returned) commits nothing;
 - a compressor WITHOUT the method (plugin engine predating the hook /
   SimpleNamespace test double) does not raise — getattr-guarded;
-- a raising prune is swallowed (debug log), never fails the turn.
+- a raising prune is swallowed (debug log), never fails the turn;
+- a committed prune forgets the read_file/skill_view dedup stubs (NFOS_DEDUP_AFTER_PRUNE_20261016),
+  so the reload that the SKILL_PRUNED marker asks for returns the full skill.
 """
 
 from __future__ import annotations
@@ -116,7 +118,7 @@ def agent():
     return a
 
 
-def _run_tool_loop(agent, n_tool_iterations: int):
+def _run_tool_loop(agent, n_tool_iterations: int, task_id=None):
     responses = [_tool_response(i) for i in range(n_tool_iterations)]
     responses.append(_stop_response())
     agent.client.chat.completions.create.side_effect = responses
@@ -130,7 +132,10 @@ def _run_tool_loop(agent, n_tool_iterations: int):
             lambda name, args, task_id=None, **kwargs: json.dumps({"ok": True}),
         ),
     ):
-        result = agent.run_conversation("do a lot of tool work")
+        if task_id is None:
+            result = agent.run_conversation("do a lot of tool work")
+        else:
+            result = agent.run_conversation("do a lot of tool work", task_id=task_id)
 
     return result
 
@@ -231,3 +236,138 @@ class TestProactivePruneLoopWiring:
         # tool output may be wrapped in an untrusted_tool_result envelope —
         # assert the original payload survived un-pruned.
         assert all('"ok": true' in m["content"] for m in tool_rows)
+
+
+def _replace_tool_rows(marker: str):
+    """A prune double that rewrites every tool row, like the real one does."""
+
+    def _prune(messages, current_tokens=None):
+        pruned = [dict(m) for m in messages]
+        changed = 0
+        for m in pruned:
+            if m.get("role") == "tool" and m.get("content") != marker:
+                m["content"] = marker
+                changed += 1
+        if not changed:
+            return messages, 0
+        return pruned, changed
+
+    return _prune
+
+
+class TestPruneForgetsToolDedup:
+    """NFOS_DEDUP_AFTER_PRUNE_20261016: the prune summarises old skill_view and
+    read_file results, so their "unchanged" stubs must not outlive them."""
+
+    def test_committed_prune_resets_tool_dedup_caches(self, agent):
+        agent.context_compressor.prune_tool_results_only = _replace_tool_rows("[pruned]")
+        with (
+            patch("tools.skills_tool.reset_skill_view_dedup") as reset_skill,
+            patch("tools.file_tools.reset_file_dedup") as reset_file,
+        ):
+            result = _run_tool_loop(agent, n_tool_iterations=1, task_id="t-prune")
+        assert result["completed"] is True
+        reset_skill.assert_called_with("t-prune")
+        reset_file.assert_called_with("t-prune")
+
+    def test_noop_prune_keeps_tool_dedup_caches(self, agent):
+        def _prune(messages, current_tokens=None):
+            return messages, 0  # nothing pruned: input object back
+
+        agent.context_compressor.prune_tool_results_only = _prune
+        with (
+            patch("tools.skills_tool.reset_skill_view_dedup") as reset_skill,
+            patch("tools.file_tools.reset_file_dedup") as reset_file,
+        ):
+            result = _run_tool_loop(agent, n_tool_iterations=2, task_id="t-prune")
+        assert result["completed"] is True
+        reset_skill.assert_not_called()
+        reset_file.assert_not_called()
+
+    def test_prune_then_skill_reload_returns_content(self, tmp_path, monkeypatch):
+        """End to end with the real skill_view: load, prune, reload as the
+        marker says. The reload must carry the skill, not the dedup stub."""
+        from agent.context_compressor import _skill_pruned_marker
+        from tools.skills_tool import _skill_view_with_bump, reset_skill_view_dedup
+
+        home = tmp_path / ".hermes"
+        skill_dir = home / "skills" / "demo-dedup-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: demo-dedup-skill\ndescription: Demo skill for dedup tests.\n---\n"
+            "# Demo\n\nStep one: run the demo procedure fully.\n"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        reset_skill_view_dedup()
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("skill_view")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                max_iterations=10,
+            )
+        a.client = MagicMock()
+        a._cached_system_prompt = "You are helpful."
+        a._use_prompt_caching = False
+        a._disable_streaming = True
+        a.tool_delay = 0
+        a.save_trajectories = False
+        a.compression_enabled = True
+        a.context_compressor = _quiet_compressor()
+        a.context_compressor.prune_tool_results_only = _replace_tool_rows(
+            _skill_pruned_marker("demo-dedup-skill")
+        )
+
+        def _skill_call(i):
+            return SimpleNamespace(
+                id=f"call_skill_{i}",
+                type="function",
+                function=SimpleNamespace(
+                    name="skill_view", arguments='{"name": "demo-dedup-skill"}'
+                ),
+            )
+
+        def _skill_response(i):
+            msg = SimpleNamespace(
+                content=None,
+                reasoning_content=None,
+                reasoning=None,
+                tool_calls=[_skill_call(i)],
+            )
+            choice = SimpleNamespace(message=msg, finish_reason="tool_calls")
+            return SimpleNamespace(choices=[choice], model="test/model", usage=None)
+
+        a.client.chat.completions.create.side_effect = [
+            _skill_response(0),
+            _skill_response(1),
+            _stop_response(),
+        ]
+        served = []
+
+        def _real_skill_view(name, args, task_id=None, **kwargs):
+            out = json.loads(_skill_view_with_bump(args, task_id=task_id))
+            served.append(out)
+            return json.dumps(out)
+
+        with (
+            patch.object(a, "_persist_session"),
+            patch.object(a, "_save_trajectory"),
+            patch.object(a, "_cleanup_task_resources"),
+            patch("run_agent.handle_function_call", _real_skill_view),
+        ):
+            result = a.run_conversation("load the skill", task_id="t-prune-e2e")
+
+        assert result["completed"] is True
+        assert len(served) == 2
+        assert "Step one" in served[0]["content"]
+        # The first result left the context (pruned), so the reload carries it.
+        assert "Step one" in served[1].get("content", "")
+        assert served[1].get("dedup") is not True
+        reset_skill_view_dedup()

@@ -35,6 +35,7 @@ from agent.conversation_compression import (
     PRE_API_COMPRESSION_STATUS_TEMPLATE,
     compression_skipped_due_to_lock,
     conversation_history_after_compression,
+    reset_tool_dedup_caches,
 )
 from agent.context_engine import automatic_compaction_status_message
 from agent.display import KawaiiSpinner
@@ -7811,6 +7812,12 @@ def run_conversation(
                             # this turn's fresh, not-yet-persisted rows into history_ids
                             # and skip writing them.
                             messages = _pruned_msgs
+                            # NFOS_DEDUP_AFTER_PRUNE_20261016: the prune summarised
+                            # old skill_view/read_file results (the skill became
+                            # "[SKILL_PRUNED: ... reload with skill_view(...)]").
+                            # Their dedup stubs would now point at content that
+                            # left the context, so the reload must return it whole.
+                            reset_tool_dedup_caches(effective_task_id)
                 
                 # Save session log incrementally (so progress is visible even if interrupted)
                 agent._session_messages = messages

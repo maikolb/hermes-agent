@@ -287,5 +287,9 @@
   {"pr": 353, "file": "agent/context_compressor.py", "text": "self.stale_reasoning_pad: bool = False"},
   {"pr": 353, "file": "agent/conversation_loop.py", "text": "NFOS_WORKER_CTX_20261016"},
   {"pr": 353, "file": "agent/agent_init.py", "text": "proactive_prune_stale_reasoning=compression_proactive_prune_stale_reasoning"},
-  {"pr": 353, "file": "agent/context_compressor.py", "text": "def _reasoning_details_are_signed("}
+  {"pr": 353, "file": "agent/context_compressor.py", "text": "def _reasoning_details_are_signed("},
+  {"pr": 354, "file": "agent/conversation_compression.py", "text": "def reset_tool_dedup_caches(task_id: str) -> None:"},
+  {"pr": 354, "file": "agent/conversation_loop.py", "text": "NFOS_DEDUP_AFTER_PRUNE_20261016"},
+  {"pr": 354, "file": "gateway/run.py", "text": "the session id; without it the reset hits"},
+  {"pr": 354, "file": "gateway/slash_commands.py", "text": "Session id from BEFORE any rotation"}
 ]
