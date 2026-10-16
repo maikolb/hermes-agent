@@ -338,5 +338,8 @@
   {"pr": 368, "file": "gateway/kanban_watchers.py", "text": "NOTIFY_ORPHAN_OWNER_20261016"},
   {"pr": 368, "file": "gateway/kanban_watchers.py", "text": "def _kanban_owner_gateway_alive(owner: str) -> bool:"},
   {"pr": 368, "file": "hermes_cli/kanban_db.py", "text": "def adopt_orphan_notify_subs(conn: sqlite3.Connection, *, owners: Iterable[str], new_owner: str) -> int:"},
-  {"pr": 368, "file": "hermes_cli/kanban_db.py", "text": "def foreign_notify_owner_counts("}
+  {"pr": 368, "file": "hermes_cli/kanban_db.py", "text": "def foreign_notify_owner_counts("},
+  {"pr": 367, "file": "hermes_cli/nfos_principal_review.py", "text": "WORKER_ROUTES_20261016"},
+  {"pr": 367, "file": "hermes_cli/nfos_principal_review.py", "text": "def worker_routes(task, policy):"},
+  {"pr": 367, "file": "hermes_cli/nfos_principal_review.py", "text": "chosen = worker_routes(task, policy)"}
 ]
