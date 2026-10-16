@@ -303,36 +303,78 @@ def test_reminders_given_before_this_rule_are_counted(board, monkeypatch, tmp_pa
     assert _reminders(board, task_id, now, decision) == [0, 3600]
 
 
-ROUTE = ("default", "openrouter", "deepseek/v4")
+ROUTE = ("concursa", "openai-codex", "gpt-6-astra")  # a rota em que o Principal decide: a de sessão do perfil do card
+OTHER = ("concursa", "openrouter", "deepseek/deepseek-v4.1-flash")  # a do worker
 
 
-def _wall(monkeypatch, start, closed=True):
-    """REMINDER_ROUTE_WALL_20261016: a rota do card fechada pelo limite de crédito, como em 16/10 (CS-0045 e CS-0061)."""
+def _wall(monkeypatch, start, route=ROUTE, principal=ROUTE, **close):
+    """REMINDER_ROUTE_WALL_20261016: parede fechada na `route`; `principal` é a rota que a sessão do Principal usa neste card.
+    Por padrão a parede traz reabertura prevista (reset_at); `reset_at=None` é a parede sem previsão."""
     from hermes_cli import nfos_route_walls as walls
-    monkeypatch.setattr(walls, "card_route", lambda conn, task: walls._key(*ROUTE))
-    if closed:
-        walls.close(*ROUTE, limit="credits", reset_at=start + 10 * DAY, now=start)
+    monkeypatch.setattr(walls, "session_route", lambda profile: walls._key(*principal))
+    close.setdefault("reset_at", start + 10 * DAY)
+    walls.close(*route, limit="credits", now=close.pop("now", start), **close)
     return walls
 
 
-def test_reminders_do_not_count_while_the_route_wall_is_closed(board, monkeypatch, tmp_path):
+def _quiet(board, task_id, decision, session, start, until):
+    _drive(board, session, task_id, until)
+    return _reminders(board, task_id, start, decision), _at(board, task_id, "nfos_decision_stalled", start)
+
+
+def test_reminders_do_not_count_while_the_principal_route_wall_holds(board, monkeypatch, tmp_path):
     task_id, decision = _card(board, "21")
     session, start = _start(board, monkeypatch, tmp_path, decision)
     _wall(monkeypatch, start)
-    _drive(board, session, task_id, start + 3 * HOUR)
-    assert _reminders(board, task_id, start) == [] and _at(board, task_id, "nfos_decision_stalled", start) == []
+    assert _quiet(board, task_id, decision, session, start, start + 90 * 60) == ([], [])
     assert kb.get_task(board, task_id).status != "blocked"
+    assert len(_at(board, task_id, "nfos_reminder_held_by_route_wall", start)) == 1  # o silêncio deixa sinal, uma vez
 
 
-def test_the_count_restarts_when_the_route_wall_opens(board, monkeypatch, tmp_path):
+def test_the_silence_has_a_ceiling_and_then_the_count_and_the_hold_come_back(board, monkeypatch, tmp_path):
     task_id, decision = _card(board, "22")
+    session, start = _start(board, monkeypatch, tmp_path, decision)
+    _wall(monkeypatch, start)
+    reminders, stalled = _quiet(board, task_id, decision, session, start, start + 4 * HOUR)
+    assert reminders and reminders[0] > delivery.ROUTE_WALL_SILENCE_MAX and len(reminders) >= 3
+    assert len(stalled) == 1 and kb.get_task(board, task_id).block_kind == "awaiting_principal"
+
+
+def test_a_stale_wall_without_a_probe_does_not_silence(board, monkeypatch, tmp_path):
+    """Parede velha: a sonda está vencida e nenhuma previsão de reabrir. A decisão do card não pode sondar, então a conta volta."""
+    task_id, decision = _card(board, "23")
+    session, start = _start(board, monkeypatch, tmp_path, decision)
+    _wall(monkeypatch, start, reset_at=None, now=start - 3 * HOUR)
+    assert _quiet(board, task_id, decision, session, start, start + HOUR) == ([600, 1500, 2400, 3600], [3300])
+
+
+def test_the_wall_of_the_worker_route_does_not_silence_the_principal(board, monkeypatch, tmp_path):
+    task_id, decision = _card(board, "24")
+    session, start = _start(board, monkeypatch, tmp_path, decision)
+    _wall(monkeypatch, start, route=OTHER)  # o Principal decide na rota dele, que está aberta
+    assert _quiet(board, task_id, decision, session, start, start + HOUR) == ([600, 1500, 2400, 3600], [3300])
+
+
+def test_a_decision_that_is_never_held_keeps_reminding_with_the_wall_closed(board, monkeypatch, tmp_path):
+    """Orientação do dono (também o portal, o reparo de pausa e o hold do #364) não é retida: a parede não a cala."""
+    task_id, decision = _card(board, "25")
+    session, start = _start(board, monkeypatch, tmp_path, decision)
+    board.execute("UPDATE nfos_decisions SET context=? WHERE id=?", (json.dumps({"owner_guidance": "orientação do dono"}), decision))
+    board.commit()
+    _wall(monkeypatch, start)
+    reminders, stalled = _quiet(board, task_id, decision, session, start, start + HOUR)
+    assert reminders[:3] == [600, 1500, 2400] and stalled == []
+
+
+def test_the_count_restarts_at_the_exact_rhythm_when_the_wall_opens(board, monkeypatch, tmp_path):
+    task_id, decision = _card(board, "26")
     session, start = _start(board, monkeypatch, tmp_path, decision)
     walls = _wall(monkeypatch, start)
     _drive(board, session, task_id, start + HOUR)
-    opened = session.now
-    walls.reopen(*ROUTE, now=opened)
-    _drive(board, session, task_id, opened + 2 * HOUR)
-    assert len(_reminders(board, task_id, start)) >= 3  # aberta, a conta é a de sempre
-    stalled = _at(board, task_id, "nfos_decision_stalled", start)
-    assert len(stalled) == 1 and stalled[0] > opened - start
-    assert kb.get_task(board, task_id).block_kind == "awaiting_principal"
+    opened = session.now - start
+    walls.reopen(*ROUTE, now=session.now)
+    _drive(board, session, task_id, start + opened + 2 * HOUR)
+    reminders = _reminders(board, task_id, start, decision)
+    assert [b - a for a, b in zip(reminders, reminders[1:3])] == [900, 900]  # 15 min entre os três primeiros
+    assert reminders[0] > opened
+    assert _at(board, task_id, "nfos_decision_stalled", start) == [reminders[2] + 900]  # retenção 15 min depois do terceiro

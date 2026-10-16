@@ -2403,6 +2403,7 @@ MAINTENANCE_REMINDER_MAX_GAP = 8 * DECISION_REMINDER_GAP
 # inventada pelo motor: a decisão segue pendente e visível.
 PRINCIPAL_REMINDER_MAX_GAP = MAINTENANCE_REMINDER_MAX_GAP
 PRINCIPAL_ANSWER_DEADLINE = 7 * 86400
+ROUTE_WALL_SILENCE_MAX = 2 * 3600  # REMINDER_ROUTE_WALL_20261016: teto do silêncio por decisão com a rota do Principal fechada
 PRINCIPAL_ANSWER_MAX_CHECKS = 2 * 7 * 96  # teto de segurança: até duas conferências por lembrete de 15 min em 7 dias
 # DEPENDENCY_RECHECK_20261010: sem prazo dito pelo Principal, a primeira reconferência vem em 1 h e as seguintes da mesma
 # pausa em 2, 4 e 6 h. Com 6 h fixas (o exemplo da instrução dizia 6 e ele copiava), em 10/10/2026 seis cards do Concursa
@@ -2512,11 +2513,15 @@ def _principal_answer_plan(conn, wait, evidence, now):
         return {'evidence': seen, 'next_check_at': int(min(due, wait['deadline_at'])), 'deadline_at': wait['deadline_at']}
     if row['status'] != 'pending':
         return later(now + 1)  # respondida entre a conferência e a transação: o passo seguinte a satisfaz
-    if _route_wall_closed(conn, wait['task_id']):
-        # REMINDER_ROUTE_WALL_20261016: com a parede de rota do card fechada nenhum worker responde; lembrete não conta nem retém.
-        # A conta zera e recomeça quando a parede abre (já retido em awaiting_principal fica como está).
+    since = int(ctx.get('route_wall_since') or 0)
+    if (not _needs_principal(conn, wait['task_id'], ctx) and not (since and now - since >= ROUTE_WALL_SILENCE_MAX)
+            and _principal_route_walled(conn, wait['task_id'], now)):
+        # REMINDER_ROUTE_WALL_20261016: a rota do Principal (não a do worker) está fechada e a parede é fresca (sonda em voo, próxima
+        # sonda ou reabertura prevista): ele não recebe o lembrete, então não conta nem retém. Teto de ROUTE_WALL_SILENCE_MAX por
+        # decisão: passado o teto, ou com a parede velha sem sonda, a conta e a retenção voltam, que é o sinal. Só decisão que seria
+        # retida: orientação do dono, portal, reparo de pausa e card já retido seguem lembrando.
         return dict(later(now + _reminder_gap(ctx), dict(evidence, last={'action': 'route_closed', 'at': now})),
-                    act=lambda c: _forget_principal_reminders(c, row, ctx) if reminders else None)
+                    act=lambda c: _silence_for_route_wall(c, wait, row, ctx, since or now, now))
     if (len(reminders) >= DECISION_MAX_REMINDERS and not ctx.get('stalled_at')
             and not _needs_principal(conn, wait['task_id'], ctx)):
         if now < last + DECISION_REMINDER_GAP:
@@ -2548,23 +2553,30 @@ def _principal_answer_plan(conn, wait, evidence, now):
                 act=lambda c: _remind_principal_answer(c, wait, row, ctx, given, now))
 
 
-def _route_wall_closed(conn, task_id):
-    """REMINDER_ROUTE_WALL_20261016: existe parede da rota deste card (a mesma rota que nfos_route_walls.hold consulta).
-    Leitura sem efeito; parede ilegível não segura nada, como no despacho."""
+def _principal_route_walled(conn, task_id, now):
+    """REMINDER_ROUTE_WALL_20261016: a parede da rota em que o Principal decide este card (a de sessão do perfil do card,
+    como a entrada do Principal em nfos_route_walls) segura agora: sonda em voo, próxima sonda por vir ou reabertura
+    prevista. Parede velha sem sonda não segura. Leitura sem efeito; ilegível não segura, como no despacho."""
     try:
         from hermes_cli import nfos_route_walls as walls
         if not walls.any_closed():
             return False
         task = _kb().get_task(conn, task_id)
-        route = walls.card_route(conn, task) if task is not None else None
-        return bool(route and walls.read(*route))  # read, não closed: entre uma sonda e outra a parede segue de pé
+        route = walls.session_route(task.assignee) if task is not None and task.assignee else None
+        return bool(route and walls.entry_held(*route, now=now))
     except Exception:  # noqa: BLE001
         return False
 
 
-def _forget_principal_reminders(conn, row, ctx):
+def _silence_for_route_wall(conn, wait, row, ctx, since, now):
+    """Zera a conta; a primeira vez grava o início do silêncio (para o teto) e o evento que o mostra."""
+    first = not ctx.get('route_wall_since')
     ctx['reminders'] = []
+    ctx['route_wall_since'] = since
     conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_json(ctx), row['id']))
+    if first:
+        _event(conn, wait['task_id'], row.get('run_id'), 'nfos_reminder_held_by_route_wall',
+               {'decision_id': row['id'], 'wait_id': wait['id'], 'max_seconds': ROUTE_WALL_SILENCE_MAX})
 
 
 def _hold_for_principal(conn, task_id, reason):
