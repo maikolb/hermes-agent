@@ -3192,6 +3192,21 @@ class GatewayKanbanWatchersMixin:
                            sub.get("task_id"), exc_info=True)
             return {ev.kind for ev in events}, False
 
+    @staticmethod
+    def _kanban_owner_gateway_alive(owner: str) -> bool:
+        """NOTIFY_ORPHAN_OWNER_20261016: a gateway of this profile runs on the host now. A profile that does not exist runs
+        none; anything unreadable counts as running, so nothing is adopted on a guess."""
+        try:
+            from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+            home = Path(resolve_profile_env(normalize_profile_name(owner)))
+        except Exception:  # noqa: BLE001
+            return False
+        try:
+            from gateway.status import get_running_pid
+            return (get_running_pid(home / "gateway.pid", cleanup_stale=False) or 0) > 0
+        except Exception:  # noqa: BLE001
+            return True
+
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver material lifecycle events.
 
@@ -3479,6 +3494,24 @@ class GatewayKanbanWatchersMixin:
                                     slug,
                                     focus_exc,
                                 )
+                        # NOTIFY_ORPHAN_OWNER_20261016: subscriptions of a profile that no gateway runs for (a cut-over moved the board
+                        # and left the old owner) are listed by nobody: the SQL owner filter hides them and the log says nothing.
+                        # They pass to this gateway, cursor at the last event, and the count goes to the log as a warning.
+                        try:
+                            foreign = _kb.foreign_notify_owner_counts(board=slug, notifier_profiles=notifier_profiles)
+                            orphans = [owner for owner in foreign if not self._kanban_owner_gateway_alive(owner)]
+                            if orphans:
+                                with _kb.connect_closing(board=slug) as adopt_conn:
+                                    adopted = _kb.adopt_orphan_notify_subs(adopt_conn, owners=orphans, new_owner=notifier_profile)
+                                logger.warning(
+                                    "kanban notifier: board %s had %d subscription(s) owned by %s, with no gateway running; "
+                                    "%d passed to profile %s (cursor at the last event of each task)",
+                                    slug, sum(foreign[o] for o in orphans), sorted(orphans), adopted, notifier_profile,
+                                )
+                            elif foreign:
+                                logger.debug("kanban notifier: board %s has subscriptions of other running gateways: %s", slug, foreign)
+                        except Exception as orphan_exc:  # noqa: BLE001
+                            logger.warning("kanban notifier: orphan owner check failed on board %s: %s", slug, orphan_exc)
                         # Zero-subscription early exit: probe the board with a
                         # cheap read-only connection BEFORE the writable
                         # `connect()`. A board with no subscriptions has

@@ -17043,6 +17043,54 @@ def count_notify_subs(
         conn.close()
 
 
+def foreign_notify_owner_counts(
+    *, board: Optional[str] = None, notifier_profiles: Iterable[str],
+) -> dict[str, int]:
+    """NOTIFY_ORPHAN_OWNER_20261016: owners of subscriptions that ``notifier_profiles`` do not include, with their counts.
+
+    Read-only, like :func:`count_notify_subs`. Those rows are invisible to the gateway's own listing, which is the point:
+    a profile that no gateway runs for leaves its subscriptions undelivered with nothing in the log."""
+    path = kanban_db_path(board=board)
+    if not path.exists():
+        return {}
+    mine = sorted({str(p).strip() for p in notifier_profiles if str(p).strip()})
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT notifier_profile, COUNT(*) FROM kanban_notify_subs WHERE notifier_profile IS NOT NULL "
+                "AND notifier_profile <> ''" + (" AND notifier_profile NOT IN (" + ",".join("?" for _ in mine) + ")" if mine else "")
+                + " GROUP BY notifier_profile", mine).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {}
+            raise
+        return {str(owner): int(n) for owner, n in rows}
+    finally:
+        conn.close()
+
+
+def adopt_orphan_notify_subs(conn: sqlite3.Connection, *, owners: Iterable[str], new_owner: str) -> int:
+    """NOTIFY_ORPHAN_OWNER_20261016: subscriptions of profiles no gateway runs for pass to ``new_owner``.
+
+    The cursor goes to the task's last event: the events the old owner never delivered are history, and delivering them
+    now would replay hundreds of notices and wake the Principal for each. Later events reach the new owner as usual. A
+    subscription with a claim in flight is left to it. Returns how many rows changed."""
+    owners = sorted({str(o).strip() for o in owners if str(o).strip()})
+    if not owners or not new_owner:
+        return 0
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE kanban_notify_subs SET "
+            "last_event_id = MAX(last_event_id, COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = kanban_notify_subs.task_id), 0)), "
+            "notifier_profile = ? WHERE notifier_profile IN (" + ",".join("?" for _ in owners) + ") "
+            "AND NOT EXISTS (SELECT 1 FROM kanban_notify_claims c WHERE c.task_id = kanban_notify_subs.task_id "
+            "AND c.platform = kanban_notify_subs.platform AND c.chat_id = kanban_notify_subs.chat_id "
+            "AND c.thread_id = kanban_notify_subs.thread_id)",
+            (new_owner, *owners))
+        return int(cur.rowcount)
+
+
 def remove_notify_sub(
     conn: sqlite3.Connection,
     *,

@@ -1281,6 +1281,7 @@ def test_non_dispatch_gateway_claims_only_its_profile_subscriptions(
     runner = _make_runner(adapter)
     runner._active_profile_name = lambda: "writer"
     runner._kanban_dispatcher_lock_handle = None
+    runner._kanban_owner_gateway_alive = lambda owner: True  # NOTIFY_ORPHAN_OWNER_20261016: the default profile's gateway runs
 
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
