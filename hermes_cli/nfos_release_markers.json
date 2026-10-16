@@ -151,6 +151,8 @@
   {"pr": 352, "file": "gateway/run.py", "text": "self._runner._mirror_lane_publication(ctx.source, _publication_inbound, display_text)"},
   {"pr": 352, "file": "gateway/run.py", "text": "topic_entry = self._peek_lane_topic_session(topic_key)"},
   {"pr": 352, "file": "gateway/run.py", "text": "def _forget_lane_publications(self, lane_key: str) -> None:"},
+  {"pr": 352, "file": "gateway/run.py", "text": "elif _lane_wake and response and not _gateway_notice:"},
+  {"pr": 352, "file": "gateway/run.py", "text": "_gateway_notice = response != _text_before_normalize"},
   {"pr": 352, "file": "gateway/run.py", "text": "if not getattr(source, \"session_lane\", None) and await asyncio.to_thread("},
   {"pr": 352, "file": "gateway/run.py", "text": "# Not for a kanban wake on its own lane (KANBAN_WAKE_OWN_SESSION_20261015): nobody"},
   {"pr": 352, "file": "gateway/session.py", "text": "LANE_PUBLICATION_LABEL = \"[Publicado neste tópico pelo despertar do card {task_id}]\""},
