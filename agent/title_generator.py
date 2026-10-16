@@ -150,6 +150,10 @@ _MACHINE_PREFIXES = (
     # actual question. Keep in sync with
     # tui_gateway.server._MODEL_SWITCH_MARKER_PREFIX.
     "[System: The active model for this chat has changed to ",
+    # KANBAN_WAKE_OWN_SESSION_20261015: the kanban notifier's wake
+    # (locales gateway.kanban.wake.message) opens each wake's own session; it
+    # names no user intent and titling it would add an auxiliary call per wake.
+    "[kanban] ",
 )
 
 

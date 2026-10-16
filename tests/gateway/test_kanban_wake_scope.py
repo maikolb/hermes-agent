@@ -1,10 +1,12 @@
-"""Kanban wake events must key to the same session as inbound messages.
+"""Kanban wake events must key to the lane of the inbound messages' session.
 
 Slack session keys include the workspace id, so the wake source the notifier
 rebuilds from a subscription row must carry it too. The contract asserted here:
-the key built from the wake source byte-matches the key built from an inbound
-source for the same conversation, a scope-less key does not, and platforms
-without tenant scoping keep their exact key shape.
+the key built from the wake source is the key built from an inbound source for
+the same conversation plus the kanban lane segment
+(KANBAN_WAKE_OWN_SESSION_20261015: the wake answers in its own session of that
+chat), a scope-less key does not match, and platforms without tenant scoping
+keep their exact key shape under the lane.
 """
 
 import pytest
@@ -16,10 +18,11 @@ from unittest.mock import AsyncMock, MagicMock
 from gateway.config import Platform, PlatformConfig
 from gateway.kanban_watchers import _wake_scope_id
 from gateway.run import GatewayRunner
-from gateway.session import build_session_key
+from gateway.session import KANBAN_WAKE_LANE, SESSION_LANE_MARK, build_session_key
 from hermes_cli import kanban_db as kb
 from plugins.platforms.slack.adapter import SlackAdapter
 
+LANE = SESSION_LANE_MARK + KANBAN_WAKE_LANE
 TEAM = "T0B8U2M6NRE"
 CHANNEL = "C0BCDG3H66P"
 THREAD = "1720000000.000100"
@@ -110,7 +113,7 @@ def _wake_source_from(adapter):
     return adapter.handle_message.await_args.args[0].source
 
 
-def test_slack_wake_resumes_the_creators_workspace_scoped_session(tmp_path, monkeypatch):
+def test_slack_wake_keys_to_the_lane_of_the_creators_workspace_scoped_session(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "wake-scope.db"))
     kb.init_db()
     _completed_subscription(
@@ -137,7 +140,7 @@ def test_slack_wake_resumes_the_creators_workspace_scoped_session(tmp_path, monk
         scope_id=TEAM,
     )
     wake_key = build_session_key(wake)
-    assert wake_key == build_session_key(inbound)
+    assert wake_key == build_session_key(inbound) + LANE
     assert TEAM in wake_key
     # A scope-less source keys to a different session for the same chat.
     assert build_session_key(replace(wake, scope_id=None, guild_id=None)) != wake_key
@@ -178,11 +181,11 @@ def test_unknown_channel_keeps_the_previous_unscoped_wake(tmp_path, monkeypatch)
 
     wake = _wake_source_from(adapter)
     assert wake.scope_id is None
-    assert build_session_key(wake) == f"agent:main:slack:group:{CHANNEL}"
+    assert build_session_key(wake) == f"agent:main:slack:group:{CHANNEL}" + LANE
 
 
-def test_unscoped_platform_wake_key_is_byte_identical(tmp_path, monkeypatch):
-    """Platforms without tenant scoping must keep their exact key shape."""
+def test_unscoped_platform_wake_key_keeps_its_shape_under_the_lane(tmp_path, monkeypatch):
+    """Platforms without tenant scoping keep their exact key shape, with the kanban lane segment after it."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "wake-scope-telegram.db"))
     kb.init_db()
     _completed_subscription(
@@ -197,7 +200,7 @@ def test_unscoped_platform_wake_key_is_byte_identical(tmp_path, monkeypatch):
     assert len(adapter.handled) == 1
     wake = adapter.handled[0].source
     assert wake.scope_id is None
-    assert build_session_key(wake) == "agent:main:telegram:dm:chat-dm"
+    assert build_session_key(wake) == "agent:main:telegram:dm:chat-dm" + LANE
 
 
 def test_wake_scope_id_prefers_persisted_metadata_over_the_adapter_map():

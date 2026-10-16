@@ -107,6 +107,12 @@ logger = logging.getLogger(__name__)
 MAX_SAFE_RESUME_MESSAGES = 20_000
 MAX_SAFE_EXPORT_MESSAGES = 20_000
 
+# KANBAN_WAKE_OWN_SESSION_20261015: 1 when a session row is a lane of its chat
+# (key ends with gateway.session.KANBAN_LANE_KEY_SUFFIX), 0 otherwise. Lookups
+# by chat origin compare it with 0 so a lane never stands in for the chat's
+# conversation; a key that only contains ":~" elsewhere is not a lane.
+LANE_KEY_SQL = "(COALESCE({alias}.session_key, '') LIKE '%:~kanban')"
+
 
 def _configured_transcript_limit(key: str, fallback: int) -> int:
     """Resolve a transcript safety limit from config at call time.
@@ -6174,13 +6180,17 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         provided, exact sender matches are preferred; if multiple distinct
         users share the chat and none matches, returns None rather than
         contaminating another participant's session.
+
+        Lane sessions (``LANE_KEY_SQL``) share the chat origin and are never
+        "the conversation of this chat".
         """
         if not platform or chat_id in (None, ""):
             return None
-        query = """
+        query = f"""
             SELECT id, user_id, started_at FROM sessions
             WHERE LOWER(source) = LOWER(?)
               AND session_key IS NOT NULL
+              AND {LANE_KEY_SQL.format(alias='sessions')} = 0
               AND chat_id = ?
               AND ended_at IS NULL
         """
@@ -6303,6 +6313,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                   AND COALESCE(s.chat_id, '') = COALESCE(?, '')
                   AND COALESCE(s.chat_type, '') = COALESCE(?, '')
                   AND COALESCE(s.thread_id, '') = COALESCE(?, '')
+                  AND {LANE_KEY_SQL.format(alias='s')} = 0
                   AND (s.ended_at IS NULL OR s.end_reason IN ({_RECOVERABLE_END_REASONS_SQL}))
                   AND (COALESCE(s.message_count, 0) > 0 OR EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = s.id LIMIT 1
@@ -6314,6 +6325,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                         AND COALESCE(b.chat_id, '') = COALESCE(s.chat_id, '')
                         AND COALESCE(b.chat_type, '') = COALESCE(s.chat_type, '')
                         AND COALESCE(b.thread_id, '') = COALESCE(s.thread_id, '')
+                        AND {LANE_KEY_SQL.format(alias='b')} = 0
                         AND b.ended_at IS NOT NULL
                         AND b.end_reason IN ({_RESET_END_REASONS_SQL})
                         AND b.ended_at

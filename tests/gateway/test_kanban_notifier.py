@@ -1600,14 +1600,16 @@ def test_notifier_wakeup_uses_subscription_chat_type(tmp_path, monkeypatch):
     assert len(adapter.handled) == 1
     assert adapter.handled[0].source.chat_type == "dm"
 
-    # The wake must resume the creator's real DM session key — the whole bug
+    # The wake must key to the creator's real DM conversation — the whole bug
     # was that a hardcoded chat_type="group" made build_session_key() produce
-    # a group-scoped key (a NEW session) instead of the ":dm:<chat_id>" shape
-    # the original conversation runs under (#56580 / #68874).
-    from gateway.session import build_session_key
+    # a group-scoped key instead of the ":dm:<chat_id>" shape the original
+    # conversation runs under (#56580 / #68874). Since
+    # KANBAN_WAKE_OWN_SESSION_20261015 the wake answers in the kanban lane of
+    # that conversation: the same DM key plus the lane segment.
+    from gateway.session import KANBAN_WAKE_LANE, SESSION_LANE_MARK, build_session_key
 
     wake_key = build_session_key(adapter.handled[0].source)
-    assert wake_key == "agent:main:telegram:dm:chat-dm"
+    assert wake_key == "agent:main:telegram:dm:chat-dm" + SESSION_LANE_MARK + KANBAN_WAKE_LANE
     assert ":group:" not in wake_key
 
 
