@@ -20467,7 +20467,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 await asyncio.to_thread(self._flush_lane_mirrors, _quick_key)
             except Exception:
                 logger.warning("kanban lane: queued publications not flushed for %s", _quick_key, exc_info=True)
-            self._forget_lane_publications(_quick_key)
+            finally:
+                # Also on cancellation: a mark left behind would drop the next identical publication.
+                self._forget_lane_publications(_quick_key)
 
     def _restore_moa_one_shot(self, event: "MessageEvent", quick_key: str) -> None:
         """Revert a ``/moa <prompt>`` one-shot model override after its turn.
@@ -23360,10 +23362,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_entry.session_id,
                 )
                 response = ""
-            elif _lane_wake and response:
+            elif _lane_wake and response and response == str(agent_result.get("final_response") or ""):
                 # KANBAN_WAKE_OWN_SESSION_20261015: what a lane turn publishes in
                 # the topic is also written in the topic's session, with its card,
-                # so an answer given there later finds the question.
+                # so an answer given there later finds the question. Only the
+                # agent's own text: a notice the gateway wrote in its place
+                # (_normalize_empty_agent_response) is not a publication of the card.
                 await asyncio.to_thread(
                     self._mirror_lane_publication, source, getattr(event, "text", None), response
                 )

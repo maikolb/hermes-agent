@@ -570,5 +570,66 @@ async def test_other_internal_events_keep_the_home_channel_notice(monkeypatch, t
     assert any("No home channel" in notice for notice in platform_notices + chat.sent)
 
 
+@pytest.mark.asyncio
+async def test_a_cancelled_flush_does_not_keep_the_publication_mark(monkeypatch, tmp_path):
+    """A cancellation during the end-of-turn flush must still clear the duplicate mark of that lane turn.
+
+    Otherwise the next lane turn that publishes the same text for the same card is dropped from the topic.
+    """
+    from gateway.session import lane_publication_mirror_text
+
+    runner, store, chat, notes, _ = _lane_runner(monkeypatch, tmp_path)
+    topic = store.get_or_create_session(_topic_source(user_id="u1"))
+    text = "PERGUNTA para Ana: qual ambiente?"
+    real_flush = runner._flush_lane_mirrors
+    armed = {"on": False}
+
+    def flush(topic_key):
+        if armed["on"]:
+            raise asyncio.CancelledError()
+        return real_flush(topic_key)
+
+    monkeypatch.setattr(runner, "_flush_lane_mirrors", flush)
+
+    async def lane_turn(cancel_flush, **_kwargs):
+        armed["on"] = False
+        # The interim publication (written while the topic is idle).
+        assert runner._mirror_lane_publication(_wake_source(), f"[kanban] Task {CARD} x", text)
+        armed["on"] = cancel_flush  # the end-of-turn flush of this turn is cancelled
+        return {"final_response": text, "messages": [], "tools": [], "history_offset": 0, "last_prompt_tokens": 1}
+
+    async def first_turn(**kw):
+        return await lane_turn(True, **kw)
+
+    async def second_turn(**kw):
+        return await lane_turn(False, **kw)
+
+    runner._run_agent = AsyncMock(side_effect=first_turn)
+    with pytest.raises(asyncio.CancelledError):
+        await runner._handle_message(_wake_event())
+
+    # The next lane turn publishes the same text for the same card.
+    runner._run_agent = AsyncMock(side_effect=second_turn)
+    await runner._handle_message(_wake_event())
+
+    mirror = lane_publication_mirror_text(CARD, text)
+    assert [r["content"] for r in _rows(store, topic.session_id)].count(mirror) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_notice_for_an_empty_agent_answer_is_not_mirrored(monkeypatch, tmp_path):
+    """An empty answer makes the gateway write its own notice; that notice is not a publication of the card."""
+    runner, store, chat, notes, _ = _lane_runner(monkeypatch, tmp_path)
+    topic = store.get_or_create_session(_topic_source(user_id="u1"))
+    runner._run_agent = AsyncMock(return_value={"final_response": "", "messages": [], "tools": [],
+                                                "history_offset": 0, "last_prompt_tokens": 1, "api_calls": 0})
+
+    await runner._handle_message(_wake_event())
+
+    contents = [r["content"] or "" for r in _rows(store, topic.session_id)]
+    assert not any("wasn't processed" in c for c in contents)
+    assert not any("[Publicado neste tópico" in c for c in contents)
+
+
 # The notifier test requires a configured host with real executor profiles, as the wake scope tests do.
 pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")
