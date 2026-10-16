@@ -159,3 +159,12 @@ def test_the_go_plus_route_has_its_own_endpoint_key_user_agent_and_a_stable_sess
     again = opencode_session_headers('opencode-go-plus', runtime['base_url'], 'session-1')
     assert first == again and first.get('x-opencode-session'), 'stable per conversation'
     assert opencode_session_headers('openrouter', 'https://openrouter.ai/api/v1', 'session-1') == {}
+
+    # the client the agent builds: the provider's own user agent replaces the default one, applied last
+    from hermes_cli.config import (
+        apply_custom_provider_extra_headers_to_client_kwargs, get_compatible_custom_providers, load_config)
+    kwargs = {'base_url': runtime['base_url'], 'api_key': runtime['api_key'],
+              'default_headers': {'User-Agent': 'HermesAgent/0', 'X-Title': 'Hermes Agent'}}
+    apply_custom_provider_extra_headers_to_client_kwargs(kwargs, runtime['base_url'],
+                                                         get_compatible_custom_providers(load_config()))
+    assert kwargs['default_headers']['User-Agent'] == 'nexa-factory-os-hermes/1.0'
