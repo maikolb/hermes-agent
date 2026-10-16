@@ -982,6 +982,19 @@ DEFAULT_CONFIG = {
                                       # models) still applies on top of overrides
                                       # (raise-only: an override above the floor
                                       # wins; one below it is raised to the floor).
+        "model_protect_last_n": {},   # Per-model override of `protect_last_n`. Keys
+                                      # are substring-matched against the model
+                                      # name (longest match wins); the value
+                                      # replaces the global tail size for that
+                                      # model only. The match is case-sensitive:
+                                      # "deepseek" does not match "DeepSeek-V4".
+                                      # The round in progress (newest assistant
+                                      # tool calls + their results) is never
+                                      # pruned, whatever this value is. e.g.
+                                      #   model_protect_last_n:
+                                      #     "deepseek": 8
+                                      # A negative or non-integer value is ignored
+                                      # (the global applies). Empty = no change.
         "idle_compact_after_seconds": 0,  # Opt-in idle compaction (0 = disabled).
                                       # When > 0, a session that resumes after at
                                       # least this many seconds of inactivity
