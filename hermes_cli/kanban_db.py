@@ -13622,6 +13622,43 @@ def _budget_continuation(
     return True
 
 
+# NFOS_SHORT_TIMEOUT_LOOP_20261016: card do NFOS cujas duas últimas execuções acabaram em timed_out em menos de 3 min e
+# sem entrega durável é laço, não tentativa. t_3f155a07 (Concursa, 21-23/09/2026) fez 235 execuções de ~1 min, em pares
+# separados por gave_up e unblocked automáticos; o limite de tempo já vinha estourado ao nascer a execução. O corte de
+# 180 s vem da distribuição das execuções timed_out desde 14/09 (234 entre 60 e 120 s, nenhuma entre 120 e 180 s, o resto
+# acima de 5 min). A contagem atravessa gave_up e unblocked de propósito: ela só se desfaz com uma execução que não seja
+# curta. shortcut: dois é o menor número que para o t_3f155a07 antes da 10ª execução; subir a 3 se parar card bom.
+_SHORT_TIMEOUT_SECONDS = 180
+_SHORT_TIMEOUT_STREAK = 2
+_DURABLE_KINDS = ("nfos_spec_saved", "nfos_report_saved", "nfos_probe", "nfos_effect_reconciled", "nfos_homologation_bound")
+
+
+def _short_timeout_loop(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Erro do último timed_out curto quando as duas últimas execuções encerradas do card do NFOS são o laço; senão None."""
+    try:
+        if conn.execute("SELECT 1 FROM nfos_workflows WHERE task_id = ?", (task_id,)).fetchone() is None:
+            return None
+    except sqlite3.OperationalError:  # quadro sem as tabelas do NFOS: o comportamento de sempre
+        return None
+    runs = conn.execute(
+        "SELECT id, outcome, error, started_at, ended_at FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT ?", (task_id, _SHORT_TIMEOUT_STREAK),
+    ).fetchall()
+    if len(runs) < _SHORT_TIMEOUT_STREAK:
+        return None
+    marks = ",".join("?" for _ in _DURABLE_KINDS)
+    for run in runs:
+        if run["outcome"] != "timed_out" or int(run["ended_at"]) - int(run["started_at"]) >= _SHORT_TIMEOUT_SECONDS:
+            return None
+        if conn.execute(
+            f"SELECT 1 FROM task_events WHERE run_id = ? AND (kind IN ({marks}) OR (kind = 'nfos_progress' "
+            "AND json_valid(payload) AND json_extract(payload, '$.process.move') = 'forward')) LIMIT 1",
+            (run["id"], *_DURABLE_KINDS),
+        ).fetchone():
+            return None
+    return str(runs[0]["error"] or "timed_out")[:400]
+
+
 # A spawn that fails while the workspace is resolved reports its error with
 # this prefix. The NFOS reads it to route the breaker's stop to the workspace
 # repair (BREAKER_OWNER_20261010).
@@ -15379,6 +15416,15 @@ def _dispatch_once_locked(
             _release_workspace_lease(workspace_lease)
             if refusal:  # a hold, not a lost race: the diagnosis names it instead of reading as a stuck dispatcher
                 result.claim_held.append((row["id"], refusal[0]))
+            continue
+        loop_error = _short_timeout_loop(conn, claimed.id)  # NFOS_SHORT_TIMEOUT_LOOP_20261016
+        if loop_error is not None:
+            _release_workspace_lease(workspace_lease)
+            if _record_task_failure(
+                conn, claimed.id, loop_error, outcome="short_timeout_loop", force_trip=True,
+                release_claim=True, end_run=True, event_payload_extra={"failures": _SHORT_TIMEOUT_STREAK},
+            ):
+                result.auto_blocked.append(claimed.id)
             continue
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
