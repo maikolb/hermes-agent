@@ -3193,17 +3193,13 @@ class GatewayKanbanWatchersMixin:
             return {ev.kind for ev in events}, False
 
     @staticmethod
-    def _kanban_owner_gateway_alive(owner: str) -> bool:
-        """NOTIFY_ORPHAN_OWNER_20261016: a gateway of this profile runs on the host now. A profile that does not exist runs
-        none; anything unreadable counts as running, so nothing is adopted on a guess."""
+    def _kanban_owner_profile_exists(owner: str) -> bool:
+        """NOTIFY_ORPHAN_OWNER_20261016: the owner is a profile of this host. Anything unreadable counts as existing, so
+        nothing is adopted on a guess. A running gateway holds its lock only while it runs (a restart drops it), and a
+        multiplexed profile has none of its own, so the lock never says that an owner is gone; a missing profile does."""
         try:
-            from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
-            home = Path(resolve_profile_env(normalize_profile_name(owner)))
-        except Exception:  # noqa: BLE001
-            return False
-        try:
-            from gateway.status import get_running_pid
-            return (get_running_pid(home / "gateway.pid", cleanup_stale=False) or 0) > 0
+            from hermes_cli.profiles import profile_exists
+            return bool(profile_exists(owner))
         except Exception:  # noqa: BLE001
             return True
 
@@ -3494,24 +3490,35 @@ class GatewayKanbanWatchersMixin:
                                     slug,
                                     focus_exc,
                                 )
-                        # NOTIFY_ORPHAN_OWNER_20261016: subscriptions of a profile that no gateway runs for (a cut-over moved the board
-                        # and left the old owner) are listed by nobody: the SQL owner filter hides them and the log says nothing.
-                        # They pass to this gateway, cursor at the last event, and the count goes to the log as a warning.
+                        # NOTIFY_ORPHAN_OWNER_20261016: subscriptions whose owner is no profile of this host are listed by nobody (the SQL
+                        # owner filter hides them) and the log said nothing. They pass to this gateway, cursor at the last event of each
+                        # task. An owner that exists but is not among this gateway's profiles may be another gateway, restarting or not:
+                        # its rows are left alone and the count goes to the log, at most every 10 min per owner.
                         try:
                             foreign = _kb.foreign_notify_owner_counts(board=slug, notifier_profiles=notifier_profiles)
-                            orphans = [owner for owner in foreign if not self._kanban_owner_gateway_alive(owner)]
-                            if orphans:
+                            gone = [owner for owner in foreign if not self._kanban_owner_profile_exists(owner)]
+                            if gone:
                                 with _kb.connect_closing(board=slug) as adopt_conn:
-                                    adopted = _kb.adopt_orphan_notify_subs(adopt_conn, owners=orphans, new_owner=notifier_profile)
-                                logger.warning(
-                                    "kanban notifier: board %s had %d subscription(s) owned by %s, with no gateway running; "
-                                    "%d passed to profile %s (cursor at the last event of each task)",
-                                    slug, sum(foreign[o] for o in orphans), sorted(orphans), adopted, notifier_profile,
-                                )
-                            elif foreign:
-                                logger.debug("kanban notifier: board %s has subscriptions of other running gateways: %s", slug, foreign)
+                                    adopted = _kb.adopt_orphan_notify_subs(adopt_conn, owners=gone, new_owner=notifier_profile)
+                                if adopted:
+                                    logger.warning(
+                                        "kanban notifier: board %s had %d subscription(s) owned by %s, which is no profile of this host; "
+                                        "%d passed to profile %s (cursor at the last event of each task)",
+                                        slug, sum(foreign[o] for o in gone), sorted(gone), adopted, notifier_profile,
+                                    )
+                            warned = getattr(self, "_kanban_foreign_owner_warned", None)
+                            if warned is None:
+                                warned = self._kanban_foreign_owner_warned = {}
+                            for owner in (o for o in foreign if o not in gone):
+                                if time.monotonic() - warned.get((slug, owner), -1e9) >= 600:
+                                    warned[(slug, owner)] = time.monotonic()
+                                    logger.warning(
+                                        "kanban notifier: board %s has %d subscription(s) owned by profile %s, not served by this gateway "
+                                        "(%s); they are delivered only while a gateway of that profile runs",
+                                        slug, foreign[owner], owner, sorted(notifier_profiles),
+                                    )
                         except Exception as orphan_exc:  # noqa: BLE001
-                            logger.warning("kanban notifier: orphan owner check failed on board %s: %s", slug, orphan_exc)
+                            logger.warning("kanban notifier: foreign owner check failed on board %s: %s", slug, orphan_exc)
                         # Zero-subscription early exit: probe the board with a
                         # cheap read-only connection BEFORE the writable
                         # `connect()`. A board with no subscriptions has

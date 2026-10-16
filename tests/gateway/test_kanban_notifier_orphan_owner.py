@@ -26,14 +26,13 @@ class RecordingAdapter:
         self.sent.append({"chat_id": chat_id, "text": text, "metadata": metadata or {}})
 
 
-def _runner(adapter, *, alive):
+def _runner(adapter):
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
     runner.adapters = {Platform.TELEGRAM: adapter}
     runner._kanban_sub_fail_counts = {}
     runner._active_profile_name = lambda: "concursa"
     runner._kanban_dispatcher_lock_handle = None
-    runner._kanban_owner_gateway_alive = lambda owner: alive
     return runner
 
 
@@ -52,7 +51,14 @@ def _tick(monkeypatch, runner):
     asyncio.run(run())
 
 
-def _board(tmp_path, monkeypatch):
+def _board(tmp_path, monkeypatch, *, owner_profile_exists=False):
+    # O detector é o real: HERMES_HOME próprio, com ou sem a pasta do perfil dono.
+    from hermes_cli import profiles
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    (tmp_path / "home" / "profiles" / "worker").mkdir(parents=True)  # o executor dos cartões
+    monkeypatch.setattr(profiles, "_get_profiles_root", lambda: tmp_path / "home" / "profiles")  # a pasta de perfis é esta
+    if owner_profile_exists:
+        (tmp_path / "home" / "profiles" / OLD_OWNER).mkdir()
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "orphan-owner.db"))
     kb.init_db()
     conn = kb.connect()
@@ -74,12 +80,12 @@ def _sub(task_id):
         conn.close()
 
 
-def test_subscriptions_of_an_owner_with_no_gateway_pass_to_the_running_profile_without_replaying_history(
+def test_subscriptions_of_an_owner_that_is_no_profile_of_the_host_pass_to_the_running_profile_without_replaying_history(
         tmp_path, monkeypatch, caplog):
     task_id = _board(tmp_path, monkeypatch)
     adapter = RecordingAdapter()
     with caplog.at_level(logging.WARNING):
-        _tick(monkeypatch, _runner(adapter, alive=False))
+        _tick(monkeypatch, _runner(adapter))
     sub, last_event = _sub(task_id)
     assert (sub["notifier_profile"], sub["last_event_id"]) == ("concursa", last_event)
     assert adapter.sent == []  # o evento antigo não volta ao chat
@@ -90,18 +96,22 @@ def test_subscriptions_of_an_owner_with_no_gateway_pass_to_the_running_profile_w
         kb.complete_task(conn, task_id, summary="evento novo")
     finally:
         conn.close()
-    _tick(monkeypatch, _runner(adapter, alive=False))
+    _tick(monkeypatch, _runner(adapter))
     assert len(adapter.sent) == 1 and "cartao antigo" in adapter.sent[0]["text"]  # o que vem depois chega
 
 
-def test_subscriptions_of_an_owner_whose_gateway_runs_are_left_alone(tmp_path, monkeypatch):
-    task_id = _board(tmp_path, monkeypatch)
+def test_an_owner_that_is_a_profile_of_the_host_is_left_alone_and_the_warning_is_rate_limited(tmp_path, monkeypatch, caplog):
+    """Gateway reiniciando (lock some), multiplex ou outro gateway: o perfil existe, as linhas não mudam. Aviso contado a cada 10 min."""
+    task_id = _board(tmp_path, monkeypatch, owner_profile_exists=True)
     before, _ = _sub(task_id)
     adapter = RecordingAdapter()
-    _tick(monkeypatch, _runner(adapter, alive=True))
+    with caplog.at_level(logging.WARNING):
+        _tick(monkeypatch, _runner(adapter))
+        _tick(monkeypatch, _runner(adapter))
     after, _ = _sub(task_id)
     assert after["notifier_profile"] == OLD_OWNER and after["last_event_id"] == before["last_event_id"]
     assert adapter.sent == []
+    assert len([r for r in caplog.records if "not served by this gateway" in r.getMessage() and "1 subscription(s)" in r.getMessage()]) >= 1
 
 
 def test_a_subscription_with_a_claim_in_flight_is_not_adopted(tmp_path, monkeypatch):
@@ -113,3 +123,15 @@ def test_a_subscription_with_a_claim_in_flight_is_not_adopted(tmp_path, monkeypa
     finally:
         conn.close()
     assert _sub(task_id)[0]["notifier_profile"] == OLD_OWNER
+
+
+def test_a_claim_whose_lease_ran_out_does_not_hold_the_adoption(tmp_path, monkeypatch):
+    task_id = _board(tmp_path, monkeypatch)
+    conn = kb.connect()
+    try:
+        kb.claim_unseen_events_for_sub(conn, task_id=task_id, platform="telegram", chat_id="chat-1", claim_token="t")
+        conn.execute("UPDATE kanban_notify_claims SET lease_until = 1 WHERE task_id = ?", (task_id,))
+        conn.commit()
+        assert kb.adopt_orphan_notify_subs(conn, owners=[OLD_OWNER], new_owner="concursa") == 1
+    finally:
+        conn.close()

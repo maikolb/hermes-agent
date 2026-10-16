@@ -17071,7 +17071,7 @@ def foreign_notify_owner_counts(
 
 
 def adopt_orphan_notify_subs(conn: sqlite3.Connection, *, owners: Iterable[str], new_owner: str) -> int:
-    """NOTIFY_ORPHAN_OWNER_20261016: subscriptions of profiles no gateway runs for pass to ``new_owner``.
+    """NOTIFY_ORPHAN_OWNER_20261016: subscriptions of profiles that do not exist on the host pass to ``new_owner``.
 
     The cursor goes to the task's last event: the events the old owner never delivered are history, and delivering them
     now would replay hundreds of notices and wake the Principal for each. Later events reach the new owner as usual. A
@@ -17080,6 +17080,12 @@ def adopt_orphan_notify_subs(conn: sqlite3.Connection, *, owners: Iterable[str],
     if not owners or not new_owner:
         return 0
     with write_txn(conn):
+        # A claim whose lease ran out belongs to a consumer that is gone: it must not hold the adoption for ever.
+        conn.execute("DELETE FROM kanban_notify_claims WHERE COALESCE(lease_until, 0) < ? AND EXISTS (SELECT 1 FROM kanban_notify_subs s "
+                     "WHERE s.task_id = kanban_notify_claims.task_id AND s.platform = kanban_notify_claims.platform "
+                     "AND s.chat_id = kanban_notify_claims.chat_id AND s.thread_id = kanban_notify_claims.thread_id "
+                     "AND s.notifier_profile IN (" + ",".join("?" for _ in owners) + "))",
+                     (time.time(), *owners))
         cur = conn.execute(
             "UPDATE kanban_notify_subs SET "
             "last_event_id = MAX(last_event_id, COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = kanban_notify_subs.task_id), 0)), "
