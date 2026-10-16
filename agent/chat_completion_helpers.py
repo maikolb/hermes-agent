@@ -44,6 +44,10 @@ from agent.message_sanitization import (
     _repair_tool_call_arguments,
 )
 from agent.reasoning_summaries import separate_glued_reasoning_blocks
+from agent.stream_diag import (
+    attach_stream_generation as _attach_stream_generation,
+    extra_field as _stream_diag_extra_field,
+)
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
 from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_float, env_int
@@ -4025,6 +4029,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         role = "assistant"
         reasoning_parts: list = []
         usage_obj = None
+        # NFOS_API_CALL_GEN_UPSTREAM_20261016: id e provedor reais do último
+        # chunk que os trouxe, para a linha "API call #N".
+        _chunk_gen_id = None
+        _chunk_upstream = None
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
         _writer_token = {"value": None}
@@ -4218,6 +4226,16 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             if not _stream_attempt_is_active(stream_attempt_id):
                 _discard_stale_stream_chunk(stream_attempt_id, chunk)
                 continue
+
+            try:
+                _cid = getattr(chunk, "id", None)
+                if isinstance(_cid, str) and _cid:
+                    _chunk_gen_id = _cid
+                _cprov = _stream_diag_extra_field(chunk, "provider")
+                if isinstance(_cprov, str) and _cprov:
+                    _chunk_upstream = _cprov
+            except Exception:
+                pass
 
             if not chunk.choices:
                 if hasattr(chunk, "model") and chunk.model:
@@ -4585,12 +4603,19 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             message=mock_message,
             finish_reason=effective_finish_reason,
         )
-        return SimpleNamespace(
+        mock_response = SimpleNamespace(
             id="stream-" + str(uuid.uuid4()),
             model=model_name,
             choices=[mock_choice],
             usage=usage_obj,
         )
+        _attach_stream_generation(
+            mock_response,
+            chunk_id=_chunk_gen_id,
+            chunk_provider=_chunk_upstream,
+            headers=_diag.get("headers"),
+        )
+        return mock_response
 
     def _call_anthropic(request_client):
         """Stream an Anthropic Messages API response.
