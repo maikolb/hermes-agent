@@ -212,6 +212,29 @@ def required(conn, task_id, kind=None):
     return settings().get('principal_validation') is True or project.get('principal_validation') is True
 
 
+def worker_routes(task, policy):
+    """``(provider, model)`` of the first of ``kanban.delivery.worker_routes`` whose wall is not holding, else the
+    first one, else ``None`` (WORKER_ROUTES_20261016).
+
+    The list is the order of preference: the cheap route first, the reserve after it. A wall closes one route
+    (``nfos_route_walls``) and this takes the card to the next. A route whose wall is due for its probe counts as
+    open, so the launch that goes there is the probe; while that probe is in flight the route holds and the cards
+    take the reserve. With every route closed the card keeps the first and waits there, as with one route."""
+    routes = [(str(r.get('provider') or '').strip(), str(r.get('model') or '').strip())
+              for r in policy.get('worker_routes') or () if isinstance(r, dict)]
+    routes = [route for route in routes if all(route)]
+    if not routes or not task.assignee:
+        return None
+    from hermes_cli import nfos_route_walls as walls
+    for provider, model in routes:
+        try:
+            if walls.closed(task.assignee, provider, model) is None:
+                return provider, model
+        except Exception:  # noqa: BLE001 - an unreadable wall lets the route through, as the dispatcher does
+            return provider, model
+    return routes[0]
+
+
 def worker_model_args(task, conn=None):
     policy = settings()
     if task.model_override:
@@ -221,6 +244,9 @@ def worker_model_args(task, conn=None):
         model = policy.get('worker_model') or task.model_override
         provider = policy.get('worker_provider') or task.provider_override
         effort = policy.get('worker_reasoning_effort') or task.reasoning_effort
+        chosen = worker_routes(task, policy)
+        if chosen:
+            provider, model = chosen
     if conn is not None:
         escalation = worker_escalation(conn, task.id)
         if escalation and not task.model_override and model in ('gpt-5.6-luna', 'gpt-6-luna') and provider in (None, 'openai-codex'):
