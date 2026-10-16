@@ -7770,6 +7770,22 @@ def run_conversation(
                     # method — treat absence as a no-op.
                     _prune = getattr(_compressor, "prune_tool_results_only", None)
                     if callable(_prune):
+                        # Stale-reasoning pad (NFOS_WORKER_CTX_20261016): tell the
+                        # engine whether the ACTIVE provider forces
+                        # reasoning_content echo-back (cached per provider,
+                        # refreshed after a fallback switch). The pad rides in the
+                        # prune commit below, so it adds no cache break. getattr
+                        # guard: gateway test doubles may lack the method.
+                        _echo_flag = getattr(agent, "_needs_thinking_reasoning_pad", None)
+                        try:
+                            _compressor.stale_reasoning_pad = (
+                                bool(_echo_flag()) if callable(_echo_flag) else False
+                            )
+                        except Exception:
+                            # Fail closed: a stale True from an earlier iteration
+                            # must not pad when the provider can no longer be read.
+                            _compressor.stale_reasoning_pad = False
+                            logger.debug("stale-reasoning pad flag unavailable", exc_info=True)
                         try:
                             _pruned_msgs, _pruned_n = _prune(
                                 messages, current_tokens=_real_tokens

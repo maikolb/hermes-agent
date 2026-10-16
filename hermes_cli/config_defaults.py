@@ -841,6 +841,15 @@ DEFAULT_CONFIG = {
                                       # for a full trigger-sized token runway to
                                       # regrow before rearming. Keeps prompt-cache
                                       # breaks episodic. 0 = no minimum-savings gate.
+        "proactive_prune_stale_reasoning": True,  # with a provider that forces
+                                      # reasoning_content echo-back (DeepSeek, Kimi,
+                                      # MiMo), the prune commit also swaps the thinking
+                                      # text of assistant messages outside the
+                                      # protected tail for the one-space pad those
+                                      # providers accept. Thinking text is re-billed
+                                      # on every call otherwise and nothing else trims
+                                      # it. Tool calls, results and visible text stay.
+                                      # Needs proactive_prune_tokens > 0. False = off.
         "micro_compact": False,       # opt-in: after each completed turn, fold the
                                       # oldest un-absorbed exchange into a rolling
                                       # summary, amortizing compression cost instead
