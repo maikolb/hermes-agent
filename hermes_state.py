@@ -107,10 +107,11 @@ logger = logging.getLogger(__name__)
 MAX_SAFE_RESUME_MESSAGES = 20_000
 MAX_SAFE_EXPORT_MESSAGES = 20_000
 
-# KANBAN_WAKE_OWN_SESSION_20261015: nonzero when a session row is a lane of its
-# chat (key carries gateway.session.SESSION_LANE_MARK). Lookups by chat origin
-# compare it with 0 so a lane never stands in for the chat's conversation.
-LANE_KEY_SQL = "INSTR(COALESCE({alias}.session_key, ''), ':~')"
+# KANBAN_WAKE_OWN_SESSION_20261015: 1 when a session row is a lane of its chat
+# (key ends with gateway.session.KANBAN_LANE_KEY_SUFFIX), 0 otherwise. Lookups
+# by chat origin compare it with 0 so a lane never stands in for the chat's
+# conversation; a key that only contains ":~" elsewhere is not a lane.
+LANE_KEY_SQL = "(COALESCE({alias}.session_key, '') LIKE '%:~kanban')"
 
 
 def _configured_transcript_limit(key: str, fallback: int) -> int:

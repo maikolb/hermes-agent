@@ -1024,7 +1024,7 @@ Read primary_task, tasks and their source_ref against the original request and
 media. Resolve with continue to atomically dispatch all accepted items through
 the same intake. You may refine the split by adding "proposal":{"primary_task":
 "First task","tasks":[{"key":"stable original location","text":"Task",
-"source_ref":"Original message/media reference"}]} to answer.json. Keep stable
+"source_ref":"Original message/media reference"}]} to answer-ID.json. Keep stable
 keys for the same task. An explicit empty tasks list keeps only the first task.
 Delimit the initial batch before the first spec. If you change an already
 specified primary_task, explicitly instruct the worker to revise/persist its spec
@@ -1037,7 +1037,10 @@ reserves capacity and each new worker creates its own card. No new human approva
 is required for additional tasks already present in the authorized request.
 Use the same CLI prefix with `pending` to inspect the persisted decision
 queue. Resolve each item with `decide --decision ID --resolution
-continue|approve|changes|human --input answer.json` (JSON containing answer).
+continue|approve|changes|human --input answer-ID.json` (JSON containing answer).
+Name each input file after the decision or card it answers (answer-ID.json,
+never a shared answer.json): the topic and a card wake of the same project run
+at the same time in the same workspace.
 Inspect the current spec, candidate and evidence before approving publication.
 You own two mandatory acceptances, including record mode, in this
 same queue. For spec_review, compare the ORIGINAL request and attachments with
@@ -1074,7 +1077,7 @@ Preserve previously proven, unchanged work and valid receipts; do not repeat a
 submission, deployment or full investigation just to refresh paperwork. Reject
 newly discovered real gaps with source evidence, but distinguish them from new
 scope. Do not invent additional criteria after the source has been satisfied.
-Accept either kind with continue and answer.json containing answer plus:
+Accept either kind with continue and answer-ID.json containing answer plus:
 {"assessment":{"request_alignment":"How the original request is covered",
 "scope_assessment":"Scope, exclusions and dependencies checked",
 "criteria":[{"id":"C1","verdict":"accept","observation":"What I checked and why it meets the criterion",
@@ -1131,12 +1134,12 @@ If it
 answers an earlier human question, use its saved source in resume; if it changes
 scope, update the instruction and have the worker revise the spec. Resolve routine
 CI/tool/dependency repairs internally when needed for the authorized delivery.
-When the human answers, use `resume --task ID --input answer.json` containing
+When the human answers, use `resume --task ID --input answer-ID.json` containing
 answer and source (the actual Telegram or Vigilia message identity). This restores the same
 card with its spec, workspace, history and next step; do not create another card.
 If you find a concrete solution to your own prior human escalation without a new
 human answer, use `reconsider --decision ID --resolution continue|approve|changes
---input answer.json` with reason and answer. Read the current spec and evidence
+--input answer-ID.json` with reason and answer. Read the current spec and evidence
 first. This preserves the prior decision and applies the normal review checks;
 it does not fabricate a human reply or permit reusing approval for another
 candidate. A missing proof after deployment is not automatically a new human

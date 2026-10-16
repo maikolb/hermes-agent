@@ -3640,7 +3640,7 @@ from gateway.session import (
     build_session_key,
     is_shared_multi_user_session,
     neutralize_untrusted_inline_text,
-    SESSION_LANE_MARK,
+    strip_session_lane,
 )
 from gateway.delivery import (
     DeliveryRouter,
@@ -4846,6 +4846,9 @@ def _resolve_hermes_bin() -> Optional[list[str]]:
     return None
 
 
+_KANBAN_TASK_ID_RE = re.compile(r"\bt_[0-9a-f]{4,}\b")
+
+
 def _is_kanban_lane_wake(event: Any, source: Any) -> bool:
     """KANBAN_WAKE_OWN_SESSION_20261015: a kanban notifier wake addressed to a lane.
 
@@ -4875,10 +4878,10 @@ def _parse_session_key(session_key: str) -> "dict | None":
     the suffix may be a user_id (per-user isolation) rather than a
     thread_id, so we leave ``thread_id`` out to avoid mis-routing.
 
-    A lane suffix (``SESSION_LANE_MARK``) names a session of the same chat, so
-    it is left out of the parts.
+    A terminal lane segment (``strip_session_lane``) names a session of the
+    same chat, so it is left out of the parts.
     """
-    parts = session_key.split(SESSION_LANE_MARK, 1)[0].split(":")
+    parts = strip_session_lane(session_key).split(":")
     if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main":
         result = {
             "platform": parts[2],
@@ -6626,6 +6629,10 @@ class TurnRunner:
             if _wake_owner_question_in_client_chat(_publication_inbound, text, ctx.source):
                 return
             display_text = text
+            if _kanban_wake and not already_streamed:
+                # KANBAN_WAKE_OWN_SESSION_20261015: what a lane turn says in the
+                # topic is also written in the topic's session, with its card.
+                self._runner._mirror_lane_publication(ctx.source, _publication_inbound, display_text)
             if _stream_consumer is not None:
                 if already_streamed:
                     _stream_consumer.on_segment_break()
@@ -9054,6 +9061,41 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     @property
     def exit_code(self) -> Optional[int]:
         return self._exit_code
+
+    def _mirror_lane_publication(self, source: SessionSource, inbound_text: Any, text: str) -> bool:
+        """KANBAN_WAKE_OWN_SESSION_20261015: write a lane turn's publication in its topic's session.
+
+        Synchronous (called from the agent thread for interim messages and
+        through ``asyncio.to_thread`` for the final one). The row is the
+        Principal's own words, labelled with the card of the wake
+        (``lane_publication_mirror_text``); nothing is written when the source
+        is not a lane, the text is empty or the topic has no session yet.
+        """
+        if not getattr(source, "session_lane", None) or not str(text or "").strip():
+            return False
+        try:
+            from gateway.mirror import mirror_to_session
+            from gateway.session import lane_publication_mirror_text
+
+            topic_key = self._session_key_for_source(dataclasses.replace(source, session_lane=None))
+            topic_entry = self.session_store.lookup_by_session_key(topic_key)
+            if topic_entry is None:
+                return False
+            first_line = str(inbound_text or "").split("\n", 1)[0]
+            card = _KANBAN_TASK_ID_RE.search(first_line)
+            return bool(mirror_to_session(
+                source.platform.value,
+                str(source.chat_id),
+                lane_publication_mirror_text(card.group(0) if card else None, str(text)),
+                source_label="kanban_lane",
+                thread_id=source.thread_id,
+                role="assistant",
+                session_id=topic_entry.session_id,
+            ))
+        except Exception:
+            logger.warning("kanban lane: publication not mirrored into the topic of %s", source.chat_id,
+                           exc_info=True)
+            return False
 
     async def _kanban_lane_note(self, source: SessionSource) -> str:
         """KANBAN_WAKE_OWN_SESSION_20261015: the note a lane turn gets from its topic.
@@ -21201,7 +21243,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return
             session_entry = resolved_entry
         self._cache_session_source(session_key, source)
-        if await asyncio.to_thread(self._is_telegram_topic_lane, source):
+        # KANBAN_WAKE_OWN_SESSION_20261015: the DM topic binding names the
+        # people's session of that topic; it must not switch a wake's lane to it.
+        if not getattr(source, "session_lane", None) and await asyncio.to_thread(
+            self._is_telegram_topic_lane, source
+        ):
             try:
                 binding = (await self._session_db.get_telegram_topic_binding(
                     chat_id=str(source.chat_id),
@@ -22407,7 +22453,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         # One-time prompt if no home channel is set for this platform
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
-        if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
+        # Skip for internal events (KANBAN_WAKE_OWN_SESSION_20261015): nobody typed
+        # them, and every kanban wake now starts with an empty history.
+        if (
+            not history
+            and not getattr(event, "internal", False)
+            and source.platform
+            and source.platform != Platform.LOCAL
+            and source.platform != Platform.WEBHOOK
+        ):
             platform_name = source.platform.value
             env_key = _home_target_env_var(platform_name)
             # Multiplex: home channel may live only in the profile secret
@@ -23221,6 +23275,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_entry.session_id,
                 )
                 response = ""
+            elif _lane_wake and response:
+                # KANBAN_WAKE_OWN_SESSION_20261015: what a lane turn publishes in
+                # the topic is also written in the topic's session, with its card,
+                # so an answer given there later finds the question.
+                await asyncio.to_thread(
+                    self._mirror_lane_publication, source, getattr(event, "text", None), response
+                )
 
             # Carry only a fence for the exact payload the ordinary adapter is
             # about to process. Streaming already crossed its own remote

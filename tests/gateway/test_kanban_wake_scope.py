@@ -113,7 +113,7 @@ def _wake_source_from(adapter):
     return adapter.handle_message.await_args.args[0].source
 
 
-def test_slack_wake_resumes_the_creators_workspace_scoped_session(tmp_path, monkeypatch):
+def test_slack_wake_keys_to_the_lane_of_the_creators_workspace_scoped_session(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "wake-scope.db"))
     kb.init_db()
     _completed_subscription(
@@ -184,8 +184,8 @@ def test_unknown_channel_keeps_the_previous_unscoped_wake(tmp_path, monkeypatch)
     assert build_session_key(wake) == f"agent:main:slack:group:{CHANNEL}" + LANE
 
 
-def test_unscoped_platform_wake_key_is_byte_identical(tmp_path, monkeypatch):
-    """Platforms without tenant scoping must keep their exact key shape."""
+def test_unscoped_platform_wake_key_keeps_its_shape_under_the_lane(tmp_path, monkeypatch):
+    """Platforms without tenant scoping keep their exact key shape, with the kanban lane segment after it."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "wake-scope-telegram.db"))
     kb.init_db()
     _completed_subscription(
