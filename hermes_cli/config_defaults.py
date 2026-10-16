@@ -986,7 +986,11 @@ DEFAULT_CONFIG = {
                                       # are substring-matched against the model
                                       # name (longest match wins); the value
                                       # replaces the global tail size for that
-                                      # model only, e.g.
+                                      # model only. The match is case-sensitive:
+                                      # "deepseek" does not match "DeepSeek-V4".
+                                      # The round in progress (newest assistant
+                                      # tool calls + their results) is never
+                                      # pruned, whatever this value is. e.g.
                                       #   model_protect_last_n:
                                       #     "deepseek": 8
                                       # A negative or non-integer value is ignored

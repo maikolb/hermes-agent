@@ -2275,6 +2275,7 @@ def init_agent(
     # Per-model protected-tail overrides (compression.model_protect_last_n):
     # keys are substring-matched against the model name, longest match wins,
     # and the value replaces compression.protect_last_n for that model only.
+    # The match is case-sensitive ("deepseek" does not match "DeepSeek-V4").
     # Values are validated at resolution time (a negative or non-integer value
     # falls back to the global); here only the shape is normalised and bad
     # entries are reported once. Empty/absent = every model uses the global.
