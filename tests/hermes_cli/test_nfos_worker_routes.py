@@ -130,23 +130,30 @@ def test_the_worker_that_meets_the_limit_closes_the_route_and_the_cards_go_on_on
         assert run.exit_code == kb.KANBAN_RATE_LIMIT_EXIT_CODE
         assert walls.read(PROFILE, *PRIMARY)['limit'] == 'weekly' and walls.read(PROFILE, *RESERVE) is None
 
-        # the card that met the wall is launched again on the reserve once its own cooldown ends; it is not held
+        # the card that met the wall is launched again on the second route once its own cooldown ends; not held
         kb.dispatch_once(conn)  # reaps the exit
         clock.advance(300)
         tick = kb.dispatch_once(conn)
         assert spawned(tick) == [first.id] and not tick.claim_held, tick
         argv, env = launcher.launches[-1]
-        assert (option(argv, '--provider'), option(argv, '-m')) == RESERVE
-        assert json.loads(env[walls.ROUTE_ENV]) == [PROFILE, *RESERVE]
+        assert (option(argv, '--provider'), option(argv, '-m')) == SECOND
+        assert json.loads(env[walls.ROUTE_ENV]) == [PROFILE, *SECOND]
         card = kb.get_task(conn, first.id)
         assert card.status == 'running' and card.consecutive_failures == 0
         assert kb.count_running_tasks(conn) == 1, 'it holds a slot: nothing waits for the closed route'
 
-        # a new card is born on the reserve as well
+        # the second route meets its own wall: the next card is born on the third
+        walls.close(PROFILE, *SECOND, limit='monthly', reset_at=clock.now + 16 * DAY)
         second = enrol(conn, launcher, text='[Japa|1]\nCorrija a ordenação da tela de pedidos.', message_id='124')
         argv, env = launcher.launches[-1]
         assert (option(argv, '--provider'), option(argv, '-m')) == RESERVE
+        assert json.loads(env[walls.ROUTE_ENV]) == [PROFILE, *RESERVE]
         assert second.id != first.id
+
+        # and when the first reopens, the launches that follow go back to it
+        assert walls.reopen(PROFILE, *PRIMARY)
+        assert review.worker_model_args(kb.get_task(conn, second.id))[:4] == ['-m', PRIMARY[1], '--provider',
+                                                                              PRIMARY[0]]
 
 
 GO_PLUS_CONFIG = """
