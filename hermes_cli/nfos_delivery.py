@@ -2630,6 +2630,41 @@ def _principal_answer_wait(conn, task_id, row, now):
                               origin={'reminders_before': len(_given_reminders(_decision_context(row)))})
 
 
+def _adopt_principal_answer_waits(conn, now):
+    """PRINCIPAL_BOTTLENECK_20261016: toda decisão pendente de card aberto ganha a espera principal_answer, sem depender do
+    despacho. O lembrete só nascia em nudge_open_decisions, que o despachante chama depois das guardas que pulam o card
+    (vaga, rota fechada, recuo, respawn_guarded): em 16/10 cinco decisões de worker em quatro cards ready ficaram sem espera e
+    sem lembrete, e o card sem despacho enquanto a decisão estava aberta. As exclusões são as de nudge_open_decisions. Não
+    responde por ninguém: o continue automático segue com o despacho, e _principal_answer_wait é idempotente e respeita a recusa."""
+    from hermes_cli import nfos_waits
+    opened = []
+    rows = conn.execute("SELECT d.* FROM nfos_decisions d JOIN tasks t ON t.id=d.task_id "
+                        "WHERE d.status='pending' AND t.status NOT IN ('done','archived') ORDER BY d.created_at,d.id").fetchall()
+    for row in rows:
+        row = dict(row)
+        try:
+            ctx = _decision_context(row)
+            if isinstance(ctx.get('lab_wait'), dict) and ctx['lab_wait'].get('hold'):
+                continue
+            if nfos_waits.open_for_decision(conn, row['id']):
+                continue
+            if (conn.execute("SELECT 1 FROM nfos_decisions WHERE task_id=? AND status='human' LIMIT 1", (row['task_id'],)).fetchone()
+                    and not (ctx.get('owner_guidance') or ctx.get('human_reply'))):
+                continue
+            predicate = {'kind': 'decision_resolved', 'decision_id': row['id'],
+                         'since': int(ctx.get('maintenance_response_at') or 0)}
+            if nfos_waits._table(conn) and conn.execute(
+                    "SELECT 1 FROM nfos_waits WHERE task_id=? AND reason='principal_answer' AND status='open' AND predicate=?",
+                    (row['task_id'], _json(predicate))).fetchone():
+                continue  # já tem a espera: nada a abrir nem a gravar
+            if _principal_answer_wait(conn, row['task_id'], row, now):
+                opened.append(row['id'])
+        except Exception:  # uma decisão com defeito não tira a adoção das outras nem o resto do tick
+            import logging
+            logging.getLogger(__name__).warning('PRINCIPAL_BOTTLENECK_20261016 adoption failed for %s', row.get('id'), exc_info=True)
+    return opened
+
+
 def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
     """Chamado pelo dispatcher para card com decisão pendente: auto-continue por classe e, sem ele, a espera do registro
     (principal_answer) com lembretes contados ao Principal (evento nfos_principal_requested, que o acorda), o estado visível
@@ -4226,6 +4261,7 @@ def sweep_lab_waits(conn):
     # do registro, com o que sobrou do teto de consultas deste tick.
     from hermes_cli import nfos_waits
     _adopt_lab_queue_waits(conn, now)
+    _adopt_principal_answer_waits(conn, now)
     words = {'satisfied': 'released', 'expired': 'escalated'}
     for wait_id, done in nfos_waits.sweep(conn, now=now, budget=nfos_waits.Budget(budget, deadline)):
         stepped = nfos_waits.get(conn, wait_id)
