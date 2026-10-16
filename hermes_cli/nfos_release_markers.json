@@ -165,6 +165,7 @@
   {"pr": 352, "file": "gateway/session.py", "text": "a background process of that session is still running"},
   {"pr": 352, "file": "hermes_cli/nfos_runtime.py", "text": "never a shared answer.json): the topic and a card wake of the same project run"},
   {"pr": 352, "file": "agent/title_generator.py", "text": "# KANBAN_WAKE_OWN_SESSION_20261015: the kanban notifier's wake"},
+  {"pr": 356, "file": "gateway/session.py", "text": "lane = getattr(source, \"session_lane\", None)"},
   {"pr": 328, "file": "hermes_cli/nfos_delivery.py", "text": "def return_coordinator_input("},
   {"pr": 328, "file": "hermes_cli/nfos_delivery.py", "text": "def coordinator_turn_refused("},
   {"pr": 328, "file": "hermes_cli/nfos_delivery.py", "text": "(coordination.get('quota') or {}).get('returned_claim')==receipt.get('claim_token')"},

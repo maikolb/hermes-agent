@@ -1245,16 +1245,18 @@ def build_session_key(
     Lane rule (KANBAN_WAKE_OWN_SESSION_20261015): a source with
     ``session_lane`` keys to the key of the same source without it plus a
     final ``SESSION_LANE_MARK`` segment, so it is a separate session of the
-    same chat/thread.
+    same chat/thread. A source object without the field (test doubles, older
+    adapters) has no lane.
     """
-    if source.session_lane:
+    lane = getattr(source, "session_lane", None)
+    if lane:
         base = build_session_key(
             replace(source, session_lane=None),
             group_sessions_per_user=group_sessions_per_user,
             thread_sessions_per_user=thread_sessions_per_user,
             profile=profile,
         )
-        return f"{base}{SESSION_LANE_MARK}{source.session_lane}"
+        return f"{base}{SESSION_LANE_MARK}{lane}"
     ns = _session_key_namespace(profile)
     platform = source.platform.value
     slack_scope_id = (
@@ -2260,7 +2262,7 @@ class SessionStore:
         """
         if not self._db:
             return None
-        if source.session_lane:
+        if getattr(source, "session_lane", None):
             allow_peer_fallback = False
         finder = getattr(self._db, "find_latest_gateway_session_for_peer", None)
         if not callable(finder):
@@ -2925,7 +2927,7 @@ class SessionStore:
                 # a new session, so a decision never pays for the ones before
                 # it. A lane holding a live background process keeps its
                 # session, as the daily/idle reset does.
-                if not _reset_reason and fresh_lane_turn and source.session_lane:
+                if not _reset_reason and fresh_lane_turn and getattr(source, "session_lane", None):
                     if self._has_active_processes_safe(session_key, context="reset"):
                         logger.info(
                             "gateway.session: lane %s keeps session %s for this wake: "
