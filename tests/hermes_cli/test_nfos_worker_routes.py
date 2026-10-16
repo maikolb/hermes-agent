@@ -13,8 +13,9 @@ What these tests hold:
   the first route keeps the cards; a card that pins its own model, a profile with no list and a list with
   unusable entries are untouched;
 * with the real dispatcher tick and a real worker: the worker that meets the limit of the first route closes it,
-  the next launch (a new card or the same card again) goes to the reserve with the reserve in its argv and its
-  route environment, holds a slot and waits for nothing;
+  the next launch (a new card or the same card again) goes to the next route with it in its argv and its route
+  environment, holds a slot and waits for nothing; with the second closed too the third takes the cards, and
+  when the first reopens the new launches go back to it;
 * the configuration of the Go Plus route: its own endpoint, its own key from the environment, the client's own
   user agent, and the stable ``x-opencode-session`` of the conversation.
 """
@@ -32,8 +33,9 @@ from tests.hermes_cli.nfos_quota_wall import (  # noqa: F401
 from tests.hermes_cli.test_nfos_route_walls import PROFILE, DAY, refusing, run_card, spawned
 
 PRIMARY = ('opencode-go-plus', 'deepseek-v4.1-flash')
+SECOND = ('opencode-go', 'deepseek-v4.1-flash')  # the older OpenCode Go account, out of quota until its month renews
 RESERVE = ('openrouter', 'deepseek/deepseek-v4.1-flash')
-ROUTES = [{'provider': p, 'model': m} for p, m in (PRIMARY, RESERVE)]
+ROUTES = [{'provider': p, 'model': m} for p, m in (PRIMARY, SECOND, RESERVE)]
 
 
 def _task(**fields):
@@ -58,18 +60,35 @@ def test_the_first_open_route_is_chosen_and_a_closed_one_hands_over_to_the_reser
     clock = Clock(monkeypatch)
     assert review.worker_routes(_task(), _policy()) == PRIMARY
     _close(PRIMARY, reset_at=clock.now + 3 * DAY, now=clock.now)
-    assert review.worker_routes(_task(), _policy()) == RESERVE, 'the wall of the first route moves the card on'
+    assert review.worker_routes(_task(), _policy()) == SECOND, 'the wall of the first route moves the card on'
+    _close(SECOND, reset_at=clock.now + 16 * DAY, now=clock.now)
+    assert review.worker_routes(_task(), _policy()) == RESERVE, 'the second closes: the third takes the cards'
     _close(RESERVE, now=clock.now)
     assert review.worker_routes(_task(), _policy()) == PRIMARY, 'every route closed: the card waits on the first'
 
 
-def test_a_route_due_for_its_probe_is_open_and_while_the_probe_flies_the_reserve_takes_the_cards(board, monkeypatch):
+def test_the_cheaper_route_takes_the_cards_back_when_its_wall_reopens(board, monkeypatch):
+    clock = Clock(monkeypatch)
+    _close(PRIMARY, reset_at=clock.now + 3 * DAY, now=clock.now)
+    _close(SECOND, reset_at=clock.now + 16 * DAY, now=clock.now)
+    assert review.worker_routes(_task(), _policy()) == RESERVE
+    clock.advance(3600)  # the hour of the probe of both walls
+    assert review.worker_routes(_task(), _policy()) == PRIMARY, 'due: the launch that goes there is the probe'
+    assert walls.take_probe(PROFILE, *PRIMARY, task_id='t_probe')
+    assert review.worker_routes(_task(), _policy()) == SECOND, 'the probe flies: the next route that is due probes'
+    assert walls.take_probe(PROFILE, *SECOND, task_id='t_probe_2')
+    assert review.worker_routes(_task(), _policy()) == RESERVE, 'both probes fly: the reserve takes the cards'
+    assert walls.reopen(PROFILE, *PRIMARY), 'the provider answered the probe of the first route'
+    assert review.worker_routes(_task(), _policy()) == PRIMARY, 'the new calls go back to the cheapest route'
+
+
+def test_a_route_due_for_its_probe_is_open_and_while_the_probe_flies_the_next_route_takes_the_cards(board, monkeypatch):
     clock = Clock(monkeypatch)
     _close(PRIMARY, reset_at=clock.now + 3 * DAY, now=clock.now)
     clock.advance(3600)  # the hour of the probe
     assert review.worker_routes(_task(), _policy()) == PRIMARY
     assert walls.take_probe(PROFILE, *PRIMARY, task_id='t_probe')
-    assert review.worker_routes(_task(), _policy()) == RESERVE, 'one launch probes; the others take the reserve'
+    assert review.worker_routes(_task(), _policy()) == SECOND, 'one launch probes; the others take the next route'
 
 
 def test_a_wall_of_another_profile_does_not_move_the_card(board, monkeypatch):
@@ -89,7 +108,7 @@ def test_the_args_follow_the_chosen_route_and_a_pinned_card_keeps_its_own(board,
     (board / 'config.yaml').write_text(yaml.safe_dump(config), encoding='utf-8')
     assert review.worker_model_args(_task()) == ['-m', PRIMARY[1], '--provider', PRIMARY[0], '--reasoning', 'max']
     _close(PRIMARY, reset_at=clock.now + DAY, now=clock.now)
-    assert review.worker_model_args(_task()) == ['-m', RESERVE[1], '--provider', RESERVE[0], '--reasoning', 'max']
+    assert review.worker_model_args(_task()) == ['-m', SECOND[1], '--provider', SECOND[0], '--reasoning', 'max']
     pinned = _task()
     pinned.model_override, pinned.provider_override = 'pinned-model', 'pinned-provider'
     assert review.worker_model_args(pinned) == ['-m', 'pinned-model', '--provider', 'pinned-provider']
