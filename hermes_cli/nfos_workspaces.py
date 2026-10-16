@@ -91,6 +91,17 @@ def _registered_in_configured_repo(configured, workspace, branch, git_dir):
     return bool(back) and kb._loose_path_identity(Path(git_dir) / back) == kb._loose_path_identity(Path(workspace) / '.git')
 
 
+def _git_operation_in_progress(workspace, git_dir):
+    """Unmerged paths or a cherry-pick, merge, revert, rebase or sequencer state in this checkout."""
+    if any((Path(git_dir) / name).exists() for name in (
+            'CHERRY_PICK_HEAD', 'MERGE_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer')):
+        return True
+    try:
+        return bool(_git(workspace, 'ls-files', '-u').strip())
+    except RuntimeError:
+        return True
+
+
 def _reconcile_drifted_receipt(conn, task, state, configured, board):
     """NFOS_WORKTREE_CONFIGURED_REPO_20261016: reseal, through repair_workspace, a card's own live checkout.
 
@@ -129,6 +140,11 @@ def _reconcile_drifted_receipt(conn, task, state, configured, board):
     # G5: registered by the configured repository, with the admin dir pointing back at this folder.
     live_git_dir = kb._git_dir(workspace)
     if live_git_dir is None or not _registered_in_configured_repo(configured, workspace, live_branch, live_git_dir):
+        return None
+    # G7: no Git operation in progress. A conflicted cherry-pick, merge, revert or rebase makes
+    # `git diff HEAD` unusable as a patch, and repair_workspace would persist that broken plan and reuse it
+    # forever, so the checkout must be settled by its owner first.
+    if _git_operation_in_progress(workspace, live_git_dir):
         return None
     # G6: no live writer in the checkout.
     lease, owner = kb._try_acquire_workspace_lease(workspace, task_id=task.id)

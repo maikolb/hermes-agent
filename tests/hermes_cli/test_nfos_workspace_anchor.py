@@ -271,3 +271,180 @@ def test_git_work_does_not_invalidate_receipt(env):
     assert check()
     git(wt, 'reset', '--hard', 'HEAD~1')
     assert check()
+
+
+# --- round 2: direct calls that isolate each guard of B and each condition of A -------------------------------
+
+def direct(env, tid):
+    """Call the reconciliation itself, so that no earlier step of the dispatcher can stand in for a guard."""
+    from hermes_cli import nfos_workspaces
+    task = kb.get_task(env.conn, tid)
+    state = json.loads(delivery.get_workflow(env.conn, tid)['state_json'])
+    return nfos_workspaces._reconcile_drifted_receipt(env.conn, task, state, env.source.resolve(), 'pilot')
+
+
+def saved_plan(env, tid):
+    return json.loads(delivery.get_workflow(env.conn, tid)['state_json']).get('workspace_repair')
+
+
+def assert_deferred(env, tid):
+    assert [r for r in env.repairs if r.startswith(DRIFT_REASON)] == []
+    assert saved_plan(env, tid) is None, 'a plan saved now would be reused forever'
+    assert events(env, tid, 'nfos_workspace_repaired') == []
+
+
+def conflict_in_worktree(env, tid, wt, kind):
+    """Leave the card's worktree in the middle of a conflicted Git operation."""
+    base = git(wt, 'rev-parse', 'HEAD~1')
+    focal = git(wt, 'branch', '--show-current')
+    git(wt, 'checkout', '--', 'file.txt')
+    git(wt, 'checkout', '-q', '-b', 'side', base)
+    (wt / 'file.txt').write_text('side change\n', encoding='utf-8')
+    git(wt, 'commit', '-am', 'side change')
+    side = git(wt, 'rev-parse', 'HEAD')
+    git(wt, 'checkout', '-q', focal)
+    local = git(wt, 'rev-parse', 'HEAD')
+    if kind == 'merge':
+        args, abort = ('merge', 'side'), ('merge', '--abort')
+    elif kind == 'revert':
+        # Revert the card's own commit after the side change was merged on top of it: conflicts on file.txt.
+        git(wt, 'merge', '-X', 'theirs', '--no-edit', 'side')
+        args, abort = ('revert', '--no-edit', local), ('revert', '--abort')
+    else:  # cherry-pick, and unmerged-index which starts as one
+        args, abort = ('cherry-pick', side), ('cherry-pick', '--abort')
+    assert kb._cleanup_git(wt, *args).returncode != 0, 'the operation must stop on a conflict'
+    if kind == 'unmerged-index':
+        os.remove(Path(git(wt, 'rev-parse', '--path-format=absolute', '--git-dir')) / 'CHERRY_PICK_HEAD')
+        abort = ('reset', '--hard', 'HEAD')
+    assert git(wt, 'ls-files', '-u')
+    return abort
+
+
+@pytest.mark.parametrize('kind', ['cherry-pick', 'merge', 'revert', 'unmerged-index'])
+def test_conflicted_git_operation_is_not_reconciled_and_no_plan_is_saved(env, kind):
+    tid, wt = drifted_card(env)
+    abort = conflict_in_worktree(env, tid, wt, kind)
+    assert direct(env, tid) is None
+    assert_deferred(env, tid)
+    # After the owner settles the operation the same card is reconciled: nothing was poisoned.
+    git(wt, *abort)
+    assert not git(wt, 'ls-files', '-u')
+    assert direct(env, tid) is not None
+    assert len(events(env, tid, 'nfos_workspace_repaired')) == 1
+
+
+def test_pending_run_termination_blocks_reconciliation(env, monkeypatch):
+    tid, wt = drifted_card(env)
+    monkeypatch.setattr('hermes_cli.nfos_runtime.previous_runs_termination_pending', lambda conn, task_id: True)
+    assert direct(env, tid) is None
+    assert_deferred(env, tid)
+
+
+def test_live_writer_lease_defers_reconciliation(env):
+    tid, wt = drifted_card(env)
+    lease, _ = kb._try_acquire_workspace_lease(wt, task_id='existing-writer')
+    assert lease
+    try:
+        result = direct(env, tid)
+        assert result is not None and result[1] is not None, 'the live owner is reported back to the dispatcher'
+        assert_deferred(env, tid)
+    finally:
+        kb._release_workspace_lease(lease)
+    assert direct(env, tid) is not None
+    assert len(events(env, tid, 'nfos_workspace_repaired')) == 1
+
+
+def test_git_dir_forged_to_a_third_repository_is_refused_by_the_common_dir_guard(env):
+    """Registered in the configured repository, same branch, admin dir pointing back: only G3 is left to refuse."""
+    from hermes_cli import nfos_workspaces
+    third = env.tmp / 'third'
+    init_repo(third, 'third repository')
+    tid = new_card(env)
+    branch = f'nfos/{tid}-focal'
+    forged = env.source / '.worktrees' / tid
+    git(env.source, 'worktree', 'add', '-b', branch, str(forged))
+    git(third, 'worktree', 'add', '-b', branch, str(third / '.worktrees' / tid))
+    admin = third / '.git' / 'worktrees' / tid
+    (admin / 'gitdir').write_text(f'{(forged / ".git").as_posix()}\n', encoding='utf-8')
+    (forged / '.git').unlink()  # hidden on Windows, so it cannot be opened for writing in place
+    (forged / '.git').write_text(f'gitdir: {admin.as_posix()}\n', encoding='utf-8')
+    seal_envelope_receipt(env, tid, forged, f'concursa-ai/{tid}-card')
+    assert kb._git_common_dir(forged) == kb._git_common_dir(third) != kb._git_common_dir(env.source)
+    assert kb._git_current_branch(forged) == branch
+    assert nfos_workspaces._registered_in_configured_repo(env.source.resolve(), forged, branch, kb._git_dir(forged))
+    assert direct(env, tid) is None
+    assert env.repairs == [] and saved_plan(env, tid) is None
+
+
+def unmaterialized_card(env, declared_parent=None):
+    tid = new_card(env)
+    declared = (declared_parent or env.envelope / '.worktrees') / tid
+    env.conn.execute('UPDATE tasks SET workspace_path=? WHERE id=?', (str(declared), tid))
+    env.conn.commit()
+    return tid, declared
+
+
+def retarget(env, tid, task=None):
+    from hermes_cli import nfos_workspaces
+    return nfos_workspaces._retarget_unmaterialized_worktree(
+        env.conn, task or kb.get_task(env.conn, tid), env.source.resolve())
+
+
+def mark_delivery(env, tid, **columns):
+    sets = ','.join(f'{name}=?' for name in columns)
+    assert env.conn.execute(f'UPDATE task_git_delivery SET {sets} WHERE task_id=?', (*columns.values(), tid)).rowcount == 1
+    env.conn.commit()
+
+
+@pytest.mark.parametrize('case', ['receipt', 'creation-intent', 'target-exists', 'anchor-outside-repository', 'already-in-configured-repo'])
+def test_retarget_leaves_the_card_alone(env, case):
+    parent = None
+    if case == 'anchor-outside-repository':
+        parent = env.tmp / 'norepo' / '.worktrees'
+        parent.parent.mkdir()
+    if case == 'already-in-configured-repo':
+        parent = env.source / '.worktrees'
+    tid, declared = unmaterialized_card(env, parent)
+    if case == 'receipt':
+        mark_delivery(env, tid, ownership_json='{}', ownership_fingerprint='0' * 64)
+    if case == 'creation-intent':
+        mark_delivery(env, tid, creation_intent_json='{}', creation_intent_fingerprint='0' * 64)
+    if case == 'target-exists':
+        (env.source / '.worktrees' / tid).mkdir(parents=True)
+    assert retarget(env, tid) is None
+    assert kb.get_task(env.conn, tid).workspace_path == str(declared)
+    assert events(env, tid, 'nfos_workspace_retargeted') == []
+
+
+@pytest.mark.parametrize('change', ['status', 'worker_pid'])
+def test_retarget_compare_and_set_refuses_a_card_that_started_meanwhile(env, change):
+    tid, declared = unmaterialized_card(env)
+    stale = kb.get_task(env.conn, tid)
+    if change == 'status':
+        env.conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+    else:
+        env.conn.execute('UPDATE tasks SET worker_pid=? WHERE id=?', (os.getpid(), tid))
+    env.conn.commit()
+    assert retarget(env, tid, stale) is None
+    assert kb.get_task(env.conn, tid).workspace_path == str(declared)
+    assert events(env, tid, 'nfos_workspace_retargeted') == []
+
+
+def test_running_card_is_not_retargeted_by_the_isolation_hook(env):
+    from hermes_cli.nfos_workspaces import isolate_retained_workspace
+    tid, declared = unmaterialized_card(env)
+    env.conn.execute('UPDATE tasks SET worker_pid=? WHERE id=?', (os.getpid(), tid))
+    env.conn.commit()
+    task, owner = isolate_retained_workspace(env.conn, kb.get_task(env.conn, tid), board='pilot')
+    assert owner is None and task.workspace_path == str(declared)
+    assert events(env, tid, 'nfos_workspace_retargeted') == []
+
+
+def test_retarget_is_idempotent(env):
+    tid, declared = unmaterialized_card(env)
+    moved = retarget(env, tid)
+    target = str(env.source.resolve() / '.worktrees' / tid)
+    assert moved is not None and kb._loose_path_identity(moved.workspace_path) == kb._loose_path_identity(target)
+    assert retarget(env, tid) is None
+    assert kb._loose_path_identity(kb.get_task(env.conn, tid).workspace_path) == kb._loose_path_identity(target)
+    assert len(events(env, tid, 'nfos_workspace_retargeted')) == 1
