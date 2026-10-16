@@ -317,5 +317,7 @@
   {"pr": 354, "file": "agent/conversation_loop.py", "text": "NFOS_DEDUP_AFTER_PRUNE_20261016"},
   {"pr": 354, "file": "gateway/run.py", "text": "the session id; without it the reset hits"},
   {"pr": 354, "file": "gateway/slash_commands.py", "text": "Session id from BEFORE any rotation"},
-  {"pr": 357, "file": "hermes_cli/nfos_workspaces.py", "text": "NFOS_WORKTREE_CONFIGURED_REPO_20261016"}
+  {"pr": 357, "file": "hermes_cli/nfos_workspaces.py", "text": "NFOS_WORKTREE_CONFIGURED_REPO_20261016"},
+  {"pr": 359, "file": "agent/agent_init.py", "text": "NFOS_PROTECT_LAST_N_POR_MODELO_20261016"},
+  {"pr": 359, "file": "agent/context_compressor.py", "text": "NFOS_ROUND_EM_ANDAMENTO_20261016"}
 ]

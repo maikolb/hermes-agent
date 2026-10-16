@@ -1673,6 +1673,26 @@ def _last_user_index(result: List[Dict[str, Any]]) -> Optional[int]:
     return None
 
 
+def _in_flight_round_start(messages: "List[Dict[str, Any]]") -> Optional[int]:
+    """Index where the tool round in progress begins, or None.
+
+    NFOS_ROUND_EM_ANDAMENTO_20261016: the round in progress is the newest
+    assistant message that made tool calls plus the tool results after it,
+    when no user message follows it. The model has not read those results yet
+    (the prune runs between appending them and the next request), so no prune
+    or compression pass may summarize them, whatever ``protect_last_n`` says
+    (a model override of 8 against a fan-out of 10 calls, or 0, would
+    otherwise summarize results the model never saw).
+    """
+    idx = _last_assistant_index(messages)
+    if idx < 0 or not messages[idx].get("tool_calls"):
+        return None
+    last_user = _last_user_index(messages)
+    if last_user is not None and last_user > idx:
+        return None
+    return idx
+
+
 def _retire_stale_tool_result_images(
     result: List[Dict[str, Any]],
     keep_newest: int = _MAX_KEEP_TOOL_IMAGES,
@@ -2159,6 +2179,37 @@ def resolve_model_threshold(
     if best_key:
         return float(model_thresholds[best_key])
     return default
+
+
+def resolve_model_protect_last_n(
+    model: str,
+    model_protect_last_n: dict[str, int] | None,
+    default: int,
+) -> int:
+    """Resolve the effective ``protect_last_n`` for a given model.
+
+    ``model_protect_last_n`` maps substring keys to a per-model tail size
+    (``compression.model_protect_last_n``).  Same matching rule as
+    :func:`resolve_model_threshold`: the longest matching key wins.  When no key
+    matches, or the mapping is empty/None, ``default`` is returned unchanged.
+    The substring match is case-sensitive (``"deepseek"`` does not match
+    ``"DeepSeek-V4"``), like ``model_thresholds``: write the key in the case
+    the model name is configured with. A matching key whose value is not a non-negative integer (negative,
+    text, bool, float) is ignored and ``default`` is returned, so a typo in the
+    config can never shrink the protected tail below the global value.
+    """
+    if not model_protect_last_n or not model:
+        return default
+    best_key = ""
+    for key in model_protect_last_n:
+        if key and key in model and len(key) > len(best_key):
+            best_key = key
+    if not best_key:
+        return default
+    value = model_protect_last_n[best_key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return default
+    return value
 
 
 class ContextCompressor(ContextEngine):
@@ -2997,6 +3048,11 @@ class ContextCompressor(ContextEngine):
         self.threshold_percent = self._effective_threshold_percent(
             context_length, _new_base,
         )
+        # Same for the protected tail: recompute from the raw global value so a
+        # fallback to/from a model with an override never keeps the old one.
+        self.protect_last_n = resolve_model_protect_last_n(
+            model, self.model_protect_last_n, self._config_protect_last_n,
+        )
         # max_tokens=None here means "caller didn't specify" → keep the existing
         # output reservation. A switch that genuinely changes the output budget
         # passes the new value explicitly. (#43547)
@@ -3208,6 +3264,7 @@ class ContextCompressor(ContextEngine):
         abort_on_summary_failure: bool = False,
         max_tokens: int | None = None,
         model_thresholds: dict[str, float] | None = None,
+        model_protect_last_n: dict[str, int] | None = None,
         threshold_tokens_cap: Any = None,
         proactive_prune_tokens: int = 0,
         proactive_prune_min_result_chars: int = 8000,
@@ -3255,7 +3312,15 @@ class ContextCompressor(ContextEngine):
             threshold_tokens_cap,
         )
         self.protect_first_n = protect_first_n
-        self.protect_last_n = protect_last_n
+        # Per-model tail size (compression.model_protect_last_n, longest
+        # substring match wins). ``_config_protect_last_n`` is the raw global
+        # value, the fallback when a model switch lands on a model with no
+        # override. Empty dict = every model uses the global value.
+        self.model_protect_last_n = model_protect_last_n or {}
+        self._config_protect_last_n = protect_last_n
+        self.protect_last_n = resolve_model_protect_last_n(
+            model, self.model_protect_last_n, protect_last_n,
+        )
         # Proactive tool-result pruning (cost-oriented; runs INDEPENDENTLY of the
         # full-compression trigger, via prune_tool_results_only()). 0 = disabled.
         self.proactive_prune_tokens = int(proactive_prune_tokens or 0)
@@ -3927,6 +3992,12 @@ class ContextCompressor(ContextEngine):
         else:
             prune_boundary = len(result) - protect_tail_count
 
+        # Floor independent of protect_last_n: the round in progress is never
+        # pruned (see ``_in_flight_round_start``). Only ever lowers the boundary.
+        round_start = _in_flight_round_start(result)
+        if round_start is not None:
+            prune_boundary = min(prune_boundary, round_start)
+
         # Pass 1: Deduplicate identical tool results.
         # When the same file is read multiple times, keep only the most recent
         # full copy and replace older duplicates with a back-reference.
@@ -3947,6 +4018,10 @@ class ContextCompressor(ContextEngine):
                 continue
             h = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
             if h in content_hashes:
+                # The round in progress keeps every result verbatim, even a
+                # byte-identical one (the model has not read it yet).
+                if round_start is not None and i >= round_start:
+                    continue
                 # This is an older duplicate — replace with back-reference
                 result[i] = {**msg, "content": "[Duplicate tool output — same content as a more recent call]"}
                 pruned += 1
@@ -4070,6 +4145,13 @@ class ContextCompressor(ContextEngine):
         # bodies *inside* the protected region until the protected tail
         # fits the soft budget, always keeping a short recent floor
         # verbatim so the active ask stays readable.
+        #
+        # Deliberate exception to the in-flight round floor (passes 1 to 3
+        # honor it, this one does not): it only runs when the protected region
+        # (round included) is over 1.5x the tail budget, and without it a round
+        # whose results alone exceed that ceiling would recreate this
+        # dead-end, where compression cannot reclaim anything and the request
+        # fails. Older messages in the region go first (ascending index).
         if protect_tail_tokens is not None and protect_tail_tokens > 0 and result:
             soft_ceiling = int(protect_tail_tokens * 1.5)
             keep_recent = min(_PRESSURE_KEEP_RECENT_MESSAGES, len(result))

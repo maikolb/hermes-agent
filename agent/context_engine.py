@@ -487,3 +487,14 @@ class ContextEngine(ABC):
         )
         self.threshold_percent = self._base_threshold_percent
         self.threshold_tokens = int(context_length * self.threshold_percent)
+        # Per-model protected tail (compression.model_protect_last_n). Only
+        # touches protect_last_n when the engine was given an override map, so
+        # engines without one keep their own value untouched.
+        _protect_map = getattr(self, "model_protect_last_n", None)
+        if _protect_map:
+            from agent.context_compressor import resolve_model_protect_last_n
+            if not hasattr(self, "_config_protect_last_n"):
+                self._config_protect_last_n = self.protect_last_n
+            self.protect_last_n = resolve_model_protect_last_n(
+                model, _protect_map, self._config_protect_last_n,
+            )
