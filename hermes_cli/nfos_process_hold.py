@@ -14,8 +14,19 @@ o predicado que o código confere (``process_step``: a etapa atual não é mais 
 única. O vencimento grava o desfecho ``still_held`` e não solta o card: a reivindicação continua a ler a etapa, porque
 liberar um worker numa etapa do Principal só repete o laço. Quem tira o card da etapa é o Principal (ou a pessoa da raia
 humana), registrando a próxima etapa no processo.
+
+PROCESS_HOLD_WAKE_20261016: a retenção era muda. Card retido em etapa ``decision`` da raia do Principal (``_asks``) abre UMA
+decisão ao Principal (``request``, o padrão de ``request_execution_budget_review``: pedido antes de qualquer execução, o
+despacho pula o card e ``nudge_open_decisions`` lembra), na primeira conferência da espera, 60 s depois da retenção. Vale
+também para a espera que já venceu (a reivindicação pede, porque o passo só roda em espera aberta). Pai aberto não pede: o
+pedido sairia antes de o card poder andar. Quando a etapa sai (``release``), o motor fecha o pedido como a espera vencida
+do Principal fecha o dele (``wait_rule.resolved_by = runtime``), e ``resolve_decision`` recusa responder enquanto o card
+segue na etapa (``standing``). Etapa ``wait`` não acorda ninguém: esperar o mundo não é decisão do Principal.
 """
+import hashlib
+import json
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +34,7 @@ REASON = 'process_hold'
 HOLD = 'process_hold'  # o motivo da recusa da reivindicação, como os demais de claim_task
 DECIDER_KINDS = ('decision', 'wait')  # project_workflow.enforce.DECIDER_KINDS, lido sem o módulo
 RECHECK_SECONDS = 300
+GRACE_SECONDS = 60  # o Principal que registra a etapa e a seguinte no mesmo turno não recebe pedido
 DEADLINE_SECONDS = 24 * 3600
 
 
@@ -61,12 +73,17 @@ def claim_hold(conn, task):
     from hermes_cli import nfos_waits
     executor = {'kind': 'principal' if step['lane'] == 'principal' else 'operator',
                 'name': f"{step['name']} (etapa {step['kind']} do processo)"}
+    grace = {'next_check_at': int(time.time()) + GRACE_SECONDS} if _asks(step) else {}
     try:
         nfos_waits.declare(conn, task.id, task.current_run_id, reason=REASON, executor=executor,
                            predicate={'kind': 'process_step', 'step': step['step']},
-                           subject=f"a etapa {step['name']} do processo", origin={'step': step})
+                           subject=f"a etapa {step['name']} do processo", origin={'step': step}, **grace)
     except _delivery().WorkflowError:
-        pass  # a mesma etapa já venceu nesta rodada: o desfecho está gravado, a retenção segue pela etapa
+        # A mesma etapa já venceu nesta rodada: o passo da espera não roda mais, então o pedido sai daqui.
+        row = conn.execute("SELECT * FROM nfos_waits WHERE task_id=? AND reason=? AND json_extract(predicate,'$.step')=? "
+                           'ORDER BY created_at DESC,id LIMIT 1', (task.id, REASON, step['step'])).fetchone()
+        if row:
+            request(conn, task.id, nfos_waits._decode(row))
     return HOLD
 
 
@@ -76,7 +93,8 @@ def wait_policy():
                 holds_card=True, on_expire='still_closed',
                 outcomes={why: 'still_held' for why in ('deadline', 'attempts', 'unreadable')},
                 first_check=RECHECK_SECONDS, recheck=RECHECK_SECONDS, deadline=DEADLINE_SECONDS,
-                max_attempts=DEADLINE_SECONDS // RECHECK_SECONDS, withdrawn=_withdrawn, expired=_expired)
+                max_attempts=DEADLINE_SECONDS // RECHECK_SECONDS, withdrawn=_withdrawn, expired=_expired,
+                plan=plan, satisfied=lambda conn, wait, evidence, now: release(conn, wait['task_id']))
 
 
 def left_step(conn, wait, budget=None):
@@ -109,3 +127,72 @@ def _withdrawn(conn, wait):
 def _expired(conn, wait, why, now):
     """O vencimento só grava o desfecho (`still_held`, pelo passo do registro). A reivindicação segue lendo a etapa."""
     return None
+
+
+def _asks(step):
+    """A etapa que só o Principal tira do lugar e que ele precisa saber que reteve o card."""
+    return (step or {}).get('kind') == 'decision' and (step or {}).get('lane') == 'principal'
+
+
+def plan(conn, wait, evidence, now):
+    """Passo da espera enquanto o card segue na etapa: vence no prazo (como sem plano) e pede ao Principal na conferência."""
+    if now >= wait['deadline_at']:
+        return {'expire': 'deadline'}
+    return {'next_check_at': min(now + RECHECK_SECONDS, wait['deadline_at']), 'deadline_at': wait['deadline_at'],
+            'act': lambda conn: request(conn, wait['task_id'], wait)}
+
+
+def request(conn, task_id, wait):
+    """Uma decisão ao Principal por retenção (id fixo pela espera, aberta ou já fechada pelo motor), ou None."""
+    step = (wait.get('origin') or {}).get('step') or {}
+    if not _asks(step) or conn.execute(
+            "SELECT 1 FROM task_links l JOIN tasks p ON p.id=l.parent_id WHERE l.child_id=? "
+            "AND p.status NOT IN ('done','archived') LIMIT 1", (task_id,)).fetchone():
+        return None  # pai aberto: o card ainda não poderia andar, o pedido não teria o que destravar
+    d = _delivery()
+    decision_id = 'dec_' + hashlib.sha256(d._json([task_id, REASON, wait['created_at']]).encode()).hexdigest()[:24]
+    if d.get_decision(conn, decision_id):
+        return decision_id
+    from hermes_cli import nfos_process
+    try:
+        exits = [f"{n['step']} ({n['name']})" for n in nfos_process.position(conn, task_id)['next']]
+    except Exception:  # noqa: BLE001 - sem as saídas o pedido sai igual, só com o comando
+        exits = []
+    workflow = d.get_workflow(conn, task_id)
+    last = conn.execute('SELECT MAX(id) FROM task_runs WHERE task_id=?', (task_id,)).fetchone()[0]
+    question = (f"O card está retido na etapa {step['name']} do processo, que só o Principal tira do lugar, e nenhum worker foi "
+                'lançado. Registre a próxima etapa no processo (project-workflow step --to <etapa>)'
+                + (f": {', '.join(exits)}." if exits else '.') + ' Responder esta decisão sem sair da etapa é recusado.')
+    context = {'process_hold': {'step': step['step'], 'name': step['name'], 'wait_id': wait['id'], 'exits': exits}}
+    conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) '
+                 "VALUES(?,?,?,'impediment',?,?,?,?)",
+                 (decision_id, task_id, last, question, d._json(context), workflow['spec_revision'], int(time.time())))
+    d._event(conn, task_id, last, 'nfos_principal_requested',
+             {'decision_id': decision_id, 'kind': 'impediment', 'question': question, 'retained_card': True})
+    return decision_id
+
+
+def standing(conn, task_id, step):
+    """O card segue retido nesta etapa? True; False se saiu ou o processo deixou de governá-lo; None se a leitura falhou."""
+    from hermes_cli import nfos_process
+    try:
+        position = nfos_process.position(conn, task_id)
+    except Exception:  # noqa: BLE001
+        return None
+    if position is None:
+        return False
+    if position.get('error'):
+        return None
+    return position.get('mode') == 'enforce' and bool(position.get('governed')) and position.get('current') == step
+
+
+def release(conn, task_id):
+    """Fecha o pedido de retenção quando o card saiu da etapa. É do motor, não do Principal: não conta como decisão dele."""
+    for row in conn.execute("SELECT id,context FROM nfos_decisions WHERE task_id=? AND status='pending' AND json_valid(context) "
+                            "AND json_extract(context,'$.process_hold.step') IS NOT NULL", (task_id,)).fetchall():
+        context = json.loads(row['context'])
+        if standing(conn, task_id, context['process_hold']['step']) is False:
+            context['wait_rule'] = {'resolved_by': 'runtime', 'outcome': 'left_step', 'at': int(time.time())}
+            conn.execute('UPDATE nfos_decisions SET context=? WHERE id=?', (_delivery()._json(context), row['id']))
+            _delivery().resolve_decision(conn, row['id'], action='continue', author='Principal',
+                                         answer='CONTINUE (runtime do NFOS): o card saiu da etapa retida; nada a decidir aqui.')
