@@ -99,6 +99,7 @@ from agent.turn_finalizer import finalize_turn
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent import empty_response_guard as _empty_guard
 from hermes_constants import PARTIAL_STREAM_STUB_ID
+from agent.stream_diag import generation_log_suffix
 from hermes_logging import set_session_context
 from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches, env_var_enabled
@@ -4392,10 +4393,13 @@ def run_conversation(
                     if canonical_usage.cache_read_tokens and prompt_tokens:
                         _cache_pct = f" cache={canonical_usage.cache_read_tokens}/{prompt_tokens} ({100*canonical_usage.cache_read_tokens/prompt_tokens:.0f}%)"
                     logger.info(
-                        "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s",
+                        "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s%s",
                         agent.session_api_calls, agent.model, agent.provider or "unknown",
                         prompt_tokens, completion_tokens, total_tokens,
                         api_duration, _cache_pct,
+                        # NFOS_API_CALL_GEN_UPSTREAM_20261016: " gen=<id> upstream=<provedor>"
+                        # no fim, só quando o OpenRouter devolveu o dado.
+                        generation_log_suffix(agent, response),
                     )
 
                     # On the MoA path, agent.model/provider are the virtual

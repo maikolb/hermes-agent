@@ -15,6 +15,7 @@ tests that patch ``run_agent.<helper>`` keep working.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -84,6 +85,115 @@ def stream_diag_capture_response(agent: Any, diag: Dict[str, Any], http_response
         diag["headers"] = captured
     except Exception:
         pass
+
+
+# ── Geração e provedor de origem do OpenRouter na linha "API call #N" ────────
+#
+# NFOS_API_CALL_GEN_UPSTREAM_20261016: a linha de log de cada chamada passa a
+# terminar em ``gen=<id> upstream=<provedor>`` quando o OpenRouter devolve os
+# dois dados. O medidor cruza o id com a cobrança da geração. Sem o dado, nada
+# é acrescentado e a linha fica idêntica à de antes.
+
+# Alfabeto de um id de geração (``gen-1a2b...``) e de um nome de provedor
+# (``Anthropic``, ``Google AI Studio``). Qualquer coisa fora disso, quebra de
+# linha e espaço no id inclusive, descarta o campo: o valor vem da rede e não
+# pode abrir uma segunda linha no log.
+_GEN_ID_RE = re.compile(r"[A-Za-z0-9._:\-]{1,128}")
+_UPSTREAM_RE = re.compile(r"[A-Za-z0-9._:/+\-]{1,64}")
+# Ids que o próprio Hermes fabrica; não são geração do provedor.
+_SYNTHETIC_ID_PREFIXES = ("stream-", "partial-stream-stub")
+
+
+def _clean_gen_id(value: Any) -> Optional[str]:
+    if isinstance(value, str) and _GEN_ID_RE.fullmatch(value):
+        if not value.startswith(_SYNTHETIC_ID_PREFIXES):
+            return value
+    return None
+
+
+def _clean_upstream(value: Any) -> Optional[str]:
+    # "Google AI Studio" vira "Google_AI_Studio" para a linha seguir em
+    # chave=valor. Só o espaço simples é aceito, e o valor precisa ter algo
+    # além de espaço: "" e "   " descartam o campo, em vez de virar "upstream=_".
+    # Quebra de linha, tab e o resto também descartam.
+    if isinstance(value, str):
+        value = re.sub(" +", "_", value.strip(" "))
+        if _UPSTREAM_RE.fullmatch(value):
+            return value
+    return None
+
+
+def extra_field(obj: Any, name: str) -> Any:
+    """Read a provider-specific field the OpenAI SDK keeps as an extra.
+
+    OpenRouter's ``provider`` is not part of the OpenAI schema; the SDK models
+    allow it as an extra (attribute access) and list it in ``model_extra``.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    value = getattr(obj, name, None)
+    if value is None:
+        extra = getattr(obj, "model_extra", None)
+        if isinstance(extra, dict):
+            value = extra.get(name)
+    return value
+
+
+def attach_stream_generation(
+    mock_response: Any,
+    *,
+    chunk_id: Any,
+    chunk_provider: Any,
+    headers: Any,
+) -> None:
+    """Carry the real generation id and upstream provider on a streamed response.
+
+    The streaming path builds its own response with a made-up ``stream-<uuid>``
+    id. The real values are the last chunk's ``id`` and ``provider``; when the
+    chunks do not carry them, the headers captured at stream open
+    (``x-openrouter-id``, ``x-openrouter-provider``) fill in.
+    """
+    hdrs = headers if isinstance(headers, dict) else {}
+    try:
+        mock_response.openrouter_generation_id = _clean_gen_id(chunk_id) or _clean_gen_id(
+            hdrs.get("x-openrouter-id")
+        )
+        mock_response.openrouter_upstream_provider = _clean_upstream(
+            chunk_provider
+        ) or _clean_upstream(hdrs.get("x-openrouter-provider"))
+    except Exception:
+        pass
+
+
+def generation_log_suffix(agent: Any, response: Any) -> str:
+    """Return `` gen=<id> upstream=<provedor>`` or ``""`` when there is no data.
+
+    Only OpenRouter answers carry the data; other providers (and the Codex
+    adapter) get an empty string so their line stays exactly as it was.
+    """
+    try:
+        is_openrouter = getattr(agent, "provider", None) == "openrouter"
+        if not is_openrouter:
+            check = getattr(agent, "_is_openrouter_url", None)
+            is_openrouter = bool(check()) if callable(check) else False
+        if not is_openrouter:
+            return ""
+        gen_id = _clean_gen_id(getattr(response, "openrouter_generation_id", None)) or (
+            _clean_gen_id(getattr(response, "id", None))
+        )
+        upstream = _clean_upstream(getattr(response, "openrouter_upstream_provider", None)) or (
+            _clean_upstream(extra_field(response, "provider"))
+        )
+        parts = []
+        if gen_id:
+            parts.append(f"gen={gen_id}")
+        if upstream:
+            parts.append(f"upstream={upstream}")
+        return (" " + " ".join(parts)) if parts else ""
+    except Exception:
+        return ""
 
 
 def flatten_exception_chain(error: BaseException) -> str:
@@ -274,6 +384,9 @@ __all__ = [
     "STREAM_DIAG_HEADERS",
     "stream_diag_init",
     "stream_diag_capture_response",
+    "attach_stream_generation",
+    "extra_field",
+    "generation_log_suffix",
     "flatten_exception_chain",
     "log_stream_retry",
     "emit_stream_drop",
