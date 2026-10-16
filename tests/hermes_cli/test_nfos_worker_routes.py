@@ -194,3 +194,34 @@ def test_the_go_plus_route_has_its_own_endpoint_key_user_agent_and_a_stable_sess
     apply_custom_provider_extra_headers_to_client_kwargs(kwargs, runtime['base_url'],
                                                          get_compatible_custom_providers(load_config()))
     assert kwargs['default_headers']['User-Agent'] == 'nexa-factory-os-hermes/1.0'
+
+
+def test_the_card_that_takes_the_probe_of_a_due_route_is_launched_on_that_route(board, launcher, monkeypatch):
+    """The dispatcher names the route four times for one launch (hold, probe, route environment, argv). Once the
+    card holds the probe, the route is closed for everyone else and open for that card: it must not leave on
+    another route, or nobody runs on the due route and its wall never reopens."""
+    config = dict(PROFILE_CONFIG, kanban={'delivery': dict(PROFILE_CONFIG['kanban']['delivery'], **_policy())})
+    (board / 'config.yaml').write_text(yaml.safe_dump(config), encoding='utf-8')
+    with kb.connect_closing() as conn:
+        clock = Clock(monkeypatch)
+        card = enrol(conn, launcher)
+        _close(PRIMARY, reset_at=clock.now + 3 * DAY, now=clock.now)
+        clock.advance(3600)  # the first route is due for its probe
+        task = kb.get_task(conn, card.id)
+        assert walls.hold(conn, task, dry_run=True) is None
+        assert walls.probe_launched(conn, task) is None
+        assert walls.read(PROFILE, *PRIMARY)['probe']['task_id'] == task.id
+        assert json.loads(walls.spawn_route(conn, task)) == [PROFILE, *PRIMARY]
+        args = review.worker_model_args(task, conn)
+        assert (option(args, '--provider'), option(args, '-m')) == PRIMARY, 'the probe card is launched off its route'
+        other = _task()
+        other.id = 't_other'
+        assert review.worker_routes(other, config['kanban']['delivery']) == SECOND, 'the others take the next route'
+
+        # the route with the probe in flight is the card's own even when the first two are both due
+        clock.advance(3600)
+        _close(SECOND, reset_at=clock.now + 16 * DAY, now=clock.now - 3600)
+        clock.advance(3600)
+        assert walls.take_probe(PROFILE, *SECOND, task_id='t_other') is not None
+        mine = review.worker_routes(task, config['kanban']['delivery'])
+        assert mine in (PRIMARY, RESERVE) and mine != SECOND

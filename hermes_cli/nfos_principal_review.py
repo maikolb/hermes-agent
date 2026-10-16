@@ -228,7 +228,10 @@ def worker_routes(task, policy):
     from hermes_cli import nfos_route_walls as walls
     for provider, model in routes:
         try:
-            if walls.closed(task.assignee, provider, model) is None:
+            wall = walls.closed(task.assignee, provider, model)
+            # the probe in flight is this card's own: the dispatcher names the route again for the route
+            # environment and the argv, and the card that took the probe must leave on the route it probes
+            if wall is None or (wall.get('probe') or {}).get('task_id') == task.id:
                 return provider, model
         except Exception:  # noqa: BLE001 - an unreadable wall lets the route through, as the dispatcher does
             return provider, model
