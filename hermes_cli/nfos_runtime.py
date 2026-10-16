@@ -451,6 +451,85 @@ def workflow_command():
     return _script_command(delivery.__file__)
 
 
+def wait_decision_command(decision_id, timeout=300):
+    """Exact, runnable command that waits for a Principal decision (NFOS_CAMINHO_NO_PONTO_DE_USO_20261016)."""
+    return workflow_command() + ' wait --decision ' + shlex.quote(str(decision_id)) + ' --timeout ' + str(int(timeout))
+
+
+def worker_locations(task, workspace, board=None, hermes_home=None, conn=None):
+    """Where things are, as absolute paths, at the top of the worker prompt (NFOS_CAMINHO_NO_PONTO_DE_USO_20261016).
+
+    Workers ran ``find /`` for files the runtime already knew: the workflow CLI, the project-workflow engine source,
+    the Playwright files (relative to the worker's cwd) and truncated or native-call output. Every line is generated at
+    spawn and a line whose path does not exist is left out, so the block never says what is not true. The top of the
+    prompt is not enough on its own (it failed for the workflow CLI in 13 of 13 sessions); the same paths are also
+    delivered where the worker needs them: the wait nudge, the truncation mark, the native-call receipt, the process
+    refusal and the MCP tool descriptions."""
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+    lines = ['Where things are (absolute paths, this run):']
+    code_root = Path(delivery.__file__).resolve().parents[1]
+    if Path(delivery.__file__).is_file():
+        lines.append('- Workflow CLI: ' + workflow_command())
+    if code_root.is_dir():
+        lines.append('- Runtime code root: ' + str(code_root) + ' (hermes_cli/, tools/, agent/)')
+    engine = process_engine_source()
+    if engine:
+        lines.append('- project-workflow engine source: ' + engine)
+    if workspace and os.path.isdir(str(workspace)):
+        lines.append('- Your workspace and cwd: ' + str(workspace) + '. Paths that browser or other MCP tools print as '
+                     './file.png or .playwright-mcp/... are relative to this directory, because your Playwright MCP '
+                     'server starts here.')
+    slug = kb._normalize_board_slug(board) or kb.get_current_board()
+    reports = Path(get_default_hermes_root()) / 'reports' / slug / str(task.id)
+    if reports.is_dir():
+        lines.append('- Card reports and evidence: ' + str(reports) + '/')
+    home = Path(hermes_home) if hermes_home else Path(get_hermes_home())
+    spill = home / 'cache' / 'terminal-output'
+    lines.append("- Truncated terminal output: the result's full_output_path, also printed at the cut mark"
+                 + ('; files live in ' + str(spill) + '/' if spill.is_dir() else ''))
+    lines.append('- Native tool call output: ' + workflow_command() + ' call --call <call_id>')
+    lines.extend(_probe_lines(task, board, home, conn))
+    logs = kb.worker_logs_dir(slug)
+    if logs.is_dir():
+        lines.append('- Your worker log: ' + str(logs / (str(task.id) + '.log')))
+    return '\n'.join(lines)
+
+
+def _probe_lines(task, board, home, conn):
+    """The probe files the project's config declares: paths only, never contents (see ``delivery.probe_locations``)."""
+    try:
+        if conn is not None:
+            found = delivery.probe_locations(conn, task.id, home=str(home))
+        else:
+            with kb.connect_closing(board=board) as own:
+                found = delivery.probe_locations(own, task.id, home=str(home))
+    except Exception as exc:
+        kb._log.warning('worker locations: probe paths unavailable for %s (%s: %s)', task.id, type(exc).__name__, exc)
+        return []
+    lines = []
+    if not found['declared']:
+        lines.append('- Project probe session: none declared in the project config (probe_session); do not look for one.')
+    elif found['session'] is not None and Path(found['session']).is_file():
+        lines.append('- Project probe session (browser storage state; use the path, never print the file): '
+                     + str(found['session']))
+    else:
+        lines.append('- Project probe session: declared as ' + found['declared'] + ' but the file does not exist'
+                     + (' at ' + str(found['session']) if found['session'] is not None else '') + '.')
+    env_files = [str(found[k]) for k in ('env_file', 'vault') if found[k] is not None and Path(found[k]).is_file()]
+    if env_files:
+        lines.append('- Project probe credentials (variable files; never print them): ' + ', '.join(env_files))
+    elif found['vault'] is not None:
+        lines.append('- Project probe credentials: none yet; the probe-env command writes ' + str(found['vault']) + '.')
+    return lines
+
+
+def process_engine_source():
+    """Source of the project-workflow engine (``cli.py``, ``validation.py``), or None when it is not there."""
+    from hermes_cli import nfos_process
+    src = Path(os.environ.get('PROJECT_WORKFLOW_SRC') or nfos_process.DEFAULT_SRC) / 'project_workflow'
+    return str(src) if src.is_dir() else None
+
+
 AUXILIARY_CLOSURE_POLICY = """Owner delegation, 15/09/2026 (auxiliary work):
 Maikol: "Sem contar que isso não era nem pra ter me pedido autorização, inclusive e não somente por isso: nem fui eu que pedi ou criei esse card".
 The Principal owns cleanup of auxiliary cards created by NFOS itself. When their

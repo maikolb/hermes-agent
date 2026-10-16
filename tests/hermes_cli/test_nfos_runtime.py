@@ -151,3 +151,151 @@ def test_workflow_cli_survives_terminal_pythonpath_sanitization(tmp_path,monkeyp
     payload=json.loads(result.stdout)
     assert payload['workflow']['task_id']==task.id
     assert payload['runtime']['code_root']==str(Path(kb.__file__).resolve().parents[1])
+
+
+# ---------------------------------------------------------------------------
+# NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the runtime hands the worker the paths it already knows
+# ---------------------------------------------------------------------------
+
+def test_wait_decision_command_is_runnable():
+    command = runtime.wait_decision_command('dec_1')
+    assert command.startswith(runtime.workflow_command())
+    assert command.endswith('--timeout 300')
+    assert ' wait --decision dec_1 ' in command
+    assert Path(delivery.__file__).resolve().is_file() and str(Path(delivery.__file__).resolve()) in command
+    # An id with shell metacharacters stays one argument.
+    assert "'dec 1; rm'" in runtime.wait_decision_command('dec 1; rm')
+
+
+@pytest.fixture
+def locations_env(tmp_path, monkeypatch):
+    home = tmp_path / 'hermes_root'
+    (home / 'cache' / 'terminal-output').mkdir(parents=True)
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    monkeypatch.setenv('HERMES_KANBAN_BOARD', 'pilot')
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(home / 'kanban.db'))
+    engine = tmp_path / 'pw_src'
+    (engine / 'project_workflow').mkdir(parents=True)
+    monkeypatch.setenv('PROJECT_WORKFLOW_SRC', str(engine))
+    workspace = tmp_path / 'worktree'
+    workspace.mkdir()
+    return SimpleNamespace(home=home, engine=engine, workspace=workspace, task=SimpleNamespace(id='t_loc'))
+
+
+def test_worker_locations_lists_existing_paths(locations_env, monkeypatch):
+    env = locations_env
+    reports = env.home / 'reports' / 'pilot' / 't_loc'
+    reports.mkdir(parents=True)
+    logs = env.home / 'kanban' / 'boards' / 'pilot' / 'logs'
+    logs.mkdir(parents=True)
+
+    block = runtime.worker_locations(env.task, str(env.workspace), 'pilot', hermes_home=str(env.home))
+
+    assert runtime.workflow_command() in block
+    assert str(Path(delivery.__file__).resolve().parents[1]) in block
+    assert str(env.engine / 'project_workflow') in block
+    assert str(env.workspace) in block
+    assert str(reports) in block
+    assert str(env.home / 'cache' / 'terminal-output') in block
+    assert str(logs / 't_loc.log') in block
+    assert block.splitlines()[0].startswith('Where things are')
+
+    # A line whose path does not exist is left out; the block never says what is not true.
+    reports.rmdir()
+    missing_engine = env.engine / 'project_workflow'
+    missing_engine.rmdir()
+    block = runtime.worker_locations(env.task, str(env.workspace / 'gone'), 'pilot', hermes_home=str(env.home))
+    assert str(reports) not in block
+    assert 'project-workflow engine source' not in block
+    assert 'Your workspace and cwd' not in block
+    assert str(env.workspace / 'gone') not in block
+    assert runtime.workflow_command() in block
+
+
+def test_worker_locations_names_browser_cwd(locations_env):
+    env = locations_env
+    block = runtime.worker_locations(env.task, str(env.workspace), 'pilot', hermes_home=str(env.home))
+    line = next(l for l in block.splitlines() if 'Your workspace and cwd' in l)
+    assert str(env.workspace) in line
+    assert '.playwright-mcp' in line and './file.png' in line and 'relative to this directory' in line
+
+
+def test_worker_prompt_starts_with_locations(tmp_path, monkeypatch):
+    # The block reaches the prompt the dispatcher hands the worker, before the workflow instructions.
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'kanban.db'))
+    monkeypatch.setattr(kb, '_resolve_hermes_argv', lambda: ['hermes'])
+    monkeypatch.setattr(kb, '_module_hermes_argv', lambda: ['hermes'])
+    with kb.connect_closing() as conn:
+        rid = request(conn)
+        reservation = delivery.reserve_request(conn, capacity=2)
+        task = delivery.bootstrap_card(conn, rid, reservation['claim_token'], pid=os.getpid())
+        task = kb.get_task(conn, task.id)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured['cmd'] = list(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, 'Popen', fake_popen)
+    kb._default_spawn(task, str(workspace))
+
+    prompt = captured['cmd'][captured['cmd'].index('-q') + 1]
+    assert 'Where things are (absolute paths, this run):' in prompt
+    assert prompt.index('Where things are') < prompt.index('Exact workflow CLI prefix')
+    assert 'Your workspace and cwd: ' + str(workspace) in prompt
+    assert runtime.workflow_command() in prompt.split('Exact workflow CLI prefix')[0]
+
+
+def _probe_card(tmp_path, monkeypatch, **project):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'kanban.db'))
+    monkeypatch.setattr(runtime, 'project_config', lambda key, config=None: dict({'project_id': 'pilot'}, **project))
+    with kb.connect_closing() as conn:
+        rid = request(conn)
+        reservation = delivery.reserve_request(conn, capacity=2)
+        task = delivery.bootstrap_card(conn, rid, reservation['claim_token'], pid=os.getpid())
+        return kb.get_task(conn, task.id)
+
+
+def test_worker_locations_names_the_declared_probe_session_without_its_content(tmp_path, monkeypatch):
+    # A worker ran `find / -name probe.env` for the project's probe session; the config already declares where it is.
+    state = tmp_path / 'browser-auth' / 'storage-state.json'
+    state.parent.mkdir()
+    state.write_text('{"cookies": [{"name": "sid", "value": "SECRET-COOKIE-VALUE"}]}', encoding='utf-8')
+    task = _probe_card(tmp_path, monkeypatch, probe_session=str(state))
+    with kb.connect_closing() as conn:
+        block = runtime.worker_locations(task, str(tmp_path), None, hermes_home=str(tmp_path), conn=conn)
+    line = next(l for l in block.splitlines() if 'Project probe session' in l)
+    assert str(state) in line and 'never print' in line
+    assert 'SECRET-COOKIE-VALUE' not in block
+
+    # The same block built without the caller's connection (the board's own).
+    assert str(state) in runtime.worker_locations(task, str(tmp_path), None, hermes_home=str(tmp_path))
+
+
+def test_worker_locations_says_when_the_project_declares_no_probe(tmp_path, monkeypatch):
+    task = _probe_card(tmp_path, monkeypatch)
+    block = runtime.worker_locations(task, str(tmp_path), None, hermes_home=str(tmp_path))
+    line = next(l for l in block.splitlines() if 'Project probe session' in l)
+    assert 'none declared' in line
+
+
+def test_worker_locations_probe_session_declared_but_missing_and_relative_to_secrets(tmp_path, monkeypatch):
+    task = _probe_card(tmp_path, monkeypatch, probe_session='pilot/state.json')
+    block = runtime.worker_locations(task, str(tmp_path), None, hermes_home=str(tmp_path))
+    expected = tmp_path / 'secrets' / 'pilot' / 'state.json'
+    line = next(l for l in block.splitlines() if 'Project probe session' in l)
+    assert 'declared as pilot/state.json' in line and 'does not exist' in line and str(expected) in line
+    (tmp_path / 'secrets' / 'pilot').mkdir(parents=True)
+    expected.write_text('{}', encoding='utf-8')
+    (tmp_path / 'secrets' / 'pilot' / 'probe.env').write_text('TOKEN=SECRET-ENV-VALUE\n', encoding='utf-8')
+    block = runtime.worker_locations(task, str(tmp_path), None, hermes_home=str(tmp_path))
+    assert any(str(expected) in l and 'does not exist' not in l for l in block.splitlines())
+    assert str(tmp_path / 'secrets' / 'pilot' / 'probe.env') in block
+    assert 'SECRET-ENV-VALUE' not in block

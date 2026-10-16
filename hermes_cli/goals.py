@@ -2172,11 +2172,28 @@ KANBAN_GOAL_AWAIT_DECISION_TEMPLATE = (
     "The card is NOT blocked: kanban_block on an NFOS card files an impediment for the "
     "Principal instead. Do not call kanban_block or kanban_complete again for the same "
     "question. Wait for the answer inside this turn with the workflow CLI: "
-    "`wait --decision {decision_id} --timeout 300`. If it answers continue or changes, "
+    "`{wait_command}`. If it answers continue or changes, "
     "follow it and keep working. If it answers human, call kanban_block once with that "
     "exact question and recipient. If it is still pending when the wait returns, stop "
     "without calling anything: the card is held until the Principal answers."
 )
+
+
+def _await_decision_prompt(decision_id) -> str:
+    """The wait nudge with the exact, runnable command (NFOS_CAMINHO_NO_PONTO_DE_USO_20261016).
+
+    Workers ran ``find /`` for the workflow CLI because this message said only ``wait --decision X``. The
+    runtime knows the interpreter and the script path, so it writes them here. If that lookup fails the nudge
+    keeps the bare text: it must never take the loop down.
+    """
+    try:
+        from hermes_cli.nfos_runtime import wait_decision_command
+
+        wait_command = wait_decision_command(decision_id)
+    except Exception as exc:
+        logger.warning("kanban goal loop: workflow command unavailable for the wait nudge (%s)", exc)
+        wait_command = f"wait --decision {decision_id} --timeout 300"
+    return KANBAN_GOAL_AWAIT_DECISION_TEMPLATE.format(decision_id=decision_id, wait_command=wait_command)
 
 
 def run_kanban_goal_loop(
@@ -2309,7 +2326,7 @@ def run_kanban_goal_loop(
                 return {"outcome": "awaiting_decision", "turns_used": turns_used, "reason": f"decision {pending_decision} pending"}
             waited_decision_id = pending_decision
             try:
-                last_response = run_turn(KANBAN_GOAL_AWAIT_DECISION_TEMPLATE.format(decision_id=pending_decision)) or ""
+                last_response = run_turn(_await_decision_prompt(pending_decision)) or ""
             except Exception as exc:
                 _log(f"kanban goal loop: run_turn failed ({exc}); stopping")
                 return {"outcome": "stopped", "turns_used": turns_used, "reason": f"run_turn error: {type(exc).__name__}"}

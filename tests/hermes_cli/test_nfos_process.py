@@ -176,6 +176,23 @@ def test_enforce_without_the_process_refuses_instead_of_skipping_it(card, monkey
     assert d.get_workflow(conn, task.id)['spec_revision'] == 0, 'a troca recusada não deixou rastro'
 
 
+def test_refusal_to_the_worker_names_the_engine_source(card, monkeypatch, tmp_path):
+    # NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: workers ran `find / -name project_workflow` to read why a gate refused.
+    conn, task, pw = card
+    policy(pw, 'enforce')
+    src = tmp_path / 'engine_src'
+    (src / 'project_workflow').mkdir(parents=True)
+    monkeypatch.setenv('PROJECT_WORKFLOW_SRC', str(src))
+    for name in [m for m in sys.modules if m == 'project_workflow' or m.startswith('project_workflow.')]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setattr(sys, 'path', [p for p in sys.path if p != MODULE_SRC])
+    with pytest.raises(nfos_process.ProcessRefusal) as refusal:
+        save_spec(conn, task)
+    assert f'Engine source: {src / "project_workflow"}' in str(refusal.value)
+    # The refusal recorded on the card (evaluate, used by the dispatcher) stays as it was.
+    assert 'Engine source' not in nfos_process.evaluate(conn, task.id, stage='spec')[1]
+
+
 @needs_module
 def test_the_motor_obeys_the_concursa_process(card):
     conn, task, pw = card

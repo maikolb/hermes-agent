@@ -750,6 +750,69 @@ class TestInterruptHandling(unittest.TestCase):
             t.join(timeout=3)
 
 
+@unittest.skipIf(sys.platform == "win32", "POSIX process groups and sh/sleep")
+class TestScriptExitReapsItsProcessGroup(unittest.TestCase):
+    """NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: a script's children do not outlive the script.
+
+    A `find /` run by an execute_code script through `subprocess.run(..., timeout=180)` survived the script's own
+    TimeoutExpired as an orphan (PPID 1, state D) for 6 to 10 minutes, at about 10% IO stress. The sandbox killed the
+    process group only when its own timeout or an interrupt fired, not when the script ended on its own.
+    """
+
+    @staticmethod
+    def _gone(pid, wait=5.0):
+        import psutil
+
+        end = time.monotonic() + wait
+        while time.monotonic() < end:
+            try:
+                if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                    return True
+            except psutil.NoSuchProcess:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _run_script(self, code):
+        with patch("model_tools.handle_function_call", return_value=json.dumps({"ok": True})):
+            return json.loads(execute_code(code, task_id="test-reap", enabled_tools=list(SANDBOX_ALLOWED_TOOLS)))
+
+    def test_child_left_behind_by_a_script_that_failed_on_its_own_timeout_is_killed(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "child.pid")
+            # The field case: the script's own subprocess timeout fires, the script dies of the exception, and the
+            # grandchild (here `sleep`, there `find /`) is left running.
+            code = (
+                "import subprocess\n"
+                f"subprocess.run(['sh', '-c', 'sleep 30 & echo $! > {pidfile}; wait'], timeout=1)\n"
+            )
+            result = self._run_script(code)
+            with open(pidfile) as fh:
+                child = int(fh.read().strip())
+            self.assertTrue(self._gone(child), f"child {child} of the finished script is still running")
+            self.assertEqual(result["status"], "error")
+            self.assertIn("TimeoutExpired", result["error"])
+
+    def test_child_left_behind_by_a_script_that_exited_normally_is_killed(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "child.pid")
+            code = (
+                "import subprocess\n"
+                f"p = subprocess.Popen(['sleep', '30']); open({pidfile!r}, 'w').write(str(p.pid))\n"
+                "print('script done')\n"
+            )
+            result = self._run_script(code)
+            with open(pidfile) as fh:
+                child = int(fh.read().strip())
+            self.assertTrue(self._gone(child), f"child {child} of the finished script is still running")
+            self.assertEqual(result["status"], "success")
+            self.assertIn("script done", result["output"])
+
+
 class TestHeadTailTruncation(unittest.TestCase):
     """Tests for head+tail truncation of large stdout in execute_code."""
 

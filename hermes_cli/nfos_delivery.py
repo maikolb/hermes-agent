@@ -957,6 +957,34 @@ def _probe_env_file(conn, task_id):
     return path if path.is_file() else None
 
 
+def probe_locations(conn, task_id, home=None):
+    """Where the project's probe files are, as declared by its config (NFOS_CAMINHO_NO_PONTO_DE_USO_20261016).
+
+    A worker ran find / -name probe.env for the project's probe session. Paths only: nothing is read, and no value
+    reaches the caller. home is the HERMES_HOME of the worker that will use them (the dispatcher's can differ).
+    Returns declared (probe_session as written in the config, or None), session (its resolved path, or None),
+    env_file (the config's probe_env file when it exists) and vault (the probe-env vault file; may not exist yet)."""
+    key, cfg = _probe_project(conn, task_id)
+    home = home or os.environ.get('HERMES_HOME') or str(Path.home() / '.hermes')
+    declared = str((cfg or {}).get('probe_session') or '').strip() or None
+    session = None
+    if declared:
+        path = Path(declared)
+        if path.is_absolute():
+            session = path
+        elif '..' not in declared:
+            session = Path(home) / 'secrets' / declared
+    env_name = str((cfg or {}).get('probe_env') or '').strip()
+    env_file = None
+    if env_name and not env_name.startswith('/') and '..' not in env_name and (Path(home) / 'secrets' / env_name).is_file():
+        env_file = Path(home) / 'secrets' / env_name
+    project_id = str((cfg or {}).get('project_id') or key or '').strip()
+    vault = None
+    if project_id and '/' not in project_id and '\\' not in project_id and not project_id.startswith('.'):
+        vault = Path(home) / 'secrets' / project_id / 'probe.env'
+    return {'declared': declared, 'session': session, 'env_file': env_file, 'vault': vault}
+
+
 def _env_values(path):
     values = {}
     for line in Path(path).read_text(encoding='utf-8', errors='replace').splitlines():
@@ -5233,13 +5261,29 @@ def card_calls(conn, task_id, limit=0):
                 'Read one call by id: call --call <id>. Every call of the card: show --full.'}
 
 
+CALL_OUTPUT_TAIL_CHARS = 20000
+
+
 def read_call(conn, call_id):
-    """SHOW_CALLS_LIMIT_20261010: uma chamada nativa inteira por id."""
-    from hermes_cli.nfos_tool import get_call
+    """SHOW_CALLS_LIMIT_20261010: uma chamada nativa inteira por id.
+
+    NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: devolve também a saída da chamada (os chunks decodificados em ordem, os
+    últimos ``CALL_OUTPUT_TAIL_CHARS`` caracteres, redigidos como o ``terminal`` redige), com o total e, se a saída
+    passou do teto do banco, o arquivo com o excedente. Sem isso o recibo não levava a lugar nenhum e o worker
+    procurava o log da chamada no disco inteiro."""
+    from agent.redact import redact_terminal_output
+    from hermes_cli.nfos_tool import get_call, read_output
     call = get_call(conn, call_id) if call_id else None
     if call is None:
         raise WorkflowError('Unknown native call')
-    return {'call': call}
+    text, overflow = read_output(conn, call)
+    # Redigir o texto inteiro e só então cortar a cauda: um corte no meio de um segredo deixaria a metade dele à vista.
+    redacted = redact_terminal_output(text, None, force=True)
+    result = {'call': call, 'output': redacted[-CALL_OUTPUT_TAIL_CHARS:],
+              'output_chars_total': len(text), 'output_truncated': len(redacted) > CALL_OUTPUT_TAIL_CHARS}
+    if overflow:
+        result['overflow_path'] = overflow
+    return result
 
 
 def card_decisions(conn, task_id, limit=0):

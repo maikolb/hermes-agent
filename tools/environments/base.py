@@ -217,6 +217,14 @@ class _BoundedOutputCollector:
             if self._total_chars <= available:
                 return head + tail + suffix
 
+            # NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: o resto da saída está no arquivo de spill, ainda aberto
+            # aqui (close_spill() roda depois do render). O corte diz onde ele está, no ponto em que o modelo
+            # lê o corte; só nos campos de metadado, no fim do JSON, o caminho já foi perdido (3 de 471).
+            spill_hint = (
+                f"; full output: {self._spill_path}"
+                if self._spill_fh is not None and self._spill_path is not None
+                else ""
+            )
             notice = ""
             for _ in range(4):
                 content_budget = max(0, available - len(notice))
@@ -225,7 +233,7 @@ class _BoundedOutputCollector:
                 omitted = max(0, self._total_chars - head_chars - tail_chars)
                 updated = (
                     f"\n\n... [OUTPUT TRUNCATED - {omitted:,} chars omitted "
-                    f"out of {self._total_chars:,} total] ...\n\n"
+                    f"out of {self._total_chars:,} total{spill_hint}] ...\n\n"
                 )
                 if updated == notice:
                     break

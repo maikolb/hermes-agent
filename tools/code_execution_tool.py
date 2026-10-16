@@ -1689,6 +1689,11 @@ def execute_code(
                 pass
             poll_interval = min(0.2, poll_interval * 1.5)
 
+        # NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the script is gone, whatever the reason (exit, exception, timeout,
+        # interrupt). Anything it started and left in its process group is not its to keep: a `find /` whose
+        # subprocess.run timed out inside the script survived it as an orphan (PPID 1) for up to 10 minutes.
+        _reap_leftover_process_group(proc)
+
         # Wait for readers to finish draining
         stdout_reader.join(timeout=3)
         stderr_reader.join(timeout=3)
@@ -1801,6 +1806,42 @@ def execute_code(
                 os.unlink(sock_path)
         except OSError:
             pass  # already cleaned up or never created
+
+
+def _reap_leftover_process_group(proc, grace: float = 2.0) -> bool:
+    """After the script has exited, signal what is left of its process group: SIGTERM, then SIGKILL after ``grace``.
+
+    ``start_new_session=True`` makes the script a group leader, and a process group outlives its leader while any member
+    runs, so ``killpg(proc.pid)`` still reaches the children even though the leader was already reaped. (The tree walk of
+    :func:`_kill_process_group` cannot: a dead leader has no children to snapshot and no pgid to look up.) Returns True
+    when something was signalled. POSIX only; on Windows ``taskkill /T`` in the timeout path is the only reach. Never
+    raises and never waits longer than ``grace``."""
+    if _IS_WINDOWS or proc is None or not getattr(proc, "pid", None):
+        return False
+    import signal as _signal
+
+    pgid = proc.pid
+    try:
+        os.killpg(pgid, _signal.SIGTERM)
+    except ProcessLookupError:
+        return False  # nothing left: the normal case
+    except OSError as e:
+        logger.debug("Could not signal leftover process group %s: %s", pgid, e, exc_info=True)
+        return False
+    end = time.monotonic() + grace
+    while time.monotonic() < end:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return True
+        time.sleep(0.02)
+    try:
+        os.killpg(pgid, _signal.SIGKILL)
+    except OSError:
+        pass
+    return True
 
 
 def _kill_process_group(proc, escalate: bool = False):

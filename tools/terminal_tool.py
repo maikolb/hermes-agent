@@ -3750,9 +3750,11 @@ def terminal_tool(
                 head_chars = int(MAX_OUTPUT_CHARS * 0.4)  # 40% head (error messages often appear early)
                 tail_chars = MAX_OUTPUT_CHARS - head_chars  # 60% tail (most recent/relevant output)
                 omitted = len(output) - head_chars - tail_chars
+                # NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: com spill, o corte nomeia o arquivo com o resto.
+                _spill_hint = f"; full output: {spill_file_path}" if spill_file_path else ""
                 truncated_notice = (
                     f"\n\n... [OUTPUT TRUNCATED - {omitted} chars omitted "
-                    f"out of {len(output)} total] ...\n\n"
+                    f"out of {len(output)} total{_spill_hint}] ...\n\n"
                 )
                 output = output[:head_chars] + truncated_notice + output[-tail_chars:]
 
@@ -3861,6 +3863,8 @@ def terminal_tool(
                         Path(spill_file_path).unlink()
                     except OSError:
                         pass
+                    # O arquivo foi descartado: o corte não pode continuar apontando para ele.
+                    result_dict["output"] = result_dict["output"].replace(f"; full output: {spill_file_path}", "")
             try:
                 from agent.verification_evidence import record_terminal_result
 

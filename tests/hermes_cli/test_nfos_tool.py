@@ -423,3 +423,57 @@ print(p.pid,flush=True)
                 assert rows[0]['worker_pid'] == identity['group_id']
                 cleanup_verified_test_processes([
                     {'pid':rows[0]['worker_pid'],'started_at':rows[0]['worker_started_at']}, identity])
+
+
+# ---------------------------------------------------------------------------
+# NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the output of a native call can be read
+# ---------------------------------------------------------------------------
+
+def test_cli_receipt_says_how_to_read_output(adapter, board, monkeypatch, capsys):
+    # A worker that had just run a call searched the disk for "call_<id>*" because the receipt said nothing about
+    # where the output is (t_8119dfb9, 15/10).
+    monkeypatch.setattr(sys, 'argv', ['nfos_tool.py', '--db', str(board), '--task', 't_one', '--run', '7',
+        '--timeout', '10', '--cwd', str(board.parent), '--call-id', 'cli_receipt', '--',
+        sys.executable, '-u', '-c', "print('printed by the call')"])
+
+    assert adapter.main() == 0
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt['id'] == 'cli_receipt' and receipt['status'] == 'succeeded'
+    command = receipt['read_output']
+    assert 'call --call cli_receipt' in command
+    delivery_script = Path(adapter.__file__).resolve().with_name('nfos_delivery.py')
+    assert delivery_script.is_file() and str(delivery_script) in command
+    assert sys.executable in command and str(board.resolve()) in command
+    # The receipt stored in the database is unchanged.
+    assert 'read_output' not in adapter.get_call(adapter.connect(board).__enter__(), 'cli_receipt')
+
+
+def test_read_call_returns_output_tail(adapter, board):
+    from hermes_cli import nfos_delivery as delivery
+
+    secret = 'sk-proj-' + 'a1B2c3D4e5F6g7H8i9J0' * 3
+    result = invoke(adapter, board,
+        "import sys;print('first line of the call');print('" + secret + "');"
+        "sys.stderr.write('stderr of the call\\n');print('x'*30000);print('last line of the call')",
+        call_id='readable')
+    assert result['status'] == 'succeeded'
+
+    with adapter.connect(board) as conn:
+        answer = delivery.read_call(conn, 'readable')
+
+    assert answer['call']['id'] == 'readable'
+    assert answer['output_chars_total'] > delivery.CALL_OUTPUT_TAIL_CHARS
+    assert answer['output_truncated'] is True
+    assert len(answer['output']) <= delivery.CALL_OUTPUT_TAIL_CHARS
+    assert 'last line of the call' in answer['output']
+    assert 'overflow_path' not in answer
+
+    # A short call comes back whole, redacted like the terminal redacts it.
+    invoke(adapter, board, "import sys;print('short call');print('" + secret + "');sys.stderr.write('err\\n')",
+           call_id='short')
+    with adapter.connect(board) as conn:
+        short = delivery.read_call(conn, 'short')
+    assert 'short call' in short['output'] and 'err' in short['output']
+    assert 'a1B2c3D4e5F6g7H8i9J0a1B2c3D4e5F6g7H8i9J0' not in short['output']
+    assert short['output_truncated'] is False and short['output_chars_total'] >= len('short call')

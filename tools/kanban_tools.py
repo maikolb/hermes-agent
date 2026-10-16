@@ -1265,6 +1265,14 @@ def _handle_block(args: dict, **kw) -> str:
                 # the Principal. Say so, and say what to do, instead of implying 'blocked'.
                 pending = kb._nfos_pending_decision(conn, tid, run.id if run else None)
                 if pending:
+                    # NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the exact command, with its path, so the worker
+                    # does not search the disk for the workflow CLI. Bare text if the lookup fails.
+                    try:
+                        from hermes_cli.nfos_runtime import wait_decision_command
+
+                        wait_command = wait_decision_command(pending)
+                    except Exception:
+                        wait_command = f"wait --decision {pending} --timeout 300"
                     return _ok(
                         task_id=tid,
                         run_id=run.id if run else None,
@@ -1274,7 +1282,7 @@ def _handle_block(args: dict, **kw) -> str:
                         note=(
                             f"NOT blocked: this NFOS card filed impediment {pending} for the Principal "
                             "instead. Do not call kanban_block again for the same question. Wait for the "
-                            f"answer with the workflow CLI `wait --decision {pending} --timeout 300`: on "
+                            f"answer with the workflow CLI `{wait_command}`: on "
                             "continue/changes keep working; on human, call kanban_block once with that exact "
                             "question and recipient; if still pending, stop without calling anything (the "
                             "card is held until the Principal answers)."
