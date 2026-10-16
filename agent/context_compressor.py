@@ -2161,6 +2161,35 @@ def resolve_model_threshold(
     return default
 
 
+def resolve_model_protect_last_n(
+    model: str,
+    model_protect_last_n: dict[str, int] | None,
+    default: int,
+) -> int:
+    """Resolve the effective ``protect_last_n`` for a given model.
+
+    ``model_protect_last_n`` maps substring keys to a per-model tail size
+    (``compression.model_protect_last_n``).  Same matching rule as
+    :func:`resolve_model_threshold`: the longest matching key wins.  When no key
+    matches, or the mapping is empty/None, ``default`` is returned unchanged.
+    A matching key whose value is not a non-negative integer (negative,
+    text, bool, float) is ignored and ``default`` is returned, so a typo in the
+    config can never shrink the protected tail below the global value.
+    """
+    if not model_protect_last_n or not model:
+        return default
+    best_key = ""
+    for key in model_protect_last_n:
+        if key and key in model and len(key) > len(best_key):
+            best_key = key
+    if not best_key:
+        return default
+    value = model_protect_last_n[best_key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return default
+    return value
+
+
 class ContextCompressor(ContextEngine):
     """Default context engine — compresses conversation context via lossy summarization.
 
@@ -2997,6 +3026,11 @@ class ContextCompressor(ContextEngine):
         self.threshold_percent = self._effective_threshold_percent(
             context_length, _new_base,
         )
+        # Same for the protected tail: recompute from the raw global value so a
+        # fallback to/from a model with an override never keeps the old one.
+        self.protect_last_n = resolve_model_protect_last_n(
+            model, self.model_protect_last_n, self._config_protect_last_n,
+        )
         # max_tokens=None here means "caller didn't specify" → keep the existing
         # output reservation. A switch that genuinely changes the output budget
         # passes the new value explicitly. (#43547)
@@ -3208,6 +3242,7 @@ class ContextCompressor(ContextEngine):
         abort_on_summary_failure: bool = False,
         max_tokens: int | None = None,
         model_thresholds: dict[str, float] | None = None,
+        model_protect_last_n: dict[str, int] | None = None,
         threshold_tokens_cap: Any = None,
         proactive_prune_tokens: int = 0,
         proactive_prune_min_result_chars: int = 8000,
@@ -3255,7 +3290,15 @@ class ContextCompressor(ContextEngine):
             threshold_tokens_cap,
         )
         self.protect_first_n = protect_first_n
-        self.protect_last_n = protect_last_n
+        # Per-model tail size (compression.model_protect_last_n, longest
+        # substring match wins). ``_config_protect_last_n`` is the raw global
+        # value, the fallback when a model switch lands on a model with no
+        # override. Empty dict = every model uses the global value.
+        self.model_protect_last_n = model_protect_last_n or {}
+        self._config_protect_last_n = protect_last_n
+        self.protect_last_n = resolve_model_protect_last_n(
+            model, self.model_protect_last_n, protect_last_n,
+        )
         # Proactive tool-result pruning (cost-oriented; runs INDEPENDENTLY of the
         # full-compression trigger, via prune_tool_results_only()). 0 = disabled.
         self.proactive_prune_tokens = int(proactive_prune_tokens or 0)

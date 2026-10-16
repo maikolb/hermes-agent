@@ -2271,6 +2271,27 @@ def init_agent(
         }
     else:
         compression_model_thresholds = {}
+    # NFOS_PROTECT_LAST_N_POR_MODELO_20261016
+    # Per-model protected-tail overrides (compression.model_protect_last_n):
+    # keys are substring-matched against the model name, longest match wins,
+    # and the value replaces compression.protect_last_n for that model only.
+    # Values are validated at resolution time (a negative or non-integer value
+    # falls back to the global); here only the shape is normalised and bad
+    # entries are reported once. Empty/absent = every model uses the global.
+    _raw_model_protect = _compression_cfg.get("model_protect_last_n", {})
+    if isinstance(_raw_model_protect, dict):
+        compression_model_protect_last_n = {
+            str(k): v for k, v in _raw_model_protect.items() if str(k)
+        }
+        for _k, _v in compression_model_protect_last_n.items():
+            if isinstance(_v, bool) or not isinstance(_v, int) or _v < 0:
+                _ra().logger.warning(
+                    "compression.model_protect_last_n[%r]=%r is not a "
+                    "non-negative integer; the global protect_last_n applies",
+                    _k, _v,
+                )
+    else:
+        compression_model_protect_last_n = {}
     # Absolute token cap: when set, compression triggers at the lower of
     # the ratio-based threshold and this absolute count. Clamped to the
     # model's context length at apply-time so a cap above the window is
@@ -2769,6 +2790,8 @@ def init_agent(
         # and may ignore the attribute.
         if compression_model_thresholds:
             agent.context_compressor.model_thresholds = compression_model_thresholds
+        if compression_model_protect_last_n:
+            agent.context_compressor.model_protect_last_n = compression_model_protect_last_n
         agent.context_compressor.update_model(
             model=agent.model,
             context_length=_plugin_ctx_len,
@@ -2796,6 +2819,7 @@ def init_agent(
             abort_on_summary_failure=compression_abort_on_summary_failure,
             max_tokens=agent.max_tokens,
             model_thresholds=compression_model_thresholds,
+            model_protect_last_n=compression_model_protect_last_n,
             threshold_tokens_cap=compression_threshold_tokens,
             proactive_prune_tokens=compression_proactive_prune_tokens,
             proactive_prune_min_result_chars=compression_proactive_prune_min_chars,
