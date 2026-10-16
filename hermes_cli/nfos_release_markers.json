@@ -325,5 +325,8 @@
   {"pr": 360, "file": "agent/chat_completion_helpers.py", "text": "attach_stream_generation as _attach_stream_generation"},
   {"pr": 360, "file": "agent/stream_diag.py", "text": "def generation_log_suffix("},
   {"pr": 361, "file": "cli.py", "text": "NFOS_GOAL_LOOP_HISTORY_20261016"},
-  {"pr": 361, "file": "agent/turn_checkpoint.py", "text": "NFOS_GOAL_LOOP_HISTORY_20261016"}
+  {"pr": 361, "file": "agent/turn_checkpoint.py", "text": "NFOS_GOAL_LOOP_HISTORY_20261016"},
+  {"pr": 363, "file": "hermes_cli/nfos_route_walls.py", "text": "CREDIT_WALL_20261016"},
+  {"pr": 363, "file": "hermes_cli/nfos_route_walls.py", "text": "def credit_window(agent, error):"},
+  {"pr": 363, "file": "hermes_cli/nfos_route_walls.py", "text": "quota_window(error, now=now) or credit_window(agent, error)"}
 ]
