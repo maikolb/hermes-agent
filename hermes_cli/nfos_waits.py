@@ -351,6 +351,56 @@ def _depends_on(conn, task_id):
     return cards
 
 
+def inherited_priorities(conn):
+    """PRIORITY_INHERITANCE_20261016: a prioridade com que o despacho enfileira o card que outros esperam.
+
+    Um card esperado por dependência de card (espera aberta com predicado `card`) leva, só para a ordem da fila, a maior
+    prioridade dos cards que esperam por ele, e a leva por cadeia: se A espera B e B espera C, C leva a de A. A herança dura
+    enquanto a espera estiver aberta; satisfeita, vencida ou retirada, a linha sai daqui e o card volta à prioridade que o
+    dono declarou. Nunca grava em `tasks.priority`: a prioridade declarada fica como está e o resultado é uma leitura.
+
+    Devolve {card: {'priority', 'declared', 'wait_id', 'waiter', 'waiter_priority', 'origin_card', 'origin_priority'}} só dos
+    cards que a herança ergue acima da própria prioridade. `waiter` é quem espera direto por ele; `origin_card` é o card
+    de onde a prioridade nasceu, na ponta da cadeia. Card que já tem prioridade igual ou maior não entra. Card concluído ou
+    arquivado não empresta nem recebe: a espera dele já não segura nada."""
+    if not _table(conn):
+        return {}
+    rows = conn.execute(
+        "SELECT n.id AS wait_id, n.task_id AS waiter, json_extract(n.predicate,'$.task_id') AS target, "
+        "COALESCE(w.priority,0) AS waiter_priority, COALESCE(t.priority,0) AS target_priority "
+        "FROM nfos_waits n JOIN tasks w ON w.id=n.task_id JOIN tasks t ON t.id=json_extract(n.predicate,'$.task_id') "
+        "WHERE n.status='open' AND json_extract(n.predicate,'$.kind')='card' AND w.status NOT IN ('done','archived') "
+        "AND t.status NOT IN ('done','archived') ORDER BY n.created_at,n.id").fetchall()
+    declared, waiters_of = {}, {}
+    for row in rows:
+        declared[row['waiter']] = int(row['waiter_priority'])
+        declared[row['target']] = int(row['target_priority'])
+        waiters_of.setdefault(row['target'], []).append(row)
+    memo = {}
+
+    def effective(card, seen):
+        """(prioridade efetiva, origem) do card. `seen` corta ciclo: a declaração já os recusa, o corte é só cinto."""
+        if card in memo:
+            return memo[card]
+        best = (declared.get(card, 0), None)
+        for row in waiters_of.get(card, ()):
+            if row['waiter'] in seen:
+                continue
+            upstream, up_origin = effective(row['waiter'], seen | {card})
+            if upstream > best[0]:
+                origin = up_origin or {'origin_card': row['waiter'], 'origin_priority': declared[row['waiter']]}
+                best = (upstream, dict(origin, wait_id=row['wait_id'], waiter=row['waiter'], waiter_priority=upstream))
+        memo[card] = best
+        return best
+
+    out = {}
+    for card in waiters_of:
+        value, origin = effective(card, frozenset())
+        if origin is not None:
+            out[card] = dict(origin, priority=value, declared=declared[card])
+    return out
+
+
 def card_cycle(conn, task_id, target):
     """O card esperado depende, por ordenação ou por espera, do próprio card que quer esperar por ele?"""
     seen, pending = set(), [target]

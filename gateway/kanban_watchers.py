@@ -1981,10 +1981,8 @@ class GatewayKanbanWatchersMixin:
 
         conn = _kb.connect(board=board or None)
         try:
-            ready = conn.execute(
-                "SELECT id FROM tasks WHERE status = 'ready' "
-                "AND claim_lock IS NULL ORDER BY priority DESC, created_at ASC"
-            ).fetchall()
+            # PRIORITY_INHERITANCE_20261016: a posição mostrada é a do despacho, com a herança por dependência de card.
+            ready = _kb._dispatch_queue(conn, "ready")
             position = next(
                 (index for index, row in enumerate(ready, start=1) if row["id"] == task_id),
                 0,

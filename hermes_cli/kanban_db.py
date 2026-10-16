@@ -14730,6 +14730,58 @@ def _heal_nonspawnable_assignee(
     return None
 
 
+def _dispatch_queue(conn: sqlite3.Connection, status: str, *, work_only: bool = False,
+                    exclude_workflows: bool = False, record: bool = False) -> list:
+    """PRIORITY_INHERITANCE_20261016: a fila do despacho, com a herança de prioridade por dependência de card.
+
+    Antes, `ORDER BY priority DESC, created_at ASC` deixava o card de correção de que dois cards de prioridade 100 dependiam
+    (nasceu com 0) atrás de 38 cards de 10 a 100 por 28 h, com 2 vagas. Agora o card esperado leva, para a ordem, a maior
+    prioridade de quem espera por ele (`nfos_waits.inherited_priorities`), só enquanto a espera estiver aberta. Cada linha
+    devolvida traz `priority` (a efetiva, que `_resume_first` e o laço usam), `declared_priority` (a do dono, que nada aqui
+    altera) e `priority_inherited_from` (a origem, ou None). Sem espera por card, a ordem é a de antes. `record` grava, uma vez por
+    espera e prioridade, o evento `nfos_priority_inherited` do card que a herança ergueu."""
+    query = ("SELECT id, assignee, priority, created_at FROM tasks WHERE status = ? AND claim_lock IS NULL"
+             + (" AND task_role = 'work'" if work_only else "")
+             + (" AND id NOT IN (SELECT task_id FROM nfos_workflows)" if exclude_workflows else "")
+             + " ORDER BY created_at ASC, rowid ASC")
+    rows = [dict(r) for r in conn.execute(query, (status,)).fetchall()]
+    try:
+        from hermes_cli import nfos_waits
+        inherited = nfos_waits.inherited_priorities(conn)
+    except Exception:
+        _log.warning("kanban dispatch: priority inheritance unavailable; using declared priorities", exc_info=True)
+        inherited = {}
+    for row in rows:
+        row["declared_priority"] = int(row["priority"] or 0)
+        origin = inherited.get(row["id"])
+        row["priority_inherited_from"] = origin
+        row["priority"] = max(row["declared_priority"], origin["priority"]) if origin else row["declared_priority"]
+        if origin and record and row["priority"] > row["declared_priority"]:
+            try:
+                _record_inherited_priority(conn, row["id"], origin)
+            except Exception:
+                _log.debug("kanban dispatch: could not record inherited priority for %s", row["id"], exc_info=True)
+    rows.sort(key=lambda r: -r["priority"])  # estável: a igual prioridade vale created_at
+    return rows
+
+
+def _record_inherited_priority(conn: sqlite3.Connection, task_id: str, origin: dict) -> None:
+    """Grava a origem da prioridade herdada: quem espera, por qual espera, e de que card a prioridade nasceu. Uma vez por
+    espera e prioridade, não a cada tick."""
+    seen = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'nfos_priority_inherited' AND json_valid(payload) "
+        "AND json_extract(payload, '$.wait_id') = ? AND json_extract(payload, '$.priority') = ? LIMIT 1",
+        (task_id, origin["wait_id"], origin["priority"]),
+    ).fetchone()
+    if seen:
+        return
+    with write_txn(conn, allow_nested=True):
+        _append_event(conn, task_id, "nfos_priority_inherited", {
+            "priority": origin["priority"], "declared_priority": origin["declared"], "wait_id": origin["wait_id"],
+            "waiter": origin["waiter"], "origin_card": origin["origin_card"], "origin_priority": origin["origin_priority"],
+        })
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -15021,21 +15073,13 @@ def _dispatch_once_locked(
                                             "reserved": reserved_count, "limit": delivery_capacity})
         spawn_budget = available if spawn_budget is None else min(spawn_budget, available)
 
-    ready_rows = _resume_first(conn, conn.execute(  # INTERRUPTED_20260910
-        "SELECT id, assignee, priority FROM tasks "
-        "WHERE status = 'ready' AND task_role = 'work' AND claim_lock IS NULL "
-        "ORDER BY priority DESC, created_at ASC"
-    ).fetchall())
+    ready_rows = _resume_first(conn, _dispatch_queue(conn, "ready", work_only=True, record=not dry_run))  # INTERRUPTED_20260910 PRIORITY_INHERITANCE_20261016
     # Review rows are enumerated up front (not after the ready loop) so the
     # budget split below can see whether review work exists at all.
     review_rows = []
     if review_dispatch_enabled():
-        review_rows = _resume_first(conn, conn.execute(  # INTERRUPTED_20260910
-            "SELECT id, assignee, priority FROM tasks "
-            "WHERE status = 'review' AND task_role = 'work' AND claim_lock IS NULL "
-            "AND id NOT IN (SELECT task_id FROM nfos_workflows) "
-            "ORDER BY priority DESC, created_at ASC"
-        ).fetchall())
+        review_rows = _resume_first(conn, _dispatch_queue(  # INTERRUPTED_20260910 PRIORITY_INHERITANCE_20261016
+            conn, "review", work_only=True, exclude_workflows=True, record=not dry_run))
     # Review-lane reservation (OOF-30 review finding): the ready loop runs
     # first and used to consume the ENTIRE shared budget, so a sustained
     # ready backlog permanently starved autonomous reviews — completed work
