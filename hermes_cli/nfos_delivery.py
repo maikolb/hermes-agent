@@ -2637,6 +2637,8 @@ def nudge_open_decisions(conn, task_id, *, owner_guidance_only=False):
     tick; aqui o passo é dado na hora, para o despacho ver o lembrete no mesmo ciclo. Orientações do proprietário e resposta
     do portal nunca têm resposta automática."""
     from hermes_cli import nfos_waits
+    from hermes_cli import nfos_process_hold
+    nfos_process_hold.release(conn, task_id)  # PROCESS_HOLD_WAKE_20261016: o pedido da retenção fecha quando o card sai da etapa
     rows = [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status='pending' ORDER BY created_at", (task_id,))]
     out = []
     now = int(time.time())
@@ -5735,6 +5737,10 @@ def resolve_decision(conn, decision_id, *, action, answer, author, proposal=None
                     raise WorkflowError('Decision already returned changes for a different proposal')
                 return
             raise WorkflowError('Decision was already resolved')
+        from hermes_cli import nfos_process_hold
+        held = (json.loads(row['context'] or '{}').get('process_hold') or {}).get('step')  # PROCESS_HOLD_WAKE_20261016
+        if held and action in {'continue','changes'} and nfos_process_hold.standing(conn,row['task_id'],held):
+            raise WorkflowError('The card is still in the held process step; register the next step first: project-workflow step --to <step>')
         if action=='approve' and row['kind']!='review':
             raise WorkflowError('Only a delivery review can authorize publication')
         if row['kind']=='preparation' and action=='continue':
