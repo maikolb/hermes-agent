@@ -9082,9 +9082,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return False
             first_line = str(inbound_text or "").split("\n", 1)[0]
             card = _KANBAN_TASK_ID_RE.search(first_line)
+            if self._peek_lane_topic_session(topic_key) is None:
+                return False
+            # Only the topic's key is queued: the session that receives the row
+            # is looked up when it is written (a compression of the topic's turn
+            # can switch its session id meanwhile).
             row = (
-                topic_key,
-                topic_entry.session_id,
                 source.platform.value,
                 str(source.chat_id),
                 source.thread_id,
@@ -9094,22 +9097,41 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.warning("kanban lane: publication not mirrored into the topic of %s", source.chat_id,
                            exc_info=True)
             return False
+        # The same publication twice in one lane turn (the interim message and
+        # the final answer carry the same text) is written once.
+        state = self._lane_mirror_state()
+        lane_key = self._session_key_for_source(source)
+        mark = (card.group(0) if card else None, " ".join(str(text).split()))
+        with state["lock"]:
+            published = state["published"].setdefault(lane_key, set())
+            if mark in published:
+                return False
+            published.add(mark)
         # Queued while the topic has a turn running: a row written between a
         # tool call and its result breaks the Codex replay chain (the result is
         # then dropped as an orphan). Written at the end of that turn instead.
-        state = self._lane_mirror_state()
         with state["lock"]:
             state["queue"].setdefault(topic_key, []).append(row)
         self._flush_lane_mirrors(topic_key)
         return True
 
+    def _peek_lane_topic_session(self, topic_key: str):
+        """The live session of the topic's key, or None when the key has none."""
+        return self.session_store.lookup_by_session_key(topic_key)
+
     def _lane_mirror_state(self) -> dict:
         """The per-process queue of lane publications waiting for their topic's turn to end."""
         state = self.__dict__.get("_lane_mirrors")
         if state is None:
-            state = {"lock": threading.Lock(), "queue": {}}
+            state = {"lock": threading.Lock(), "queue": {}, "published": {}}
             self.__dict__["_lane_mirrors"] = state
         return state
+
+    def _forget_lane_publications(self, lane_key: str) -> None:
+        """End of a lane turn: its publications are no longer remembered for the duplicate check."""
+        state = self._lane_mirror_state()
+        with state["lock"]:
+            state["published"].pop(lane_key, None)
 
     def _flush_lane_mirrors(self, topic_key: str) -> int:
         """Write the queued lane publications of a topic once it has no turn running. Returns the rows written.
@@ -9127,7 +9149,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not state["queue"].get(topic_key) or self._is_session_running(topic_key):
                 return 0
             rows = state["queue"].pop(topic_key)
-            for _key, session_id, platform, chat_id, thread_id, text in rows:
+            # The receiving session is the topic key's live session now, not the
+            # one that was live when the row was queued (a compression of the
+            # topic's turn switches the session id).
+            topic_entry = self._peek_lane_topic_session(topic_key)
+            if topic_entry is None:
+                logger.warning("kanban lane: %d queued publication(s) dropped, no live session for %s",
+                               len(rows), topic_key)
+                return 0
+            for platform, chat_id, thread_id, text in rows:
                 try:
                     if mirror_to_session(
                         platform,
@@ -9136,12 +9166,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         source_label="kanban_lane",
                         thread_id=thread_id,
                         role="assistant",
-                        session_id=session_id,
+                        session_id=topic_entry.session_id,
                     ):
                         written += 1
                 except Exception:
-                    logger.warning("kanban lane: queued publication not mirrored into %s", session_id,
-                                   exc_info=True)
+                    logger.warning("kanban lane: queued publication not mirrored into %s",
+                                   topic_entry.session_id, exc_info=True)
         return written
 
     async def _kanban_lane_note(self, source: SessionSource) -> str:
@@ -20437,6 +20467,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 await asyncio.to_thread(self._flush_lane_mirrors, _quick_key)
             except Exception:
                 logger.warning("kanban lane: queued publications not flushed for %s", _quick_key, exc_info=True)
+            self._forget_lane_publications(_quick_key)
 
     def _restore_moa_one_shot(self, event: "MessageEvent", quick_key: str) -> None:
         """Revert a ``/moa <prompt>`` one-shot model override after its turn.
@@ -22506,11 +22537,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         # One-time prompt if no home channel is set for this platform
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
-        # Skip for internal events (KANBAN_WAKE_OWN_SESSION_20261015): nobody typed
-        # them, and every kanban wake now starts with an empty history.
+        # Not for a kanban wake on its own lane (KANBAN_WAKE_OWN_SESSION_20261015): nobody
+        # typed it, and every such wake starts with an empty history. Other internal events
+        # keep the notice as before.
         if (
             not history
-            and not getattr(event, "internal", False)
+            and not _lane_wake
             and source.platform
             and source.platform != Platform.LOCAL
             and source.platform != Platform.WEBHOOK

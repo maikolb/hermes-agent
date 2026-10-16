@@ -503,5 +503,72 @@ async def test_a_lane_publication_waits_for_the_topic_turn_in_codex_shape(monkey
     assert any(r.get("role") == "tool" and r.get("tool_call_id") == "c1" for r in repaired)
 
 
+def test_a_queued_lane_publication_lands_in_the_topic_session_alive_at_the_flush(monkeypatch, tmp_path):
+    """The topic's session id can change between queueing and flushing (a compression of its turn switches it).
+
+    The queue keeps the topic key only; the row goes to the session the key has when the turn ends, not to the
+    session that was live when the publication was queued.
+    """
+    from gateway.session import lane_publication_mirror_text
+
+    runner, store, chat, notes, _ = _lane_runner(monkeypatch, tmp_path)
+    topic = store.get_or_create_session(_topic_source(user_id="u1"))
+    topic_key = topic.session_key
+    old_sid = topic.session_id
+    # The topic's turn is running; the card's wake publishes into it.
+    runner._session_state(topic_key).turn.agent = object()
+    assert runner._mirror_lane_publication(_wake_source(), f"[kanban] Task {CARD} x", "Aviso: deploy adiado")
+    # The topic's session is replaced while its turn runs (new live entry for the same key).
+    new_entry = store.get_or_create_session(_topic_source(user_id="u1"), force_new=True)
+    assert new_entry.session_id != old_sid
+    # The turn ends: the queue is written into the live session of the key.
+    runner._session_state(topic_key).turn.agent = None
+    assert runner._flush_lane_mirrors(topic_key) == 1
+
+    text = lane_publication_mirror_text(CARD, "Aviso: deploy adiado")
+    assert text in [r["content"] for r in _rows(store, new_entry.session_id)]
+    assert text not in [r["content"] for r in _rows(store, old_sid)]
+
+
+@pytest.mark.asyncio
+async def test_an_interim_publication_that_is_also_the_final_answer_is_mirrored_once(monkeypatch, tmp_path):
+    """The lane turn publishes its text as an interim message and again as its final answer.
+
+    The interim callback mirrors it (run.py interim path); the final answer path must not mirror it a second time,
+    as happens when a fallback turn repeats the content that was already shown.
+    """
+    from gateway.session import lane_publication_mirror_text
+
+    runner, store, chat, notes, _ = _lane_runner(monkeypatch, tmp_path)
+    topic = store.get_or_create_session(_topic_source(user_id="u1"))
+    text = "PERGUNTA para Ana: qual ambiente?"
+
+    async def lane_turn(**_kwargs):
+        # The interim callback of the lane turn (the same call _interim_assistant_cb makes).
+        assert runner._mirror_lane_publication(_wake_source(), f"[kanban] Task {CARD} x", text)
+        return {"final_response": text, "messages": [], "tools": [], "history_offset": 0, "last_prompt_tokens": 1}
+
+    runner._run_agent = AsyncMock(side_effect=lane_turn)
+    await runner._handle_message(_wake_event())
+
+    mirror = lane_publication_mirror_text(CARD, text)
+    rows = [r["content"] for r in _rows(store, topic.session_id)]
+    assert rows.count(mirror) == 1
+
+
+@pytest.mark.asyncio
+async def test_other_internal_events_keep_the_home_channel_notice(monkeypatch, tmp_path):
+    """The home-channel notice is skipped for the kanban lane wake only; a watch or other internal event still gets it."""
+    runner, store, chat, notes, platform_notices = _lane_runner(monkeypatch, tmp_path)
+    topic = store.get_or_create_session(_topic_source(user_id="u1"))
+    runner._run_agent = AsyncMock(return_value={"final_response": "ok", "messages": [], "tools": [],
+                                                "history_offset": 0, "last_prompt_tokens": 1})
+    watch = MessageEvent(text="[watch] build passou", source=_topic_source(user_id="u1"), internal=True)
+
+    await runner._handle_message(watch)
+
+    assert any("No home channel" in notice for notice in platform_notices + chat.sent)
+
+
 # The notifier test requires a configured host with real executor profiles, as the wake scope tests do.
 pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")
