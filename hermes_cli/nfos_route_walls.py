@@ -13,6 +13,8 @@ the limit (``metadata.limitName``), the reset time (``resets_at`` / ``reset_at``
 * ``quota_window`` is the verdict. A reset further away than the longest wait the client does for one attempt
   (``LONG_WINDOW_FLOOR_SECONDS``) cannot be outlasted inside the turn: the capped sleep ends before the window
   does. A named limit with no reset time is a window whose end is unknown. Anything else stays what it was.
+* ``credit_window`` (CREDIT_WALL_20261016) is the same verdict for a paid balance that ran out: no window, no name,
+  no reset time in the answer, only the HTTP status the runtime's classifier already reads as billing.
 * ``on_quota_error`` is the conversation loop's single question: leave the turn on this attempt? A dispatcher-owned
   kanban worker also closes its route here.
 * A route is the profile a card is launched as, the provider and the model. The profile is part of it because the
@@ -222,6 +224,28 @@ def quota_window(error, *, now=None):
     elif reset_at - now <= LONG_WINDOW_FLOOR_SECONDS:
         return None
     return {'limit': name or _error_kind(payloads) or 'retry-after', 'reset_at': reset_at}
+
+
+CREDITS_LIMIT = 'credits'
+
+
+def credit_window(agent, error):
+    """``{'limit': 'credits', 'reset_at': None}`` when the provider refused because the account is out of paid
+    credit (OpenRouter: HTTP 402 ``Insufficient credits``, no limit name and no reset time in the answer), else
+    ``None``.
+
+    CREDIT_WALL_20261016: a paid balance has no window the provider can date, so ``quota_window`` finds none and
+    every card of the route used to launch a worker into the same refusal. The runtime's own classifier decides
+    what is credit exhaustion, on the HTTP status alone (the 402 that only says "try again in five minutes" is a
+    throttle to it, a billing verdict from message text or from a body that may be a content filter rejection
+    shuts nothing); the route then closes like any wall with no reset time, probed at spaced intervals until the
+    provider answers."""
+    from agent.error_classifier import FailoverReason, classify_api_error
+    verdict = classify_api_error(error, provider=str(getattr(agent, 'provider', '') or ''),
+                                 model=str(getattr(agent, 'model', '') or ''))
+    if verdict.reason == FailoverReason.billing and verdict.status_code == 402 and not verdict.billing_unverified:
+        return {'limit': CREDITS_LIMIT, 'reset_at': None}
+    return None
 
 
 def quota_account(error):
@@ -834,7 +858,7 @@ def on_quota_error(agent, error):
     _note_refused_wake(agent)
     now = time.time()
     try:
-        window = quota_window(error, now=now)
+        window = quota_window(error, now=now) or credit_window(agent, error)
     except Exception:  # noqa: BLE001 - an answer that cannot be read is retried as before this rule
         logger.warning('ROUTE_WALL_20261012 could not read a quota refusal', exc_info=True)
         return False
