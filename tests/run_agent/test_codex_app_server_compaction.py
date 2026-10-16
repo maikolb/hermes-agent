@@ -180,3 +180,42 @@ def test_codex_native_boundary_clears_stale_hermes_fallback_streak():
     assert _record_codex_app_server_compaction(agent, turn) is True
     assert compressor._fallback_compression_streak == 0
     assert compressor._verify_compaction_cleared_threshold is True
+
+
+def test_codex_compaction_resets_skill_view_dedup(tmp_path, monkeypatch):
+    """NFOS_DEDUP_AFTER_PRUNE_20261016: the Codex path used to forget only the
+    read_file dedup, so a skill viewed before the compaction came back as an
+    "unchanged" stub with nothing to point at."""
+    import json
+
+    from tools.skills_tool import (
+        _check_skill_view_dedup,
+        _skill_view_with_bump,
+        reset_skill_view_dedup,
+    )
+
+    home = tmp_path / ".hermes"
+    skill_dir = home / "skills" / "demo-dedup-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-dedup-skill\ndescription: Demo skill.\n---\n# Demo\n\nStep one.\n"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    reset_skill_view_dedup()
+    first = json.loads(_skill_view_with_bump({"name": "demo-dedup-skill"}, task_id="t-codex"))
+    assert first["success"] is True
+    assert _check_skill_view_dedup("t-codex", "demo-dedup-skill", None) is not None
+
+    agent = DummyAgent(TurnResult(thread_id="thread-1", turn_id="compact-turn-1"))
+    compress_context(
+        agent,
+        [{"role": "user", "content": "hi"}],
+        "system",
+        approx_tokens=100000,
+        task_id="t-codex",
+        force=True,
+    )
+
+    assert agent._codex_session.calls == 1
+    assert _check_skill_view_dedup("t-codex", "demo-dedup-skill", None) is None
+    reset_skill_view_dedup()

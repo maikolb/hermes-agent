@@ -4577,6 +4577,9 @@ class GatewaySlashCommandsMixin:
                         focus_topic=focus_topic,
                         force=True,
                         defer_context_engine_notification=True,
+                        # Session id from BEFORE any rotation: it is the key the
+                        # turn used to register its read_file/skill_view caches.
+                        task_id=session_entry.session_id,
                     )
                 )
 

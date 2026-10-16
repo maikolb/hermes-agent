@@ -516,3 +516,40 @@ async def test_compress_command_cleanup_does_not_block_event_loop():
         "event loop was blocked during manual /compress cleanup: only "
         f"{observed.get('ticks_during_block')} ticks while agent.close() was running"
     )
+
+
+@pytest.mark.asyncio
+async def test_slash_compress_passes_session_task_id():
+    """NFOS_DEDUP_AFTER_PRUNE_20261016: the turn registers its read_file and
+    skill_view caches under the session id. /compress must pass that id as
+    ``task_id``; the default "default" resets a key nobody uses."""
+    history = _make_history()
+    compressed = [
+        history[0],
+        {"role": "assistant", "content": "compressed summary"},
+        history[-1],
+    ]
+    runner = _make_runner(history)
+    agent_instance = MagicMock()
+    agent_instance.shutdown_memory_provider = MagicMock()
+    agent_instance.close = MagicMock()
+    agent_instance._cached_system_prompt = ""
+    agent_instance.tools = None
+    agent_instance.context_compressor.has_content_to_compress.return_value = True
+    agent_instance.session_id = "sess-1"
+    agent_instance._compress_context.return_value = (compressed, "")
+    agent_instance._compression_skipped_due_to_lock = False
+
+    def _estimate(messages, **_kwargs):
+        return 100 if messages == history else 60
+
+    with (
+        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),
+        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        patch("run_agent.AIAgent", return_value=agent_instance),
+        patch("agent.model_metadata.estimate_request_tokens_rough", side_effect=_estimate),
+    ):
+        await runner._handle_compress_command(_make_event())
+
+    agent_instance._compress_context.assert_called_once()
+    assert agent_instance._compress_context.call_args.kwargs.get("task_id") == "sess-1"

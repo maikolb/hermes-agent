@@ -2382,6 +2382,26 @@ def finalize_context_engine_compression_notification(
     return bool(pending())
 
 
+def reset_tool_dedup_caches(task_id: str) -> None:
+    """Forget the read_file and skill_view dedup state of ``task_id``.
+
+    Every rewrite that summarises old tool results (full compression, Codex
+    compaction, proactive prune) removes the content the "unchanged" stubs
+    point back to. Without this reset the next view of the same file or skill
+    returns a stub that refers to a result the model can no longer see.
+    """
+    try:
+        from tools.file_tools import reset_file_dedup
+        reset_file_dedup(task_id)
+    except Exception:
+        pass
+    try:
+        from tools.skills_tool import reset_skill_view_dedup
+        reset_skill_view_dedup(task_id)
+    except Exception:
+        pass
+
+
 def compress_context(
     agent: Any,
     messages: list,
@@ -2402,7 +2422,7 @@ def compress_context(
         system_message: Current system prompt; used when compression needs a
             rebuilt cached prompt.
         approx_tokens: Pre-compression token estimate, logged for ops.
-        task_id: Tool task scope (used for clearing file-read dedup state).
+        task_id: Tool task scope (used for clearing read_file and skill_view dedup state).
         focus_topic: Optional focus string for guided compression — the
             summariser will prioritise preserving information related to
             this topic.  Inspired by Claude Code's ``/compact <focus>``.
@@ -4374,21 +4394,10 @@ def compress_context(
             else:
                 agent.context_compressor._verify_compaction_cleared_threshold = True
 
-        # Clear the file-read dedup cache.  After compression the original
-        # read content is summarised away — if the model re-reads the same
-        # file it needs the full content, not a "file unchanged" stub.
-        try:
-            from tools.file_tools import reset_file_dedup
-            reset_file_dedup(task_id)
-        except Exception:
-            pass
-        # Same for the skill_view repeat-view dedup: a post-compression
-        # re-view must return the full skill content again.
-        try:
-            from tools.skills_tool import reset_skill_view_dedup
-            reset_skill_view_dedup(task_id)
-        except Exception:
-            pass
+        # After compression the original read_file / skill_view content is
+        # summarised away: a re-read must return the full content, not an
+        # "unchanged" stub that points at a result which no longer exists.
+        reset_tool_dedup_caches(task_id)
 
         logger.info(
             "context compression done: session=%s messages=%d->%d rough_tokens=~%s awaiting_real_usage=true",
@@ -4567,12 +4576,7 @@ def _compress_context_via_codex_app_server(
     except Exception:
         logger.debug("codex compaction bookkeeping failed", exc_info=True)
 
-    try:
-        from tools.file_tools import reset_file_dedup
-
-        reset_file_dedup(task_id)
-    except Exception:
-        pass
+    reset_tool_dedup_caches(task_id)
 
     logger.info(
         "codex app-server compaction done: session=%s thread=%s turn=%s",

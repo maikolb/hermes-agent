@@ -22072,6 +22072,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             _hyg_msgs, "",
                                             approx_tokens=_approx_tokens,
                                             commit_fence=_hyg_commit_fence,
+                                            # The turn registers its tool caches under
+                                            # the session id; without it the reset hits
+                                            # the "default" key and the cache survives.
+                                            task_id=session_entry.session_id,
                                         ),
                                     )
                                     try:

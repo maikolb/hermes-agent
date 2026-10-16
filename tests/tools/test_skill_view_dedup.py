@@ -92,3 +92,22 @@ class TestSkillViewDedup:
         # conversation_compression imports this lazily; keep the seam stable.
         from tools.skills_tool import reset_skill_view_dedup as f
         f(None)
+
+    def test_reset_tool_dedup_caches_clears_skill_view(self, skills_home):
+        from agent.conversation_compression import reset_tool_dedup_caches
+
+        _view("demo-dedup-skill")
+        assert _view("demo-dedup-skill").get("dedup") is True
+        reset_tool_dedup_caches("t-svd")
+        r = _view("demo-dedup-skill")
+        assert "Step one" in r.get("content", "")
+        assert r.get("dedup") is None
+
+    def test_reset_tool_dedup_caches_keeps_other_tasks(self, skills_home):
+        from agent.conversation_compression import reset_tool_dedup_caches
+
+        _view("demo-dedup-skill", task="task-A")
+        _view("demo-dedup-skill", task="task-B")
+        reset_tool_dedup_caches("task-A")
+        assert "Step one" in _view("demo-dedup-skill", task="task-A").get("content", "")
+        assert _view("demo-dedup-skill", task="task-B").get("dedup") is True
