@@ -1,6 +1,7 @@
 """SPAWN_GUARD_20261016: _default_spawn refuses a worker whose profile cannot run its own contract."""
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
@@ -26,6 +27,7 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(root))
     monkeypatch.delenv("HERMES_MANAGED_DIR", raising=False)
     kb._PROFILE_REFUSED.clear()
+    monkeypatch.setattr(kb, "_PROBE_TIMEOUT_SECONDS", 300)  # the real probe took 12-21 s on a loaded box; only a hung one may time out
     monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
     launched = []
 
@@ -191,3 +193,119 @@ def test_request_bootstrap_refusal_runs_before_the_attach_and_requeues_the_reque
         assert "absent-plugin" in row["last_error"]
         assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0  # nothing attached, no card claimed
     assert not launched
+
+
+def _fake_probe(monkeypatch, stderr=None, calls=None):
+    """Stand-in for the plugin probe child: same answer (enabled minus disabled, not found under <home>/plugins), no 12-21 s."""
+    import json as _json
+
+    import yaml
+
+    real_run = subprocess.run
+
+    def run(cmd, *a, **k):
+        if cmd[1:2] != ["-c"] or "discover_plugins" not in cmd[2]:
+            return real_run(cmd, *a, **k)
+        if calls is not None:
+            calls.append(cmd)
+        home = k["env"]["HERMES_HOME"]
+        cfg = yaml.safe_load(open(home + "/config.yaml", encoding="utf-8")) or {}
+        skip = set(_json.loads(cmd[3]))
+        bad = [n for n in sorted(cfg["plugins"]["enabled"]) if n not in skip and not os.path.exists(f"{home}/plugins/{n}/plugin.yaml")]
+        if stderr is not None:
+            return subprocess.CompletedProcess(cmd, 1, "", stderr())
+        return subprocess.CompletedProcess(cmd, 0, _json.dumps(bad) + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+def _request(conn, rid, profile, created_at):
+    import json
+
+    payload = {"project": {"profile": profile, "delivery_type": "code"}, "source": {}, "text": "do it", "attachments": []}
+    conn.execute("INSERT INTO nfos_requests(id,source_key,payload,status,created_at) VALUES(?,?,?,'pending',?)",
+                 (rid, "s_" + rid, json.dumps(payload), created_at))
+    conn.commit()
+
+
+EXECUTORS = "kanban:\n  executor_profiles: [concursa]\n  default_assignee: concursa\n"
+
+
+def test_request_for_a_profile_that_create_task_retargets_is_not_refused(host):
+    """B1: the card is created on default_assignee, so the guard must judge that profile and not the raw payload one."""
+    from hermes_cli import nfos_delivery, nfos_runtime
+
+    spawn, profile, launched, root = host
+    root.joinpath("config.yaml").write_text(EXECUTORS, encoding="utf-8")
+    profile("concursa", "toolsets:\n  - hermes-cli\n")
+    profile("hermes-project-factory", None)  # bare dir, outside executor_profiles: create_task would re-point it
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        _request(conn, "r1", "hermes-project-factory", 1)
+        got = nfos_delivery.reserve_request(conn, capacity=1)
+        assert nfos_runtime._profile_ready_or_requeue(conn, got["id"], got["claim_token"]) is True
+        assert conn.execute("SELECT status FROM nfos_requests WHERE id='r1'").fetchone()["status"] == "starting"
+
+
+def test_refused_request_steps_back_so_the_next_one_is_reserved(host):
+    """B1: a true refusal must not sit at the head of the queue and starve a capacity-1 board."""
+    from hermes_cli import nfos_delivery, nfos_runtime
+
+    _, profile, _, _ = host
+    profile("bare", None)
+    profile("good", "toolsets:\n  - hermes-cli\n")
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        _request(conn, "r_old", "bare", 1)
+        _request(conn, "r_new", "good", 2)
+        order = []
+        for _ in range(2):
+            got = nfos_delivery.reserve_request(conn, capacity=1)
+            order.append(got["id"])
+            if not nfos_runtime._profile_ready_or_requeue(conn, got["id"], got["claim_token"]):
+                continue
+            conn.execute("UPDATE nfos_requests SET status='attached' WHERE id=?", (got["id"],))  # the good one got its card
+            conn.commit()
+        assert order == ["r_old", "r_new"]  # r_new is reached on the very next reservation
+        assert nfos_delivery.reserve_request(conn, capacity=1) is None  # r_old is held, not at the head again
+        row = conn.execute("SELECT status,last_error FROM nfos_requests WHERE id='r_old'").fetchone()
+        assert row["status"] == "pending" and row["last_error"].startswith(nfos_delivery.LAUNCH_REFUSED_PREFIX)
+        # once the hold is over the refused request is tried again, before newer ones
+        conn.execute("UPDATE nfos_requests SET claimed_at=claimed_at-? WHERE id='r_old'", (nfos_delivery.LAUNCH_REFUSED_HOLD_SECONDS + 1,))
+        conn.commit()
+        assert nfos_delivery.reserve_request(conn, capacity=1)["id"] == "r_old"
+
+
+def test_refusal_with_a_changing_stderr_is_one_event_not_one_per_tick(host, monkeypatch):
+    """B2: the dedupe key is (code, profile), not the text of the reason (which carries the probe stderr tail)."""
+    spawn, profile, launched, _ = host
+    profile("plug", PRESENT)
+    ticks = iter(range(100))
+    _fake_probe(monkeypatch, stderr=lambda: f"Traceback at tick {next(ticks)}: boom")
+    kb.init_db()
+    conn = kb.connect()
+    tid = kb.create_task(conn, title="t", assignee="plug")
+    for _ in range(5):
+        kb._PROFILE_REFUSED.clear()  # ticks are 60 s apart: the in-memory memo is gone
+        kb.dispatch_once(conn, failure_limit=2)
+    kinds = [r["kind"] for r in conn.execute("SELECT kind FROM task_events WHERE task_id=?", (tid,))]
+    assert kinds.count("spawn_refused") == 1 and not launched
+
+
+def test_refusal_is_remembered_longer_than_one_dispatch_tick(host, monkeypatch):
+    """B3: the tick is 60 s and the probe runs under the board lock: a refused profile is not probed again on the next tick."""
+    spawn, profile, launched, _ = host
+    profile("plug", PLUG)
+    calls = []
+    _fake_probe(monkeypatch, calls=calls)
+    now = [1000.0]
+    monkeypatch.setattr(kb.time, "time", lambda: now[0])
+    for _ in range(3):
+        with pytest.raises(kb.WorkerProfileRefused, match="absent-plugin"):
+            spawn("plug")
+        now[0] += 60
+    assert len(calls) == 1
+    now[0] += 400
+    with pytest.raises(kb.WorkerProfileRefused):
+        spawn("plug")
+    assert len(calls) == 2  # the memo does expire

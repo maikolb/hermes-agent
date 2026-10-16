@@ -15342,7 +15342,7 @@ def _dispatch_once_locked(
                 from hermes_cli.profiles import normalize_profile_name
                 _assert_worker_profile_ready(normalize_profile_name(row_assignee))
             except WorkerProfileRefused as exc:
-                _note_launch_refusal(conn, row["id"], str(exc))
+                _note_launch_refusal(conn, row["id"], exc)
                 result.claim_held.append((row["id"], "profile_refused"))
                 continue
         if dry_run:
@@ -15572,7 +15572,7 @@ def _dispatch_once_locked(
                 from hermes_cli.profiles import normalize_profile_name
                 _assert_worker_profile_ready(normalize_profile_name(review_assignee))
             except WorkerProfileRefused as exc:
-                _note_launch_refusal(conn, row["id"], str(exc))
+                _note_launch_refusal(conn, row["id"], exc)
                 result.claim_held.append((row["id"], "profile_refused"))
                 continue
         if dry_run:
@@ -16050,13 +16050,26 @@ def ok(n):
     return bool(p) and (p['enabled'] or str(p['error'] or '').startswith('exclusive plugin'))
 print(json.dumps([n for n in sorted(_get_enabled_plugins() or ()) if n not in skip and not ok(n)]))
 """
-_PROFILE_REFUSED: dict[tuple, tuple[float, str]] = {}
-_PROBE_TIMEOUT_SECONDS = 30  # measured 5.6-8 s cold per probe on Windows; 4x headroom
+_PROFILE_REFUSED: dict[tuple, tuple[float, str, str]] = {}  # (home, state key) -> (expires_at, message, code)
+_PROBE_TIMEOUT_SECONDS = 30  # measured 5.6-8 s cold per probe on Windows, 12-21 s on a loaded box; only a hung probe may time out
+# A dispatch tick is 60 s and the probe runs under the board lock, so a refusal has to outlive a tick. A refusal that
+# says "do not load" is exact for its state key (a config or plugin edit changes the key and probes at once); one that
+# could not verify may be transient, so it is retried sooner.
+_REFUSAL_MEMO_SECONDS = {"plugins_not_loading": 300, "probe_failed": 120}
 
 
 class WorkerProfileRefused(ValueError):
     """The launch guard refused a worker. A precondition, not a spawn failure: it never counts toward
-    ``failure_limit`` and never blocks the card; the card stays in its lane and is tried again."""
+    ``failure_limit`` and never blocks the card; the card stays in its lane and is tried again.
+
+    ``code`` and ``profile`` are the stable identity of the refusal: the message may carry a probe stderr tail
+    that differs on every attempt, so deduplication keys on (code, profile), never on the message.
+    """
+
+    def __init__(self, message: str, code: str = "refused", profile: str = ""):
+        super().__init__(message)
+        self.code = code
+        self.profile = profile
 
 
 def _profile_state_key(home: Path, cfg_bytes: bytes) -> str:
@@ -16089,17 +16102,17 @@ def _assert_worker_profile_ready(profile: str) -> None:
 
     allowlist = _configured_executor_profiles()
     if allowlist is not None and profile not in allowlist:
-        raise WorkerProfileRefused(f"Profile {profile!r} is not an executor on this host (kanban.executor_profiles); worker not started")
+        raise WorkerProfileRefused(f"Profile {profile!r} is not an executor on this host (kanban.executor_profiles); worker not started", "not_executor", profile)
     try:
         home = Path(resolve_profile_env(profile))
     except FileNotFoundError:
-        raise WorkerProfileRefused(f"Profile {profile!r} has no directory on this host; worker not started") from None
+        raise WorkerProfileRefused(f"Profile {profile!r} has no directory on this host; worker not started", "no_profile_dir", profile) from None
     cfg_path = home / "config.yaml"
     try:
         cfg_bytes = cfg_path.read_bytes()
         cfg = fast_safe_load(cfg_bytes.decode("utf-8")) or {}
     except Exception as exc:
-        raise WorkerProfileRefused(f"Profile {profile!r} has no readable config.yaml ({cfg_path}): {exc}; worker not started") from None
+        raise WorkerProfileRefused(f"Profile {profile!r} has no readable config.yaml ({cfg_path}): {exc}; worker not started", "no_config", profile) from None
     plugins_cfg = cfg.get("plugins") if isinstance(cfg, dict) else None
     plugins_cfg = plugins_cfg if isinstance(plugins_cfg, dict) else {}
     if not plugins_cfg.get("enabled") or os.environ.get("HERMES_SAFE_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -16113,8 +16126,8 @@ def _assert_worker_profile_ready(profile: str) -> None:
     except Exception:  # noqa: BLE001 — no cache, probe
         pass
     memo = _PROFILE_REFUSED.get((str(home), key))
-    if memo and time.time() - memo[0] < 30:  # many ready cards of one profile in one tick: one probe
-        raise WorkerProfileRefused(memo[1])
+    if memo and time.time() < memo[0]:  # many ready cards of one profile, and the next ticks: one probe
+        raise WorkerProfileRefused(memo[1], memo[2], profile)
     skip = sorted(str(n) for n in (plugins_cfg.get("disabled") or ()))
     env = dict(os.environ, HERMES_HOME=str(home))
     try:
@@ -16126,9 +16139,9 @@ def _assert_worker_profile_ready(profile: str) -> None:
     except Exception as exc:
         bad, detail = None, str(exc)
     if bad is None:
-        msg = f"Could not verify the plugins enabled for profile {profile!r}: {detail}; worker not started"
+        code, msg = "probe_failed", f"Could not verify the plugins enabled for profile {profile!r}: {detail}; worker not started"
     elif bad:
-        msg = f"Plugins enabled for profile {profile!r} do not load: {', '.join(bad)}; worker not started"
+        code, msg = "plugins_not_loading", f"Plugins enabled for profile {profile!r} do not load: {', '.join(bad)}; worker not started"
     else:
         _PROFILE_REFUSED.pop((str(home), key), None)
         try:
@@ -16136,20 +16149,23 @@ def _assert_worker_profile_ready(profile: str) -> None:
         except OSError:
             pass
         return
-    _PROFILE_REFUSED[(str(home), key)] = (time.time(), msg)
-    raise WorkerProfileRefused(msg)
+    _PROFILE_REFUSED[(str(home), key)] = (time.time() + _REFUSAL_MEMO_SECONDS[code], msg, code)
+    raise WorkerProfileRefused(msg, code, profile)
 
 
-def _note_launch_refusal(conn: sqlite3.Connection, task_id: str, reason: str) -> None:
-    """One ``spawn_refused`` event per distinct reason: the same refusal on later ticks adds nothing."""
+def _note_launch_refusal(conn: sqlite3.Connection, task_id: str, exc: WorkerProfileRefused) -> None:
+    """One ``spawn_refused`` event per distinct (code, profile): the same refusal on later ticks adds nothing,
+    even when its message changes (a probe stderr tail varies on every attempt)."""
     last = conn.execute(
         "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind != 'heartbeat' ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    if last and last["kind"] == "spawn_refused" and (json.loads(last["payload"] or "{}")).get("reason") == reason:
-        return
+    if last and last["kind"] == "spawn_refused":
+        prior = json.loads(last["payload"] or "{}")
+        if (prior.get("code"), prior.get("profile")) == (exc.code, exc.profile):
+            return
     with write_txn(conn):
-        _append_event(conn, task_id, "spawn_refused", {"reason": reason})
+        _append_event(conn, task_id, "spawn_refused", {"reason": str(exc), "code": exc.code, "profile": exc.profile})
 
 
 def _default_spawn(

@@ -421,21 +421,21 @@ def reconcile_runtime(conn, *, worker_exit_grace_seconds=15, lab_sweep=True):
 
 def _profile_ready_or_requeue(conn, request_id, token):
     """SPAWN_GUARD_20261016: the launch guard runs BEFORE the card is attached. A refusal puts the request back to
-    pending with the reason in last_error (tried again next tick); nothing is attached, no card is claimed."""
+    pending with the reason in last_error, held for LAUNCH_REFUSED_HOLD_SECONDS so it does not sit at the head of the
+    queue and take a start slot on every tick; nothing is attached, no card is claimed."""
     row=delivery.get_request(conn,request_id)
     if not row or row['claim_token']!=token or row['task_id']:
         return True  # not a fresh start: bootstrap_card owns the ownership checks
     try:
         project=json.loads(row['payload'])['project']
-        profile=project['profile']
-        if project.get('existing_task_id'):
-            profile=kb._resolve_executable_assignee(profile)
+        profile=kb._resolve_executable_assignee(project['profile'])  # create_task re-points the card the same way
         from hermes_cli.profiles import normalize_profile_name
         kb._assert_worker_profile_ready(normalize_profile_name(profile))
     except kb.WorkerProfileRefused as exc:
         with kb.write_txn(conn):
-            conn.execute("UPDATE nfos_requests SET status='pending',claim_token=NULL,worker_pid=NULL,last_error=? WHERE id=? AND status='starting' AND claim_token=?",
-                         (str(exc)[:500],request_id,token))
+            conn.execute("UPDATE nfos_requests SET status='pending',claim_token=NULL,worker_pid=NULL,claimed_at=?,last_error=? WHERE id=? AND status='starting' AND claim_token=?",
+                         (int(time.time()),(delivery.LAUNCH_REFUSED_PREFIX+str(exc))[:500],request_id,token))
+        print(f'{delivery.LAUNCH_REFUSED_PREFIX}{request_id}: {exc}',file=sys.stderr,flush=True)  # lands in logs/<request>.log
         return False
     except Exception:  # noqa: BLE001 — a malformed payload is bootstrap_card's error to report
         return True
