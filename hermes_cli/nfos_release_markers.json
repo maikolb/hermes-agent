@@ -323,5 +323,7 @@
   {"pr": 360, "file": "agent/conversation_loop.py", "text": "NFOS_API_CALL_GEN_UPSTREAM_20261016"},
   {"pr": 360, "file": "agent/conversation_loop.py", "text": "generation_log_suffix(agent, response),"},
   {"pr": 360, "file": "agent/chat_completion_helpers.py", "text": "attach_stream_generation as _attach_stream_generation"},
-  {"pr": 360, "file": "agent/stream_diag.py", "text": "def generation_log_suffix("}
+  {"pr": 360, "file": "agent/stream_diag.py", "text": "def generation_log_suffix("},
+  {"pr": 361, "file": "cli.py", "text": "NFOS_GOAL_LOOP_HISTORY_20261016"},
+  {"pr": 361, "file": "agent/turn_checkpoint.py", "text": "NFOS_GOAL_LOOP_HISTORY_20261016"}
 ]

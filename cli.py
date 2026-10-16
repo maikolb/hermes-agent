@@ -21037,6 +21037,10 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, first_result=
 
     # Result of the turn just run; the loop asks about it before it judges.
     last_result = [first_result]
+    # NFOS_GOAL_LOOP_HISTORY_20261016: each turn continues the transcript of the previous one, as cli.chat does
+    # (self.conversation_history = result["messages"]); otherwise every turn restarts from the restored snapshot.
+    if isinstance(first_result, dict) and first_result.get("messages") is not None:
+        cli.conversation_history = first_result["messages"]
 
     def _run_turn(prompt: str) -> str:
         result = cli.agent.run_conversation(
@@ -21044,6 +21048,8 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, first_result=
             conversation_history=cli.conversation_history,
         )
         last_result[0] = result
+        if isinstance(result, dict) and result.get("messages") is not None:
+            cli.conversation_history = result["messages"]
         # Keep session_id in sync if mid-run compression rotated it.
         if (
             getattr(cli.agent, "session_id", None)
