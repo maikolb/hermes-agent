@@ -16020,6 +16020,69 @@ def _worker_resume_context(task: Task, home: str, *, board=None) -> tuple[Option
     return session_id, note
 
 
+_PLUGIN_PROBE = """
+import json
+from hermes_cli.plugins import discover_plugins, get_plugin_manager, _get_enabled_plugins
+discover_plugins()
+rows = {}
+for p in get_plugin_manager().list_plugins():
+    rows[p['key']] = p
+    rows[p['name']] = p
+def ok(n):
+    p = rows.get(n)
+    return bool(p) and (p['enabled'] or str(p['error'] or '').startswith('exclusive plugin'))
+print(json.dumps([n for n in sorted(_get_enabled_plugins() or ()) if not ok(n)]))
+"""
+_PROFILE_READY_CACHE: dict[tuple, float] = {}
+
+
+def _assert_worker_profile_ready(profile: str) -> None:
+    """SPAWN_GUARD_20261016: refuse to launch a worker whose profile cannot run its own contract.
+
+    Single launch point (``_default_spawn``), so the dispatcher and every other launcher share it. The profile must
+    be on ``kanban.executor_profiles`` when that list is set, have a readable ``config.yaml``, and every entry of its
+    ``plugins.enabled`` must load (probed in a child process with the profile's home, so the caller registers nothing).
+    """
+    import subprocess
+
+    from hermes_cli.profiles import resolve_profile_env
+    from utils import fast_safe_load
+
+    allowlist = _configured_executor_profiles()
+    if allowlist is not None and profile not in allowlist:
+        raise ValueError(f"Profile {profile!r} is not an executor on this host (kanban.executor_profiles); worker not started")
+    try:
+        home = Path(resolve_profile_env(profile))
+    except FileNotFoundError:
+        raise ValueError(f"Profile {profile!r} has no directory on this host; worker not started") from None
+    cfg_path = home / "config.yaml"
+    try:
+        cfg = fast_safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        raise ValueError(f"Profile {profile!r} has no readable config.yaml ({cfg_path}): {exc}; worker not started") from None
+    plugins_cfg = cfg.get("plugins") if isinstance(cfg, dict) else None
+    enabled = plugins_cfg.get("enabled") if isinstance(plugins_cfg, dict) else None
+    if not enabled:
+        return
+    stamp = cfg_path.stat().st_mtime_ns
+    key = (str(home), stamp)
+    if time.time() - _PROFILE_READY_CACHE.get(key, 0.0) < 300:
+        return
+    env = dict(os.environ, HERMES_HOME=str(home))
+    try:
+        done = subprocess.run([sys.executable, "-c", _PLUGIN_PROBE], env=env, cwd=str(Path(__file__).resolve().parents[1]),
+                              capture_output=True, text=True, timeout=120)
+        bad = json.loads(done.stdout.strip().splitlines()[-1]) if done.returncode == 0 else None
+        detail = done.stderr.strip()[-300:]
+    except Exception as exc:
+        bad, detail = None, str(exc)
+    if bad is None:
+        raise ValueError(f"Could not verify the plugins enabled for profile {profile!r}: {detail}; worker not started")
+    if bad:
+        raise ValueError(f"Plugins enabled for profile {profile!r} do not load: {', '.join(bad)}; worker not started")
+    _PROFILE_READY_CACHE[key] = time.time()
+
+
 def _default_spawn(
     task: Task,
     workspace: str,
@@ -16046,6 +16109,7 @@ def _default_spawn(
     from hermes_cli.profiles import normalize_profile_name
 
     profile_arg = normalize_profile_name(task.assignee)
+    _assert_worker_profile_ready(profile_arg)
 
     # The card supplies scope; delivery instructions preserve the current
     # owner's workflow in newly created and replacement worker sessions.
