@@ -694,6 +694,15 @@ compression:
   # prune. Default 4096.
   proactive_prune_min_reclaim_tokens: 4096
 
+  # With a provider that forces reasoning_content echo-back (DeepSeek, Kimi,
+  # MiMo), the proactive prune commit also replaces the thinking text of
+  # assistant messages outside the protected tail (protect_last_n) with the
+  # one-space pad those providers accept. Thinking text is re-sent on every
+  # call otherwise and no other pass trims it. Tool calls, tool results and
+  # visible text are kept. No effect unless proactive_prune_tokens > 0.
+  # Default true; false turns it off.
+  proactive_prune_stale_reasoning: true
+
   # To pin a specific model/provider for compression summaries, use the
   # auxiliary section below (auxiliary.compression.provider / model).
 

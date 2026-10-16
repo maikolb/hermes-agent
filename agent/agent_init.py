@@ -2242,6 +2242,12 @@ def init_agent(
             _compression_cfg.get("proactive_prune_min_reclaim_tokens", 4096), 4096
         ),
     )
+    # Pad the thinking text of old assistant messages inside a proactive prune
+    # commit when the provider forces reasoning_content echo-back (DeepSeek,
+    # Kimi, MiMo). Only acts when proactive_prune_tokens > 0; default on.
+    compression_proactive_prune_stale_reasoning = str(
+        _compression_cfg.get("proactive_prune_stale_reasoning", True)
+    ).strip().lower() not in {"false", "0", "no", "off"}
     # protect_first_n is the number of non-system messages to protect at
     # the head, in addition to the system prompt (which is always
     # implicitly protected by the compressor).  Floor at 0 — a value of
@@ -2794,6 +2800,7 @@ def init_agent(
             proactive_prune_tokens=compression_proactive_prune_tokens,
             proactive_prune_min_result_chars=compression_proactive_prune_min_chars,
             proactive_prune_min_reclaim_tokens=compression_proactive_prune_min_reclaim,
+            proactive_prune_stale_reasoning=compression_proactive_prune_stale_reasoning,
             min_tail_user_messages=compression_min_tail_users,
             tail_mode=compression_tail_mode,
             keep_last_human_messages=compression_keep_last_humans,

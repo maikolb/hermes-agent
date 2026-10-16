@@ -282,5 +282,9 @@
   {"pr": 351, "file": "hermes_cli/nfos_runtime.py", "text": "GIT_MERGED_20261015"},
   {"pr": 351, "file": "hermes_cli/nfos_runtime.py", "text": "check that pull request first: `gh pr view <n> --repo <owner/name> --json"},
   {"pr": 351, "file": "hermes_cli/nfos_workspace_repair.py", "text": "{\"kind\":\"git_merged\",\"repo\":\"dono/nome\",\"pr\":123,\"base\":\"main\"} para o PR que já conserta o que o "},
-  {"pr": 351, "file": "hermes_cli/nfos_delivery.py", "text": "não consegui ler o fato nas últimas {unread} conferências"}
+  {"pr": 351, "file": "hermes_cli/nfos_delivery.py", "text": "não consegui ler o fato nas últimas {unread} conferências"},
+  {"pr": 353, "file": "agent/context_compressor.py", "text": "def _pad_stale_reasoning("},
+  {"pr": 353, "file": "agent/context_compressor.py", "text": "self.stale_reasoning_pad: bool = False"},
+  {"pr": 353, "file": "agent/conversation_loop.py", "text": "NFOS_WORKER_CTX_20261016"},
+  {"pr": 353, "file": "agent/agent_init.py", "text": "proactive_prune_stale_reasoning=compression_proactive_prune_stale_reasoning"}
 ]

@@ -3186,6 +3186,7 @@ class ContextCompressor(ContextEngine):
         proactive_prune_tokens: int = 0,
         proactive_prune_min_result_chars: int = 8000,
         proactive_prune_min_reclaim_tokens: int = 4096,
+        proactive_prune_stale_reasoning: bool = True,
         min_tail_user_messages: int = 1,
         tail_mode: str = "legacy",
         keep_last_human_messages: int = 0,
@@ -3254,6 +3255,20 @@ class ContextCompressor(ContextEngine):
         self.proactive_prune_min_reclaim_tokens = max(
             0, int(proactive_prune_min_reclaim_tokens or 0)
         )
+        # Stale-reasoning pad (NFOS_WORKER_CTX_20261016). On a provider that
+        # forces ``reasoning_content`` echo-back (DeepSeek / Kimi / MiMo) every
+        # assistant message of a long single-turn run keeps its full thinking
+        # text on the wire for the whole run, and nothing trims it: the tool
+        # prune below never touches it and full compression only fires at
+        # ``threshold`` x window (850k on a 1M model). Inside the proactive
+        # prune commit (the cache break it already pays) the thinking text of
+        # assistant messages outside the protected tail is replaced by the
+        # one-space pad those providers already accept. ``stale_reasoning_pad``
+        # is refreshed by the conversation loop from the agent's cached
+        # provider-direction flag before each prune consult; it is False for
+        # providers that do not echo reasoning, so they are untouched.
+        self.proactive_prune_stale_reasoning = bool(proactive_prune_stale_reasoning)
+        self.stale_reasoning_pad: bool = False
         # A committed prune is a prompt-cache boundary. Do not permit the next
         # one until the prompt has regrown the tokens just reclaimed.
         self._proactive_prune_rearm_tokens: int = 0
@@ -4116,6 +4131,50 @@ class ContextCompressor(ContextEngine):
 
         return result, pruned
 
+    @staticmethod
+    def _pad_stale_reasoning(
+        messages: List[Dict[str, Any]], protect_tail_count: int,
+    ) -> int:
+        """Replace the thinking text of non-tail assistant messages by the pad.
+
+        Only called for providers that force ``reasoning_content`` echo-back
+        (see ``stale_reasoning_pad``). Those providers accept a one-space
+        ``reasoning_content`` on any assistant message (the replay policy in
+        ``message_sanitization.apply_reasoning_content_policy`` already writes
+        it for every assistant row that has none), so a padded row stays valid
+        on the wire while its thinking text stops being re-billed on every call.
+
+        Class of what is cut: ``reasoning`` / ``reasoning_content`` /
+        ``reasoning_details`` of messages OUTSIDE the last ``protect_tail_count``
+        messages. That is thinking text, not an effect: tool calls (name and
+        arguments), tool results, assistant visible text and the card state all
+        stay. The pre-prune rows stay archived in the session store
+        (``archive_and_compact``), so nothing is lost for audit.
+
+        Mutates ``messages`` in place by replacing dict entries with copies
+        (the list is the caller's private copy from ``_prune_old_tool_results``).
+        Returns how many messages were padded.
+        """
+        boundary = len(messages) - max(0, int(protect_tail_count))
+        padded = 0
+        for i in range(max(0, boundary)):
+            msg = messages[i]
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            rc = msg.get("reasoning_content")
+            has_text = (
+                (isinstance(rc, str) and rc.strip())
+                or (isinstance(msg.get("reasoning"), str) and msg["reasoning"].strip())
+                or msg.get("reasoning_details")
+            )
+            if not has_text:
+                continue
+            new_msg = {k: v for k, v in msg.items() if k not in ("reasoning", "reasoning_details")}
+            new_msg["reasoning_content"] = " "
+            messages[i] = new_msg
+            padded += 1
+        return padded
+
     def prune_tool_results_only(
         self, messages: List[Dict[str, Any]], current_tokens: int | None = None,
     ) -> tuple[List[Dict[str, Any]], int]:
@@ -4188,6 +4247,10 @@ class ContextCompressor(ContextEngine):
             protect_tail_tokens=None,
             min_prune_chars=self.proactive_prune_min_result_chars,
         )
+        if self.proactive_prune_stale_reasoning and self.stale_reasoning_pad:
+            pruned_count += self._pad_stale_reasoning(
+                pruned_msgs, protect_tail_count=self.protect_last_n
+            )
         if not pruned_count:
             # Standard no-op contract: hand back the INPUT object so callers
             # can gate bookkeeping on `result is not input`.
