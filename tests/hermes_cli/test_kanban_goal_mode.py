@@ -320,3 +320,51 @@ class TestCLIJudgeGate:
         rc, complete_calls = self._run(monkeypatch, goal_mode=False)
         assert rc == 0
         assert complete_calls == ["t1"]
+
+
+# ---------------------------------------------------------------------------
+# NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the wait nudge carries the runnable command
+# ---------------------------------------------------------------------------
+
+def _wait_nudge(monkeypatch):
+    """The prompt the loop sends when a Principal decision is pending."""
+    monkeypatch.setattr(goals, "judge_goal", lambda *a, **k: pytest.fail("judge_goal must not run while a decision is pending"))
+    prompts = []
+    goals.run_kanban_goal_loop(
+        task_id="t_wait",
+        goal_text="do the thing",
+        run_turn=lambda p: prompts.append(p) or "waiting",
+        task_status_fn=lambda: "running",
+        block_fn=lambda r: pytest.fail("should not block"),
+        max_turns=5,
+        first_response="asked the Principal",
+        pending_decision_fn=lambda: "dec_1",
+    )
+    return prompts[0]
+
+
+def test_await_decision_nudge_names_the_workflow_cli(monkeypatch):
+    # Workers ran `find / -name nfos_delivery*` because this nudge said only "wait --decision dec_1".
+    from hermes_cli import nfos_delivery as delivery
+    from hermes_cli import nfos_runtime
+
+    nudge = _wait_nudge(monkeypatch)
+
+    assert nfos_runtime.workflow_command() + " wait --decision dec_1" in nudge
+    script = Path(delivery.__file__).resolve()
+    assert script.is_file() and str(script) in nudge
+
+
+def test_await_decision_nudge_falls_back_without_runtime(monkeypatch):
+    # A lookup failure must never take the goal loop down: the nudge keeps today's bare text.
+    from hermes_cli import nfos_runtime
+
+    def _broken(*args, **kwargs):
+        raise RuntimeError("runtime unavailable")
+
+    monkeypatch.setattr(nfos_runtime, "wait_decision_command", _broken)
+
+    nudge = _wait_nudge(monkeypatch)
+
+    assert "`wait --decision dec_1 --timeout 300`" in nudge
+    assert "decision dec_1 is still pending" in nudge

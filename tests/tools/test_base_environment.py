@@ -50,6 +50,32 @@ class TestBoundedOutputCollector:
         assert rendered.endswith("[Command timed out after 1s]")
         assert "[OUTPUT TRUNCATED" in rendered
 
+    def test_render_marker_names_spill_path(self, tmp_path):
+        # NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the cut mark says where the rest of the output is. The path used to
+        # sit only in metadata fields at the end of the JSON, and workers that read the cut in the middle searched
+        # the disk for the file (`find / -name "*-<pid>-<hex>.log"`).
+        spill = tmp_path / "cache" / "terminal-output" / "out-1-2-abc.log"
+        collector = _BoundedOutputCollector(1_000, spill_path=spill)
+        for _ in range(100):
+            collector.append("x" * 100)
+
+        rendered = collector.render()
+
+        assert "[OUTPUT TRUNCATED" in rendered
+        assert f"full output: {spill}" in rendered
+        assert len(rendered) <= 1_000
+        collector.close_spill()
+        assert spill.is_file()
+
+        # Without a spill file the mark is the one from before.
+        plain = _BoundedOutputCollector(1_000)
+        for _ in range(100):
+            plain.append("x" * 100)
+        marker = plain.render()
+        assert "[OUTPUT TRUNCATED" in marker
+        assert "full output" not in marker
+        assert "total] ..." in marker
+
 
 class TestWrapCommand:
     def test_basic_shape(self):

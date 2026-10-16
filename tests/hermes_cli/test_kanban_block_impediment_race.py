@@ -382,3 +382,21 @@ def test_goal_loop_without_the_hook_keeps_the_old_behaviour(monkeypatch):
     assert result["outcome"] == "blocked_budget"
     assert len(prompts) == 1 and "task is still open" in prompts[0]
     assert len(blocks) == 1 and "never called kanban_complete" in blocks[0]
+
+
+def test_block_note_names_the_workflow_cli(board, monkeypatch):
+    """NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the note of an NFOS kanban_block that filed an impediment said only
+    "wait --decision X --timeout 300"; 23 `find /` in a week went looking for the CLI. It now carries the command."""
+    from hermes_cli import nfos_runtime
+    from tools import kanban_tools as kt
+
+    with kb.connect_closing() as conn:
+        task = _running_card(conn)
+        monkeypatch.setenv("HERMES_KANBAN_TASK", task.id)
+        monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(task.current_run_id))
+        out = json.loads(kt._handle_block({"reason": PAUSE, "kind": "capability"}))
+        pending = kb._nfos_pending_decision(conn, task.id, task.current_run_id)
+
+    assert out["blocked"] is False and out["decision_id"] == pending
+    assert nfos_runtime.workflow_command() + " wait --decision " + pending in out["note"]
+    assert str(Path(delivery.__file__).resolve()) in out["note"]

@@ -156,8 +156,17 @@ def guard(conn, task_id, **what):
     """Como ``evaluate``, mas recusa com ``ProcessRefusal`` (dentro da transação, desfaz a troca)."""
     decision, refusal = evaluate(conn, task_id, **what)
     if refusal:
-        raise ProcessRefusal(refusal)
+        raise ProcessRefusal(refusal + _engine_source_note())
     return decision
+
+
+def _engine_source_note() -> str:
+    """Where the engine that refused lives, for the worker that has to read why (NFOS_CAMINHO_NO_PONTO_DE_USO_20261016).
+
+    Workers ran ``find /`` for ``project_workflow`` (cli.py, validation.py) to understand a refusal: the path was only inside
+    the wrapper script. Only the refusal that reaches the worker carries it; the one recorded on the card does not."""
+    src = Path(os.environ.get("PROJECT_WORKFLOW_SRC") or DEFAULT_SRC) / "project_workflow"
+    return f" Engine source: {src}." if src.is_dir() else ""
 
 
 def last_event_id(conn) -> int:

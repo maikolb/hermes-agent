@@ -316,5 +316,17 @@
   {"pr": 354, "file": "agent/conversation_compression.py", "text": "def reset_tool_dedup_caches(task_id: str) -> None:"},
   {"pr": 354, "file": "agent/conversation_loop.py", "text": "NFOS_DEDUP_AFTER_PRUNE_20261016"},
   {"pr": 354, "file": "gateway/run.py", "text": "the session id; without it the reset hits"},
-  {"pr": 354, "file": "gateway/slash_commands.py", "text": "Session id from BEFORE any rotation"}
+  {"pr": 354, "file": "gateway/slash_commands.py", "text": "Session id from BEFORE any rotation"},
+  {"pr": 358, "file": "hermes_cli/nfos_runtime.py", "text": "def wait_decision_command("},
+  {"pr": 358, "file": "hermes_cli/nfos_runtime.py", "text": "def worker_locations("},
+  {"pr": 358, "file": "hermes_cli/goals.py", "text": "def _await_decision_prompt("},
+  {"pr": 358, "file": "tools/kanban_tools.py", "text": "wait_command = wait_decision_command(pending)"},
+  {"pr": 358, "file": "tools/environments/base.py", "text": "spill_hint = ("},
+  {"pr": 358, "file": "tools/terminal_tool.py", "text": "_spill_hint = f\"; full output: {spill_file_path}\""},
+  {"pr": 358, "file": "hermes_cli/nfos_tool.py", "text": "def read_output_command("},
+  {"pr": 358, "file": "hermes_cli/nfos_delivery.py", "text": "CALL_OUTPUT_TAIL_CHARS = 20000"},
+  {"pr": 358, "file": "hermes_cli/nfos_process.py", "text": "def _engine_source_note("},
+  {"pr": 358, "file": "tools/mcp_tool.py", "text": "def _worker_cwd_note("},
+  {"pr": 358, "file": "tools/code_execution_tool.py", "text": "def _reap_leftover_process_group("},
+  {"pr": 358, "file": "hermes_cli/kanban_db.py", "text": "worker_locations(task, workspace, board, hermes_home=worker_home)"}
 ]

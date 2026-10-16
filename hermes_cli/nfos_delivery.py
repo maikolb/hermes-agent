@@ -5233,13 +5233,29 @@ def card_calls(conn, task_id, limit=0):
                 'Read one call by id: call --call <id>. Every call of the card: show --full.'}
 
 
+CALL_OUTPUT_TAIL_CHARS = 20000
+
+
 def read_call(conn, call_id):
-    """SHOW_CALLS_LIMIT_20261010: uma chamada nativa inteira por id."""
-    from hermes_cli.nfos_tool import get_call
+    """SHOW_CALLS_LIMIT_20261010: uma chamada nativa inteira por id.
+
+    NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: devolve também a saída da chamada (os chunks decodificados em ordem, os
+    últimos ``CALL_OUTPUT_TAIL_CHARS`` caracteres, redigidos como o ``terminal`` redige), com o total e, se a saída
+    passou do teto do banco, o arquivo com o excedente. Sem isso o recibo não levava a lugar nenhum e o worker
+    procurava o log da chamada no disco inteiro."""
+    from agent.redact import redact_terminal_output
+    from hermes_cli.nfos_tool import get_call, read_output
     call = get_call(conn, call_id) if call_id else None
     if call is None:
         raise WorkflowError('Unknown native call')
-    return {'call': call}
+    text, overflow = read_output(conn, call)
+    # Redigir o texto inteiro e só então cortar a cauda: um corte no meio de um segredo deixaria a metade dele à vista.
+    redacted = redact_terminal_output(text, None, force=True)
+    result = {'call': call, 'output': redacted[-CALL_OUTPUT_TAIL_CHARS:],
+              'output_chars_total': len(text), 'output_truncated': len(redacted) > CALL_OUTPUT_TAIL_CHARS}
+    if overflow:
+        result['overflow_path'] = overflow
+    return result
 
 
 def card_decisions(conn, task_id, limit=0):

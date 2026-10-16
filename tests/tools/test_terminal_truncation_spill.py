@@ -35,6 +35,20 @@ class TestTruncationSpill:
         assert "row_100 " in full
         assert "read_file" in r["truncation_note"]
 
+    def test_truncation_marker_names_the_spill_path(self, small_cap):
+        # NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the path is also inside the output, at the cut mark.
+        r = json.loads(terminal_tool(
+            "python3 -c \"[print(f'row_{i}', 'x'*80) for i in range(200)]\"", task_id="t-spill-mark"))
+        assert r["full_output_path"] in r["output"]
+        assert "full output: " + r["full_output_path"] in r["output"]
+        assert Path(r["full_output_path"]).exists()
+
+    def test_small_output_has_no_marker_path(self, small_cap):
+        r = json.loads(terminal_tool("echo tiny", task_id="t-spill-small"))
+        assert "OUTPUT TRUNCATED" not in r["output"]
+        assert "full output:" not in r["output"]
+        assert "full_output_path" not in r
+
     def test_small_output_has_no_metadata(self, small_cap):
         r = json.loads(terminal_tool("echo tiny", task_id="t-spill-2"))
         assert r["exit_code"] == 0

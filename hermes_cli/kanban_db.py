@@ -16015,7 +16015,16 @@ def _default_spawn(
                     and not accepted(delivery_conn,task.id,'spec_review')):
                 delivery.ask_principal(delivery_conn,task.id,task.current_run_id,kind='spec_review',
                     question='Validate the retained spec before this worker continues execution',context={})
-            from hermes_cli.nfos_runtime import worker_instructions
+            from hermes_cli.nfos_runtime import worker_instructions, worker_locations
+            try:  # NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: where things are, before the instructions
+                from hermes_cli.profiles import resolve_profile_env
+                try:
+                    worker_home = resolve_profile_env(profile_arg)
+                except FileNotFoundError:
+                    worker_home = None
+                prompt += "\n\n" + worker_locations(task, workspace, board, hermes_home=worker_home)
+            except Exception as exc:
+                _log.warning("kanban worker: locations block skipped for %s (%s: %s)", task.id, type(exc).__name__, exc)
             prompt += "\n\n" + worker_instructions()
             try:  # LEARNING_20260911: contexto do caso e lições do projeto entram na montagem do prompt, sem etapa do worker
                 prompt += delivery.worker_context(delivery_conn, task.id)

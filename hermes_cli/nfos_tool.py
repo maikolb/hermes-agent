@@ -15,6 +15,7 @@ import math
 import os
 from pathlib import Path
 import queue
+import shlex
 import signal
 import sqlite3
 import subprocess
@@ -304,6 +305,41 @@ def read_chunks(conn, call_id, *, after_seq=0, limit=1000):
     return [dict(row) for row in conn.execute('''SELECT * FROM nfos_tool_chunks
         WHERE call_id=? AND seq>? ORDER BY seq LIMIT ?''',
         (call_id, max(0, int(after_seq)), min(1000, max(1, int(limit)))))]
+
+
+def read_output(conn, call):
+    """Whole decoded output of a call, in chunk order, plus the overflow file if the cap was reached.
+
+    NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: until now nothing in the workflow read these chunks, so a worker that
+    wanted the output of a call it had just run searched the disk for a log file that never existed. Bytes are
+    concatenated before decoding (a multi-byte character can straddle two chunks). Above ``tool_chunk_max_bytes``
+    the database keeps the head and one marker; the rest is in the file named by the truncation event."""
+    call_id = call['id']
+    raw, after = bytearray(), 0
+    while True:
+        rows = read_chunks(conn, call_id, after_seq=after, limit=1000)
+        for row in rows:
+            raw += bytes(row['content'])
+        if len(rows) < 1000:
+            break
+        after = rows[-1]['seq']
+    overflow = None
+    for event in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_tool_chunk_truncated' "
+                              "ORDER BY id", (call['task_id'],)):
+        try:
+            payload = json.loads(event[0] or '{}')
+        except ValueError:
+            continue
+        if payload.get('call_id') == call_id and payload.get('spill'):
+            overflow = payload['spill']
+    return raw.decode('utf-8', errors='replace'), overflow
+
+
+def read_output_command(db_path, call_id):
+    """Exact command that prints the output of ``call_id`` (the sibling workflow CLI, same interpreter)."""
+    argv = [sys.executable, str(Path(__file__).resolve().with_name('nfos_delivery.py')), 'call', '--call', str(call_id),
+            '--db', str(Path(db_path).resolve())]
+    return subprocess.list2cmdline(argv) if os.name == 'nt' else ' '.join(shlex.quote(a) for a in argv)
 
 
 def call_runner_alive(call):
@@ -685,7 +721,9 @@ def main():
     result = run_command(args.db, task_id=args.task, run_id=args.run, argv=argv, cwd=args.cwd,
                          timeout_seconds=args.timeout, call_id=args.call_id, stdin_path=args.stdin_file,
                          _cli_owner=True)
-    print(json.dumps(result, ensure_ascii=False))
+    # NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the printed receipt says how to read the output (the stored one is unchanged).
+    printed = dict(result, read_output=read_output_command(args.db, result['id']))
+    print(json.dumps(printed, ensure_ascii=False))
     if result['timed_out']:
         return 124
     return 0 if result['status'] == 'succeeded' else result['returncode'] or 1

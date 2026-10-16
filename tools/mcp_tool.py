@@ -6816,13 +6816,30 @@ def mcp_prefixed_tool_name(server_name: str, tool_name: str) -> str:
     return f"{MCP_TOOL_NAME_PREFIX}{safe_server}{_MCP_NAME_DELIM}{safe_tool}"
 
 
-def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
+def _worker_cwd_note(config) -> str:
+    """One sentence for the descriptions of a worker's stdio MCP tools: where their relative paths point.
+
+    NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the Playwright MCP prints ``./shot.png`` and ``.playwright-mcp/...`` relative
+    to the directory its server started in, and workers searched the whole disk for them. A stdio server inherits the
+    worker's cwd unless its config sets ``cwd``, so the runtime can say which directory that is. Only a kanban worker
+    gets the sentence; remote (url) servers have no cwd of ours."""
+    if not os.environ.get("HERMES_KANBAN_TASK") or not isinstance(config, dict):
+        return ""
+    if "url" in config or not config.get("command"):
+        return ""
+    cwd = config.get("cwd") or os.getcwd()
+    return (f" Relative file paths in this tool's output (./file.png, .playwright-mcp/...) are relative to {cwd}, "
+            "the directory this server started in.")
+
+
+def _convert_mcp_schema(server_name: str, mcp_tool, *, cwd_note: str = "") -> dict:
     """Convert an MCP tool listing to the Hermes registry schema format.
 
     Args:
         server_name: The logical server name for prefixing.
         mcp_tool:    An MCP ``Tool`` object with ``.name``, ``.description``,
                      and ``.input_schema`` (``.inputSchema`` before mcp 2.0).
+        cwd_note:    Optional sentence appended to the description (see ``_worker_cwd_note``).
 
     Returns:
         A dict suitable for ``registry.register(schema=...)``.
@@ -6832,7 +6849,7 @@ def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
         "name": prefixed_name,
         "description": strip_unicode_tags(
             mcp_tool.description or f"MCP tool {mcp_tool.name} from {server_name}"
-        ),
+        ) + cwd_note,
         "parameters": _normalize_mcp_input_schema(
             mcp_field(mcp_tool, "input_schema", "inputSchema")
         ),
@@ -7168,7 +7185,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
             continue
 
         _scan_mcp_description(name, mcp_tool.name, mcp_tool.description or "")
-        schema = _convert_mcp_schema(name, mcp_tool)
+        schema = _convert_mcp_schema(name, mcp_tool, cwd_note=_worker_cwd_note(config))
         candidates.append(
             {
                 "registry_name": schema["name"],
@@ -7447,7 +7464,7 @@ def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]
         # Defense-in-depth: the cache file is user-writable JSON, so run the
         # same injection scan the eager discovery path applies.
         _scan_mcp_description(name, mcp_tool.name, mcp_tool.description or "")
-        schema = _convert_mcp_schema(name, mcp_tool)
+        schema = _convert_mcp_schema(name, mcp_tool, cwd_note=_worker_cwd_note(config))
         registry_name = schema["name"]
         existing_toolset = registry.get_toolset_for_tool(registry_name)
         if existing_toolset and existing_toolset != toolset_name:

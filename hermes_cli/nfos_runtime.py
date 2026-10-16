@@ -451,6 +451,56 @@ def workflow_command():
     return _script_command(delivery.__file__)
 
 
+def wait_decision_command(decision_id, timeout=300):
+    """Exact, runnable command that waits for a Principal decision (NFOS_CAMINHO_NO_PONTO_DE_USO_20261016)."""
+    return workflow_command() + ' wait --decision ' + shlex.quote(str(decision_id)) + ' --timeout ' + str(int(timeout))
+
+
+def worker_locations(task, workspace, board=None, hermes_home=None):
+    """Where things are, as absolute paths, at the top of the worker prompt (NFOS_CAMINHO_NO_PONTO_DE_USO_20261016).
+
+    Workers ran ``find /`` for files the runtime already knew: the workflow CLI, the project-workflow engine source,
+    the Playwright files (relative to the worker's cwd) and truncated or native-call output. Every line is generated at
+    spawn and a line whose path does not exist is left out, so the block never says what is not true. The top of the
+    prompt is not enough on its own (it failed for the workflow CLI in 13 of 13 sessions); the same paths are also
+    delivered where the worker needs them: the wait nudge, the truncation mark, the native-call receipt, the process
+    refusal and the MCP tool descriptions."""
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+    lines = ['Where things are (absolute paths, this run):']
+    code_root = Path(delivery.__file__).resolve().parents[1]
+    if Path(delivery.__file__).is_file():
+        lines.append('- Workflow CLI: ' + workflow_command())
+    if code_root.is_dir():
+        lines.append('- Runtime code root: ' + str(code_root) + ' (hermes_cli/, tools/, agent/)')
+    engine = process_engine_source()
+    if engine:
+        lines.append('- project-workflow engine source: ' + engine)
+    if workspace and os.path.isdir(str(workspace)):
+        lines.append('- Your workspace and cwd: ' + str(workspace) + '. Paths that browser or other MCP tools print as '
+                     './file.png or .playwright-mcp/... are relative to this directory, because your Playwright MCP '
+                     'server starts here.')
+    slug = kb._normalize_board_slug(board) or kb.get_current_board()
+    reports = Path(get_default_hermes_root()) / 'reports' / slug / str(task.id)
+    if reports.is_dir():
+        lines.append('- Card reports and evidence: ' + str(reports) + '/')
+    home = Path(hermes_home) if hermes_home else Path(get_hermes_home())
+    spill = home / 'cache' / 'terminal-output'
+    lines.append("- Truncated terminal output: the result's full_output_path, also printed at the cut mark"
+                 + ('; files live in ' + str(spill) + '/' if spill.is_dir() else ''))
+    lines.append('- Native tool call output: ' + workflow_command() + ' call --call <call_id>')
+    logs = kb.worker_logs_dir(slug)
+    if logs.is_dir():
+        lines.append('- Your worker log: ' + str(logs / (str(task.id) + '.log')))
+    return '\n'.join(lines)
+
+
+def process_engine_source():
+    """Source of the project-workflow engine (``cli.py``, ``validation.py``), or None when it is not there."""
+    from hermes_cli import nfos_process
+    src = Path(os.environ.get('PROJECT_WORKFLOW_SRC') or nfos_process.DEFAULT_SRC) / 'project_workflow'
+    return str(src) if src.is_dir() else None
+
+
 AUXILIARY_CLOSURE_POLICY = """Owner delegation, 15/09/2026 (auxiliary work):
 Maikol: "Sem contar que isso não era nem pra ter me pedido autorização, inclusive e não somente por isso: nem fui eu que pedi ou criei esse card".
 The Principal owns cleanup of auxiliary cards created by NFOS itself. When their

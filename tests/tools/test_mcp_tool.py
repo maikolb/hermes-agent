@@ -367,6 +367,30 @@ class TestSchemaConversion:
         assert schema["description"] == "Read a file"
         assert "properties" in schema["parameters"]
 
+    def test_worker_stdio_tool_description_says_where_relative_paths_point(self, monkeypatch, tmp_path):
+        """NFOS_CAMINHO_NO_PONTO_DE_USO_20261016: the Playwright MCP prints ./shot.png relative to the directory its
+        server started in, and workers searched the disk for the file. A kanban worker's stdio tool says which."""
+        from tools.mcp_tool import _convert_mcp_schema, _worker_cwd_note
+
+        mcp_tool = _make_mcp_tool(name="browser_take_screenshot", description="Take a screenshot")
+        monkeypatch.chdir(tmp_path)
+
+        # Not a worker: nothing changes.
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        assert _worker_cwd_note({"command": "npx"}) == ""
+        assert _convert_mcp_schema("pw", mcp_tool)["description"] == "Take a screenshot"
+
+        # A worker's stdio server starts in the worker's cwd, or in the cwd its config sets.
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_x")
+        note = _worker_cwd_note({"command": "npx"})
+        assert os.getcwd() in note and ".playwright-mcp" in note
+        assert os.path.abspath(str(tmp_path / "set")) in _worker_cwd_note({"command": "npx", "cwd": str(tmp_path / "set")})
+        schema = _convert_mcp_schema("pw", mcp_tool, cwd_note=note)
+        assert schema["description"] == "Take a screenshot" + note
+
+        # A remote server has no cwd of ours.
+        assert _worker_cwd_note({"url": "https://example.test/mcp"}) == ""
+
     def test_definitions_as_property_name_is_preserved(self):
         """A tool parameter literally named ``definitions`` must not be renamed.
 
