@@ -17046,10 +17046,10 @@ def count_notify_subs(
 def foreign_notify_owner_counts(
     *, board: Optional[str] = None, notifier_profiles: Iterable[str],
 ) -> dict[str, int]:
-    """NOTIFY_ORPHAN_OWNER_20261016: owners of subscriptions that ``notifier_profiles`` do not include, with their counts.
+    """NOTIFY_FOREIGN_OWNER_20261016: owners of subscriptions that ``notifier_profiles`` do not include, with their counts.
 
     Read-only, like :func:`count_notify_subs`. Those rows are invisible to the gateway's own listing, which is the point:
-    a profile that no gateway runs for leaves its subscriptions undelivered with nothing in the log."""
+    a profile that no gateway runs for (a cut-over left the old owner on the rows) leaves its subscriptions undelivered with nothing in the log."""
     path = kanban_db_path(board=board)
     if not path.exists():
         return {}
@@ -17068,33 +17068,6 @@ def foreign_notify_owner_counts(
         return {str(owner): int(n) for owner, n in rows}
     finally:
         conn.close()
-
-
-def adopt_orphan_notify_subs(conn: sqlite3.Connection, *, owners: Iterable[str], new_owner: str) -> int:
-    """NOTIFY_ORPHAN_OWNER_20261016: subscriptions of profiles that do not exist on the host pass to ``new_owner``.
-
-    The cursor goes to the task's last event: the events the old owner never delivered are history, and delivering them
-    now would replay hundreds of notices and wake the Principal for each. Later events reach the new owner as usual. A
-    subscription with a claim in flight is left to it. Returns how many rows changed."""
-    owners = sorted({str(o).strip() for o in owners if str(o).strip()})
-    if not owners or not new_owner:
-        return 0
-    with write_txn(conn):
-        # A claim whose lease ran out belongs to a consumer that is gone: it must not hold the adoption for ever.
-        conn.execute("DELETE FROM kanban_notify_claims WHERE COALESCE(lease_until, 0) < ? AND EXISTS (SELECT 1 FROM kanban_notify_subs s "
-                     "WHERE s.task_id = kanban_notify_claims.task_id AND s.platform = kanban_notify_claims.platform "
-                     "AND s.chat_id = kanban_notify_claims.chat_id AND s.thread_id = kanban_notify_claims.thread_id "
-                     "AND s.notifier_profile IN (" + ",".join("?" for _ in owners) + "))",
-                     (time.time(), *owners))
-        cur = conn.execute(
-            "UPDATE kanban_notify_subs SET "
-            "last_event_id = MAX(last_event_id, COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = kanban_notify_subs.task_id), 0)), "
-            "notifier_profile = ? WHERE notifier_profile IN (" + ",".join("?" for _ in owners) + ") "
-            "AND NOT EXISTS (SELECT 1 FROM kanban_notify_claims c WHERE c.task_id = kanban_notify_subs.task_id "
-            "AND c.platform = kanban_notify_subs.platform AND c.chat_id = kanban_notify_subs.chat_id "
-            "AND c.thread_id = kanban_notify_subs.thread_id)",
-            (new_owner, *owners))
-        return int(cur.rowcount)
 
 
 def remove_notify_sub(

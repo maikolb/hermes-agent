@@ -3192,17 +3192,6 @@ class GatewayKanbanWatchersMixin:
                            sub.get("task_id"), exc_info=True)
             return {ev.kind for ev in events}, False
 
-    @staticmethod
-    def _kanban_owner_profile_exists(owner: str) -> bool:
-        """NOTIFY_ORPHAN_OWNER_20261016: the owner is a profile of this host. Anything unreadable counts as existing, so
-        nothing is adopted on a guess. A running gateway holds its lock only while it runs (a restart drops it), and a
-        multiplexed profile has none of its own, so the lock never says that an owner is gone; a missing profile does."""
-        try:
-            from hermes_cli.profiles import profile_exists
-            return bool(profile_exists(owner))
-        except Exception:  # noqa: BLE001
-            return True
-
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver material lifecycle events.
 
@@ -3397,6 +3386,7 @@ class GatewayKanbanWatchersMixin:
                             rehydrate_complete = False
                         boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
                     seen_db_paths: set[str] = set()
+                    foreign_by_board: dict[str, dict[str, int]] = {}  # NOTIFY_FOREIGN_OWNER_20261016
                     for board_meta in boards:
                         slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
                         db_path = board_meta.get("db_path")
@@ -3490,35 +3480,26 @@ class GatewayKanbanWatchersMixin:
                                     slug,
                                     focus_exc,
                                 )
-                        # NOTIFY_ORPHAN_OWNER_20261016: subscriptions whose owner is no profile of this host are listed by nobody (the SQL
-                        # owner filter hides them) and the log said nothing. They pass to this gateway, cursor at the last event of each
-                        # task. An owner that exists but is not among this gateway's profiles may be another gateway, restarting or not:
-                        # its rows are left alone and the count goes to the log, at most every 10 min per owner.
+                        # NOTIFY_FOREIGN_OWNER_20261016: the owner filter of the listing hides subscriptions owned by a profile this gateway
+                        # does not serve, and until 16/10 nothing said so (a cut-over left 227 rows on the old owner and the Principal
+                        # was never woken). They are not touched: the owner may be a gateway that is restarting or a multiplexed
+                        # profile. The count goes to the log, at most every 10 min per owner, and to the runtime status.
                         try:
                             foreign = _kb.foreign_notify_owner_counts(board=slug, notifier_profiles=notifier_profiles)
-                            gone = [owner for owner in foreign if not self._kanban_owner_profile_exists(owner)]
-                            if gone:
-                                with _kb.connect_closing(board=slug) as adopt_conn:
-                                    adopted = _kb.adopt_orphan_notify_subs(adopt_conn, owners=gone, new_owner=notifier_profile)
-                                if adopted:
-                                    logger.warning(
-                                        "kanban notifier: board %s had %d subscription(s) owned by %s, which is no profile of this host; "
-                                        "%d passed to profile %s (cursor at the last event of each task)",
-                                        slug, sum(foreign[o] for o in gone), sorted(gone), adopted, notifier_profile,
-                                    )
+                            foreign_by_board[slug] = foreign
                             warned = getattr(self, "_kanban_foreign_owner_warned", None)
                             if warned is None:
                                 warned = self._kanban_foreign_owner_warned = {}
-                            for owner in (o for o in foreign if o not in gone):
+                            for owner, count in foreign.items():
                                 if time.monotonic() - warned.get((slug, owner), -1e9) >= 600:
                                     warned[(slug, owner)] = time.monotonic()
                                     logger.warning(
                                         "kanban notifier: board %s has %d subscription(s) owned by profile %s, not served by this gateway "
                                         "(%s); they are delivered only while a gateway of that profile runs",
-                                        slug, foreign[owner], owner, sorted(notifier_profiles),
+                                        slug, count, owner, sorted(notifier_profiles),
                                     )
-                        except Exception as orphan_exc:  # noqa: BLE001
-                            logger.warning("kanban notifier: foreign owner check failed on board %s: %s", slug, orphan_exc)
+                        except Exception as foreign_exc:  # noqa: BLE001
+                            logger.warning("kanban notifier: foreign owner check failed on board %s: %s", slug, foreign_exc)
                         # Zero-subscription early exit: probe the board with a
                         # cheap read-only connection BEFORE the writable
                         # `connect()`. A board with no subscriptions has
@@ -3767,6 +3748,17 @@ class GatewayKanbanWatchersMixin:
                                 ]
                         finally:
                             conn.close()
+                    try:  # NOTIFY_FOREIGN_OWNER_20261016: the runtime status says it too, written when it changes
+                        totals: dict[str, int] = {}
+                        for per_board in foreign_by_board.values():
+                            for owner, count in per_board.items():
+                                totals[owner] = totals.get(owner, 0) + count
+                        if totals != getattr(self, "_kanban_foreign_owner_status", {}):
+                            from gateway.status import write_runtime_status as _write_status
+                            _write_status(kanban_foreign_owner_subs=totals)
+                            self._kanban_foreign_owner_status = totals
+                    except Exception:  # noqa: BLE001
+                        logger.debug("kanban notifier: foreign owner status not written", exc_info=True)
                     return deliveries, focus_rows, rehydrate_complete
 
                 deliveries, focus_rows, rehydrate_complete = await asyncio.to_thread(

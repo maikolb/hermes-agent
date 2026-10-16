@@ -1,9 +1,10 @@
-"""NOTIFY_ORPHAN_OWNER_20261016: subscriptions of a profile that no gateway runs for.
+"""NOTIFY_FOREIGN_OWNER_20261016: subscriptions owned by a profile this gateway does not serve.
 
-16/10/2026, Concursa cut-over: 227 subscriptions kept the owner `hermes-project-factory`, which has no gateway on the new
-host. The gateway's listing filters by owner in SQL, so nothing claimed them, nothing was logged, and the Principal was never
-woken for the 19 cards with a pending decision. They now pass to the running gateway's profile with the cursor at the last event
-of each task, and the count goes to the log as a warning."""
+16/10/2026, Concursa cut-over: 227 subscriptions kept the owner `hermes-project-factory`, which has no gateway on the new host.
+The listing filters by owner in SQL, so nothing claimed them, nothing was logged, and the Principal was never woken for the 19
+cards with a pending decision. The notifier does not touch them (the owner may be a gateway that is restarting or a multiplexed
+profile; the cut-over procedure migrates the owner with the SQL of CONTORNO-CURSOR.md). It says so: a WARNING with the count at
+most every 10 min per owner, and `kanban_foreign_owner_subs` in the runtime status."""
 import asyncio
 import logging
 
@@ -37,6 +38,7 @@ def _runner(adapter):
 
 
 def _tick(monkeypatch, runner):
+    runner._running = True  # cada volta para o laço ao fim; a próxima o religa
     real_sleep = asyncio.sleep
 
     async def fake_sleep(delay):
@@ -51,21 +53,22 @@ def _tick(monkeypatch, runner):
     asyncio.run(run())
 
 
-def _board(tmp_path, monkeypatch, *, owner_profile_exists=False):
-    # O detector é o real: HERMES_HOME próprio, com ou sem a pasta do perfil dono.
-    from hermes_cli import profiles
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    (tmp_path / "home" / "profiles" / "worker").mkdir(parents=True)  # o executor dos cartões
-    monkeypatch.setattr(profiles, "_get_profiles_root", lambda: tmp_path / "home" / "profiles")  # a pasta de perfis é esta
-    if owner_profile_exists:
-        (tmp_path / "home" / "profiles" / OLD_OWNER).mkdir()
-    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "orphan-owner.db"))
+@pytest.fixture
+def status_writes(monkeypatch):
+    import gateway.status as status
+    writes = []
+    monkeypatch.setattr(status, "write_runtime_status", lambda **kw: writes.append(kw))
+    return writes
+
+
+def _board(tmp_path, monkeypatch, owner=OLD_OWNER):
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "foreign-owner.db"))
     kb.init_db()
     conn = kb.connect()
     try:
         task_id = kb.create_task(conn, title="cartao antigo", assignee="worker")
-        kb.add_notify_sub(conn, task_id=task_id, platform="telegram", chat_id="chat-1", notifier_profile=OLD_OWNER)
-        kb.block_task(conn, task_id, reason="evento antigo, ninguem entregou", kind="needs_input")  # antes da adocao
+        kb.add_notify_sub(conn, task_id=task_id, platform="telegram", chat_id="chat-1", notifier_profile=owner)
+        kb.block_task(conn, task_id, reason="evento que o dono ausente nao entregou", kind="needs_input")
     finally:
         conn.close()
     return task_id
@@ -74,64 +77,50 @@ def _board(tmp_path, monkeypatch, *, owner_profile_exists=False):
 def _sub(task_id):
     conn = kb.connect()
     try:
-        return kb.list_notify_subs(conn, task_id)[0], conn.execute(
-            "SELECT MAX(id) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0]
+        return kb.list_notify_subs(conn, task_id)[0]
     finally:
         conn.close()
 
 
-def test_subscriptions_of_an_owner_that_is_no_profile_of_the_host_pass_to_the_running_profile_without_replaying_history(
-        tmp_path, monkeypatch, caplog):
+def test_a_foreign_owner_is_left_alone_and_said_once_in_the_log_and_in_the_status(tmp_path, monkeypatch, caplog, status_writes):
     task_id = _board(tmp_path, monkeypatch)
-    adapter = RecordingAdapter()
+    before = _sub(task_id)
+    adapter, runner = RecordingAdapter(), None
+    runner = _runner(adapter)
     with caplog.at_level(logging.WARNING):
-        _tick(monkeypatch, _runner(adapter))
-    sub, last_event = _sub(task_id)
-    assert (sub["notifier_profile"], sub["last_event_id"]) == ("concursa", last_event)
-    assert adapter.sent == []  # o evento antigo não volta ao chat
-    warned = [r.getMessage() for r in caplog.records if "had 1 subscription(s) owned by" in r.getMessage()]
-    assert warned and OLD_OWNER in warned[0] and "1 passed to profile concursa" in warned[0]
-    conn = kb.connect()
-    try:
-        kb.complete_task(conn, task_id, summary="evento novo")
-    finally:
-        conn.close()
-    _tick(monkeypatch, _runner(adapter))
-    assert len(adapter.sent) == 1 and "cartao antigo" in adapter.sent[0]["text"]  # o que vem depois chega
-
-
-def test_an_owner_that_is_a_profile_of_the_host_is_left_alone_and_the_warning_is_rate_limited(tmp_path, monkeypatch, caplog):
-    """Gateway reiniciando (lock some), multiplex ou outro gateway: o perfil existe, as linhas não mudam. Aviso contado a cada 10 min."""
-    task_id = _board(tmp_path, monkeypatch, owner_profile_exists=True)
-    before, _ = _sub(task_id)
-    adapter = RecordingAdapter()
-    with caplog.at_level(logging.WARNING):
-        _tick(monkeypatch, _runner(adapter))
-        _tick(monkeypatch, _runner(adapter))
-    after, _ = _sub(task_id)
-    assert after["notifier_profile"] == OLD_OWNER and after["last_event_id"] == before["last_event_id"]
+        _tick(monkeypatch, runner)
+        _tick(monkeypatch, runner)  # 2 voltas, 1 aviso
+    after = _sub(task_id)
+    assert (after["notifier_profile"], after["last_event_id"]) == (OLD_OWNER, before["last_event_id"])
     assert adapter.sent == []
-    assert len([r for r in caplog.records if "not served by this gateway" in r.getMessage() and "1 subscription(s)" in r.getMessage()]) >= 1
+    warned = [r.getMessage() for r in caplog.records if "not served by this gateway" in r.getMessage()]
+    assert len(warned) == 1 and "1 subscription(s)" in warned[0] and OLD_OWNER in warned[0]
+    assert status_writes == [{"kanban_foreign_owner_subs": {OLD_OWNER: 1}}]  # só quando muda
 
 
-def test_a_subscription_with_a_claim_in_flight_is_not_adopted(tmp_path, monkeypatch):
+def test_the_warning_comes_back_after_ten_minutes_and_the_status_clears_when_the_owner_is_migrated(
+        tmp_path, monkeypatch, caplog, status_writes):
     task_id = _board(tmp_path, monkeypatch)
+    runner = _runner(RecordingAdapter())
+    with caplog.at_level(logging.WARNING):
+        _tick(monkeypatch, runner)
+        for key in runner._kanban_foreign_owner_warned:
+            runner._kanban_foreign_owner_warned[key] -= 601
+        _tick(monkeypatch, runner)
+    assert len([r for r in caplog.records if "not served by this gateway" in r.getMessage()]) == 2
     conn = kb.connect()
     try:
-        kb.claim_unseen_events_for_sub(conn, task_id=task_id, platform="telegram", chat_id="chat-1", claim_token="t")
-        assert kb.adopt_orphan_notify_subs(conn, owners=[OLD_OWNER], new_owner="concursa") == 0
-    finally:
-        conn.close()
-    assert _sub(task_id)[0]["notifier_profile"] == OLD_OWNER
-
-
-def test_a_claim_whose_lease_ran_out_does_not_hold_the_adoption(tmp_path, monkeypatch):
-    task_id = _board(tmp_path, monkeypatch)
-    conn = kb.connect()
-    try:
-        kb.claim_unseen_events_for_sub(conn, task_id=task_id, platform="telegram", chat_id="chat-1", claim_token="t")
-        conn.execute("UPDATE kanban_notify_claims SET lease_until = 1 WHERE task_id = ?", (task_id,))
+        conn.execute("UPDATE kanban_notify_subs SET notifier_profile='concursa' WHERE task_id=?", (task_id,))
         conn.commit()
-        assert kb.adopt_orphan_notify_subs(conn, owners=[OLD_OWNER], new_owner="concursa") == 1
     finally:
         conn.close()
+    _tick(monkeypatch, runner)  # o procedimento de corte migrou o dono: a métrica zera
+    assert status_writes[-1] == {"kanban_foreign_owner_subs": {}}
+
+
+def test_nothing_is_said_when_every_owner_is_served(tmp_path, monkeypatch, caplog, status_writes):
+    _board(tmp_path, monkeypatch, owner="concursa")
+    with caplog.at_level(logging.WARNING):
+        _tick(monkeypatch, _runner(RecordingAdapter()))
+    assert not [r for r in caplog.records if "not served by this gateway" in r.getMessage()]
+    assert status_writes == []
