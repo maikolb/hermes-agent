@@ -204,6 +204,13 @@ def _message_projection(message: Any) -> dict[str, Any]:
     ):
         if key in message and message.get(key) is not None:
             projected[key] = message.get(key)
+    # NFOS_GOAL_LOOP_HISTORY_20261016: the SessionDB readback (hermes_state._rows_to_conversation) returns user and
+    # assistant content as sanitize_context(content).strip(); the hash must project the same text.
+    content = projected.get("content")
+    if projected.get("role") in {"user", "assistant"} and isinstance(content, str):
+        from agent.memory_manager import sanitize_context
+
+        projected["content"] = sanitize_context(content).strip()
     return projected
 
 
