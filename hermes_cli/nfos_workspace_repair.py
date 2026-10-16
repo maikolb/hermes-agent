@@ -158,7 +158,8 @@ BREAKER_PAUSE_KIND = 'failure_breaker'
 _BLOCK_CAUSE_EVENTS = ('blocked', 'block_loop_detected', 'dependency_wait', 'unblocked', 'claimed', 'status', 'reclaimed',
                        'claim_reaped', 'completed', 'archived', 'changes_requested', 'gave_up')
 _BREAKER_OUTCOME = dict(crashed='o worker caiu', timed_out='o worker passou do tempo limite',
-                        spawn_failed='o worker não chegou a iniciar')
+                        spawn_failed='o worker não chegou a iniciar',
+                        short_timeout_loop='as duas últimas execuções passaram do tempo limite em menos de 3 minutos')
 
 
 def own_breaker_stop(conn, task_id):
