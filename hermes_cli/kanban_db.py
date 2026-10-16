@@ -13779,12 +13779,15 @@ def _record_task_failure(
             limit_source = "dispatcher"
 
         if force_trip or failures >= effective_limit:
-            # Trip the breaker.
+            # Trip the breaker. BREAKER_KIND_RESET_20261016: o bloqueio do disjuntor nasce sem tipo, que é o que
+            # own_breaker_stop exige para dar dono ao card. unblock_task deixa o block_kind da parada anterior
+            # (awaiting_principal) no card; sem zerar aqui, a segunda parada de qualquer card ficava sem decisão
+            # e o sweep a soltava em silêncio.
             if release_claim:
                 # Spawn path: still running, also clear claim state.
                 conn.execute(
                     "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
-                    "claim_expires = NULL, worker_pid = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, block_kind = NULL, "
                     "consecutive_failures = ?, last_failure_error = ? "
                     "WHERE id = ? AND status IN ('running', 'ready', 'review')",
                     (failures, error[:500], task_id),
@@ -13794,7 +13797,7 @@ def _record_task_failure(
                 # cleared; just flip to blocked + update
                 # counter fields.
                 conn.execute(
-                    "UPDATE tasks SET status = 'blocked', "
+                    "UPDATE tasks SET status = 'blocked', block_kind = NULL, "
                     "consecutive_failures = ?, last_failure_error = ? "
                     "WHERE id = ? AND status IN ('ready', 'review', 'running')",
                     (failures, error[:500], task_id),

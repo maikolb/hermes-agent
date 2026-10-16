@@ -115,9 +115,16 @@ def test_after_the_principal_continues_the_card_gets_two_more_runs_before_stoppi
 
 @pytest.mark.parametrize("second,kinds", [
     (3 * 3600, ()),                       # a execução longa que estourou o limite é trabalho, não laço
-    (66, ("nfos_spec_saved",)),           # curta, mas salvou a especificação
+    (66, ("nfos_spec_saved",)),           # curta, mas deixou algo durável
     (66, ("nfos_report_saved",)),
-], ids=["long-run", "spec-saved", "report-saved"])
+    (66, ("nfos_probe",)),
+    (66, ("nfos_effect_reconciled",)),
+    (66, ("nfos_homologation_bound",)),
+    (180, ()),                            # a fronteira: 180 s já não é curta
+    (300, ()),
+    (1700, ()),                           # abaixo de 1800, acima do corte
+], ids=["long-run", "spec-saved", "report-saved", "probe", "effect-reconciled", "homologation-bound",
+        "exactly-180s", "300s", "1700s"])
 def test_a_run_that_is_long_or_delivered_something_breaks_the_streak(conn, second, kinds):
     task = _card(conn)
     _idle(conn, task.id)
@@ -126,6 +133,14 @@ def test_a_run_that_is_long_or_delivered_something_breaks_the_streak(conn, secon
     spawned, _ = _dispatch(conn)
     assert spawned == [task.id] and kb.get_task(conn, task.id).status == "running"
     assert _events(conn, task.id, "gave_up") == []
+
+
+def test_a_run_just_under_the_cut_is_still_the_loop(conn):
+    task = _card(conn)
+    _idle(conn, task.id)
+    _ended_run(conn, task.id, 65)
+    _ended_run(conn, task.id, 179)
+    assert _dispatch(conn)[0] == []
 
 
 def test_a_forward_workflow_step_breaks_the_streak(conn):
@@ -155,3 +170,45 @@ def test_card_outside_the_nfos_keeps_the_dispatcher_behaviour(conn):
     _ended_run(conn, task_id, 66)
     spawned, result = _dispatch(conn)
     assert spawned == [task_id] and result.auto_blocked == []
+
+
+def _pending(conn, task_id):
+    return [dict(r) for r in conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND status IN ('pending','human')", (task_id,))]
+
+
+def _continue(conn, task_id):
+    [decision] = _pending(conn, task_id)
+    delivery.resolve_decision(conn, decision["id"], action="continue", answer="CONTINUE: causa tratada.", author="Principal")
+    assert delivery.sweep_awaiting_principal(conn) == [task_id]
+
+
+@pytest.mark.parametrize("cycles", [2, 4])
+def test_every_stop_creates_its_decision_not_only_the_first(conn, cycles):
+    """Parada, continue, parada: unblock_task deixa o block_kind da parada anterior no card. A revisora do #362 mostrou
+    a segunda parada sem decisão (own_breaker_stop só age em blocked sem tipo) e o sweep soltando o card em silêncio."""
+    task = _card(conn)
+    _idle(conn, task.id)
+    for cycle in range(1, cycles + 1):
+        _ended_run(conn, task.id, 65)
+        _ended_run(conn, task.id, 66)
+        spawned, result = _dispatch(conn)
+        assert spawned == [] and result.auto_blocked == [task.id], f"ciclo {cycle}"
+        held = kb.get_task(conn, task.id)
+        assert (held.status, held.block_kind) == ("blocked", "awaiting_principal"), f"ciclo {cycle}"
+        assert len(_pending(conn, task.id)) == 1, f"ciclo {cycle}: a parada tem de criar a decisão"
+        assert delivery.sweep_awaiting_principal(conn) == [], f"ciclo {cycle}: com a decisão aberta o card fica"
+        _continue(conn, task.id)
+    assert len(_events(conn, task.id, "gave_up")) == cycles
+
+
+@pytest.mark.parametrize("cycles", [2, 4])
+def test_the_failure_breaker_of_315_creates_the_decision_on_every_stop(conn, cycles):
+    """O mesmo defeito no disjuntor de falhas já em produção: qualquer card que o Principal liberou e que desiste de novo."""
+    task = _card(conn)
+    _idle(conn, task.id)
+    for cycle in range(1, cycles + 1):
+        for expected in (False, True):
+            assert kb._record_task_failure(conn, task.id, "pid 1586801 exited with code 1", outcome="crashed",
+                                           failure_limit=2, release_claim=False, end_run=False) is expected
+        assert len(_pending(conn, task.id)) == 1, f"ciclo {cycle}: a desistência tem de criar a decisão"
+        _continue(conn, task.id)
