@@ -334,5 +334,8 @@
   {"pr": 363, "file": "hermes_cli/nfos_route_walls.py", "text": "quota_window(error, now=now) or credit_window(agent, error)"},
   {"pr": 364, "file": "hermes_cli/nfos_process_hold.py", "text": "PROCESS_HOLD_WAKE_20261016"},
   {"pr": 364, "file": "hermes_cli/nfos_process_hold.py", "text": "def request(conn, task_id, wait):"},
-  {"pr": 364, "file": "hermes_cli/nfos_delivery.py", "text": "PROCESS_HOLD_WAKE_20261016"}
+  {"pr": 364, "file": "hermes_cli/nfos_delivery.py", "text": "PROCESS_HOLD_WAKE_20261016"},
+  {"pr": 367, "file": "hermes_cli/nfos_principal_review.py", "text": "WORKER_ROUTES_20261016"},
+  {"pr": 367, "file": "hermes_cli/nfos_principal_review.py", "text": "def worker_routes(task, policy):"},
+  {"pr": 367, "file": "hermes_cli/nfos_principal_review.py", "text": "chosen = worker_routes(task, policy)"}
 ]
