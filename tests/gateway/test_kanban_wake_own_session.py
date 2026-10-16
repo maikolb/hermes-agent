@@ -455,5 +455,53 @@ def test_decision_input_files_are_named_per_decision():
     assert "never a shared answer.json" in text
 
 
+@pytest.mark.asyncio
+async def test_a_lane_publication_waits_for_the_topic_turn_in_codex_shape(monkeypatch, tmp_path):
+    """A lane publication written in the middle of a topic turn must not split a Codex tool call from its result.
+
+    Review of 4ea0f811ff: the mirror row between the tool call and its result made the repair treat the result as an
+    orphan, and the next turn saw "[Result unavailable]". The publication is queued while the topic turn runs and is
+    written when that turn ends, after its final answer.
+    """
+    from agent.agent_runtime_helpers import repair_message_sequence
+    from gateway.session import lane_publication_mirror_text
+
+    runner, store, chat, notes, _ = _lane_runner(monkeypatch, tmp_path)
+    topic_source = _topic_source(user_id="u1")
+    topic_key = build_session_key(topic_source)
+    call = {"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}
+    wake_text = f"[kanban] Task {CARD} worker aguardando sua decisão.\nTitle: relatório"
+
+    async def topic_turn(**_kwargs):
+        sid = store.lookup_by_session_key(topic_key).session_id
+        db = store._db
+        db.append_message(sid, "assistant", "", tool_calls=[call],
+                          codex_message_items=[{"type": "message"}])
+        # The card's wake answers while the topic's turn is still running.
+        assert runner._mirror_lane_publication(_wake_source(), wake_text, "PERGUNTA para Ana: qual ambiente?")
+        db.append_message(sid, "tool", "ok", tool_call_id="c1", tool_name="terminal")
+        db.append_message(sid, "assistant", "Pronto: relatório enviado.",
+                          codex_message_items=[{"type": "message"}])
+        return {"final_response": "Pronto: relatório enviado.", "messages": [], "tools": [],
+                "history_offset": 0, "last_prompt_tokens": 1000}
+
+    runner._run_agent = AsyncMock(side_effect=topic_turn)
+    event = MessageEvent(text="[Ana] e o relatório?", source=topic_source, message_id="m-ana")
+
+    await runner._handle_message(event)
+
+    sid = store.lookup_by_session_key(topic_key).session_id
+    rows = [dict(r) for r in store._db.get_messages(sid)]
+    mirror = lane_publication_mirror_text(CARD, "PERGUNTA para Ana: qual ambiente?")
+    mirrored = [i for i, r in enumerate(rows) if r.get("content") == mirror]
+    tool = [i for i, r in enumerate(rows) if r.get("role") == "tool"]
+    final = [i for i, r in enumerate(rows) if r.get("content") == "Pronto: relatório enviado."]
+    assert len(mirrored) == 1 and len(tool) == 1 and final
+    assert mirrored[0] > final[0], "the publication is written after the topic's turn ends"
+    repaired = [dict(r) for r in rows]
+    repair_message_sequence(SimpleNamespace(), repaired)
+    assert any(r.get("role") == "tool" and r.get("tool_call_id") == "c1" for r in repaired)
+
+
 # The notifier test requires a configured host with real executor profiles, as the wake scope tests do.
 pytestmark = pytest.mark.usefixtures("kanban_executor_catalog")

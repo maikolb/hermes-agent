@@ -9074,7 +9074,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not getattr(source, "session_lane", None) or not str(text or "").strip():
             return False
         try:
-            from gateway.mirror import mirror_to_session
             from gateway.session import lane_publication_mirror_text
 
             topic_key = self._session_key_for_source(dataclasses.replace(source, session_lane=None))
@@ -9083,19 +9082,67 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return False
             first_line = str(inbound_text or "").split("\n", 1)[0]
             card = _KANBAN_TASK_ID_RE.search(first_line)
-            return bool(mirror_to_session(
+            row = (
+                topic_key,
+                topic_entry.session_id,
                 source.platform.value,
                 str(source.chat_id),
+                source.thread_id,
                 lane_publication_mirror_text(card.group(0) if card else None, str(text)),
-                source_label="kanban_lane",
-                thread_id=source.thread_id,
-                role="assistant",
-                session_id=topic_entry.session_id,
-            ))
+            )
         except Exception:
             logger.warning("kanban lane: publication not mirrored into the topic of %s", source.chat_id,
                            exc_info=True)
             return False
+        # Queued while the topic has a turn running: a row written between a
+        # tool call and its result breaks the Codex replay chain (the result is
+        # then dropped as an orphan). Written at the end of that turn instead.
+        state = self._lane_mirror_state()
+        with state["lock"]:
+            state["queue"].setdefault(topic_key, []).append(row)
+        self._flush_lane_mirrors(topic_key)
+        return True
+
+    def _lane_mirror_state(self) -> dict:
+        """The per-process queue of lane publications waiting for their topic's turn to end."""
+        state = self.__dict__.get("_lane_mirrors")
+        if state is None:
+            state = {"lock": threading.Lock(), "queue": {}}
+            self.__dict__["_lane_mirrors"] = state
+        return state
+
+    def _flush_lane_mirrors(self, topic_key: str) -> int:
+        """Write the queued lane publications of a topic once it has no turn running. Returns the rows written.
+
+        The queue lives in this process: a publication queued when the gateway
+        stops is not written, but the lane session keeps it.
+        """
+        if not topic_key:
+            return 0
+        from gateway.mirror import mirror_to_session
+
+        state = self._lane_mirror_state()
+        written = 0
+        with state["lock"]:
+            if not state["queue"].get(topic_key) or self._is_session_running(topic_key):
+                return 0
+            rows = state["queue"].pop(topic_key)
+            for _key, session_id, platform, chat_id, thread_id, text in rows:
+                try:
+                    if mirror_to_session(
+                        platform,
+                        chat_id,
+                        text,
+                        source_label="kanban_lane",
+                        thread_id=thread_id,
+                        role="assistant",
+                        session_id=session_id,
+                    ):
+                        written += 1
+                except Exception:
+                    logger.warning("kanban lane: queued publication not mirrored into %s", session_id,
+                                   exc_info=True)
+        return written
 
     async def _kanban_lane_note(self, source: SessionSource) -> str:
         """KANBAN_WAKE_OWN_SESSION_20261015: the note a lane turn gets from its topic.
@@ -20384,6 +20431,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # (routing key, run generation) so this unwind can only ever free
             # the lease its own turn acquired, never a newer turn's.
             self._release_turn_lease(_quick_key, _run_generation)
+            # KANBAN_WAKE_OWN_SESSION_20261015: lane publications queued while
+            # this session's turn ran are written now that its transcript is done.
+            try:
+                await asyncio.to_thread(self._flush_lane_mirrors, _quick_key)
+            except Exception:
+                logger.warning("kanban lane: queued publications not flushed for %s", _quick_key, exc_info=True)
 
     def _restore_moa_one_shot(self, event: "MessageEvent", quick_key: str) -> None:
         """Revert a ``/moa <prompt>`` one-shot model override after its turn.
