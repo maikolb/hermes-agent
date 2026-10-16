@@ -184,6 +184,38 @@ def test_a_provider_with_spaces_stays_one_key_value_token(caplog):
     )
 
 
+@pytest.mark.parametrize("blank_provider", ["", " ", "   "])
+def test_a_provider_empty_or_only_spaces_drops_the_upstream_field(caplog, blank_provider):
+    # Vazio ou só espaço não é nome de provedor: o campo some (não vira
+    # "upstream=_") e o gen= segue.
+    agent = _make_agent()
+    records = _run_turn(agent, _completion(provider=blank_provider), caplog)
+
+    line = records[0].getMessage()
+    assert "upstream=" not in line, line
+    assert line.endswith(" gen=gen-1750000000-AbC123"), line
+
+
+def test_a_provider_with_edge_and_repeated_spaces_is_normalized(caplog):
+    agent = _make_agent()
+    records = _run_turn(agent, _completion(provider="  Google   AI Studio "), caplog)
+
+    assert records[0].getMessage().endswith(
+        " gen=gen-1750000000-AbC123 upstream=Google_AI_Studio"
+    )
+
+
+def test_a_openrouter_base_url_with_another_provider_name_still_gets_the_fields(caplog):
+    # O gate vale por provedor "openrouter" OU base URL do OpenRouter: aqui o
+    # provedor é "custom" e só a URL identifica o OpenRouter.
+    agent = _make_agent(base_url="https://openrouter.ai/api/v1", provider="custom")
+    assert agent.provider == "custom"
+
+    records = _run_turn(agent, _completion(provider="DeepInfra"), caplog)
+
+    assert records[0].getMessage().endswith(" gen=gen-1750000000-AbC123 upstream=DeepInfra")
+
+
 # ── (b) streaming: último chunk e cabeçalhos capturados ────────────────────
 
 

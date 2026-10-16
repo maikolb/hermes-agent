@@ -113,10 +113,11 @@ def _clean_gen_id(value: Any) -> Optional[str]:
 
 def _clean_upstream(value: Any) -> Optional[str]:
     # "Google AI Studio" vira "Google_AI_Studio" para a linha seguir em
-    # chave=valor. Só o espaço simples é aceito; quebra de linha, tab e o resto
-    # descartam o campo.
+    # chave=valor. Só o espaço simples é aceito, e o valor precisa ter algo
+    # além de espaço: "" e "   " descartam o campo, em vez de virar "upstream=_".
+    # Quebra de linha, tab e o resto também descartam.
     if isinstance(value, str):
-        value = value.replace(" ", "_")
+        value = re.sub(" +", "_", value.strip(" "))
         if _UPSTREAM_RE.fullmatch(value):
             return value
     return None
