@@ -328,5 +328,8 @@
   {"pr": 361, "file": "agent/turn_checkpoint.py", "text": "NFOS_GOAL_LOOP_HISTORY_20261016"},
   {"pr": 362, "file": "hermes_cli/kanban_db.py", "text": "NFOS_SHORT_TIMEOUT_LOOP_20261016"},
   {"pr": 362, "file": "hermes_cli/kanban_db.py", "text": "def _short_timeout_loop("},
-  {"pr": 362, "file": "hermes_cli/nfos_workspace_repair.py", "text": "short_timeout_loop="}
+  {"pr": 362, "file": "hermes_cli/nfos_workspace_repair.py", "text": "short_timeout_loop="},
+  {"pr": 363, "file": "hermes_cli/nfos_route_walls.py", "text": "CREDIT_WALL_20261016"},
+  {"pr": 363, "file": "hermes_cli/nfos_route_walls.py", "text": "def credit_window(agent, error):"},
+  {"pr": 363, "file": "hermes_cli/nfos_route_walls.py", "text": "quota_window(error, now=now) or credit_window(agent, error)"}
 ]
