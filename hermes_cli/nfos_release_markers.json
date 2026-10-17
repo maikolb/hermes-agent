@@ -349,5 +349,6 @@
   {"pr": 370, "file": "gateway/kanban_watchers.py", "text": "the owner's death proves"},
   {"pr": 370, "file": "hermes_cli/kanban_db.py", "text": "def record_worker_exit(code: int) -> bool:"},
   {"pr": 370, "file": "hermes_cli/kanban_db.py", "text": "def _worker_exit_receipt("},
-  {"pr": 370, "file": "hermes_cli/main.py", "text": "run_with_exit_receipt(_main)"}
+  {"pr": 370, "file": "hermes_cli/main.py", "text": "run_with_exit_receipt(_main)"},
+  {"pr": 370, "file": "hermes_cli/kanban_db.py", "text": "def _launcher_gone("}
 ]

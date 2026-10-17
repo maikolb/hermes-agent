@@ -13174,6 +13174,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
             pid = int(row["worker_pid"])
             kind, code = _classify_worker_exit(pid)
+            orphaned = False
             if kind == "unknown":  # not our child (start-approved): the worker's own receipt stands for waitpid
                 receipt = _worker_exit_receipt(conn, row["id"], pid)
                 if receipt == 0:
@@ -13182,6 +13183,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     kind, code = "rate_limited", receipt
                 elif receipt is not None and receipt != _SIGINT_EXIT_CODE:  # an interrupt keeps the gateway-restart reading
                     kind, code = "nonzero_exit", receipt
+                else:
+                    orphaned = _launcher_gone(row["claim_lock"])  # no receipt and nobody to wait for it: not a crash of the card
             interrupted = _interrupted_by_gateway_restart(row, kind, _gw_start)  # INTERRUPTED_20260910
             rate_limited_exit = False
             awaiting_decision = False  # IMPEDIMENT_RACE_20260911
@@ -13311,6 +13314,12 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     )
                     event_payload["worker_started_at"] = row["worker_started_at"]
                     event_payload["gateway_started_at"] = _gw_start
+                elif orphaned:
+                    event_kind = "worker_lost"
+                    error_text = (
+                        f"pid {pid} is gone with no exit receipt and the process that launched it (start-approved) "
+                        "exited too; requeued without counting a failure"
+                    )
                 if code is not None and kind != "unknown":
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
@@ -13332,7 +13341,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     "awaiting_decision" if awaiting_decision  # IMPEDIMENT_RACE_20260911
                     else "refused_exit" if refused_exit  # CLOSURE_RECOVERY_20260911
                     else "rate_limited" if rate_limited_exit
-                    else ("reclaimed" if interrupted else "crashed")  # INTERRUPTED_20260910
+                    else ("reclaimed" if interrupted or orphaned else "crashed")  # INTERRUPTED_20260910
                 )
                 run_id = _end_run(
                     conn, row["id"],
@@ -13376,7 +13385,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     quota_exit_decision = _nfos_open_decision(conn, row["id"])
                     if quota_exit_decision and quota_exit_decision["status"] == "human":
                         human_blocks.append((row["id"], str(quota_exit_decision["answer"] or quota_exit_decision["question"] or "")))
-                elif interrupted or refused_exit:  # INTERRUPTED_20260910, CLOSURE_RECOVERY_20260911: sem falha, sem breaker, sem wake
+                elif interrupted or orphaned or refused_exit:  # INTERRUPTED_20260910, CLOSURE_RECOVERY_20260911: sem falha, sem breaker, sem wake
                     interrupted_ids.append(row["id"])
                 else:
                     if protocol_violation:
@@ -17633,6 +17642,16 @@ def run_with_exit_receipt(entry):
         raise
     record_worker_exit(_exit_code_of(result) if isinstance(result, int) else 0)
     return result
+
+
+def _launcher_gone(claim_lock) -> bool:
+    """True when the claim belongs to a local process that is no longer alive.
+
+    A card the dispatcher launched keeps the gateway's pid in its claim, and the gateway outlives the worker. A card the Balcao
+    start-approved launched keeps the pid of the short-lived launcher, so when its worker leaves nobody read the exit.
+    """
+    owner = str(claim_lock or "").rpartition(":")[2]
+    return owner.isdigit() and not _pid_alive(int(owner))
 
 
 def _worker_exit_receipt(conn: sqlite3.Connection, task_id: str, pid: int) -> Optional[int]:
