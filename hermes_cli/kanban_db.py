@@ -11259,6 +11259,12 @@ _RESPAWN_BLOCKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Text the rate-limit requeue stamps into ``last_failure_error`` (no failure
+# counted). The respawn guard recognises the stamp by this text, so once a
+# later reclaim/timeout supersedes the rate-limited run the stale stamp never
+# reads as ``blocker_auth``.
+_RATE_LIMIT_REQUEUE_STAMP = "exited rate-limited (quota wall)"
+
 # Within this window a completed run counts as "recent proof"; don't re-spawn.
 _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
 
@@ -13276,7 +13282,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 protocol_violation = False
                 rate_limited_exit = True
                 error_text = (
-                    f"pid {pid} exited rate-limited (quota wall) — "
+                    f"pid {pid} {_RATE_LIMIT_REQUEUE_STAMP} — "
                     f"requeued without counting a failure"
                 )
                 event_kind = "rate_limited"
@@ -14082,7 +14088,7 @@ def check_respawn_guard(
     genuinely dead (no live PID on this host).
     """
     row = conn.execute(
-        "SELECT last_failure_error, consecutive_failures FROM tasks WHERE id = ?",
+        "SELECT last_failure_error FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -14136,14 +14142,15 @@ def check_respawn_guard(
         # crash/completion supersedes it.
         return None
 
-    # 2. Quota / auth blocker: retrying immediately will not help. Only while a
-    #    failure is actually counted: the rate-limit requeue stamps the quota
-    #    text WITHOUT incrementing ``consecutive_failures``, so once a later
-    #    reclaim/timeout supersedes that run (step 1 no longer applies) the
-    #    stale stamp would park the task forever — the breaker that is meant
-    #    to free it never trips at zero (17/10/2026: 9 of 56 ready cards).
+    # 2. Quota / auth blocker: retrying immediately will not help. The stamp
+    #    the rate-limit requeue writes is NOT an auth failure: it counted no
+    #    failure, so once a later reclaim/timeout supersedes that run (step 1
+    #    no longer applies) the regex would park the task forever — the
+    #    breaker that is meant to free it never trips (17/10/2026: 9 of 56
+    #    ready cards). Recognise the stamp by its text, not by the counter: a
+    #    task with earlier counted failures gets the same stale stamp.
     err = row["last_failure_error"]
-    if err and (row["consecutive_failures"] or 0) > 0 and _RESPAWN_BLOCKER_RE.search(err):
+    if err and _RATE_LIMIT_REQUEUE_STAMP not in err and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR
