@@ -155,14 +155,16 @@ def request(conn, task_id, wait):
         return decision_id
     from hermes_cli import nfos_process
     try:
-        exits = [f"{n['step']} ({n['name']})" for n in nfos_process.position(conn, task_id)['next']]
+        position = nfos_process.position(conn, task_id)
+        exits = [f"{n['step']} ({n['name']})" for n in position['next']]
     except Exception:  # noqa: BLE001 - sem as saídas o pedido sai igual, só com o comando
-        exits = []
+        position, exits = {}, []
     workflow = d.get_workflow(conn, task_id)
     last = conn.execute('SELECT MAX(id) FROM task_runs WHERE task_id=?', (task_id,)).fetchone()[0]
     question = (f"O card está retido na etapa {step['name']} do processo, que só o Principal tira do lugar, e nenhum worker foi "
                 'lançado. Registre a próxima etapa no processo (project-workflow step --to <etapa>)'
-                + (f": {', '.join(exits)}." if exits else '.') + ' Responder esta decisão sem sair da etapa é recusado.')
+                + (f": {', '.join(exits)}." if exits else '.') + ' Responder esta decisão sem sair da etapa é recusado.'
+                + guide(position))
     context = {'process_hold': {'step': step['step'], 'name': step['name'], 'wait_id': wait['id'], 'exits': exits}}
     conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) '
                  "VALUES(?,?,?,'impediment',?,?,?,?)",
@@ -170,6 +172,18 @@ def request(conn, task_id, wait):
     d._event(conn, task_id, last, 'nfos_principal_requested',
              {'decision_id': decision_id, 'kind': 'impediment', 'question': question, 'retained_card': True})
     return decision_id
+
+
+def guide(position):
+    """PROCESS_HOLD_GUIDE_20261017: a meta e a saída que a definição do projeto escreveu para esta etapa, no pedido ao Principal.
+    O código não conhece nenhum projeto: a regra de cada um (por exemplo, o caminho curto do dado do aluno no Concursa) vem do texto
+    da etapa. Sem esse texto o pedido sai como antes. Cada campo é cortado para o pedido não virar um documento."""
+    parts = []
+    for label, key in (('Meta', 'current_goal'), ('Saída', 'current_exit')):
+        text = ' '.join(str((position or {}).get(key) or '').split())
+        if text:
+            parts.append(f"{label}: {text[:2500]}{'...' if len(text) > 2500 else ''}")
+    return (' Guia desta etapa no processo do projeto. ' + ' '.join(parts)) if parts else ''
 
 
 def standing(conn, task_id, step):

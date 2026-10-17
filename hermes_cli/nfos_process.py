@@ -247,6 +247,8 @@ def position(conn, task_id) -> dict | None:
                 "current_name": steps.get(here, {}).get("name"),
                 # PROCESS_HOLD_20261014: decision/wait steps only the decider leaves (nfos_process_hold).
                 "current_kind": steps.get(here, {}).get("kind"), "current_lane": steps.get(here, {}).get("lane"),
+                # PROCESS_HOLD_GUIDE_20261017: o que a definição do projeto diz para quem decide nesta etapa (meta e saída).
+                "current_goal": steps.get(here, {}).get("goal"), "current_exit": steps.get(here, {}).get("exit"),
                 "permits": sorted(specmod.permits(spec, here)),
                 "next": [{"step": t["to"], "name": steps[t["to"]]["name"], "when": t.get("when")}
                          for t in specmod.outgoing(spec, here)]}
