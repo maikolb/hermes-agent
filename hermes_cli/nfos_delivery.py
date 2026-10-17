@@ -2621,7 +2621,14 @@ def _principal_answer_wait(conn, task_id, row, now, *, hold=True):
         held = conn.execute("SELECT id FROM nfos_waits WHERE task_id=? AND reason='principal_answer' AND status='open' AND predicate=?",
                             (task_id, _json(predicate))).fetchone()
         if held:
-            return nfos_waits.get(conn, held[0])  # sem abrir transação de escrita a cada passada do despacho
+            found = nfos_waits.get(conn, held[0])  # sem abrir transação de escrita a cada passada do despacho
+            if hold and (found.get('origin') or {}).get('no_hold'):
+                # O despacho alcançou o card: a espera adotada pelo sweep passa a ser a dele, com a retenção de sempre.
+                origin = {k: v for k, v in found['origin'].items() if k != 'no_hold'}
+                with _kb().write_txn(conn, allow_nested=True):
+                    nfos_waits._move(conn, found, origin=dict(origin, reached_by_dispatch=True), updated_at=now)
+                found = nfos_waits.get(conn, held[0])
+            return found
     if nfos_waits.refusal(conn, task_id, reason='principal_answer', predicate=predicate):
         return None
     # PRINCIPAL_ANSWER_UNBOUND_20261014: decision_id fica vazio; a decisão vai só no predicado. A release anterior pula no

@@ -141,6 +141,25 @@ def test_two_sweeps_open_one_wait_for_the_same_decision(board, monkeypatch):
     assert delivery._adopt_principal_answer_waits(board, clock.now) == []  # a chamada direta também não duplica
 
 
+def test_a_card_the_dispatcher_reaches_is_held_at_55_minutes_as_before(board, monkeypatch):
+    """A dispensa da retenção vale só enquanto o despacho não alcança o card. Com sweep e nudge no mesmo tick, desde a idade 0,
+    o nudge encontra a espera que o sweep adotou e a retenção do REMINDER_BACKOFF_20261014 continua no minuto 55."""
+    task_id, decision = _card(board, "23")
+    clock, start = _start(board, monkeypatch, decision)
+    while clock.now <= start + 3300:
+        delivery.sweep_lab_waits(board)
+        delivery.nudge_open_decisions(board, task_id)
+        clock.now += 60
+    stalled = [int(c) - start for (c,) in board.execute(
+        "SELECT created_at FROM task_events WHERE task_id=? AND kind='nfos_decision_stalled'", (task_id,))]
+    assert stalled == [3300]
+    assert kb.get_task(board, task_id).block_kind == "awaiting_principal"
+    assert _reminder_times(board, task_id, decision, start) == [600, 1500, 2400]
+    (wait,) = _waits(board, decision)
+    origin = nfos_waits.get(board, wait["id"])["origin"]
+    assert "no_hold" not in origin and origin["reached_by_dispatch"] is True
+
+
 def test_a_closed_card_and_an_answered_decision_are_not_adopted(board, monkeypatch):
     done_task, done_decision = _card(board, "14")
     clock, start = _start(board, monkeypatch, done_decision)
