@@ -390,6 +390,8 @@ def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, mon
         busy = running_task("commented once", nfos=True, extra_kind="commented")
         probing = running_task("probed once", nfos=True, extra_kind="nfos_probe")
         asking = running_task("open question", nfos=True)
+        answered = running_task("answered 100 s ago", nfos=True)
+        answered_long_ago = running_task("answered 400 s ago", nfos=True)
         waiting = running_task("open wait", nfos=True)
         plain = running_task("not an NFOS run", nfos=False)
         with kb.write_txn(conn):
@@ -398,6 +400,13 @@ def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, mon
                 "INSERT INTO nfos_decisions(id, task_id, run_id, kind, status, question, context, spec_revision, created_at) "
                 "VALUES('dec_test', ?, ?, 'impediment', 'pending', 'q', '{}', 1, ?)", (asking, run_id, now),
             )
+            # The clock restarts when the Principal answers: a 600 s run answered 100 s ago is not idle yet.
+            for tid, dec, resolved in ((answered, "dec_recent", now - 100), (answered_long_ago, "dec_old", now - 400)):
+                conn.execute(
+                    "INSERT INTO nfos_decisions(id, task_id, run_id, kind, status, question, context, answer, action, "
+                    "spec_revision, created_at, resolved_at) VALUES(?, ?, ?, 'impediment', 'resolved', 'q', '{}', 'a', "
+                    "'continue', 1, ?, ?)", (dec, tid, kb.get_task(conn, tid).current_run_id, resolved - 50, resolved),
+                )
             conn.execute(
                 "INSERT INTO nfos_waits(id, task_id, run_id, episode, reason, executor, predicate, status, next_check_at, "
                 "deadline_at, max_attempts, created_at, updated_at) VALUES('wait_test', ?, ?, 1, 'lab_queue', '{}', '{}', "
@@ -405,8 +414,8 @@ def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, mon
             )
 
         ended = kb.detect_no_progress_running(conn, timeout_seconds=300, signal_fn=_signal_fn)
-        assert sorted(ended) == sorted([idle, *runtime_only])
-        assert sorted(pid for pid, _sig in killed) == [os.getpid()] * 5
+        assert sorted(ended) == sorted([idle, *runtime_only, answered_long_ago])
+        assert sorted(pid for pid, _sig in killed) == [os.getpid()] * 6
 
         task = kb.get_task(conn, idle)
         assert task.status == "ready", f"no-progress task should reset to ready, got {task.status}"
@@ -421,7 +430,7 @@ def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, mon
         assert event.payload["limit_seconds"] == 300
         assert event.payload["elapsed_seconds"] >= 600
 
-        for tid in (busy, probing, asking, waiting, plain):
+        for tid in (busy, probing, asking, answered, waiting, plain):
             assert kb.get_task(conn, tid).status == "running", tid
         assert kb.detect_no_progress_running(conn, timeout_seconds=0, signal_fn=_signal_fn) == []
     finally:

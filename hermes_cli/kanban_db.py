@@ -12770,23 +12770,38 @@ _NO_PROGRESS_WORKER_KINDS = (
 )
 
 
-def _no_progress_waiting(conn: sqlite3.Connection, task_id: str, run_id: int) -> bool:
-    """A worker holding an open question to the Principal or an open wait is
-    idle on purpose, not looping; state is read from the tables, not from
-    event names (reminders re-emit ``nfos_principal_requested``)."""
+def _no_progress_window(conn: sqlite3.Connection, task_id: str, run_id: int, started: int) -> Optional[int]:
+    """Where the no-progress window starts for this run, or None while the
+    worker is idle on purpose. A worker holding an open question to the
+    Principal or an open wait is waiting, not looping; once the answer lands
+    (``resolved_at``) or the wait closes (``closed_at``) the clock restarts
+    there, so a long run that just got its answer is not cut on the next tick.
+    State is read from the tables, not from event names (reminders re-emit
+    ``nfos_principal_requested``)."""
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nfos_decisions', 'nfos_waits')"
     )}
-    if "nfos_decisions" in tables and conn.execute(
-        "SELECT 1 FROM nfos_decisions WHERE task_id = ? AND run_id = ? AND status IN ('pending', 'human') LIMIT 1",
-        (task_id, run_id),
-    ).fetchone():
-        return True
-    if "nfos_waits" in tables and conn.execute(
-        "SELECT 1 FROM nfos_waits WHERE task_id = ? AND status = 'open' LIMIT 1", (task_id,),
-    ).fetchone():
-        return True
-    return False
+    since = started
+    if "nfos_decisions" in tables:
+        if conn.execute(
+            "SELECT 1 FROM nfos_decisions WHERE task_id = ? AND run_id = ? AND status IN ('pending', 'human') LIMIT 1",
+            (task_id, run_id),
+        ).fetchone():
+            return None
+        resolved = conn.execute(
+            "SELECT MAX(resolved_at) FROM nfos_decisions WHERE task_id = ? AND run_id = ?", (task_id, run_id),
+        ).fetchone()[0]
+        since = max(since, int(resolved or 0))
+    if "nfos_waits" in tables:
+        if conn.execute(
+            "SELECT 1 FROM nfos_waits WHERE task_id = ? AND status = 'open' LIMIT 1", (task_id,),
+        ).fetchone():
+            return None
+        closed = conn.execute(
+            "SELECT MAX(closed_at) FROM nfos_waits WHERE task_id = ? AND closed_at >= ?", (task_id, started),
+        ).fetchone()[0]
+        since = max(since, int(closed or 0))
+    return since
 
 
 def detect_no_progress_running(
@@ -12799,9 +12814,11 @@ def detect_no_progress_running(
 
     A run counts as NFOS when it recorded ``nfos_worker_execution``; it counts
     as progressing when an event of ``_NO_PROGRESS_WORKER_KINDS`` exists since
-    the run started, or when the run holds an open question to the Principal
-    or an open wait (``_no_progress_waiting``). Without any of those for the
-    whole window the worker is terminated like ``enforce_max_runtime`` does
+    the window started, or when the run holds an open question to the
+    Principal or an open wait. The window starts at the run start, or at the
+    last answered decision / closed wait of the run when that is later
+    (``_no_progress_window``). Without any of those for the whole window the
+    worker is terminated like ``enforce_max_runtime`` does
     (SIGTERM, grace, SIGKILL), the run closes with outcome ``no_progress`` and
     the card returns to its source phase with one counted failure, so the
     breaker still parks a card that never progresses. The next spawn resumes
@@ -12826,8 +12843,7 @@ def detect_no_progress_running(
         if not lock.startswith(host_prefix):
             continue
         started = int(row["started_at"])
-        elapsed = now - started
-        if elapsed < timeout_seconds:
+        if now - started < timeout_seconds:
             continue
         nfos_run = conn.execute(
             "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'nfos_worker_execution' "
@@ -12836,11 +12852,17 @@ def detect_no_progress_running(
         ).fetchone()
         if not nfos_run:
             continue
+        since = _no_progress_window(conn, row["id"], int(row["run_id"]), started)
+        if since is None:
+            continue
+        elapsed = now - since
+        if elapsed < timeout_seconds:
+            continue
         progress = conn.execute(
             f"SELECT 1 FROM task_events WHERE task_id = ? AND created_at >= ? AND kind IN ({marks}) LIMIT 1",
-            (row["id"], started, *_NO_PROGRESS_WORKER_KINDS),
+            (row["id"], since, *_NO_PROGRESS_WORKER_KINDS),
         ).fetchone()
-        if progress or _no_progress_waiting(conn, row["id"], int(row["run_id"])):
+        if progress:
             continue
 
         pid = int(row["worker_pid"])
