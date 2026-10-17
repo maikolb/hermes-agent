@@ -216,3 +216,62 @@ def test_unknown_receipt_recovery_records_history_not_new_authority(delivery):
     save_spec(conn,task)
     d.reconcile_effect(conn,effect['id'],found=True,evidence=receipt())
     with pytest.raises(d.WorkflowError): start(conn,task,'staging_merge')
+
+
+# STAGING_RECORD_MODE_20261017: em modo registro (owner mode) o begin_effect não guardava a preparação no efeito, e o reconcile a
+# exige: o recibo de staging nunca fechava (CS-0035 do Concursa: PR 669 e PR 645 prontos, o registro recusado). Agora o registro
+# grava a preparação na abertura do efeito com a mesma regra do modo conduzido (nfos_preparation.authorized).
+def _effect(conn,effect_id):
+    return d._row(conn,'nfos_effects','id',effect_id)
+
+def test_record_mode_staging_effect_stores_the_preparation_and_its_receipt_closes(delivery,monkeypatch):
+    conn,task=delivery
+    decision=prepare(conn,task)
+    monkeypatch.setattr(d,'_owner_mode',lambda:True)
+    pr=start(conn,task)
+    opened=json.loads(_effect(conn,pr['id'])['evidence'])
+    assert opened['preparation_decision']==decision and opened['preparation_identity']['candidate_sha']==A
+    d.reconcile_effect(conn,pr['id'],found=True,evidence=receipt())
+    assert _effect(conn,pr['id'])['status']=='confirmed'
+    assert json.loads(_effect(conn,pr['id'])['evidence'])['preparation_identity']['target']==TARGET
+    merge=start(conn,task,'staging_merge')
+    d.reconcile_effect(conn,merge['id'],found=True,evidence=receipt(integrated_sha=B))
+    assert json.loads(d.get_workflow(conn,task.id)['state_json'])['staging_sha']==B
+    before=_effect(conn,pr['id'])['evidence']
+    d.reconcile_effect(conn,pr['id'],found=True,evidence=receipt())             # o mesmo recibo de novo: idempotente
+    assert _effect(conn,pr['id'])['evidence']==before
+
+def test_record_mode_staging_merge_needs_the_confirmed_staging_pr(delivery,monkeypatch):
+    conn,task=delivery
+    prepare(conn,task)
+    monkeypatch.setattr(d,'_owner_mode',lambda:True)
+    with pytest.raises(d.WorkflowError,match='Read back the staging PR'):
+        start(conn,task,'staging_merge')
+
+@pytest.mark.parametrize('case',['no_decision','pending','changes','continue_then_changes','continue_then_pending',
+                                 'spec_revised','candidate_moved','other_candidate','other_target'])
+def test_record_mode_staging_effect_is_refused_when_the_conducted_mode_would_refuse(delivery,monkeypatch,case):
+    conn,task=delivery
+    if case in ('pending','changes'):
+        decision=ask(conn,task)
+        if case=='changes':
+            d.resolve_decision(conn,decision,action='changes',answer='Checked',author='Principal')
+    elif case!='no_decision':
+        prepare(conn,task)
+        if case=='continue_then_changes':
+            d.resolve_decision(conn,ask(conn,task),action='changes',answer='Withdrawn',author='Principal')
+        elif case=='continue_then_pending':
+            ask(conn,task)
+        elif case=='spec_revised':
+            save_spec(conn,task)
+        elif case=='candidate_moved':
+            d.advance(conn,task.id,task.current_run_id,'implement',next_action='Moved',state={'candidate_sha':B,'candidate_tree':TREE})
+    monkeypatch.setattr(d,'_owner_mode',lambda:True)
+    updates={'candidate':B} if case=='other_candidate' else ({'target':REPO+'/tree/other'} if case=='other_target' else {})
+    with pytest.raises(d.WorkflowError):
+        start(conn,task,**updates)
+    assert conn.execute("SELECT count(*) FROM nfos_effects WHERE task_id=?",(task.id,)).fetchone()[0]==0
+    # e o modo conduzido recusa o mesmo (a regra é a mesma)
+    monkeypatch.setattr(d,'_owner_mode',lambda:False)
+    with pytest.raises(d.WorkflowError):
+        start(conn,task,**updates)
