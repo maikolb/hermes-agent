@@ -123,4 +123,11 @@ def test_nothing_is_said_when_every_owner_is_served(tmp_path, monkeypatch, caplo
     with caplog.at_level(logging.WARNING):
         _tick(monkeypatch, _runner(RecordingAdapter()))
     assert not [r for r in caplog.records if "not served by this gateway" in r.getMessage()]
-    assert status_writes == []
+    assert status_writes == [{"kanban_foreign_owner_subs": {}}]  # a primeira volta do processo escreve o total, vazio
+
+
+def test_a_new_process_clears_the_status_the_old_one_left(tmp_path, monkeypatch, status_writes):
+    """Reinício depois da migração do dono: o total vazio da primeira volta é escrito, o arquivo velho não sobrevive."""
+    _board(tmp_path, monkeypatch, owner="concursa")
+    _tick(monkeypatch, _runner(RecordingAdapter()))
+    assert status_writes == [{"kanban_foreign_owner_subs": {}}]

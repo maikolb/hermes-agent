@@ -3748,22 +3748,24 @@ class GatewayKanbanWatchersMixin:
                                 ]
                         finally:
                             conn.close()
-                    try:  # NOTIFY_FOREIGN_OWNER_20261016: the runtime status says it too, written when it changes
-                        totals: dict[str, int] = {}
-                        for per_board in foreign_by_board.values():
-                            for owner, count in per_board.items():
-                                totals[owner] = totals.get(owner, 0) + count
-                        if totals != getattr(self, "_kanban_foreign_owner_status", {}):
-                            from gateway.status import write_runtime_status as _write_status
-                            _write_status(kanban_foreign_owner_subs=totals)
-                            self._kanban_foreign_owner_status = totals
-                    except Exception:  # noqa: BLE001
-                        logger.debug("kanban notifier: foreign owner status not written", exc_info=True)
+                    totals: dict[str, int] = {}  # NOTIFY_FOREIGN_OWNER_20261016: written to the status outside this thread
+                    for per_board in foreign_by_board.values():
+                        for owner, count in per_board.items():
+                            totals[owner] = totals.get(owner, 0) + count
+                    self._kanban_foreign_owner_totals = totals
                     return deliveries, focus_rows, rehydrate_complete
 
                 deliveries, focus_rows, rehydrate_complete = await asyncio.to_thread(
                     _collect
                 )
+                try:  # NOTIFY_FOREIGN_OWNER_20261016: the runtime status says it too; the first pass of a process always writes
+                    _foreign = getattr(self, "_kanban_foreign_owner_totals", None)
+                    if _foreign is not None and _foreign != getattr(self, "_kanban_foreign_owner_status", None):
+                        from gateway.status import write_runtime_status as _write_status
+                        _write_status(kanban_foreign_owner_subs=_foreign)
+                        self._kanban_foreign_owner_status = dict(_foreign)
+                except Exception:  # noqa: BLE001
+                    logger.debug("kanban notifier: foreign owner status not written", exc_info=True)
                 if rehydrate_worker_focus and rehydrate_complete:
                     self._kanban_worker_focus_rehydrated = True
                 self._kanban_focus_apply_rows(focus_rows)
