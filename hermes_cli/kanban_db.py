@@ -13174,6 +13174,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
             pid = int(row["worker_pid"])
             kind, code = _classify_worker_exit(pid)
+            if kind == "unknown" and _worker_left_by_quota_door(conn, row["id"]):
+                kind, code = "rate_limited", KANBAN_RATE_LIMIT_EXIT_CODE  # not our child (start-approved): the receipt stands for waitpid
             interrupted = _interrupted_by_gateway_restart(row, kind, _gw_start)  # INTERRUPTED_20260910
             rate_limited_exit = False
             awaiting_decision = False  # IMPEDIMENT_RACE_20260911
@@ -17388,6 +17390,48 @@ def bind_dispatcher_session(session_id: str) -> bool:
     except Exception:
         _log.warning("Could not bind dispatcher session to its claimed run", exc_info=True)
         return False
+
+
+def record_worker_quota_exit() -> bool:
+    """Leave a durable receipt that this worker is exiting by the quota door.
+
+    The exit code 75 reaches ``detect_crashed_workers`` only through the
+    dispatcher's own ``waitpid`` registry. A worker launched by another
+    process (the Balcao start-approved) is not its child, so the tick sees the
+    exit as ``unknown`` and would count a 402 as a crash. This event, scoped to
+    the run, is the same kind of receipt the goal yield leaves.
+    """
+    task_id = os.environ.get("HERMES_KANBAN_TASK", "")
+    run_id = os.environ.get("HERMES_KANBAN_RUN_ID", "")
+    if not task_id or not run_id.isdigit():
+        return False
+    try:
+        with connect_closing(board=os.environ.get("HERMES_KANBAN_BOARD") or None) as conn:
+            with write_txn(conn):
+                row = conn.execute(
+                    "SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,),
+                ).fetchone()
+                if not row or row["status"] != "running" or row["current_run_id"] != int(run_id):
+                    return False
+                _append_event(
+                    conn, task_id, "worker_quota_exit",
+                    {"exit_code": KANBAN_RATE_LIMIT_EXIT_CODE, "pid": os.getpid()},
+                    run_id=int(run_id),
+                )
+        return True
+    except Exception:
+        _log.warning("Could not record the worker quota exit receipt", exc_info=True)
+        return False
+
+
+def _worker_left_by_quota_door(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when the current run's worker left a ``worker_quota_exit`` receipt."""
+    return conn.execute(
+        "SELECT 1 FROM task_events e JOIN tasks t ON t.id = e.task_id "
+        "AND t.current_run_id = e.run_id "
+        "WHERE e.task_id = ? AND e.kind = 'worker_quota_exit' LIMIT 1",
+        (task_id,),
+    ).fetchone() is not None
 
 
 def read_worker_log(

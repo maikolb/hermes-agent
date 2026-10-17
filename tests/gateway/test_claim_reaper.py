@@ -101,7 +101,7 @@ def test_dead_mirror_is_archived_and_dead_worker_requeued(board, monkeypatch):
         claim=f"{HOST}:{DEAD_PID}", mirror_comment=True, heartbeat_age=120,
     )
     worker = _make_running(
-        claim=f"{HOST}:{DEAD_PID}", worker_pid=DEAD_PID, heartbeat_age=120,
+        claim=f"{HOST}:{DEAD_PID}", worker_pid=DEAD_PID, heartbeat_age=700,
     )
 
     asyncio.run(_runner()._kanban_claim_reaper())
@@ -201,3 +201,38 @@ def test_unclassified_dead_claim_is_left_alone(board, monkeypatch):
     asyncio.run(_runner()._kanban_claim_reaper())
 
     assert _status(task_id)[0] == "running"
+
+
+def _start_run(task_id, started_ago):
+    conn = kb.connect()
+    try:
+        with kb.write_txn(conn):
+            cur = conn.execute(
+                "INSERT INTO task_runs (task_id, status, started_at) VALUES (?, 'running', ?)",
+                (task_id, int(time.time() - started_ago)),
+            )
+            conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (cur.lastrowid, task_id))
+    finally:
+        conn.close()
+
+
+def test_dead_launcher_does_not_preempt_the_tick_that_reads_the_exit(board, monkeypatch):
+    """start-approved claims in a process that exits right after the spawn, so
+    its claim owner is always dead when the worker leaves. The dead owner is no
+    proof: the dispatcher tick still has to read the exit code and the yield
+    receipt, and the reaper used to write `reclaimed` over both 2 to 10 s
+    after the exit (runs 1714 to 1733 of the Concursa board, 16/10)."""
+    monkeypatch.setattr(gs, "_pid_exists", lambda pid: False)
+    fresh = _make_running(claim=f"{HOST}:{DEAD_PID}", worker_pid=DEAD_PID, heartbeat_age=5)
+    stale = _make_running(claim=f"{HOST}:{DEAD_PID}", worker_pid=DEAD_PID, heartbeat_age=700)
+    no_beat_new = _make_running(claim=f"{HOST}:{DEAD_PID}", worker_pid=DEAD_PID)
+    no_beat_old = _make_running(claim=f"{HOST}:{DEAD_PID}", worker_pid=DEAD_PID)
+    _start_run(no_beat_new, 5)
+    _start_run(no_beat_old, 700)
+
+    asyncio.run(_runner()._kanban_claim_reaper())
+
+    assert _status(fresh)[0] == "running"
+    assert _status(no_beat_new)[0] == "running"
+    assert _status(stale)[0] == "ready", "the heartbeat window is the fallback when no tick reads the exit"
+    assert _status(no_beat_old)[0] == "ready"

@@ -21735,6 +21735,8 @@ def main(
                                         KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,
                                     )
                                     _exit_code = _RL_CODE
+                                    from hermes_cli.kanban_db import record_worker_quota_exit
+                                    record_worker_quota_exit()
                                 except Exception:
                                     _exit_code = 1
                         sys.exit(_exit_code)
@@ -21744,7 +21746,8 @@ def main(
                 # the whole pool is inside a usage window leaves by the quota
                 # door, like the turn above that the provider refused.
                 if _kanban_route_unresolved_on_quota(cli):
-                    from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+                    from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE, record_worker_quota_exit
+                    record_worker_quota_exit()
                     sys.exit(KANBAN_RATE_LIMIT_EXIT_CODE)
                 sys.exit(1)
             else:
