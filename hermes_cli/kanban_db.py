@@ -514,12 +514,14 @@ def _resolve_rate_limit_cooldown_seconds() -> int:
     return DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
 
 
-# NO_PROGRESS_20261017: an NFOS worker that recorded nothing but heartbeats
+# NO_PROGRESS_20261017: an NFOS worker that recorded no progress of its own
 # for this long is ended and its card goes back to the queue (one counted
 # failure). 17/10/2026: a worker looped 65 min re-reading the same files after
 # every context compaction, with no step, artifact, probe or comment, while
-# only ``max_runtime_seconds`` (120 min) would have stopped it.
-DEFAULT_NO_PROGRESS_TIMEOUT_SECONDS = 2700
+# only ``max_runtime_seconds`` (120 min) would have stopped it. 3600 s: on the
+# Concursa board the first worker event of a completed run came as late as
+# 41 min (7 days, 202 runs, reviewer's measurement).
+DEFAULT_NO_PROGRESS_TIMEOUT_SECONDS = 3600
 
 
 def _resolve_no_progress_timeout_seconds() -> int:
@@ -11377,9 +11379,10 @@ class DispatchResult:
     """Task ids reclaimed because no progress (heartbeat) was seen
     within ``dispatch_stale_timeout_seconds``."""
     no_progress: list[str] = field(default_factory=list)
-    """NFOS task ids whose worker heartbeated for ``no_progress_timeout_seconds``
-    without recording any other event (step, comment, probe, wait, decision);
-    the run was ended and the card returned to the queue with one failure."""
+    """NFOS task ids whose worker recorded no progress of its own (comment,
+    spec, report, probe, effect, wait, tool call, open question) for
+    ``no_progress_timeout_seconds``; the run was ended and the card returned
+    to the queue with one failure."""
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
     """Tasks skipped by the respawn guard, as ``(task_id, reason)`` pairs.
 
@@ -12752,8 +12755,38 @@ def enforce_max_runtime(
     return timed_out
 
 
-# Events every NFOS run records before any real work; anything else counts as progress.
-_NO_PROGRESS_BOOTSTRAP_KINDS = ("heartbeat", "claimed", "spawned", "worker_session_linked", "nfos_worker_execution")
+# Events only the worker's own actions record (kanban comment; nfos_delivery
+# precheck, probe, save-spec, progress, save-report, effect, reconcile,
+# complete, lesson, rework, wait, tool). Events the runtime writes on its own
+# (worktree_owned seconds after the start, assigned, reminders such as
+# nfos_principal_requested, exit requests) are NOT progress: on the Concursa
+# board worktree_owned was the first post-start event in 64 of 202 runs.
+_NO_PROGRESS_WORKER_KINDS = (
+    "commented", "nfos_precheck", "nfos_probe", "nfos_spec_saved", "nfos_progress",
+    "nfos_report_saved", "nfos_effect_requested", "nfos_effect_reconciled",
+    "nfos_completion_refused", "nfos_homologation_bound", "nfos_lesson_recorded",
+    "nfos_rework_requested", "nfos_wait_declared", "nfos_tool_intent", "nfos_tool_started",
+    "nfos_tool_finished", "nfos_tool_command_exited",
+)
+
+
+def _no_progress_waiting(conn: sqlite3.Connection, task_id: str, run_id: int) -> bool:
+    """A worker holding an open question to the Principal or an open wait is
+    idle on purpose, not looping; state is read from the tables, not from
+    event names (reminders re-emit ``nfos_principal_requested``)."""
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nfos_decisions', 'nfos_waits')"
+    )}
+    if "nfos_decisions" in tables and conn.execute(
+        "SELECT 1 FROM nfos_decisions WHERE task_id = ? AND run_id = ? AND status IN ('pending', 'human') LIMIT 1",
+        (task_id, run_id),
+    ).fetchone():
+        return True
+    if "nfos_waits" in tables and conn.execute(
+        "SELECT 1 FROM nfos_waits WHERE task_id = ? AND status = 'open' LIMIT 1", (task_id,),
+    ).fetchone():
+        return True
+    return False
 
 
 def detect_no_progress_running(
@@ -12762,17 +12795,18 @@ def detect_no_progress_running(
     timeout_seconds: int,
     signal_fn=None,
 ) -> list[str]:
-    """NO_PROGRESS_20261017: end NFOS runs that only heartbeated for ``timeout_seconds``.
+    """NO_PROGRESS_20261017: end NFOS runs whose worker recorded no progress for ``timeout_seconds``.
 
     A run counts as NFOS when it recorded ``nfos_worker_execution``; it counts
-    as progressing when any event outside ``_NO_PROGRESS_BOOTSTRAP_KINDS``
-    exists since the run started (a comment, a saved spec or report, a probe,
-    a declared wait, a question to the Principal, a tool call). Without one
-    for the whole window the worker is terminated like ``enforce_max_runtime``
-    does (SIGTERM, grace, SIGKILL), the run closes with outcome
-    ``no_progress`` and the card returns to its source phase with one counted
-    failure, so the breaker still parks a card that never progresses. The
-    next spawn resumes the saved session, so what the worker learned is kept.
+    as progressing when an event of ``_NO_PROGRESS_WORKER_KINDS`` exists since
+    the run started, or when the run holds an open question to the Principal
+    or an open wait (``_no_progress_waiting``). Without any of those for the
+    whole window the worker is terminated like ``enforce_max_runtime`` does
+    (SIGTERM, grace, SIGKILL), the run closes with outcome ``no_progress`` and
+    the card returns to its source phase with one counted failure, so the
+    breaker still parks a card that never progresses. The next spawn resumes
+    the saved session, so what the worker learned is kept. Known limit: once
+    a run has progressed, a later loop in the same run is not caught.
 
     Host-local like the other reclaim paths; ``signal_fn`` is a test hook.
     """
@@ -12781,9 +12815,9 @@ def detect_no_progress_running(
         return ended
     now = int(time.time())
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
-    marks = ",".join("?" for _ in _NO_PROGRESS_BOOTSTRAP_KINDS)
+    marks = ",".join("?" for _ in _NO_PROGRESS_WORKER_KINDS)
     rows = conn.execute(
-        "SELECT t.id, t.worker_pid, t.worker_started_at, t.claim_lock, r.started_at "
+        "SELECT t.id, t.worker_pid, t.worker_started_at, t.claim_lock, r.id AS run_id, r.started_at "
         "FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.worker_pid IS NOT NULL AND r.started_at IS NOT NULL"
     ).fetchall()
@@ -12803,10 +12837,10 @@ def detect_no_progress_running(
         if not nfos_run:
             continue
         progress = conn.execute(
-            f"SELECT 1 FROM task_events WHERE task_id = ? AND created_at >= ? AND kind NOT IN ({marks}) LIMIT 1",
-            (row["id"], started, *_NO_PROGRESS_BOOTSTRAP_KINDS),
+            f"SELECT 1 FROM task_events WHERE task_id = ? AND created_at >= ? AND kind IN ({marks}) LIMIT 1",
+            (row["id"], started, *_NO_PROGRESS_WORKER_KINDS),
         ).fetchone()
-        if progress:
+        if progress or _no_progress_waiting(conn, row["id"], int(row["run_id"])):
             continue
 
         pid = int(row["worker_pid"])

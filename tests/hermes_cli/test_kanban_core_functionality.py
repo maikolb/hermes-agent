@@ -340,10 +340,15 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
 
 
 def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, monkeypatch):
-    """NO_PROGRESS_20261017: an NFOS run that only heartbeated past the window is
-    SIGTERM'd, closes with outcome ``no_progress``, counts one failure and goes
-    back to ready. A run with any other event, and a run that never announced
-    ``nfos_worker_execution``, are left alone; 0 disables the check."""
+    """NO_PROGRESS_20261017: an NFOS run whose worker recorded nothing of its own
+    past the window is SIGTERM'd, closes with outcome ``no_progress``, counts one
+    failure and goes back to ready. Events the runtime writes by itself
+    (``worktree_owned`` seconds after the start, ``assigned``, a reminder's
+    ``nfos_principal_requested``, an exit request) do not count as progress; a
+    worker event, an open question to the Principal or an open wait do. A run
+    that never announced ``nfos_worker_execution`` is left alone; 0 disables."""
+    from hermes_cli import nfos_delivery, nfos_waits
+
     killed = []
 
     def _signal_fn(pid, sig):
@@ -354,7 +359,10 @@ def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, mon
 
     conn = kb.connect()
     try:
-        old_started = int(time.time()) - 600
+        nfos_delivery.init_schema(conn)
+        nfos_waits.ensure(conn)
+        now = int(time.time())
+        old_started = now - 600
 
         def running_task(title, *, nfos, extra_kind=None):
             tid = kb.create_task(conn, title=title, assignee="worker")
@@ -377,12 +385,28 @@ def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, mon
             return tid
 
         idle = running_task("heartbeats only", nfos=True)
+        runtime_only = [running_task(f"runtime wrote {kind}", nfos=True, extra_kind=kind)
+                        for kind in ("worktree_owned", "assigned", "nfos_principal_requested", "nfos_worker_exit_requested")]
         busy = running_task("commented once", nfos=True, extra_kind="commented")
+        probing = running_task("probed once", nfos=True, extra_kind="nfos_probe")
+        asking = running_task("open question", nfos=True)
+        waiting = running_task("open wait", nfos=True)
         plain = running_task("not an NFOS run", nfos=False)
+        with kb.write_txn(conn):
+            run_id = kb.get_task(conn, asking).current_run_id
+            conn.execute(
+                "INSERT INTO nfos_decisions(id, task_id, run_id, kind, status, question, context, spec_revision, created_at) "
+                "VALUES('dec_test', ?, ?, 'impediment', 'pending', 'q', '{}', 1, ?)", (asking, run_id, now),
+            )
+            conn.execute(
+                "INSERT INTO nfos_waits(id, task_id, run_id, episode, reason, executor, predicate, status, next_check_at, "
+                "deadline_at, max_attempts, created_at, updated_at) VALUES('wait_test', ?, ?, 1, 'lab_queue', '{}', '{}', "
+                "'open', ?, ?, 3, ?, ?)", (waiting, kb.get_task(conn, waiting).current_run_id, now, now + 3600, now, now),
+            )
 
         ended = kb.detect_no_progress_running(conn, timeout_seconds=300, signal_fn=_signal_fn)
-        assert ended == [idle]
-        assert killed and killed[0][0] == os.getpid()
+        assert sorted(ended) == sorted([idle, *runtime_only])
+        assert sorted(pid for pid, _sig in killed) == [os.getpid()] * 5
 
         task = kb.get_task(conn, idle)
         assert task.status == "ready", f"no-progress task should reset to ready, got {task.status}"
@@ -397,8 +421,8 @@ def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, mon
         assert event.payload["limit_seconds"] == 300
         assert event.payload["elapsed_seconds"] >= 600
 
-        for tid in (busy, plain):
-            assert kb.get_task(conn, tid).status == "running"
+        for tid in (busy, probing, asking, waiting, plain):
+            assert kb.get_task(conn, tid).status == "running", tid
         assert kb.detect_no_progress_running(conn, timeout_seconds=0, signal_fn=_signal_fn) == []
     finally:
         conn.close()
