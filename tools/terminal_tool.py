@@ -831,6 +831,82 @@ def _count_real_sudo_invocations(command: str) -> int:
     return count
 
 
+_SUDO_NON_INTERACTIVE_FLAGS = {"-n", "--non-interactive"}
+
+
+def _all_sudo_invocations_non_interactive(command: str) -> bool:
+    """True when every real sudo command word in *command* carries ``-n``.
+
+    Reuses the tokeniser of ``_count_real_sudo_invocations``: after a real
+    ``sudo`` token, the flags that follow are scanned until the first
+    non-flag word; ``-n``, ``--non-interactive`` or a short cluster that
+    contains ``n`` (``-nu``) count. No real sudo at all returns False.
+    """
+    found = False
+    i = 0
+    n = len(command)
+    command_start = True
+
+    while i < n:
+        ch = command[i]
+
+        if ch.isspace():
+            if ch == "\n":
+                command_start = True
+            i += 1
+            continue
+
+        if ch == "#" and command_start:
+            comment_end = command.find("\n", i)
+            if comment_end == -1:
+                break
+            i = comment_end
+            continue
+
+        if command.startswith("&&", i) or command.startswith("||", i) or command.startswith(";;", i):
+            i += 2
+            command_start = True
+            continue
+
+        if ch in ";|&(":
+            i += 1
+            command_start = True
+            continue
+
+        if ch == ")":
+            i += 1
+            command_start = False
+            continue
+
+        token, next_i = _read_shell_token(command, i)
+        if command_start and token == "sudo":
+            found = True
+            non_interactive = False
+            j = next_i
+            while j < n:
+                while j < n and command[j] in " \t":
+                    j += 1
+                if j >= n or not command[j].startswith("-"):
+                    break
+                flag, j = _read_shell_token(command, j)
+                if flag in _SUDO_NON_INTERACTIVE_FLAGS or (
+                    re.fullmatch(r"-[A-Za-z]+", flag) and "n" in flag
+                ):
+                    non_interactive = True
+                    break
+            if not non_interactive:
+                return False
+            next_i = j
+
+        if command_start and _looks_like_env_assignment(token):
+            command_start = True
+        else:
+            command_start = False
+        i = next_i
+
+    return found
+
+
 def _sudo_nopasswd_works() -> bool:
     """Return True when local sudo currently works without prompting.
 
@@ -1100,9 +1176,15 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
     # parent's TUI for /dev/tty and blocks the child for the full timeout.
     # Children always behave as headless — configured SUDO_PASSWORD, the
     # session cache, and the NOPASSWD probe above all still work.
+    # ``sudo -n`` asks sudo itself never to prompt: the caller relies on a
+    # NOPASSWD rule and wants a fast failure otherwise. The NOPASSWD probe
+    # above runs ``sudo -n true``, which a per-command rule (e.g. only one
+    # root helper allowed) does not satisfy, so without this check a headless
+    # worker paid the full 45 s prompt timeout on every such call and then
+    # ran the command unchanged anyway (17/10/2026, Concursa repair port).
     should_prompt_for_sudo = (
         env_var_enabled("HERMES_INTERACTIVE") or has_sudo_prompt_callback
-    ) and not _in_delegated_child_context()
+    ) and not _in_delegated_child_context() and not _all_sudo_invocations_non_interactive(command)
     if not has_configured_password and not sudo_password and should_prompt_for_sudo:
         sudo_password = _prompt_for_sudo_password(timeout_seconds=45)
         if sudo_password:
