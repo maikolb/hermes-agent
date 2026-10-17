@@ -602,6 +602,21 @@ def _isolate_hermes_home(_hermetic_environment):
 
 
 @pytest.fixture(autouse=True)
+def _skip_spawn_profile_guard(request, monkeypatch):
+    """SPAWN_GUARD_20261016: tests that fake a worker launch do not build a full profile (config.yaml, plugins).
+
+    The guard itself is exercised for real (inside dispatch_once too) by tests marked real_spawn_guard.
+    """
+    if request.node.get_closest_marker("real_spawn_guard"):
+        return
+    try:
+        from hermes_cli import kanban_db
+    except Exception:
+        return
+    monkeypatch.setattr(kanban_db, "_assert_worker_profile_ready", lambda profile: None, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_kanban_memory_guard(request, monkeypatch):
     """Pin the kanban dispatcher's memory guard to "no data" for every test.
 

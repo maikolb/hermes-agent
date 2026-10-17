@@ -1133,6 +1133,7 @@ def write_runtime_status(
     needs_attention: Any = _UNSET,
     retrying_since: Any = _UNSET,
     served_profiles: Any = _UNSET,
+    kanban_foreign_owner_subs: Any = _UNSET,
     session_store: Any = _UNSET,
     clear_profile_platforms: bool = False,
 ) -> None:
@@ -1184,6 +1185,10 @@ def write_runtime_status(
         # for a single-profile gateway. Lets `hermes status` show per-profile
         # coverage without a second probe.
         payload["served_profiles"] = list(served_profiles or [])
+    if kanban_foreign_owner_subs is not _UNSET:
+        # NOTIFY_FOREIGN_OWNER_20261016: kanban subscriptions owned by profiles this gateway does not serve ({owner: count}).
+        # Empty when every subscription has an owner served here; anything else is delivered by no one unless that owner's gateway runs.
+        payload["kanban_foreign_owner_subs"] = dict(kanban_foreign_owner_subs or {})
     if session_store is not _UNSET:
         state = "unknown"
         if isinstance(session_store, dict):
