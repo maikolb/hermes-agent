@@ -60,6 +60,28 @@ def test_a_held_decision_step_opens_one_request_after_the_grace(board, process, 
         assert [r['status'] for r in _requests(conn, task.id)] == ['pending']
 
 
+def test_the_request_carries_the_goal_and_the_exit_the_project_wrote_for_the_step(board, process, hold, monkeypatch):
+    process['position'] = dict(CHOOSE, current_goal='Pick the short lane   when the fix fits a typed operation.',
+                               current_exit='Record the route and the cut in one entry.')
+    with kb.connect_closing() as conn:
+        task = _answered_card(conn, monkeypatch)
+        assert _claim(conn, task.id) == (None, ['process_hold'])
+        [wait] = _waits(conn, task.id)
+        nfos_waits.sweep(conn, now=wait['created_at'] + hold.GRACE_SECONDS)
+        [request] = _requests(conn, task.id)
+        assert 'Guia desta etapa no processo do projeto.' in request['question']
+        assert 'Meta: Pick the short lane when the fix fits a typed operation.' in request['question']  # espaços repetidos viram um
+        assert 'Saída: Record the route and the cut in one entry.' in request['question']
+        assert json.loads(request['context'])['process_hold']['exits'] == ['build (Build)', 'drop (Drop)']
+
+
+def test_the_guide_is_cut_and_absent_without_text(hold):
+    long = 'x' * 4000
+    text = hold.guide({'current_goal': long, 'current_exit': None})
+    assert text.count('x') == 2500 and text.endswith('...') and 'Saída' not in text
+    assert hold.guide({}) == '' and hold.guide(None) == '' and hold.guide({'current_goal': '   '}) == ''
+
+
 def test_leaving_the_step_closes_the_request_as_the_runtime_and_releases_the_card(board, process, hold, monkeypatch):
     process['position'] = CHOOSE
     with kb.connect_closing() as conn:
