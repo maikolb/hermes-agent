@@ -74,6 +74,12 @@ def _waits(conn, decision):
         "SELECT * FROM nfos_waits WHERE reason='principal_answer' AND json_extract(predicate,'$.decision_id')=? ORDER BY id", (decision,))]
 
 
+def _reminder_times(conn, task_id, decision, start):
+    return [int(created) - start for created, p in conn.execute(
+        "SELECT created_at, payload FROM task_events WHERE task_id=? AND kind='nfos_principal_requested' ORDER BY id", (task_id,))
+        if json.loads(p).get("decision_id") == decision and json.loads(p).get("reminder")]
+
+
 def _requests(conn, task_id, decision):
     return [json.loads(p) for (p,) in conn.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind='nfos_principal_requested' ORDER BY id", (task_id,))
@@ -93,6 +99,24 @@ def test_a_worker_decision_gets_its_wait_and_its_first_reminder_without_the_disp
     reminders = [r for r in _requests(board, task_id, decision) if r.get("reminder")]
     assert [r["reminder"] for r in reminders] == [1] and reminders[0]["wait_id"] == wait["id"]
     assert kb.get_task(board, task_id).status == "ready"  # o sweep não responde nem retém: o despacho continua dono do card
+
+
+def test_the_adopted_wait_keeps_reminding_and_never_holds_the_card(board, monkeypatch):
+    """O card que o despacho não alcança continua `ready` depois do 3º lembrete (e depois da hora da retenção, 55 min): a
+    espera adotada só lembra, com o recuo de sempre. A retenção awaiting_principal é decisão do despacho."""
+    task_id, decision = _card(board, "21")
+    clock, start = _start(board, monkeypatch, decision)
+    while clock.now < start + 4 * 3600:
+        delivery.sweep_lab_waits(board)  # o tick real do runtime, sem nudge_open_decisions
+        clock.now += 300
+    task = kb.get_task(board, task_id)
+    assert task.status == "ready" and task.block_kind != "awaiting_principal"
+    assert board.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='nfos_decision_stalled'", (task_id,)).fetchone()[0] == 0
+    times = _reminder_times(board, task_id, decision, start)
+    assert times[:4] == [600, 1500, 2400, 3300]  # nos mesmos minutos 10, 25 e 40 de sempre; o recuo segue depois deles
+    assert times[3] < 3600 < times[-1] and len(set(times)) == len(times)  # os lembretes continuam depois dos 55 min
+    (wait,) = _waits(board, decision)
+    assert wait["status"] == "open" and nfos_waits.get(board, wait["id"])["origin"].get("no_hold") is True
 
 
 def test_a_decision_held_by_the_lab_queue_gets_no_principal_wait(board, monkeypatch):
@@ -131,13 +155,25 @@ def test_a_closed_card_and_an_answered_decision_are_not_adopted(board, monkeypat
 
 def test_a_decision_with_another_open_wait_in_the_registry_is_left_to_it(board, monkeypatch):
     """nfos_waits.open_for_decision é a exclusão que o lembrete sempre teve: o dono do passo é a outra espera."""
+    task_id, decision = _card(board, "22")
+    clock, start = _start(board, monkeypatch, decision)
+    nfos_waits.declare(board, task_id, None, reason="principal_decision", executor=nfos_waits.PRINCIPAL,
+                       predicate={"kind": "decision_resolved", "decision_id": decision}, decision_id=decision,
+                       subject="decisão entregue ao Principal", now=start)
+    assert nfos_waits.open_for_decision(board, decision)
+    clock.now = start + 2 * delivery.DECISION_REMINDER_AFTER
+    assert delivery._adopt_principal_answer_waits(board, clock.now) == []
+    assert _waits(board, decision) == []  # só existe a espera de outro motivo; a adoção não abre uma segunda
+
+
+def test_a_decision_behind_an_open_human_question_is_left_to_the_person(board, monkeypatch):
+    """Pergunta `human` aberta no card, e a decisão sem orientação nem resposta humana: o card espera a pessoa, como o
+    lembrete sempre pulou."""
     task_id, decision = _card(board, "16")
     clock, start = _start(board, monkeypatch, decision)
     board.execute("INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at,status) "
                   "SELECT 'dec_human',task_id,run_id,'impediment','Pergunta ao humano?','{}',0,created_at,'human' "
                   "FROM nfos_decisions WHERE id=?", (decision,))
     board.commit()
-    # pergunta humana aberta no card e decisão sem orientação nem resposta humana: o card espera a pessoa, como o lembrete pulava
     assert delivery._adopt_principal_answer_waits(board, start + 2 * delivery.DECISION_REMINDER_AFTER) == []
     assert _waits(board, decision) == []
-    assert nfos_waits.open_for_decision(board, decision) is None

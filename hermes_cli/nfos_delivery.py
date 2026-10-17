@@ -2512,7 +2512,10 @@ def _principal_answer_plan(conn, wait, evidence, now):
         return {'evidence': seen, 'next_check_at': int(min(due, wait['deadline_at'])), 'deadline_at': wait['deadline_at']}
     if row['status'] != 'pending':
         return later(now + 1)  # respondida entre a conferência e a transação: o passo seguinte a satisfaz
-    if (len(reminders) >= DECISION_MAX_REMINDERS and not ctx.get('stalled_at')
+    # PRINCIPAL_BOTTLENECK_20261016: a espera adotada pelo sweep (card que o despacho não alcançou) só lembra; a retenção
+    # awaiting_principal é do despacho, que decide sobre o card, e o recuo dos lembretes é o de sempre.
+    keeps_card = bool((wait.get('origin') or {}).get('no_hold'))
+    if (len(reminders) >= DECISION_MAX_REMINDERS and not ctx.get('stalled_at') and not keeps_card
             and not _needs_principal(conn, wait['task_id'], ctx)):
         if now < last + DECISION_REMINDER_GAP:
             return later(last + DECISION_REMINDER_GAP)
@@ -2536,7 +2539,7 @@ def _principal_answer_plan(conn, wait, evidence, now):
         return later(due)
     given = reminders + [now]
     # A decisão comum que chega ao terceiro lembrete é retida 15 min depois dele; o recuo vale para os lembretes seguintes.
-    stalls_next = (len(given) >= DECISION_MAX_REMINDERS and not ctx.get('stalled_at')
+    stalls_next = (len(given) >= DECISION_MAX_REMINDERS and not ctx.get('stalled_at') and not keeps_card
                    and not _needs_principal(conn, wait['task_id'], ctx))
     following = now + (DECISION_REMINDER_GAP if stalls_next else _reminder_gap(ctx))  # o recuo é conferido nessa hora
     return dict(later(following, dict(evidence, last={'action': 'reminder', 'n': len(given), 'at': now})),
@@ -2605,9 +2608,10 @@ def _principal_answer_expired(conn, wait, why, now):
            {'decision_id': row['id'], 'wait_id': wait['id'], 'why': why, 'reminders': given})
 
 
-def _principal_answer_wait(conn, task_id, row, now):
+def _principal_answer_wait(conn, task_id, row, now, *, hold=True):
     """A espera da decisão pendente do Principal: a aberta, ou uma nova com os lembretes que a decisão já teve. None quando
-    ela já venceu nesta rodada do card: a decisão segue pendente e visível, sem lembrete."""
+    ela já venceu nesta rodada do card: a decisão segue pendente e visível, sem lembrete. `hold=False` (adoção pelo sweep): a
+    espera nova só lembra e nunca retém o card."""
     from hermes_cli import nfos_waits
     # `since` é a última resposta do Principal que devolveu a decisão a pendente (reparo de pausa sem reparar): depois dela a
     # espera é outra, com prazo novo, mesmo que a anterior já tenha vencido nesta rodada do card.
@@ -2627,7 +2631,8 @@ def _principal_answer_wait(conn, task_id, row, now):
     return nfos_waits.declare(conn, task_id, row.get('run_id'), reason='principal_answer', executor=nfos_waits.PRINCIPAL,
                               predicate=predicate, decision_id=None, subject=f"decisão {row.get('kind')} do Principal",
                               now=now, next_check_at=now,
-                              origin={'reminders_before': len(_given_reminders(_decision_context(row)))})
+                              origin=dict({'reminders_before': len(_given_reminders(_decision_context(row)))},
+                                          **({} if hold else {'no_hold': True})))
 
 
 def _adopt_principal_answer_waits(conn, now):
@@ -2657,7 +2662,7 @@ def _adopt_principal_answer_waits(conn, now):
                     "SELECT 1 FROM nfos_waits WHERE task_id=? AND reason='principal_answer' AND status='open' AND predicate=?",
                     (row['task_id'], _json(predicate))).fetchone():
                 continue  # já tem a espera: nada a abrir nem a gravar
-            if _principal_answer_wait(conn, row['task_id'], row, now):
+            if _principal_answer_wait(conn, row['task_id'], row, now, hold=False):
                 opened.append(row['id'])
         except Exception:  # uma decisão com defeito não tira a adoção das outras nem o resto do tick
             import logging
