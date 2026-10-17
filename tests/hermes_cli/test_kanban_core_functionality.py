@@ -393,8 +393,21 @@ def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, mon
         answered = running_task("answered 100 s ago", nfos=True)
         answered_long_ago = running_task("answered 400 s ago", nfos=True)
         waiting = running_task("open wait", nfos=True)
+        saved_spec = running_task("saved a spec artifact", nfos=True)
+        applied = running_task("effect through the repair port", nfos=True)
         plain = running_task("not an NFOS run", nfos=False)
         with kb.write_txn(conn):
+            # Work persisted outside task_events: an artifact row and an effect row during the window.
+            conn.execute(
+                "INSERT INTO nfos_artifacts(task_id, run_id, kind, revision, content, author, evidence, created_at) "
+                "VALUES(?, ?, 'spec', 1, '{}', 'worker', '{}', ?)",
+                (saved_spec, kb.get_task(conn, saved_spec).current_run_id, now - 60),
+            )
+            conn.execute(
+                "INSERT INTO nfos_effects(id, task_id, run_id, operation, target, candidate, status, created_at, updated_at) "
+                "VALUES('eff_test', ?, ?, 'repair', 'position:x', 'sha', 'requested', ?, ?)",
+                (applied, kb.get_task(conn, applied).current_run_id, now - 60, now - 60),
+            )
             run_id = kb.get_task(conn, asking).current_run_id
             conn.execute(
                 "INSERT INTO nfos_decisions(id, task_id, run_id, kind, status, question, context, spec_revision, created_at) "
@@ -430,7 +443,7 @@ def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, mon
         assert event.payload["limit_seconds"] == 300
         assert event.payload["elapsed_seconds"] >= 600
 
-        for tid in (busy, probing, asking, answered, waiting, plain):
+        for tid in (busy, probing, asking, answered, waiting, saved_spec, applied, plain):
             assert kb.get_task(conn, tid).status == "running", tid
         assert kb.detect_no_progress_running(conn, timeout_seconds=0, signal_fn=_signal_fn) == []
     finally:

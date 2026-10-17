@@ -12804,6 +12804,24 @@ def _no_progress_window(conn: sqlite3.Connection, task_id: str, run_id: int, sta
     return since
 
 
+def _no_progress_records(conn: sqlite3.Connection, task_id: str, since: int) -> bool:
+    """Work the worker persisted outside ``task_events``: a spec, report or
+    probe artifact, or an effect requested/reconciled through the repair
+    port, written since ``since``."""
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nfos_artifacts', 'nfos_effects')"
+    )}
+    if "nfos_artifacts" in tables and conn.execute(
+        "SELECT 1 FROM nfos_artifacts WHERE task_id = ? AND created_at >= ? LIMIT 1", (task_id, since),
+    ).fetchone():
+        return True
+    if "nfos_effects" in tables and conn.execute(
+        "SELECT 1 FROM nfos_effects WHERE task_id = ? AND updated_at >= ? LIMIT 1", (task_id, since),
+    ).fetchone():
+        return True
+    return False
+
+
 def detect_no_progress_running(
     conn: sqlite3.Connection,
     *,
@@ -12814,8 +12832,9 @@ def detect_no_progress_running(
 
     A run counts as NFOS when it recorded ``nfos_worker_execution``; it counts
     as progressing when an event of ``_NO_PROGRESS_WORKER_KINDS`` exists since
-    the window started, or when the run holds an open question to the
-    Principal or an open wait. The window starts at the run start, or at the
+    the window started, when an artifact or effect row of the card was written
+    since then (``_no_progress_records``), or when the run holds an open
+    question to the Principal or an open wait. The window starts at the run start, or at the
     last answered decision / closed wait of the run when that is later
     (``_no_progress_window``). Without any of those for the whole window the
     worker is terminated like ``enforce_max_runtime`` does
@@ -12862,7 +12881,7 @@ def detect_no_progress_running(
             f"SELECT 1 FROM task_events WHERE task_id = ? AND created_at >= ? AND kind IN ({marks}) LIMIT 1",
             (row["id"], since, *_NO_PROGRESS_WORKER_KINDS),
         ).fetchone()
-        if progress:
+        if progress or _no_progress_records(conn, row["id"], since):
             continue
 
         pid = int(row["worker_pid"])
