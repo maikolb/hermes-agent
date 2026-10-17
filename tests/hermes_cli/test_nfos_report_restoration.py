@@ -46,6 +46,25 @@ def test_the_final_report_inherits_the_restoration_the_repair_port_recorded(task
     assert evidence['report_sha256'] == d.hashlib.sha256(d._artifact(conn, task.id, 'report')['content'].encode()).hexdigest()
 
 
+def test_a_support_reopening_ends_the_inheritance(task_context, monkeypatch):
+    """ALTO da revisora: a prova vale para o episódio atual (EPISODE_FACTS_20261010, enforce.card_facts lê ``support_reopened``).
+    Depois da reabertura pelo suporte, o relatório sem prova não herda a da rodada anterior; a prova nova volta a valer."""
+    conn, task, artifact = prepare(task_context, monkeypatch)
+    clock = iter(range(1_800_000_000, 1_800_000_100))  # cada gravação num segundo próprio: a reabertura fica entre r1 e r2
+    monkeypatch.setattr(d.time, 'time', lambda: next(clock))
+    d.save_report(conn, task.id, task.current_run_id, report(artifact, restoration=RESTORATION))
+    conn.execute("INSERT INTO task_events(task_id, run_id, kind, payload, created_at) VALUES (?, ?, 'support_reopened', '{}', ?)",
+                 (task.id, task.current_run_id, next(clock)))
+    conn.commit()
+    d.save_report(conn, task.id, task.current_run_id, report(artifact, summary='Rodada nova sem prova'))
+    assert 'restoration' not in latest(conn, task.id)[1]
+    again = dict(RESTORATION, after={'move_plan_position:p1': {'position_id': 'cargo-novo-2'}})
+    d.save_report(conn, task.id, task.current_run_id, report(artifact, restoration=again))
+    d.save_report(conn, task.id, task.current_run_id, report(artifact, summary='Entrega da rodada nova'))
+    revision, content, _ = latest(conn, task.id)
+    assert revision == 4 and content['restoration'] == again  # a prova do episódio atual herda
+
+
 def test_a_report_that_brings_its_own_restoration_keeps_it(task_context, monkeypatch):
     conn, task, artifact = prepare(task_context, monkeypatch)
     d.save_report(conn, task.id, task.current_run_id, report(artifact, restoration=RESTORATION))
