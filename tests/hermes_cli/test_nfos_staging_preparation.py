@@ -216,3 +216,41 @@ def test_unknown_receipt_recovery_records_history_not_new_authority(delivery):
     save_spec(conn,task)
     d.reconcile_effect(conn,effect['id'],found=True,evidence=receipt())
     with pytest.raises(d.WorkflowError): start(conn,task,'staging_merge')
+
+
+# STAGING_RECORD_MODE_20261017: em modo registro (owner mode) o begin_effect não guarda a preparação no efeito, e o reconcile a
+# exige. O recibo de staging nunca fechava (CS-0035 do Concursa: PR 669 e PR 645 prontos, o registro recusado). O reconcile
+# deriva a preparação da decisão do Principal que já existe, sem criar autoridade nova.
+def _effect(conn,effect_id):
+    return d._row(conn,'nfos_effects','id',effect_id)
+
+def test_record_mode_staging_receipt_derives_the_preparation_from_the_resolved_decision(delivery,monkeypatch):
+    conn,task=delivery
+    decision=prepare(conn,task)
+    monkeypatch.setattr(d,'_owner_mode',lambda:True)
+    pr=start(conn,task)
+    assert pr['execute'] and not _effect(conn,pr['id'])['evidence']            # modo registro: nada de preparação gravada
+    d.reconcile_effect(conn,pr['id'],found=True,evidence=receipt())
+    saved=json.loads(_effect(conn,pr['id'])['evidence'])
+    assert _effect(conn,pr['id'])['status']=='confirmed'
+    assert saved['preparation_decision']==decision and saved['preparation_identity']['candidate_sha']==A
+    assert saved['preparation_identity']['target']==TARGET
+    merge=start(conn,task,'staging_merge')
+    d.reconcile_effect(conn,merge['id'],found=True,evidence=receipt(integrated_sha=B))
+    assert json.loads(d.get_workflow(conn,task.id)['state_json'])['staging_sha']==B
+    d.reconcile_effect(conn,pr['id'],found=True,evidence=receipt())             # o mesmo recibo de novo: idempotente
+    assert json.loads(_effect(conn,pr['id'])['evidence'])==saved
+
+@pytest.mark.parametrize('case',['no_decision','other_candidate','not_continue','pending'])
+def test_record_mode_receipt_without_a_matching_principal_decision_is_still_refused(delivery,monkeypatch,case):
+    conn,task=delivery
+    if case in ('other_candidate','not_continue','pending'):
+        decision=ask(conn,task)
+        if case!='pending':
+            d.resolve_decision(conn,decision,action='changes' if case=='not_continue' else 'continue',answer='Checked',
+                               author='Principal')
+    monkeypatch.setattr(d,'_owner_mode',lambda:True)
+    pr=start(conn,task,**({'candidate':B} if case=='other_candidate' else {}))
+    with pytest.raises(d.WorkflowError,match='original preparation identity'):
+        d.reconcile_effect(conn,pr['id'],found=True,evidence=receipt(**({'candidate':B} if case=='other_candidate' else {})))
+    assert _effect(conn,pr['id'])['status']!='confirmed'

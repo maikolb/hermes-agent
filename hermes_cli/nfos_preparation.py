@@ -70,9 +70,26 @@ def confirmed_pr(conn, task_id, candidate, target):
     return json.loads(row['evidence'])
 
 
+def _recorded_preparation(conn, effect):
+    """STAGING_RECORD_MODE_20261017: em modo registro o begin_effect não grava a preparação no efeito (o registro não
+    conduz), e o reconcile a exige. A preparação sai da decisão do Principal que já existe para esta tarefa: a mais recente
+    resolvida como continue, cuja identidade aponta exatamente a candidata e o destino do efeito. Sem decisão assim,
+    nada é derivado e o recibo segue recusado: autoridade nova nunca nasce aqui."""
+    rows = conn.execute("SELECT * FROM nfos_decisions WHERE task_id=? AND kind='preparation' AND status='resolved' "
+                        "AND action='continue' AND author='Principal' ORDER BY rowid DESC", (effect['task_id'],)).fetchall()
+    for row in rows:
+        prepared = json.loads(row['context']).get('preparation_identity') or {}
+        if (prepared.get('task_id') == effect['task_id'] and prepared.get('candidate_sha') == effect['candidate']
+                and prepared.get('target') == effect['target']):
+            return {'preparation_identity': prepared, 'preparation_decision': row['id']}
+    return {}
+
+
 def reconcile(conn, effect, found, evidence, state):
     """Read historical intent even after a spec change; never grant new authority."""
     prior = json.loads(effect['evidence'] or '{}')
+    if not (prior.get('preparation_identity') and prior.get('preparation_decision')):
+        prior = dict(prior, **_recorded_preparation(conn, effect))
     prepared = prior.get('preparation_identity') or {}
     decision = d.get_decision(conn, prior.get('preparation_decision'))
     if (not decision or decision['task_id'] != effect['task_id'] or decision['kind'] != 'preparation'
