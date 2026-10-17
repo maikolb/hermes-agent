@@ -984,6 +984,24 @@ def _env_values(path):
 # HUMAN_LAST_RESORT_20260914: medição não depende de humano. O worker do card grava a credencial da sonda no cofre do projeto
 # (probe-env) e a sonda obrigatória mede o host do destino, nunca uma cópia local ou isolada.
 _PROBE_ENV_NAME_RX = re.compile(r'^[A-Z][A-Z0-9_]{0,63}$')
+# CREDENTIAL_DEFENSES_20261017: a value the redactor already masked is not a credential. The vault accepted a DSN whose password
+# was `***` (run 1708, 16/10) and the probe then tried to log in three times with it.
+_MASKED_VALUE_RX = re.compile(r'^(?:[*•xX]{3,}|<?\[?(?:redacted|oculto|hidden|masked|secret)\]?>?|[^\s.]{2,12}\.\.\.[^\s.]{2,12})$', re.IGNORECASE)
+
+
+def _masked_credential(text):
+    """Why the value is a mask or an empty password, or None. Looks at the whole value and at the password of a URL userinfo."""
+    value = text.strip()
+    if _MASKED_VALUE_RX.match(value):
+        return 'the value is a mask, not a credential'
+    match = re.match(r'^[A-Za-z][A-Za-z0-9+.\-]*://([^/?#\s]*)@', value)
+    if match and ':' in match.group(1):
+        password = match.group(1).rsplit(':', 1)[1]
+        if not password:
+            return 'the URL has an empty password'
+        if _MASKED_VALUE_RX.match(unquote(password)):
+            return 'the URL password is a mask, not a credential'
+    return None
 
 
 def _probe_vault_file(conn, task_id):
@@ -1182,6 +1200,9 @@ def probe_env_command(conn, task_id, *, set_name=None, unset_name=None, value=No
         text = str(value or '').strip('\r\n')
         if not text.strip() or '\n' in text or '\r' in text or len(text) > 16384:
             raise WorkflowError('probe-env --set reads exactly one non-empty line (the value) from standard input; nothing was saved')
+        masked = _masked_credential(text)
+        if masked:
+            raise WorkflowError(f'probe-env --set refuses this value: {masked}; nothing was saved. Read the real value from its source and send it on standard input')
     elif not unset_name:
         return {'names': sorted(_env_values(path)) if path.is_file() else [], 'vault': str(path)}
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
