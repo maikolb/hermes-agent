@@ -14082,7 +14082,7 @@ def check_respawn_guard(
     genuinely dead (no live PID on this host).
     """
     row = conn.execute(
-        "SELECT last_failure_error FROM tasks WHERE id = ?",
+        "SELECT last_failure_error, consecutive_failures FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -14136,9 +14136,14 @@ def check_respawn_guard(
         # crash/completion supersedes it.
         return None
 
-    # 2. Quota / auth blocker: retrying immediately will not help.
+    # 2. Quota / auth blocker: retrying immediately will not help. Only while a
+    #    failure is actually counted: the rate-limit requeue stamps the quota
+    #    text WITHOUT incrementing ``consecutive_failures``, so once a later
+    #    reclaim/timeout supersedes that run (step 1 no longer applies) the
+    #    stale stamp would park the task forever — the breaker that is meant
+    #    to free it never trips at zero (17/10/2026: 9 of 56 ready cards).
     err = row["last_failure_error"]
-    if err and _RESPAWN_BLOCKER_RE.search(err):
+    if err and (row["consecutive_failures"] or 0) > 0 and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR

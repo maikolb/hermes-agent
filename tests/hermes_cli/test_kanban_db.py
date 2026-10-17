@@ -367,6 +367,56 @@ def test_respawn_guard_defers_rate_limited_within_cooldown(
         assert kb.check_respawn_guard(conn, tid) is None
 
 
+def test_respawn_guard_ignores_stale_rate_limit_stamp_after_reclaim(kanban_home, monkeypatch):
+    """A rate-limit requeue stamps ``last_failure_error`` without counting a
+    failure. When a later run ends another way (reclaimed, timed out), step 1
+    no longer applies; the stale stamp must not become a permanent
+    ``blocker_auth`` (the breaker never trips at zero failures). A counted
+    auth failure still defers."""
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "300")
+    now = 5_000_000
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="rl-then-reclaim", assignee="a")
+        kb.claim_task(conn, tid)
+        first = kb.get_task(conn, tid).current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome='rate_limited', status='rate_limited', ended_at=? WHERE id=?",
+            (now, first),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', current_run_id=NULL, claim_lock=NULL, claim_expires=NULL, "
+            "worker_pid=NULL, consecutive_failures=0, last_failure_error=? WHERE id=?",
+            ("pid 1 exited rate-limited (quota wall) — requeued without counting a failure", tid),
+        )
+        conn.commit()
+        kb.claim_task(conn, tid)
+        second = kb.get_task(conn, tid).current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome='reclaimed', status='reclaimed', ended_at=? WHERE id=?",
+            (now + 7200, second),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', current_run_id=NULL, claim_lock=NULL, claim_expires=NULL, "
+            "worker_pid=NULL WHERE id=?",
+            (tid,),
+        )
+        conn.commit()
+
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 7300)
+        assert kb.check_respawn_guard(conn, tid) is None
+
+        # A counted failure with an auth-flavoured error still defers.
+        conn.execute(
+            "UPDATE tasks SET consecutive_failures=1, last_failure_error='401 unauthorized: invalid api key' WHERE id=?",
+            (tid,),
+        )
+        conn.commit()
+        assert kb.check_respawn_guard(conn, tid) == "blocker_auth"
+
+
 
 
 
