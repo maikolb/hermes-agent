@@ -4481,20 +4481,33 @@ class GatewayKanbanWatchersMixin:
                         continue
                 dead = False
                 if host == hostname and pid_s.isdigit():
+                    owner_dead = False
                     try:
                         from gateway.status import _pid_exists
 
-                        dead = not _pid_exists(int(pid_s))
+                        owner_dead = not _pid_exists(int(pid_s))
                     except Exception:  # noqa: BLE001
-                        dead = False
-                    if not dead and row["worker_pid"] is not None:
-                        # Claim owner alive but the worker process died —
-                        # judge by the worker, with the heartbeat as the
-                        # grace signal so a just-spawned worker isn't hit.
-                        if row["last_heartbeat_at"] is not None:
-                            dead = (
-                                now - float(row["last_heartbeat_at"])
-                            ) > heartbeat_secs
+                        owner_dead = False
+                    dead = owner_dead
+                    if row["worker_pid"] is not None:
+                        # The worker process is already gone (a live one
+                        # was skipped above), so the owner's death proves
+                        # nothing new: a launcher that spawns and exits (the
+                        # Balcao start-approved) is always dead by now. Judge
+                        # by the worker, with the heartbeat as the grace the
+                        # dispatcher tick needs to read the exit code and
+                        # the yield receipt. Reaping at once wrote `reclaimed`
+                        # over every rate_limited / awaiting_decision exit.
+                        since = row["last_heartbeat_at"]
+                        if since is None and owner_dead and row["current_run_id"]:
+                            started = conn.execute(
+                                "SELECT started_at FROM task_runs WHERE id = ?",
+                                (row["current_run_id"],),
+                            ).fetchone()
+                            since = started["started_at"] if started else None
+                        dead = since is not None and (
+                            now - float(since)
+                        ) > heartbeat_secs
                 elif row["last_heartbeat_at"] is not None:
                     dead = (
                         now - float(row["last_heartbeat_at"])

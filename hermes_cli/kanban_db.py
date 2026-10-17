@@ -13174,6 +13174,17 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
             pid = int(row["worker_pid"])
             kind, code = _classify_worker_exit(pid)
+            orphaned = False
+            if kind == "unknown":  # not our child (start-approved): the worker's own receipt stands for waitpid
+                receipt = _worker_exit_receipt(conn, row["id"], pid)
+                if receipt == 0:
+                    kind, code = "clean_exit", 0
+                elif receipt == KANBAN_RATE_LIMIT_EXIT_CODE:
+                    kind, code = "rate_limited", receipt
+                elif receipt is not None and receipt != _SIGINT_EXIT_CODE:  # an interrupt keeps the gateway-restart reading
+                    kind, code = "nonzero_exit", receipt
+                else:
+                    orphaned = _launcher_gone(row["claim_lock"])  # no receipt and nobody to wait for it: not a crash of the card
             interrupted = _interrupted_by_gateway_restart(row, kind, _gw_start)  # INTERRUPTED_20260910
             rate_limited_exit = False
             awaiting_decision = False  # IMPEDIMENT_RACE_20260911
@@ -13303,6 +13314,12 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     )
                     event_payload["worker_started_at"] = row["worker_started_at"]
                     event_payload["gateway_started_at"] = _gw_start
+                elif orphaned:
+                    event_kind = "worker_lost"
+                    error_text = (
+                        f"pid {pid} is gone with no exit receipt and the process that launched it (start-approved) "
+                        "exited too; requeued without counting a failure"
+                    )
                 if code is not None and kind != "unknown":
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
@@ -13324,7 +13341,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     "awaiting_decision" if awaiting_decision  # IMPEDIMENT_RACE_20260911
                     else "refused_exit" if refused_exit  # CLOSURE_RECOVERY_20260911
                     else "rate_limited" if rate_limited_exit
-                    else ("reclaimed" if interrupted else "crashed")  # INTERRUPTED_20260910
+                    else ("reclaimed" if interrupted or orphaned else "crashed")  # INTERRUPTED_20260910
                 )
                 run_id = _end_run(
                     conn, row["id"],
@@ -13368,7 +13385,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     quota_exit_decision = _nfos_open_decision(conn, row["id"])
                     if quota_exit_decision and quota_exit_decision["status"] == "human":
                         human_blocks.append((row["id"], str(quota_exit_decision["answer"] or quota_exit_decision["question"] or "")))
-                elif interrupted or refused_exit:  # INTERRUPTED_20260910, CLOSURE_RECOVERY_20260911: sem falha, sem breaker, sem wake
+                elif interrupted or orphaned or refused_exit:  # INTERRUPTED_20260910, CLOSURE_RECOVERY_20260911: sem falha, sem breaker, sem wake
                     interrupted_ids.append(row["id"])
                 else:
                     if protocol_violation:
@@ -17564,6 +17581,93 @@ def bind_dispatcher_session(session_id: str) -> bool:
     except Exception:
         _log.warning("Could not bind dispatcher session to its claimed run", exc_info=True)
         return False
+
+
+_SIGINT_EXIT_CODE = 130  # KeyboardInterrupt: what a gateway restart sends the worker (KillMode=control-group); not a choice of the worker
+
+
+def _exit_code_of(code) -> int:
+    """The process exit status of a ``SystemExit.code`` (None is 0, a message is 1)."""
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code & 0xFF
+    return 1
+
+
+def record_worker_exit(code: int) -> bool:
+    """Leave a durable receipt of this worker's exit code on its run.
+
+    ``detect_crashed_workers`` learns how a worker left from the dispatcher's own ``waitpid`` registry. A worker launched by
+    another process (the Balcao start-approved) is not its child, so the tick saw every such exit as ``unknown`` and counted
+    it as a crash, whatever the worker meant (rc 0 after a refused completion, the quota door 75, a real error). The receipt
+    carries the exit code and the worker's own pid (a ``hermes`` the worker runs inside a command inherits the card env and
+    leaves its own receipt, which must not stand for the worker). Same kind of receipt the goal yield leaves.
+    """
+    task_id = os.environ.get("HERMES_KANBAN_TASK", "")
+    run_id = os.environ.get("HERMES_KANBAN_RUN_ID", "")
+    if not task_id or not run_id.isdigit():
+        return False
+    try:
+        with connect_closing(board=os.environ.get("HERMES_KANBAN_BOARD") or None) as conn:
+            with write_txn(conn):
+                row = conn.execute(
+                    "SELECT status, current_run_id, worker_pid FROM tasks WHERE id = ?", (task_id,),
+                ).fetchone()
+                if not row or row["status"] != "running" or row["current_run_id"] != int(run_id) or row["worker_pid"] != os.getpid():
+                    return False
+                _append_event(
+                    conn, task_id, "worker_exit", {"exit_code": int(code), "pid": os.getpid()}, run_id=int(run_id),
+                )
+        return True
+    except Exception:
+        _log.warning("Could not record the worker exit receipt", exc_info=True)
+        return False
+
+
+def run_with_exit_receipt(entry):
+    """Run the process entry point and leave the exit receipt when this process is a kanban worker."""
+    if not (os.environ.get("HERMES_KANBAN_TASK") and os.environ.get("HERMES_KANBAN_RUN_ID")):
+        return entry()
+    try:
+        result = entry()
+    except SystemExit as exc:
+        record_worker_exit(_exit_code_of(exc.code))
+        raise
+    except KeyboardInterrupt:
+        record_worker_exit(_SIGINT_EXIT_CODE)
+        raise
+    except BaseException:
+        record_worker_exit(1)
+        raise
+    record_worker_exit(_exit_code_of(result) if isinstance(result, int) else 0)
+    return result
+
+
+def _launcher_gone(claim_lock) -> bool:
+    """True when the claim belongs to a local process that is no longer alive.
+
+    A card the dispatcher launched keeps the gateway's pid in its claim, and the gateway outlives the worker. A card the Balcao
+    start-approved launched keeps the pid of the short-lived launcher, so when its worker leaves nobody read the exit.
+    """
+    owner = str(claim_lock or "").rpartition(":")[2]
+    return owner.isdigit() and not _pid_alive(int(owner))
+
+
+def _worker_exit_receipt(conn: sqlite3.Connection, task_id: str, pid: int) -> Optional[int]:
+    """Exit code the worker with this pid left on the current run, or None."""
+    row = conn.execute(
+        "SELECT e.payload FROM task_events e JOIN tasks t ON t.id = e.task_id AND t.current_run_id = e.run_id "
+        "WHERE e.task_id = ? AND e.kind = 'worker_exit' ORDER BY e.id DESC LIMIT 20", (task_id,),
+    ).fetchall()
+    for found in row:
+        try:
+            payload = json.loads(found["payload"] or "{}")
+        except ValueError:
+            continue
+        if payload.get("pid") == pid and isinstance(payload.get("exit_code"), int):
+            return payload["exit_code"]
+    return None
 
 
 def read_worker_log(
