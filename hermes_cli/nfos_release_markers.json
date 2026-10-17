@@ -345,5 +345,7 @@
   {"pr": 365, "file": "hermes_cli/kanban_db.py", "text": "_assert_worker_profile_ready(profile_arg)"},
   {"pr": 365, "file": "hermes_cli/kanban_db.py", "text": "_REFUSAL_MEMO_SECONDS = "},
   {"pr": 365, "file": "hermes_cli/nfos_delivery.py", "text": "def _launch_held(row, now):"},
-  {"pr": 365, "file": "hermes_cli/nfos_runtime.py", "text": "profile=kb._resolve_executable_assignee(project['profile'])"}
+  {"pr": 365, "file": "hermes_cli/nfos_runtime.py", "text": "profile=kb._resolve_executable_assignee(project['profile'])"},
+  {"pr": 369, "file": "hermes_cli/nfos_delivery.py", "text": "PRINCIPAL_BOTTLENECK_20261016"},
+  {"pr": 369, "file": "hermes_cli/nfos_delivery.py", "text": "def _adopt_principal_answer_waits(conn, now):"}
 ]
