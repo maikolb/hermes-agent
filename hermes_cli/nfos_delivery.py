@@ -6296,6 +6296,14 @@ def begin_effect(conn, task_id, run_id, *, operation, target, candidate):
                     raise WorkflowError('This project delivers in HML: staging PR, HML deploy and HML readback close the card. Production (merge or deploy on main) needs the current spec destination set to production from the owner intent, accepted by the Principal, with every later owner guidance already judged by the Principal')
             if _owner_mode():  # RECORD_MODE_20260911: o runtime registra a publicação (task, run, operação, alvo, SHA) e não conduz
                 preparation=_record_mode_effect_checks(conn,task_id,candidate)
+                if staging:
+                    # STAGING_RECORD_MODE_20261017: o recibo de staging lê a preparação do próprio efeito (nfos_preparation.reconcile);
+                    # no registro ela é gravada na abertura, com a mesma regra do modo conduzido: a decisão de preparação mais
+                    # recente do Principal, continue, na candidata e no destino exatos, com spec, instruções e candidata vigentes.
+                    from hermes_cli import nfos_preparation
+                    preparation=nfos_preparation.authorized(conn,task_id,target,candidate)
+                    if operation=='staging_merge':
+                        nfos_preparation.confirmed_pr(conn,task_id,candidate,target)
             else:
                 preparation=_conducted_effect_checks(conn,task,task_id,run_id,operation,target,candidate,scope,staging)
         key=hashlib.sha256(_json([task_id,operation,target,candidate]).encode()).hexdigest()
