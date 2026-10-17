@@ -514,6 +514,37 @@ def _resolve_rate_limit_cooldown_seconds() -> int:
     return DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
 
 
+# NO_PROGRESS_20261017: an NFOS worker that recorded nothing but heartbeats
+# for this long is ended and its card goes back to the queue (one counted
+# failure). 17/10/2026: a worker looped 65 min re-reading the same files after
+# every context compaction, with no step, artifact, probe or comment, while
+# only ``max_runtime_seconds`` (120 min) would have stopped it.
+DEFAULT_NO_PROGRESS_TIMEOUT_SECONDS = 2700
+
+
+def _resolve_no_progress_timeout_seconds() -> int:
+    """Seconds an NFOS run may heartbeat without any other event before the
+    dispatcher ends it. ``HERMES_KANBAN_NO_PROGRESS_TIMEOUT_SECONDS`` wins,
+    then ``kanban.no_progress_timeout_seconds`` in config, then the default.
+    0 disables the check."""
+    raw = os.environ.get("HERMES_KANBAN_NO_PROGRESS_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            parsed = -1
+        if parsed >= 0:
+            return parsed
+    try:
+        from hermes_cli.config import load_config
+        value = ((load_config() or {}).get("kanban") or {}).get("no_progress_timeout_seconds")
+        if value is not None and int(value) >= 0:
+            return int(value)
+    except Exception:
+        pass
+    return DEFAULT_NO_PROGRESS_TIMEOUT_SECONDS
+
+
 # Worker-context caps so build_worker_context() stays bounded on
 # pathological boards (retry-heavy tasks, comment storms, giant
 # summaries). Values chosen to fit a typical 100k-char LLM prompt with
@@ -11345,6 +11376,10 @@ class DispatchResult:
     stale: list[str] = field(default_factory=list)
     """Task ids reclaimed because no progress (heartbeat) was seen
     within ``dispatch_stale_timeout_seconds``."""
+    no_progress: list[str] = field(default_factory=list)
+    """NFOS task ids whose worker heartbeated for ``no_progress_timeout_seconds``
+    without recording any other event (step, comment, probe, wait, decision);
+    the run was ended and the card returned to the queue with one failure."""
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
     """Tasks skipped by the respawn guard, as ``(task_id, reason)`` pairs.
 
@@ -12715,6 +12750,109 @@ def enforce_max_runtime(
                 },
             )
     return timed_out
+
+
+# Events every NFOS run records before any real work; anything else counts as progress.
+_NO_PROGRESS_BOOTSTRAP_KINDS = ("heartbeat", "claimed", "spawned", "worker_session_linked", "nfos_worker_execution")
+
+
+def detect_no_progress_running(
+    conn: sqlite3.Connection,
+    *,
+    timeout_seconds: int,
+    signal_fn=None,
+) -> list[str]:
+    """NO_PROGRESS_20261017: end NFOS runs that only heartbeated for ``timeout_seconds``.
+
+    A run counts as NFOS when it recorded ``nfos_worker_execution``; it counts
+    as progressing when any event outside ``_NO_PROGRESS_BOOTSTRAP_KINDS``
+    exists since the run started (a comment, a saved spec or report, a probe,
+    a declared wait, a question to the Principal, a tool call). Without one
+    for the whole window the worker is terminated like ``enforce_max_runtime``
+    does (SIGTERM, grace, SIGKILL), the run closes with outcome
+    ``no_progress`` and the card returns to its source phase with one counted
+    failure, so the breaker still parks a card that never progresses. The
+    next spawn resumes the saved session, so what the worker learned is kept.
+
+    Host-local like the other reclaim paths; ``signal_fn`` is a test hook.
+    """
+    ended: list[str] = []
+    if timeout_seconds <= 0:
+        return ended
+    now = int(time.time())
+    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
+    marks = ",".join("?" for _ in _NO_PROGRESS_BOOTSTRAP_KINDS)
+    rows = conn.execute(
+        "SELECT t.id, t.worker_pid, t.worker_started_at, t.claim_lock, r.started_at "
+        "FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+        "WHERE t.status = 'running' AND t.worker_pid IS NOT NULL AND r.started_at IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        lock = row["claim_lock"] or ""
+        if not lock.startswith(host_prefix):
+            continue
+        started = int(row["started_at"])
+        elapsed = now - started
+        if elapsed < timeout_seconds:
+            continue
+        nfos_run = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'nfos_worker_execution' "
+            "AND created_at >= ? LIMIT 1",
+            (row["id"], started),
+        ).fetchone()
+        if not nfos_run:
+            continue
+        progress = conn.execute(
+            f"SELECT 1 FROM task_events WHERE task_id = ? AND created_at >= ? AND kind NOT IN ({marks}) LIMIT 1",
+            (row["id"], started, *_NO_PROGRESS_BOOTSTRAP_KINDS),
+        ).fetchone()
+        if progress:
+            continue
+
+        pid = int(row["worker_pid"])
+        tid = row["id"]
+        termination = _terminate_reclaimed_worker(
+            pid, row["claim_lock"],
+            started_at=row["worker_started_at"], signal_fn=signal_fn,
+        )
+        if termination.get("identity_unavailable"):
+            _defer_reclaim_for_live_worker(
+                conn, tid, row["claim_lock"], now, termination,
+                reason="no_progress_worker_identity_unavailable",
+            )
+            continue
+        error = f"no progress for {int(elapsed)}s (limit {int(timeout_seconds)}s): heartbeats only"
+        with write_txn(conn):
+            retry_status = _retry_status_for_run(conn, tid)
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL, "
+                "last_heartbeat_at = NULL "
+                "WHERE id = ? AND status = 'running' "
+                "  AND worker_pid = ? AND claim_lock IS ?",
+                (retry_status, tid, pid, row["claim_lock"]),
+            )
+            if cur.rowcount == 1:
+                payload = {
+                    "pid": pid,
+                    "elapsed_seconds": int(elapsed),
+                    "limit_seconds": int(timeout_seconds),
+                    "sigkill": bool(termination.get("sigkill")),
+                    "retry_status": retry_status,
+                }
+                run_id = _end_run(
+                    conn, tid, outcome="no_progress", status="no_progress",
+                    error=error, metadata=payload,
+                )
+                _append_event(conn, tid, "no_progress", payload, run_id=run_id)
+                ended.append(tid)
+        if cur.rowcount == 1:
+            _record_task_failure(
+                conn, tid, error=error, outcome="no_progress",
+                release_claim=False, end_run=False,
+                event_payload_extra={"pid": pid, "retry_status": retry_status},
+            )
+    return ended
 
 
 # Heartbeat staleness heartbeat gap — if a running task hasn't sent a
@@ -15018,8 +15156,12 @@ def _dispatch_once_locked(
     if _crash_rate_limited:
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
+    result.no_progress = detect_no_progress_running(
+        conn, timeout_seconds=_resolve_no_progress_timeout_seconds(),
+    )
     if not dry_run and any((result.reclaimed, result.reconciled_orphans,
-                            result.stale, result.crashed, result.timed_out)):
+                            result.stale, result.crashed, result.timed_out,
+                            result.no_progress)):
         # Reclaim can close a run after the initial reconciliation. Finish its
         # recorded process tree before this tick considers a replacement;
         # claim_task also refuses the claim if termination remains pending.

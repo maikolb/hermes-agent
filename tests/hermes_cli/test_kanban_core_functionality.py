@@ -339,6 +339,71 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
         _kb._pid_alive = original_alive
 
 
+def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, monkeypatch):
+    """NO_PROGRESS_20261017: an NFOS run that only heartbeated past the window is
+    SIGTERM'd, closes with outcome ``no_progress``, counts one failure and goes
+    back to ready. A run with any other event, and a run that never announced
+    ``nfos_worker_execution``, are left alone; 0 disables the check."""
+    killed = []
+
+    def _signal_fn(pid, sig):
+        killed.append((pid, sig))
+
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setattr(_kb, "_pid_alive", lambda pid: False)  # SIGTERM "works" at once
+
+    conn = kb.connect()
+    try:
+        old_started = int(time.time()) - 600
+
+        def running_task(title, *, nfos, extra_kind=None):
+            tid = kb.create_task(conn, title=title, assignee="worker")
+            kb.claim_task(conn, tid)
+            kb._set_worker_pid(conn, tid, os.getpid())
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_runs SET started_at = ? "
+                    "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
+                    (old_started, tid),
+                )
+                # The card and its claim predate the run, as in production.
+                conn.execute(
+                    "UPDATE task_events SET created_at = ? WHERE task_id = ?", (old_started - 10, tid),
+                )
+                if nfos:
+                    kb._append_event(conn, tid, "nfos_worker_execution", {})
+                if extra_kind:
+                    kb._append_event(conn, tid, extra_kind, {})
+            return tid
+
+        idle = running_task("heartbeats only", nfos=True)
+        busy = running_task("commented once", nfos=True, extra_kind="commented")
+        plain = running_task("not an NFOS run", nfos=False)
+
+        ended = kb.detect_no_progress_running(conn, timeout_seconds=300, signal_fn=_signal_fn)
+        assert ended == [idle]
+        assert killed and killed[0][0] == os.getpid()
+
+        task = kb.get_task(conn, idle)
+        assert task.status == "ready", f"no-progress task should reset to ready, got {task.status}"
+        assert task.worker_pid is None
+        failures = conn.execute("SELECT consecutive_failures FROM tasks WHERE id = ?", (idle,)).fetchone()[0]
+        assert failures == 1
+        run = conn.execute(
+            "SELECT outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (idle,),
+        ).fetchone()
+        assert run["outcome"] == "no_progress"
+        event = next(e for e in kb.list_events(conn, idle) if e.kind == "no_progress" and "limit_seconds" in e.payload)
+        assert event.payload["limit_seconds"] == 300
+        assert event.payload["elapsed_seconds"] >= 600
+
+        for tid in (busy, plain):
+            assert kb.get_task(conn, tid).status == "running"
+        assert kb.detect_no_progress_running(conn, timeout_seconds=0, signal_fn=_signal_fn) == []
+    finally:
+        conn.close()
+
+
 
 
 
