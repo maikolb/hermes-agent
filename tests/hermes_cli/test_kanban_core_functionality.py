@@ -339,6 +339,117 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
         _kb._pid_alive = original_alive
 
 
+def test_no_progress_run_is_ended_and_requeued_with_one_failure(kanban_home, monkeypatch):
+    """NO_PROGRESS_20261017: an NFOS run whose worker recorded nothing of its own
+    past the window is SIGTERM'd, closes with outcome ``no_progress``, counts one
+    failure and goes back to ready. Events the runtime writes by itself
+    (``worktree_owned`` seconds after the start, ``assigned``, a reminder's
+    ``nfos_principal_requested``, an exit request) do not count as progress; a
+    worker event, an open question to the Principal or an open wait do. A run
+    that never announced ``nfos_worker_execution`` is left alone; 0 disables."""
+    from hermes_cli import nfos_delivery, nfos_waits
+
+    killed = []
+
+    def _signal_fn(pid, sig):
+        killed.append((pid, sig))
+
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setattr(_kb, "_pid_alive", lambda pid: False)  # SIGTERM "works" at once
+
+    conn = kb.connect()
+    try:
+        nfos_delivery.init_schema(conn)
+        nfos_waits.ensure(conn)
+        now = int(time.time())
+        old_started = now - 600
+
+        def running_task(title, *, nfos, extra_kind=None):
+            tid = kb.create_task(conn, title=title, assignee="worker")
+            kb.claim_task(conn, tid)
+            kb._set_worker_pid(conn, tid, os.getpid())
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_runs SET started_at = ? "
+                    "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
+                    (old_started, tid),
+                )
+                # The card and its claim predate the run, as in production.
+                conn.execute(
+                    "UPDATE task_events SET created_at = ? WHERE task_id = ?", (old_started - 10, tid),
+                )
+                if nfos:
+                    kb._append_event(conn, tid, "nfos_worker_execution", {})
+                if extra_kind:
+                    kb._append_event(conn, tid, extra_kind, {})
+            return tid
+
+        idle = running_task("heartbeats only", nfos=True)
+        runtime_only = [running_task(f"runtime wrote {kind}", nfos=True, extra_kind=kind)
+                        for kind in ("worktree_owned", "assigned", "nfos_principal_requested", "nfos_worker_exit_requested")]
+        busy = running_task("commented once", nfos=True, extra_kind="commented")
+        probing = running_task("probed once", nfos=True, extra_kind="nfos_probe")
+        asking = running_task("open question", nfos=True)
+        answered = running_task("answered 100 s ago", nfos=True)
+        answered_long_ago = running_task("answered 400 s ago", nfos=True)
+        waiting = running_task("open wait", nfos=True)
+        saved_spec = running_task("saved a spec artifact", nfos=True)
+        applied = running_task("effect through the repair port", nfos=True)
+        plain = running_task("not an NFOS run", nfos=False)
+        with kb.write_txn(conn):
+            # Work persisted outside task_events: an artifact row and an effect row during the window.
+            conn.execute(
+                "INSERT INTO nfos_artifacts(task_id, run_id, kind, revision, content, author, evidence, created_at) "
+                "VALUES(?, ?, 'spec', 1, '{}', 'worker', '{}', ?)",
+                (saved_spec, kb.get_task(conn, saved_spec).current_run_id, now - 60),
+            )
+            conn.execute(
+                "INSERT INTO nfos_effects(id, task_id, run_id, operation, target, candidate, status, created_at, updated_at) "
+                "VALUES('eff_test', ?, ?, 'repair', 'position:x', 'sha', 'requested', ?, ?)",
+                (applied, kb.get_task(conn, applied).current_run_id, now - 60, now - 60),
+            )
+            run_id = kb.get_task(conn, asking).current_run_id
+            conn.execute(
+                "INSERT INTO nfos_decisions(id, task_id, run_id, kind, status, question, context, spec_revision, created_at) "
+                "VALUES('dec_test', ?, ?, 'impediment', 'pending', 'q', '{}', 1, ?)", (asking, run_id, now),
+            )
+            # The clock restarts when the Principal answers: a 600 s run answered 100 s ago is not idle yet.
+            for tid, dec, resolved in ((answered, "dec_recent", now - 100), (answered_long_ago, "dec_old", now - 400)):
+                conn.execute(
+                    "INSERT INTO nfos_decisions(id, task_id, run_id, kind, status, question, context, answer, action, "
+                    "spec_revision, created_at, resolved_at) VALUES(?, ?, ?, 'impediment', 'resolved', 'q', '{}', 'a', "
+                    "'continue', 1, ?, ?)", (dec, tid, kb.get_task(conn, tid).current_run_id, resolved - 50, resolved),
+                )
+            conn.execute(
+                "INSERT INTO nfos_waits(id, task_id, run_id, episode, reason, executor, predicate, status, next_check_at, "
+                "deadline_at, max_attempts, created_at, updated_at) VALUES('wait_test', ?, ?, 1, 'lab_queue', '{}', '{}', "
+                "'open', ?, ?, 3, ?, ?)", (waiting, kb.get_task(conn, waiting).current_run_id, now, now + 3600, now, now),
+            )
+
+        ended = kb.detect_no_progress_running(conn, timeout_seconds=300, signal_fn=_signal_fn)
+        assert sorted(ended) == sorted([idle, *runtime_only, answered_long_ago])
+        assert sorted(pid for pid, _sig in killed) == [os.getpid()] * 6
+
+        task = kb.get_task(conn, idle)
+        assert task.status == "ready", f"no-progress task should reset to ready, got {task.status}"
+        assert task.worker_pid is None
+        failures = conn.execute("SELECT consecutive_failures FROM tasks WHERE id = ?", (idle,)).fetchone()[0]
+        assert failures == 1
+        run = conn.execute(
+            "SELECT outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (idle,),
+        ).fetchone()
+        assert run["outcome"] == "no_progress"
+        event = next(e for e in kb.list_events(conn, idle) if e.kind == "no_progress" and "limit_seconds" in e.payload)
+        assert event.payload["limit_seconds"] == 300
+        assert event.payload["elapsed_seconds"] >= 600
+
+        for tid in (busy, probing, asking, answered, waiting, saved_spec, applied, plain):
+            assert kb.get_task(conn, tid).status == "running", tid
+        assert kb.detect_no_progress_running(conn, timeout_seconds=0, signal_fn=_signal_fn) == []
+    finally:
+        conn.close()
+
+
 
 
 

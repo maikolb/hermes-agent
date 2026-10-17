@@ -514,6 +514,39 @@ def _resolve_rate_limit_cooldown_seconds() -> int:
     return DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
 
 
+# NO_PROGRESS_20261017: an NFOS worker that recorded no progress of its own
+# for this long is ended and its card goes back to the queue (one counted
+# failure). 17/10/2026: a worker looped 65 min re-reading the same files after
+# every context compaction, with no step, artifact, probe or comment, while
+# only ``max_runtime_seconds`` (120 min) would have stopped it. 3600 s: on the
+# Concursa board the first worker event of a completed run came as late as
+# 41 min (7 days, 202 runs, reviewer's measurement).
+DEFAULT_NO_PROGRESS_TIMEOUT_SECONDS = 3600
+
+
+def _resolve_no_progress_timeout_seconds() -> int:
+    """Seconds an NFOS run may heartbeat without any other event before the
+    dispatcher ends it. ``HERMES_KANBAN_NO_PROGRESS_TIMEOUT_SECONDS`` wins,
+    then ``kanban.no_progress_timeout_seconds`` in config, then the default.
+    0 disables the check."""
+    raw = os.environ.get("HERMES_KANBAN_NO_PROGRESS_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            parsed = -1
+        if parsed >= 0:
+            return parsed
+    try:
+        from hermes_cli.config import load_config
+        value = ((load_config() or {}).get("kanban") or {}).get("no_progress_timeout_seconds")
+        if value is not None and int(value) >= 0:
+            return int(value)
+    except Exception:
+        pass
+    return DEFAULT_NO_PROGRESS_TIMEOUT_SECONDS
+
+
 # Worker-context caps so build_worker_context() stays bounded on
 # pathological boards (retry-heavy tasks, comment storms, giant
 # summaries). Values chosen to fit a typical 100k-char LLM prompt with
@@ -11345,6 +11378,11 @@ class DispatchResult:
     stale: list[str] = field(default_factory=list)
     """Task ids reclaimed because no progress (heartbeat) was seen
     within ``dispatch_stale_timeout_seconds``."""
+    no_progress: list[str] = field(default_factory=list)
+    """NFOS task ids whose worker recorded no progress of its own (comment,
+    spec, report, probe, effect, wait, tool call, open question) for
+    ``no_progress_timeout_seconds``; the run was ended and the card returned
+    to the queue with one failure."""
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
     """Tasks skipped by the respawn guard, as ``(task_id, reason)`` pairs.
 
@@ -12715,6 +12753,181 @@ def enforce_max_runtime(
                 },
             )
     return timed_out
+
+
+# Events only the worker's own actions record (kanban comment; nfos_delivery
+# precheck, probe, save-spec, progress, save-report, effect, reconcile,
+# complete, lesson, rework, wait, tool). Events the runtime writes on its own
+# (worktree_owned seconds after the start, assigned, reminders such as
+# nfos_principal_requested, exit requests) are NOT progress: on the Concursa
+# board worktree_owned was the first post-start event in 64 of 202 runs.
+_NO_PROGRESS_WORKER_KINDS = (
+    "commented", "nfos_precheck", "nfos_probe", "nfos_spec_saved", "nfos_progress",
+    "nfos_report_saved", "nfos_effect_requested", "nfos_effect_reconciled",
+    "nfos_completion_refused", "nfos_homologation_bound", "nfos_lesson_recorded",
+    "nfos_rework_requested", "nfos_wait_declared", "nfos_tool_intent", "nfos_tool_started",
+    "nfos_tool_finished", "nfos_tool_command_exited",
+)
+
+
+def _no_progress_window(conn: sqlite3.Connection, task_id: str, run_id: int, started: int) -> Optional[int]:
+    """Where the no-progress window starts for this run, or None while the
+    worker is idle on purpose. A worker holding an open question to the
+    Principal or an open wait is waiting, not looping; once the answer lands
+    (``resolved_at``) or the wait closes (``closed_at``) the clock restarts
+    there, so a long run that just got its answer is not cut on the next tick.
+    State is read from the tables, not from event names (reminders re-emit
+    ``nfos_principal_requested``)."""
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nfos_decisions', 'nfos_waits')"
+    )}
+    since = started
+    if "nfos_decisions" in tables:
+        if conn.execute(
+            "SELECT 1 FROM nfos_decisions WHERE task_id = ? AND run_id = ? AND status IN ('pending', 'human') LIMIT 1",
+            (task_id, run_id),
+        ).fetchone():
+            return None
+        resolved = conn.execute(
+            "SELECT MAX(resolved_at) FROM nfos_decisions WHERE task_id = ? AND run_id = ?", (task_id, run_id),
+        ).fetchone()[0]
+        since = max(since, int(resolved or 0))
+    if "nfos_waits" in tables:
+        if conn.execute(
+            "SELECT 1 FROM nfos_waits WHERE task_id = ? AND status = 'open' LIMIT 1", (task_id,),
+        ).fetchone():
+            return None
+        closed = conn.execute(
+            "SELECT MAX(closed_at) FROM nfos_waits WHERE task_id = ? AND closed_at >= ?", (task_id, started),
+        ).fetchone()[0]
+        since = max(since, int(closed or 0))
+    return since
+
+
+def _no_progress_records(conn: sqlite3.Connection, task_id: str, since: int) -> bool:
+    """Work the worker persisted outside ``task_events``: a spec, report or
+    probe artifact, or an effect requested/reconciled through the repair
+    port, written since ``since``."""
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nfos_artifacts', 'nfos_effects')"
+    )}
+    if "nfos_artifacts" in tables and conn.execute(
+        "SELECT 1 FROM nfos_artifacts WHERE task_id = ? AND created_at >= ? LIMIT 1", (task_id, since),
+    ).fetchone():
+        return True
+    if "nfos_effects" in tables and conn.execute(
+        "SELECT 1 FROM nfos_effects WHERE task_id = ? AND updated_at >= ? LIMIT 1", (task_id, since),
+    ).fetchone():
+        return True
+    return False
+
+
+def detect_no_progress_running(
+    conn: sqlite3.Connection,
+    *,
+    timeout_seconds: int,
+    signal_fn=None,
+) -> list[str]:
+    """NO_PROGRESS_20261017: end NFOS runs whose worker recorded no progress for ``timeout_seconds``.
+
+    A run counts as NFOS when it recorded ``nfos_worker_execution``; it counts
+    as progressing when an event of ``_NO_PROGRESS_WORKER_KINDS`` exists since
+    the window started, when an artifact or effect row of the card was written
+    since then (``_no_progress_records``), or when the run holds an open
+    question to the Principal or an open wait. The window starts at the run start, or at the
+    last answered decision / closed wait of the run when that is later
+    (``_no_progress_window``). Without any of those for the whole window the
+    worker is terminated like ``enforce_max_runtime`` does
+    (SIGTERM, grace, SIGKILL), the run closes with outcome ``no_progress`` and
+    the card returns to its source phase with one counted failure, so the
+    breaker still parks a card that never progresses. The next spawn resumes
+    the saved session, so what the worker learned is kept. Known limit: once
+    a run has progressed, a later loop in the same run is not caught.
+
+    Host-local like the other reclaim paths; ``signal_fn`` is a test hook.
+    """
+    ended: list[str] = []
+    if timeout_seconds <= 0:
+        return ended
+    now = int(time.time())
+    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
+    marks = ",".join("?" for _ in _NO_PROGRESS_WORKER_KINDS)
+    rows = conn.execute(
+        "SELECT t.id, t.worker_pid, t.worker_started_at, t.claim_lock, r.id AS run_id, r.started_at "
+        "FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+        "WHERE t.status = 'running' AND t.worker_pid IS NOT NULL AND r.started_at IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        lock = row["claim_lock"] or ""
+        if not lock.startswith(host_prefix):
+            continue
+        started = int(row["started_at"])
+        if now - started < timeout_seconds:
+            continue
+        nfos_run = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'nfos_worker_execution' "
+            "AND created_at >= ? LIMIT 1",
+            (row["id"], started),
+        ).fetchone()
+        if not nfos_run:
+            continue
+        since = _no_progress_window(conn, row["id"], int(row["run_id"]), started)
+        if since is None:
+            continue
+        elapsed = now - since
+        if elapsed < timeout_seconds:
+            continue
+        progress = conn.execute(
+            f"SELECT 1 FROM task_events WHERE task_id = ? AND created_at >= ? AND kind IN ({marks}) LIMIT 1",
+            (row["id"], since, *_NO_PROGRESS_WORKER_KINDS),
+        ).fetchone()
+        if progress or _no_progress_records(conn, row["id"], since):
+            continue
+
+        pid = int(row["worker_pid"])
+        tid = row["id"]
+        termination = _terminate_reclaimed_worker(
+            pid, row["claim_lock"],
+            started_at=row["worker_started_at"], signal_fn=signal_fn,
+        )
+        if termination.get("identity_unavailable"):
+            _defer_reclaim_for_live_worker(
+                conn, tid, row["claim_lock"], now, termination,
+                reason="no_progress_worker_identity_unavailable",
+            )
+            continue
+        error = f"no progress for {int(elapsed)}s (limit {int(timeout_seconds)}s): heartbeats only"
+        with write_txn(conn):
+            retry_status = _retry_status_for_run(conn, tid)
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL, "
+                "last_heartbeat_at = NULL "
+                "WHERE id = ? AND status = 'running' "
+                "  AND worker_pid = ? AND claim_lock IS ?",
+                (retry_status, tid, pid, row["claim_lock"]),
+            )
+            if cur.rowcount == 1:
+                payload = {
+                    "pid": pid,
+                    "elapsed_seconds": int(elapsed),
+                    "limit_seconds": int(timeout_seconds),
+                    "sigkill": bool(termination.get("sigkill")),
+                    "retry_status": retry_status,
+                }
+                run_id = _end_run(
+                    conn, tid, outcome="no_progress", status="no_progress",
+                    error=error, metadata=payload,
+                )
+                _append_event(conn, tid, "no_progress", payload, run_id=run_id)
+                ended.append(tid)
+        if cur.rowcount == 1:
+            _record_task_failure(
+                conn, tid, error=error, outcome="no_progress",
+                release_claim=False, end_run=False,
+                event_payload_extra={"pid": pid, "retry_status": retry_status},
+            )
+    return ended
 
 
 # Heartbeat staleness heartbeat gap — if a running task hasn't sent a
@@ -15018,8 +15231,12 @@ def _dispatch_once_locked(
     if _crash_rate_limited:
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
+    result.no_progress = detect_no_progress_running(
+        conn, timeout_seconds=_resolve_no_progress_timeout_seconds(),
+    )
     if not dry_run and any((result.reclaimed, result.reconciled_orphans,
-                            result.stale, result.crashed, result.timed_out)):
+                            result.stale, result.crashed, result.timed_out,
+                            result.no_progress)):
         # Reclaim can close a run after the initial reconciliation. Finish its
         # recorded process tree before this tick considers a replacement;
         # claim_task also refuses the claim if termination remains pending.
