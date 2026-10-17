@@ -16085,6 +16085,39 @@ def _profile_state_key(home: Path, cfg_bytes: bytes) -> str:
     return h.hexdigest()
 
 
+def _assert_launch_requires(profile: str, home: Path, entries) -> None:
+    """CREDENTIAL_DEFENSES_20261017: a contract the profile requires must load before its worker starts.
+
+    ``kanban.launch_requires`` in the profile config lists ``{name, policy, file_key, sha_key}``: ``policy`` is a JSON file
+    (absolute, or relative to the profile home) that names the contract document under ``file_key`` and its SHA-256 under
+    ``sha_key`` (defaults ``contract_path`` and ``contract_sha256``). A missing, unreadable or divergent contract refuses the
+    launch as a hold with an event, like the plugin probe: the contract hook only injected a warning line, and the Concursa
+    worker went on reading the whole server (runs 1708 and 1709, 16/10). Cheap, so it runs on every launch, never cached.
+    """
+    import hashlib
+
+    if not isinstance(entries, (list, tuple)):
+        return
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("policy"):
+            continue
+        name = str(entry.get("name") or "contract")
+        try:
+            policy_path = Path(str(entry["policy"]))
+            policy = json.loads((policy_path if policy_path.is_absolute() else home / policy_path).read_text(encoding="utf-8"))
+            document = Path(str(policy[entry.get("file_key") or "contract_path"]))
+            wanted = str(policy[entry.get("sha_key") or "contract_sha256"])
+            digest = hashlib.sha256(document.read_bytes()).hexdigest()
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise WorkerProfileRefused(
+                f"The {name} required by profile {profile!r} is not available on this host ({type(exc).__name__}); worker not started",
+                "contract_unavailable", profile) from None
+        if digest != wanted:
+            raise WorkerProfileRefused(
+                f"The {name} required by profile {profile!r} differs from the approved version (sha256 {digest[:12]}); worker not started",
+                "contract_divergent", profile)
+
+
 def _assert_worker_profile_ready(profile: str) -> None:
     """SPAWN_GUARD_20261016: refuse to launch a worker whose profile cannot run its own contract.
 
@@ -16113,6 +16146,8 @@ def _assert_worker_profile_ready(profile: str) -> None:
         cfg = fast_safe_load(cfg_bytes.decode("utf-8")) or {}
     except Exception as exc:
         raise WorkerProfileRefused(f"Profile {profile!r} has no readable config.yaml ({cfg_path}): {exc}; worker not started", "no_config", profile) from None
+    kanban_cfg = cfg.get("kanban") if isinstance(cfg, dict) else None
+    _assert_launch_requires(profile, home, kanban_cfg.get("launch_requires") if isinstance(kanban_cfg, dict) else None)
     plugins_cfg = cfg.get("plugins") if isinstance(cfg, dict) else None
     plugins_cfg = plugins_cfg if isinstance(plugins_cfg, dict) else {}
     if not plugins_cfg.get("enabled") or os.environ.get("HERMES_SAFE_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:

@@ -112,6 +112,34 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
 
+_WITHHELD = '[nfos: redaction unavailable; content withheld]'
+
+
+def _mask_secrets(text):
+    """CREDENTIAL_DEFENSES_20261017: what the board stores about a command never carries a secret.
+
+    The command runs with the real argv and prints what it prints; the board keeps the masked copy (argv_json, the output
+    chunks and the spill file). A DSN with a 64-character password reached kanban.db in clear this way (call argv on 13/10,
+    stderr on 15 and 16/10). Fails closed: if the redactor cannot run, nothing is stored.
+    """
+    try:
+        from agent.redact import redact_sensitive_text
+        return redact_sensitive_text(text, force=True, redact_url_credentials=True)
+    except Exception:
+        return _WITHHELD
+
+
+def _mask_argv(argv):
+    return [_mask_secrets(arg) for arg in argv]
+
+
+def _mask_chunk(data):
+    """Masked copy of an output chunk; the original bytes when nothing in it is a secret."""
+    text = data.decode('utf-8', 'surrogateescape')
+    masked = _mask_secrets(text)
+    return data if masked == text else masked.encode('utf-8', 'surrogateescape')
+
+
 _CHUNK_CAP_DEFAULT = 262144
 
 
@@ -502,8 +530,8 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
         with _transaction(conn):
             previous = get_call(conn, call_id)
             if previous:
-                if (previous['task_id'], previous['run_id'], previous['argv_json'], previous['cwd'], previous['stdin_sha256']) != (
-                        task_id, run_id, _json(argv), cwd, input_hash):
+                if (previous['task_id'], previous['run_id'], previous['argv_json'] in (_json(_mask_argv(argv)), _json(argv)), previous['cwd'], previous['stdin_sha256']) != (
+                        task_id, run_id, True, cwd, input_hash):  # a call written before the masking still matches its own argv
                     raise ToolExecutionError('This call identity belongs to a different command or execution')
                 return previous
             if not _owned(conn, task_id, run_id):
@@ -517,7 +545,7 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
             conn.execute('''INSERT INTO nfos_tool_calls
                 (id,task_id,run_id,argv_json,cwd,stdin_path,stdin_sha256,status,created_at,timeout_seconds,runner_pid,runner_started_at,runner_kind)
                 VALUES(?,?,?,?,?,?,?,'intent',?,?,?,?,?)''',
-                (call_id, task_id, run_id, _json(argv), cwd, input_path, input_hash, time.time(), timeout_seconds,
+                (call_id, task_id, run_id, _json(_mask_argv(argv)), cwd, input_path, input_hash, time.time(), timeout_seconds,
                  identity['pid'], identity['started_at'], 'cli' if _cli_owner else 'embedded'))
             _event(conn, get_call(conn, call_id), 'nfos_tool_intent')
         streams = queue.Queue(maxsize=128)
@@ -569,6 +597,7 @@ def run_command(db_path, *, task_id, run_id, argv, cwd, timeout_seconds, call_id
             def flush(stream, data):
                 nonlocal sequence, stored_bytes, spill_fh, spilled_bytes
                 sequence += 1
+                data = _mask_chunk(data)  # CREDENTIAL_DEFENSES_20261017: the board and the spill file keep the masked copy
                 if stored_bytes + len(data) <= chunk_cap:
                     stored_bytes += len(data)
                     with _transaction(conn):
