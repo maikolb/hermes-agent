@@ -17192,6 +17192,33 @@ def count_notify_subs(
         conn.close()
 
 
+def foreign_notify_owner_counts(
+    *, board: Optional[str] = None, notifier_profiles: Iterable[str],
+) -> dict[str, int]:
+    """NOTIFY_FOREIGN_OWNER_20261016: owners of subscriptions that ``notifier_profiles`` do not include, with their counts.
+
+    Read-only, like :func:`count_notify_subs`. Those rows are invisible to the gateway's own listing, which is the point:
+    a profile that no gateway runs for (a cut-over left the old owner on the rows) leaves its subscriptions undelivered with nothing in the log."""
+    path = kanban_db_path(board=board)
+    if not path.exists():
+        return {}
+    mine = sorted({str(p).strip() for p in notifier_profiles if str(p).strip()})
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT notifier_profile, COUNT(*) FROM kanban_notify_subs WHERE notifier_profile IS NOT NULL "
+                "AND notifier_profile <> ''" + (" AND notifier_profile NOT IN (" + ",".join("?" for _ in mine) + ")" if mine else "")
+                + " GROUP BY notifier_profile", mine).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {}
+            raise
+        return {str(owner): int(n) for owner, n in rows}
+    finally:
+        conn.close()
+
+
 def remove_notify_sub(
     conn: sqlite3.Connection,
     *,
