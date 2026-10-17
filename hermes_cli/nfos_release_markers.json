@@ -340,5 +340,10 @@
   {"pr": 368, "file": "gateway/status.py", "text": "kanban_foreign_owner_subs: Any = _UNSET,"},
   {"pr": 367, "file": "hermes_cli/nfos_principal_review.py", "text": "WORKER_ROUTES_20261016"},
   {"pr": 367, "file": "hermes_cli/nfos_principal_review.py", "text": "def worker_routes(task, policy):"},
-  {"pr": 367, "file": "hermes_cli/nfos_principal_review.py", "text": "chosen = worker_routes(task, policy)"}
+  {"pr": 367, "file": "hermes_cli/nfos_principal_review.py", "text": "chosen = worker_routes(task, policy)"},
+  {"pr": 365, "file": "hermes_cli/kanban_db.py", "text": "def _assert_worker_profile_ready("},
+  {"pr": 365, "file": "hermes_cli/kanban_db.py", "text": "_assert_worker_profile_ready(profile_arg)"},
+  {"pr": 365, "file": "hermes_cli/kanban_db.py", "text": "_REFUSAL_MEMO_SECONDS = "},
+  {"pr": 365, "file": "hermes_cli/nfos_delivery.py", "text": "def _launch_held(row, now):"},
+  {"pr": 365, "file": "hermes_cli/nfos_runtime.py", "text": "profile=kb._resolve_executable_assignee(project['profile'])"}
 ]
