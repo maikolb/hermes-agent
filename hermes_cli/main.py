@@ -12920,6 +12920,14 @@ def _advertise_agent_env() -> None:
 
 
 def main():
+    """Process entry point. A kanban worker leaves its exit code on its run (see ``record_worker_exit``)."""
+    if not (os.environ.get("HERMES_KANBAN_TASK") and os.environ.get("HERMES_KANBAN_RUN_ID")):
+        return _main()
+    from hermes_cli.kanban_db import run_with_exit_receipt
+    return run_with_exit_receipt(_main)
+
+
+def _main():
     """Main entry point for hermes CLI."""
     # Cosmetic: make the process show up as 'hermes' instead of 'python3.11'
     # in ps/top/htop.  Non-fatal — just a nicer UX.

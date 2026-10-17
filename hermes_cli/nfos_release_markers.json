@@ -347,6 +347,7 @@
   {"pr": 365, "file": "hermes_cli/nfos_delivery.py", "text": "def _launch_held(row, now):"},
   {"pr": 365, "file": "hermes_cli/nfos_runtime.py", "text": "profile=kb._resolve_executable_assignee(project['profile'])"},
   {"pr": 370, "file": "gateway/kanban_watchers.py", "text": "the owner's death proves"},
-  {"pr": 370, "file": "hermes_cli/kanban_db.py", "text": "def record_worker_quota_exit() -> bool:"},
-  {"pr": 370, "file": "hermes_cli/kanban_db.py", "text": "def _worker_left_by_quota_door("}
+  {"pr": 370, "file": "hermes_cli/kanban_db.py", "text": "def record_worker_exit(code: int) -> bool:"},
+  {"pr": 370, "file": "hermes_cli/kanban_db.py", "text": "def _worker_exit_receipt("},
+  {"pr": 370, "file": "hermes_cli/main.py", "text": "run_with_exit_receipt(_main)"}
 ]
