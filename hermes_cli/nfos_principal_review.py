@@ -502,6 +502,46 @@ def _owned_worker_run(conn, task_id, run_id, claim):
     return row
 
 
+DEFAULT_CALL_CEILING = 300
+
+
+def _call_ceiling_yield(conn, task_id, run_id, claim, agent):
+    """Soft ceiling of model calls per run (17/10/2026): at ``kanban.delivery.call_ceiling`` calls (300 by default, 0 turns it
+    off) the worker yields to the Principal with a checkpoint instead of running on. It files one impediment decision for
+    the run, which the goal loop reads as ``awaiting_decision``; the run is not ended and no failure is counted. Each
+    ``continue`` or ``changes`` answer grants another ceiling of calls. The card's iteration balance stays the hard limit."""
+    ceiling = settings().get('call_ceiling', DEFAULT_CALL_CEILING)
+    budget = getattr(agent, 'iteration_budget', None)
+    if type(ceiling) is not int or ceiling <= 0 or budget is None or not d.get_workflow(conn, task_id):
+        return False
+    calls = budget.used
+    marked = conn.execute("SELECT status,action FROM nfos_decisions WHERE task_id=? AND run_id=? "
+                          "AND json_extract(context,'$.call_ceiling') IS NOT NULL ORDER BY rowid", (task_id, run_id)).fetchall()
+    granted = sum(1 for r in marked if r['status'] == 'resolved' and r['action'] in ('continue', 'changes'))
+    if calls < ceiling * (granted + 1):
+        return False
+    if any(r['status'] == 'pending' for r in marked):
+        return True
+    with d._kb().write_txn(conn):
+        row = _owned_worker_run(conn, task_id, run_id, claim)
+        if row is None:
+            return False
+        workflow = d.get_workflow(conn, task_id)
+        task = d._kb().get_task(conn, task_id)
+        checkpoint = dict(calls=calls, ceiling=ceiling, grants=granted, session_id=getattr(agent, 'session_id', None),
+                          instruction_revision=task.instruction_revision, run_id=run_id)
+        context = dict(call_ceiling=checkpoint)
+        decision_id = 'dec_' + hashlib.sha256(d._json([task_id, run_id, granted, 'call_ceiling']).encode()).hexdigest()[:24]
+        question = (f'Teto de {ceiling} chamadas por run atingido ({calls} chamadas). O worker parou com checkpoint e o run segue aberto, '
+                    'sem falha. Responda continue para liberar mais chamadas a partir do checkpoint, ou changes com a nova orientação.')
+        conn.execute('INSERT INTO nfos_decisions(id,task_id,run_id,kind,question,context,spec_revision,created_at) '
+                     "VALUES(?,?,?,'impediment',?,?,?,?)",
+                     (decision_id, task_id, run_id, question, d._json(context), workflow['spec_revision'], int(time.time())))
+        d._kb()._append_event(conn, task_id, 'nfos_principal_requested',
+                              dict(decision_id=decision_id, kind='impediment', question=question, retained_card=True), run_id=run_id)
+    return True
+
+
 def worker_checkpoint(agent, turn_id=None):
     """Called only between completed tool batches, before another model call."""
     task_id, run_id = os.environ.get('HERMES_KANBAN_TASK'), os.environ.get('HERMES_KANBAN_RUN_ID')
@@ -535,6 +575,8 @@ def worker_checkpoint(agent, turn_id=None):
                 metadata['worker_execution'] = execution
                 conn.execute('UPDATE task_runs SET metadata=? WHERE id=?', (d._json(metadata), int(run_id)))
                 d._event(conn, task_id, int(run_id), 'nfos_worker_execution', execution)
+        if _call_ceiling_yield(conn, task_id, int(run_id), claim, agent):
+            return True
         if not pending and settings().get('worker_escalation') is not True:
             return False
         budget = getattr(agent, 'iteration_budget', None)
