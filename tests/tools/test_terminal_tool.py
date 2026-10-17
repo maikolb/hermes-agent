@@ -103,6 +103,38 @@ def test_validate_workdir_still_blocks_metachars_in_unicode_paths():
     assert terminal_tool._validate_workdir("/tmp/ü\x00ber")
 
 
+def test_sudo_n_never_opens_the_interactive_prompt(monkeypatch):
+    """A headless worker calling ``sudo -n <root helper>`` under a per-command
+    NOPASSWD rule: ``sudo -n true`` fails, so the probe says no; the prompt
+    must still be skipped because the command itself forbids prompting."""
+    monkeypatch.delenv("SUDO_PASSWORD", raising=False)
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+    monkeypatch.setattr(terminal_tool, "_sudo_nopasswd_works", lambda: False)
+
+    def _fail_prompt(*_args, **_kwargs):
+        raise AssertionError("sudo -n must not open the interactive password prompt")
+
+    monkeypatch.setattr(terminal_tool, "_prompt_for_sudo_password", _fail_prompt)
+
+    command = "sudo -n /usr/local/sbin/concursa-reparo status --card t_1 --ticket CS-1"
+    assert terminal_tool._transform_sudo_command(command) == (command, None)
+    assert terminal_tool._transform_sudo_command("sudo -nu root true && sudo --non-interactive true") == (
+        "sudo -nu root true && sudo --non-interactive true", None,
+    )
+
+    # A bare sudo in the same command still goes through the prompt path.
+    prompted = {"n": 0}
+
+    def _count_prompt(*_args, **_kwargs):
+        prompted["n"] += 1
+        return ""
+
+    monkeypatch.setattr(terminal_tool, "_prompt_for_sudo_password", _count_prompt)
+    terminal_tool._transform_sudo_command("sudo -n true; sudo true")
+    assert prompted["n"] == 1
+    assert terminal_tool._all_sudo_invocations_non_interactive("grep sudo README.md") is False
+
+
 def test_count_real_sudo_invocations_ignores_mentions(monkeypatch):
     assert terminal_tool._count_real_sudo_invocations("grep sudo README.md") == 0
     assert terminal_tool._count_real_sudo_invocations("sudo a; sudo b") == 2
