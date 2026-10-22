@@ -122,3 +122,23 @@ def test_live_release_is_read_from_the_launcher(releases, capsys):
     assert guard.main(ok[:-1]) == 1 and "tests/test_novo.py difere" in capsys.readouterr().out
     assert guard.main(["--new", str(nova), "--launcher", str(tmp_path / "ausente")]) == 1
     assert "guarda não pôde conferir" in capsys.readouterr().out
+
+
+def test_markers_come_from_the_frozen_list_and_one_file_per_pr(tmp_path):
+    """Cada PR traz a marca num arquivo próprio: nada compartilhado para conflitar, e a árvore da release não difere por ele."""
+    tree = _tree(tmp_path / "t", {"a.py": "x = 1\ny = 2\n"}, [{"pr": 1, "file": "a.py", "text": "x = 1"}])
+    directory = tree / guard.MARKERS_DIR
+    directory.mkdir(parents=True)
+    (directory / "pr-2.json").write_text(json.dumps([{"pr": 2, "file": "a.py", "text": "y = 2"}]), encoding="utf-8")
+    (directory / "pr-3.json").write_text(json.dumps([{"pr": 3, "file": "a.py", "text": "z = 3"}]), encoding="utf-8")
+    assert [marker["pr"] for marker in guard.load_markers(tree)] == [1, 2, 3]
+    assert guard.problems(tree) == ["a.py perdeu a marca de #3: 'z = 3' aparece 0 vez(es), mínimo 1"]
+
+    (directory / "pr-3.json").unlink()
+    assert guard.problems(tree) == []
+    live = _tree(tmp_path / "live", {"a.py": "x = 1\ny = 2\n"}, [{"pr": 1, "file": "a.py", "text": "x = 1"}])
+    assert guard.tree_differences(live, tree) == [], "a pasta de marcas não conta como código da release"
+
+    (directory / "repetida.json").write_text(json.dumps([{"pr": 9, "file": "a.py", "text": "y = 2"}]), encoding="utf-8")
+    with pytest.raises(guard.GuardError):
+        guard.load_markers(tree)
