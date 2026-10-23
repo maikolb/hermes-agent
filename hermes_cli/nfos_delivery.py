@@ -4731,6 +4731,13 @@ def save_report(conn, task_id, run_id, report):
         raise WorkflowError('No persisted spec')
     _require_current_instruction_spec(conn,task_id)
     report=json.loads(_json(report))
+    if 'restoration' not in report:  # RESTORATION_INHERIT_20261017: a porta de reparo grava a prova da releitura no aplicar; o relatório final herda
+        # só do episódio atual: a reabertura pelo suporte zera a prova (EPISODE_FACTS_20261010, enforce.card_facts), e a herança não a traz de volta
+        _earlier=_artifact(conn,task_id,'report')
+        _since=conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id=? AND kind='support_reopened'",(task_id,)).fetchone()[0] or 0
+        _inherited=json.loads(_earlier['content']).get('restoration') if _earlier and (_earlier['created_at'] or 0)>=_since else None
+        if _inherited is not None:
+            report['restoration']=_inherited
     public=report.get('public_delivery')  # PUBLIC_TEXT_FORM_20261009
     if isinstance(public,dict):
         _require_public_form('o resumo público do relatório (public_delivery.summary)',public.get('summary'))
