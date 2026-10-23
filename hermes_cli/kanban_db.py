@@ -13274,6 +13274,47 @@ def _interrupted_by_gateway_restart(row, kind: str, gateway_started) -> bool:
 
 URGENT_PRIORITY = 100  # URGENT_20260910
 
+# CAUSE_URGENCY_20261015: o card de causa (code sem chamado) herda a maior prioridade dos casos (chamado do portal ou operation)
+# ligados a ele
+# (task_links: o caso é o pai). Espelha project_workflow.enforce._effective_priority; arquivado e cancelado não contam.
+def _effective_priority_sql(conn: sqlite3.Connection) -> str:
+    """Expressão SQL da prioridade efetiva, a mesma regra de project_workflow.enforce._effective_priority: o pai é caso
+    (chamado do portal, de qualquer delivery_type, ou operation); o filho é causa (code sem chamado); arquivado e
+    cancelado ([CANCELADO] no título ou estágio cancelled) não emprestam."""
+    tables = set()
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    except Exception:
+        pass
+    has_requests = {"nfos_workflows", "nfos_requests"} <= tables
+
+    def chamado(alias: str) -> str:
+        if not has_requests:
+            return "0"
+        return ("EXISTS (SELECT 1 FROM nfos_workflows w JOIN nfos_requests r ON r.id = w.request_id "
+                f"WHERE w.task_id = {alias}.id AND COALESCE(json_extract(r.payload, '$.origin.portal.chamado'), '') != '')")
+
+    cancelled = "AND p.title NOT LIKE '[CANCELADO]%'"
+    if "nfos_workflows" in tables:
+        cancelled += " AND NOT EXISTS (SELECT 1 FROM nfos_workflows wc WHERE wc.task_id = p.id AND wc.stage = 'cancelled')"
+    return (
+        "MAX(COALESCE(priority, 0), CASE WHEN tasks.delivery_type = 'code' AND NOT "
+        + chamado("tasks")
+        + " THEN COALESCE((SELECT MAX(p.priority) FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+        "WHERE l.child_id = tasks.id AND p.status != 'archived' "
+        f"AND (p.delivery_type = 'operation' OR {chamado('p')}) {cancelled}), 0) ELSE 0 END)"
+    )
+
+
+def effective_priority(conn: sqlite3.Connection, task_id: str) -> int:
+    """Prioridade com que o despachante enfileira o card: a própria, ou a do caso urgente ligado à causa."""
+    try:
+        row = conn.execute(f"SELECT {_effective_priority_sql(conn)} FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception:
+        row = conn.execute("SELECT priority FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return int(row[0] or 0) if row else 0
+
 
 def _urgent_burst_slots(conn: sqlite3.Connection) -> int:
     """URGENT_20260910 (ordem do Maikol): uma vaga extra por board enquanto houver card ready/review com
@@ -13282,7 +13323,7 @@ def _urgent_burst_slots(conn: sqlite3.Connection) -> int:
     try:
         rows = conn.execute(
             "SELECT id FROM tasks WHERE status IN ('ready', 'review') AND task_role = 'work' "
-            "AND claim_lock IS NULL AND priority >= ?", (URGENT_PRIORITY,),
+            f"AND claim_lock IS NULL AND {_effective_priority_sql(conn)} >= ?", (URGENT_PRIORITY,),
         ).fetchall()
         # URGENT2_20260910: urgente com decisão aberta não é despachável (OPEN_DECISION_SKIP); não gera vaga
         _open = globals().get("_nfos_decision_open")
@@ -13290,7 +13331,7 @@ def _urgent_burst_slots(conn: sqlite3.Connection) -> int:
         if not waiting:
             return 0
         running = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'running' AND priority >= ?", (URGENT_PRIORITY,),
+            f"SELECT COUNT(*) FROM tasks WHERE status = 'running' AND {_effective_priority_sql(conn)} >= ?", (URGENT_PRIORITY,),
         ).fetchone()[0]
         return 1 if running == 0 else 0
     except Exception:
@@ -13312,7 +13353,7 @@ def _resume_first(conn: sqlite3.Connection, rows: list) -> list:
         return rows
     def _rank(r):  # URGENT_20260910: urgente antes de tudo, depois interrompidos, depois a ordem normal
         try:
-            if "priority" in r.keys() and int(r["priority"] or 0) >= URGENT_PRIORITY:
+            if "priority" in r.keys() and max(int(r["priority"] or 0), effective_priority(conn, r["id"])) >= URGENT_PRIORITY:
                 return 0
         except Exception:
             pass
