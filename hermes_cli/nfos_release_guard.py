@@ -6,7 +6,7 @@ outra sessão ativava a `silencio`, e ativá-la tiraria do runtime o filtro que 
 
 Duas guardas, com a mesma lista de marcas (`hermes_cli/nfos_release_markers.json`):
 
-1. Marcas. Cada PR que muda o runtime do NFOS deixa na lista um trecho que só existe por causa dele. O teste
+1. Marcas. Cada PR que muda o runtime do NFOS deixa um trecho que só existe por causa dele, num arquivo próprio em `hermes_cli/nfos_release_markers.d/`. O teste
    `tests/e2e/test_nfos_release_markers.py` roda no CI de todo PR e falha quando uma marca some da árvore: quem apagou o
    trabalho de outro descobre antes do merge. Tirar uma marca da lista é mudança visível no diff e pede o motivo no PR.
 
@@ -33,6 +33,9 @@ import sys
 from pathlib import Path
 
 MARKERS_FILE = "hermes_cli/nfos_release_markers.json"
+# Marcas novas entram aqui, um arquivo por PR (mesma forma da lista): dois PRs abertos juntos não editam o mesmo arquivo,
+# o que a lista única fazia conflitar em todo par (31 conflitos em 150 merges).
+MARKERS_DIR = "hermes_cli/nfos_release_markers.d"
 # Não são código da release: ambiente, cache, o recibo que cada release grava de si mesma e a própria lista de marcas
 # (ela muda a cada PR e é conferida pelo conteúdo, não por igualdade de arquivo).
 IGNORED_DIRS = frozenset({"venv", ".venv", "__pycache__", ".git", "node_modules", ".pytest_cache", ".ruff_cache"})
@@ -43,21 +46,28 @@ class GuardError(ValueError):
     pass
 
 
-def load_markers(root: Path) -> list[dict]:
-    """Marcas da árvore `root`. Lista ausente devolve vazio (release anterior à guarda); lista malformada é erro."""
-    path = Path(root) / MARKERS_FILE
-    if not path.exists():
-        return []
+def _read_markers(path: Path) -> list:
     markers = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(markers, list):
+        raise GuardError(f"marca malformada em {path.name}: {markers!r}")
+    return markers
+
+
+def load_markers(root: Path) -> list[dict]:
+    """Marcas da árvore `root`: a lista antiga mais um arquivo por PR em MARKERS_DIR. Sem nenhuma, vazio (release anterior à
+    guarda); marca malformada ou repetida é erro."""
+    root = Path(root)
+    paths = [root / MARKERS_FILE, *sorted((root / MARKERS_DIR).glob("*.json"))]
+    markers = [marker for path in paths if path.exists() for marker in _read_markers(path)]
     seen = set()
-    for marker in markers if isinstance(markers, list) else [None]:
+    for marker in markers:
         if (not isinstance(marker, dict) or not isinstance(marker.get("file"), str) or not isinstance(marker.get("text"), str)
                 or not marker["text"].strip() or not isinstance(marker.get("min", 1), int) or marker.get("min", 1) < 1
                 or Path(marker["file"]).is_absolute() or ".." in Path(marker["file"]).parts):
-            raise GuardError(f"marca malformada em {MARKERS_FILE}: {marker!r}")
+            raise GuardError(f"marca malformada em {MARKERS_FILE} ou {MARKERS_DIR}: {marker!r}")
         key = (marker["file"], marker["text"])
         if key in seen:
-            raise GuardError(f"marca repetida em {MARKERS_FILE}: {key}")
+            raise GuardError(f"marca repetida em {MARKERS_FILE} ou {MARKERS_DIR}: {key}")
         seen.add(key)
     return markers
 
@@ -86,7 +96,7 @@ def _files(root: Path) -> set[str]:
         dirs[:] = [name for name in dirs if name not in IGNORED_DIRS]
         for name in names:
             relative = (Path(base) / name).relative_to(root).as_posix()
-            if relative not in IGNORED_FILES and not name.endswith((".pyc", ".pyo")):
+            if relative not in IGNORED_FILES and not relative.startswith(MARKERS_DIR + "/") and not name.endswith((".pyc", ".pyo")):
                 found.add(relative)
     return found
 
